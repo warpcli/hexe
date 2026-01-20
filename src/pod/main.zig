@@ -163,7 +163,8 @@ const Pod = struct {
     server: core.IpcServer,
     client: ?core.IpcConnection = null,
     backlog: RingBuffer,
-    reader: pod_protocol.Reader = .{},
+    reader: pod_protocol.Reader,
+    input_reader: pod_protocol.Reader,
 
     pub fn init(allocator: std.mem.Allocator, uuid_str: []const u8, socket_path: []const u8, shell: []const u8, cwd: ?[]const u8) !Pod {
         var uuid: [32]u8 = undefined;
@@ -179,12 +180,20 @@ const Pod = struct {
         var backlog = try RingBuffer.init(allocator, 4 * 1024 * 1024);
         errdefer backlog.deinit(allocator);
 
+        var reader = try pod_protocol.Reader.init(allocator, pod_protocol.MAX_FRAME_LEN);
+        errdefer reader.deinit(allocator);
+
+        var input_reader = try pod_protocol.Reader.init(allocator, pod_protocol.MAX_FRAME_LEN);
+        errdefer input_reader.deinit(allocator);
+
         return .{
             .allocator = allocator,
             .uuid = uuid,
             .pty = pty,
             .server = server,
             .backlog = backlog,
+            .reader = reader,
+            .input_reader = input_reader,
         };
     }
 
@@ -195,12 +204,16 @@ const Pod = struct {
         self.server.deinit();
         self.pty.close();
         self.backlog.deinit(self.allocator);
+        self.reader.deinit(self.allocator);
+        self.input_reader.deinit(self.allocator);
     }
 
     pub fn run(self: *Pod) !void {
         var poll_fds: [3]posix.pollfd = undefined;
-        var buf: [pod_protocol.MAX_FRAME_LEN]u8 = undefined;
-        var backlog_tmp: [pod_protocol.MAX_FRAME_LEN]u8 = undefined;
+        var buf = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
+        defer self.allocator.free(buf);
+        var backlog_tmp = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
+        defer self.allocator.free(backlog_tmp);
 
         while (true) {
             // Exit if the child shell/process exited.
@@ -225,7 +238,7 @@ const Pod = struct {
                         // No existing client - this is the main mux connection
                         self.client = conn;
                         // Replay backlog.
-                        const n = self.backlog.copyOut(&backlog_tmp);
+                        const n = self.backlog.copyOut(backlog_tmp);
                         var off: usize = 0;
                         while (off < n) {
                             const chunk = @min(@as(usize, 16 * 1024), n - off);
@@ -237,10 +250,10 @@ const Pod = struct {
                         // Already have a client - this is an input-only connection (e.g., hexe com send)
                         // Read any input frames and process them, then close
                         var input_buf: [4096]u8 = undefined;
-                        var input_reader: pod_protocol.Reader = .{};
                         const n = posix.read(conn.fd, &input_buf) catch 0;
                         if (n > 0) {
-                            input_reader.feed(input_buf[0..n], @ptrCast(self), podFrameCallback);
+                            self.input_reader.reset();
+                            self.input_reader.feed(input_buf[0..n], @ptrCast(self), podFrameCallback);
                         }
                         var tmp_conn = conn;
                         tmp_conn.close();
@@ -253,7 +266,7 @@ const Pod = struct {
                 break;
             }
             if (poll_fds[1].revents & posix.POLL.IN != 0) {
-                const n = self.pty.read(&buf) catch |err| switch (err) {
+                const n = self.pty.read(buf) catch |err| switch (err) {
                     error.WouldBlock => 0,
                     else => return err,
                 };
@@ -277,7 +290,7 @@ const Pod = struct {
             // Client input.
             if (self.client != null and poll_fds[2].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) != 0) {
                 if (poll_fds[2].revents & posix.POLL.IN != 0) {
-                    const n = posix.read(self.client.?.fd, &buf) catch |err| switch (err) {
+                    const n = posix.read(self.client.?.fd, buf) catch |err| switch (err) {
                         error.WouldBlock => 0,
                         else => return err,
                     };

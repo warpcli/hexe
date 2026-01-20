@@ -10,11 +10,12 @@ const pop = @import("pop");
 
 const PodBackend = struct {
     conn: core.ipc.Connection,
-    reader: pod_protocol.Reader = .{},
+    reader: pod_protocol.Reader,
     socket_path: []u8,
 
     pub fn deinit(self: *PodBackend, allocator: std.mem.Allocator) void {
         self.conn.close();
+        self.reader.deinit(allocator);
         allocator.free(self.socket_path);
         self.* = undefined;
     }
@@ -171,7 +172,10 @@ pub const Pane = struct {
         var client = try core.ipc.Client.connect(owned_path);
         const conn = client.toConnection();
 
-        self.backend = .{ .pod = .{ .conn = conn, .socket_path = owned_path } };
+        var reader = try pod_protocol.Reader.init(allocator, pod_protocol.MAX_FRAME_LEN);
+        errdefer reader.deinit(allocator);
+
+        self.backend = .{ .pod = .{ .conn = conn, .socket_path = owned_path, .reader = reader } };
 
         try self.vt.init(allocator, width, height);
         errdefer self.vt.deinit();
@@ -228,7 +232,10 @@ pub const Pane = struct {
 
         var client = try core.ipc.Client.connect(owned_path);
         const conn = client.toConnection();
-        self.backend = .{ .pod = .{ .conn = conn, .socket_path = owned_path } };
+        var reader = try pod_protocol.Reader.init(self.allocator, pod_protocol.MAX_FRAME_LEN);
+        errdefer reader.deinit(self.allocator);
+
+        self.backend = .{ .pod = .{ .conn = conn, .socket_path = owned_path, .reader = reader } };
 
         // Reset VT state (will be reconstructed from pod backlog replay).
         self.vt.deinit();

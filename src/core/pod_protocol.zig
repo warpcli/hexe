@@ -39,10 +39,27 @@ pub const Reader = struct {
 
     frame_type: FrameType = .output,
     frame_len: usize = 0,
-    payload_buf: [MAX_FRAME_LEN]u8 = undefined,
+    payload_buf: []u8 = &[_]u8{},
     payload_len: usize = 0,
     skipping: bool = false,
     skip_len: usize = 0,
+
+    pub fn init(allocator: std.mem.Allocator, max_len: usize) !Reader {
+        return .{ .payload_buf = try allocator.alloc(u8, max_len) };
+    }
+
+    pub fn deinit(self: *Reader, allocator: std.mem.Allocator) void {
+        allocator.free(self.payload_buf);
+        self.* = undefined;
+    }
+
+    pub fn reset(self: *Reader) void {
+        self.header_len = 0;
+        self.frame_len = 0;
+        self.payload_len = 0;
+        self.skipping = false;
+        self.skip_len = 0;
+    }
 
     pub fn feed(self: *Reader, data: []const u8, ctx: *anyopaque, on_frame: *const fn (*anyopaque, Frame) void) void {
         var i: usize = 0;
@@ -68,7 +85,7 @@ pub const Reader = struct {
                     self.frame_len = std.mem.readInt(u32, self.header[1..5], .big);
                     self.payload_len = 0;
 
-                    if (self.frame_len > MAX_FRAME_LEN) {
+                    if (self.frame_len > self.payload_buf.len) {
                         self.skipping = true;
                         self.skip_len = self.frame_len;
                         continue;
