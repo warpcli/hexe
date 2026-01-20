@@ -182,6 +182,8 @@ pub const Renderer = struct {
 
     /// Set a cell in the next frame buffer
     pub fn setCell(self: *Renderer, x: u16, y: u16, cell: Cell) void {
+        // Strict bounds checking - prevent any out-of-bounds writes
+        // This is critical when rendering from large scrollback states
         if (x >= self.next.width or y >= self.next.height) return;
         self.next.get(x, y).* = cell;
     }
@@ -191,20 +193,48 @@ pub const Renderer = struct {
     /// This renders from ghostty's `RenderState` snapshot, which is safe to read
     /// even when the terminal is actively scrolling or updating pages.
     pub fn drawRenderState(self: *Renderer, state: *const ghostty.RenderState, offset_x: u16, offset_y: u16, width: u16, height: u16) void {
+        // Validate RenderState dimensions to prevent corruption from large scrollback
+        // Ghostty's state.rows/cols can become very large when scrollback is huge
+        // We must clamp to reasonable values to avoid buffer overruns
+        const MAX_REASONABLE_ROWS: usize = 10000;
+        const MAX_REASONABLE_COLS: usize = 1000;
+
         const row_slice = state.row_data.slice();
-        const rows = @min(@as(usize, height), @as(usize, state.rows));
-        const cols = @min(@as(usize, width), @as(usize, state.cols));
+
+        // Clamp state dimensions to reasonable maximums to prevent corruption
+        const safe_state_rows = @min(@as(usize, state.rows), MAX_REASONABLE_ROWS);
+        const safe_state_cols = @min(@as(usize, state.cols), MAX_REASONABLE_COLS);
+
+        // Also clamp to requested dimensions
+        const rows = @min(@as(usize, height), safe_state_rows);
+        const cols = @min(@as(usize, width), safe_state_cols);
+
+        // Validate we're not reading beyond row_data bounds
+        const available_rows = @min(rows, row_slice.len);
+        if (available_rows == 0) return;
 
         const row_cells = row_slice.items(.cells);
 
-        for (0..rows) |yi| {
+        // Calculate maximum safe write position in the renderer's cell buffer
+        const max_write_x = self.next.width;
+        const max_write_y = self.next.height;
+
+        for (0..available_rows) |yi| {
             const y: u16 = @intCast(yi);
+
+            // Skip writing if we're beyond the renderer's Y bounds
+            if (offset_y + y >= max_write_y) break;
+
             const cells_slice = row_cells[yi].slice();
             const raw_cells = cells_slice.items(.raw);
             const styles = cells_slice.items(.style);
 
             for (0..cols) |xi| {
                 const x: u16 = @intCast(xi);
+
+                // Skip writing if we're beyond the renderer's X bounds
+                if (offset_x + x >= max_write_x) break;
+
                 const raw = raw_cells[xi];
 
                 var render_cell = Cell{};

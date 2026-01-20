@@ -69,6 +69,20 @@ pub const Pane = struct {
             self.allocator.free(p);
         }
     }
+
+    // Static buffer for getProcCwd to avoid returning dangling pointer
+    var proc_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    /// Get current working directory from /proc/<child_pid>/cwd
+    /// This is the authoritative CWD from OS, not dependent on shell OSC 7
+    pub fn getProcCwd(self: *const Pane) ?[]const u8 {
+        if (self.child_pid == 0) return null;
+
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{self.child_pid}) catch return null;
+        const link = posix.readlink(path, &proc_cwd_buf) catch return null;
+        return link;
+    }
 };
 
 /// Client connection state

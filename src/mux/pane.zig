@@ -73,6 +73,8 @@ pub const Pane = struct {
     is_pwd: bool = false,
     // Sticky float - survives mux exit, can be reattached
     sticky: bool = false,
+    // Cached CWD from ses daemon (for pod panes where /proc access is in ses)
+    ses_cwd: ?[]const u8 = null,
     // For tab-bound floats: which tab owns this float
     // null = global float (special=true or pwd=true)
     parent_tab: ?usize = null,
@@ -192,12 +194,24 @@ pub const Pane = struct {
         if (self.pwd_dir) |dir| {
             self.allocator.free(dir);
         }
+        if (self.ses_cwd) |cwd| {
+            self.allocator.free(cwd);
+        }
         if (self.notifications_initialized) {
             self.notifications.deinit();
         }
         if (self.popups_initialized) {
             self.popups.deinit();
         }
+    }
+
+    /// Set cached CWD from ses daemon (for pod panes)
+    pub fn setSesCwd(self: *Pane, cwd: ?[]u8) void {
+        // Free old cached CWD if any
+        if (self.ses_cwd) |old| {
+            self.allocator.free(old);
+        }
+        self.ses_cwd = cwd;
     }
 
     pub fn replaceWithPod(self: *Pane, pod_socket_path: []const u8, uuid: [32]u8) !void {
@@ -614,23 +628,35 @@ pub const Pane = struct {
         return self.vt.isCursorVisible();
     }
 
+    // Static buffers for proc reads
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var proc_buf: [256]u8 = undefined;
+
     /// Get current working directory (from OSC 7)
     pub fn getPwd(self: *Pane) ?[]const u8 {
         return self.vt.getPwd();
     }
 
-    // Static buffers for proc reads
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var proc_buf: [256]u8 = undefined;
-
-    /// Get current working directory by reading /proc/<pid>/cwd.
-    /// Only available for local PTY panes.
+    /// Get best available current working directory.
+    /// Tries OSC 7 first (most reliable and up-to-date), then falls back
+    /// to local /proc/<pid>/cwd (works for local PTY panes), then falls back
+    /// to cached CWD from ses (works for pod panes where mux can't read /proc).
     pub fn getRealCwd(self: *Pane) ?[]const u8 {
-        const pid = self.getFgPid() orelse return null;
-        var path_buf: [64]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pid}) catch return null;
-        const link = std.posix.readlink(path, &cwd_buf) catch return null;
-        return link;
+        // Try OSC 7 first (works for both local and pod panes)
+        if (self.vt.getPwd()) |pwd| {
+            return pwd;
+        }
+
+        // Try local /proc fallback (works for local PTY panes)
+        if (self.getFgPid()) |pid| {
+            var path_buf: [64]u8 = undefined;
+            const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pid}) catch return self.ses_cwd;
+            const link = std.posix.readlink(path, &cwd_buf) catch return self.ses_cwd;
+            return link;
+        }
+
+        // For pod panes, use cached CWD from ses daemon (populated by main.zig)
+        return self.ses_cwd;
     }
 
     extern fn tcgetpgrp(fd: c_int) posix.pid_t;

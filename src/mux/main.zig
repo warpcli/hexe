@@ -259,7 +259,8 @@ const State = struct {
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         if (self.tabs.items.len > 0) {
             if (self.currentLayout().getFocusedPane()) |focused| {
-                cwd = focused.getRealCwd();
+                // Refresh CWD from ses for pod panes
+                cwd = self.refreshPaneCwd(focused);
             }
         } else {
             // First tab - use mux's current directory
@@ -1027,6 +1028,22 @@ const State = struct {
         };
     }
 
+    /// Refresh CWD cache from ses for a pod pane.
+    /// For pod panes, queries ses daemon for /proc/<pid>/cwd and caches it.
+    /// Returns the best available CWD (OSC 7, local /proc, or ses cache).
+    fn refreshPaneCwd(self: *State, pane: *Pane) ?[]const u8 {
+        // For pod panes, query ses for CWD from /proc and cache it
+        switch (pane.backend) {
+            .pod => {
+                if (self.ses_client.getPaneCwd(pane.uuid)) |cwd| {
+                    pane.setSesCwd(cwd);
+                }
+            },
+            .local => {},
+        }
+        return pane.getRealCwd();
+    }
+
     /// Periodically sync focused pane info (CWD, fg_process) to ses
     fn syncFocusedPaneInfo(self: *State) void {
         if (!self.ses_client.isConnected()) return;
@@ -1041,6 +1058,9 @@ const State = struct {
         const p = pane.?;
         if (p.uuid[0] == 0) return;
 
+        // Refresh CWD cache for pod panes
+        _ = self.refreshPaneCwd(p);
+
         const pane_type: SesClient.PaneType = if (p.floating) .float else .split;
         const cursor = p.getCursorPos();
         self.ses_client.updatePaneAux(
@@ -1051,7 +1071,7 @@ const State = struct {
             null, // don't update created_from
             null, // don't update focused_from
             .{ .x = cursor.x, .y = cursor.y },
-            p.getPwd(),
+            p.getRealCwd(), // Use cached CWD after refresh
             null,
             null,
         ) catch {};
@@ -2689,7 +2709,8 @@ fn handleAltKey(state: *State, key: u8) bool {
 
     if (key == split_h_key) {
         const parent_uuid = state.getCurrentFocusedUuid();
-        const cwd = if (state.currentLayout().getFocusedPane()) |p| p.getRealCwd() else null;
+        // Refresh CWD from ses for pod panes before splitting
+        const cwd = if (state.currentLayout().getFocusedPane()) |p| state.refreshPaneCwd(p) else null;
         if (state.currentLayout().splitFocused(.horizontal, cwd) catch null) |new_pane| {
             state.syncPaneAux(new_pane, parent_uuid);
         }
@@ -2700,7 +2721,8 @@ fn handleAltKey(state: *State, key: u8) bool {
 
     if (key == split_v_key) {
         const parent_uuid = state.getCurrentFocusedUuid();
-        const cwd = if (state.currentLayout().getFocusedPane()) |p| p.getRealCwd() else null;
+        // Refresh CWD from ses for pod panes before splitting
+        const cwd = if (state.currentLayout().getFocusedPane()) |p| state.refreshPaneCwd(p) else null;
         if (state.currentLayout().splitFocused(.vertical, cwd) catch null) |new_pane| {
             state.syncPaneAux(new_pane, parent_uuid);
         }
@@ -2841,10 +2863,10 @@ fn handleAltKey(state: *State, key: u8) bool {
 
 fn toggleNamedFloat(state: *State, float_def: *const core.FloatDef) void {
     // Get current directory from focused pane (for pwd floats)
-    // Use getRealCwd which reads /proc/<pid>/cwd for accurate directory
+    // Use refreshPaneCwd which queries ses for pod panes
     var current_dir: ?[]const u8 = null;
     if (state.currentLayout().getFocusedPane()) |focused| {
-        current_dir = focused.getRealCwd();
+        current_dir = state.refreshPaneCwd(focused);
     }
 
     // Find existing float by key (and directory if pwd)

@@ -345,6 +345,34 @@ pub const SesClient = struct {
         return info;
     }
 
+    /// Get current working directory from /proc/<pid>/cwd via ses
+    /// Returns an owned slice that the caller must free with the allocator.
+    pub fn getPaneCwd(self: *SesClient, uuid: [32]u8) ?[]u8 {
+        const conn = &(self.conn orelse return null);
+
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{{\"type\":\"get_pane_cwd\",\"uuid\":\"{s}\"}}", .{uuid}) catch return null;
+        conn.sendLine(msg) catch return null;
+
+        // Wait for response
+        var resp_buf: [std.fs.max_path_bytes + 128]u8 = undefined;
+        const line = conn.recvLine(&resp_buf) catch return null;
+        if (line == null) return null;
+
+        // Parse JSON response
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line.?, .{}) catch return null;
+        defer parsed.deinit();
+
+        const root = parsed.value.object;
+        if (root.get("cwd")) |cwd| {
+            if (cwd == .string) {
+                // Duplicate the string since parsed will be freed
+                return self.allocator.dupe(u8, cwd.string) catch return null;
+            }
+        }
+        return null;
+    }
+
     /// Ping ses to check if it's alive
     pub fn ping(self: *SesClient) !bool {
         const conn = &(self.conn orelse return false);

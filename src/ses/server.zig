@@ -21,6 +21,7 @@ pub const RequestType = enum {
     adopt_pane,
     kill_pane,
     ping,
+    get_pane_cwd,
 };
 
 /// Message types from ses to mux
@@ -245,6 +246,8 @@ pub const Server = struct {
             try pop_handlers.handlePopChoose(self.ses_state, &self.pending_pop_requests, conn, root, sendErrorFn);
         } else if (std.mem.eql(u8, type_str, "pane_info")) {
             try pane_handlers.handlePaneInfo(self.ses_state, conn, root, sendErrorFn);
+        } else if (std.mem.eql(u8, type_str, "get_pane_cwd")) {
+            try pane_handlers.handleGetPaneCwd(self.ses_state, conn, root, sendErrorFn);
         } else if (std.mem.eql(u8, type_str, "detach_session")) {
             try session_handlers.handleDetachSession(self.allocator, self.ses_state, conn, cid, root, sendErrorFn);
         } else if (std.mem.eql(u8, type_str, "reattach")) {

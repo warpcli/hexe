@@ -5,6 +5,38 @@ const ipc = core.ipc;
 const state = @import("../state.zig");
 const ses = @import("../main.zig");
 
+/// Handle get_pane_cwd request - queries /proc/<pid>/cwd for a pane
+pub fn handleGetPaneCwd(
+    ses_state: *state.SesState,
+    conn: *ipc.Connection,
+    root: std.json.ObjectMap,
+    sendError: *const fn (*ipc.Connection, []const u8) anyerror!void,
+) !void {
+    const uuid_str = (root.get("uuid") orelse return sendError(conn, "missing_uuid")).string;
+    if (uuid_str.len != 32) return sendError(conn, "invalid_uuid");
+
+    var uuid: [32]u8 = undefined;
+    @memcpy(&uuid, uuid_str[0..32]);
+
+    const pane = ses_state.getPane(uuid) orelse {
+        var response_buf: [256]u8 = undefined;
+        const response = try std.fmt.bufPrint(&response_buf, "{{\"type\":\"pane_cwd\",\"uuid\":\"{s}\",\"cwd\":null}}\n", .{uuid});
+        try conn.send(response);
+        return;
+    };
+
+    // Get CWD from /proc/<child_pid>/cwd
+    const cwd = pane.getProcCwd();
+
+    var response_buf: [std.fs.max_path_bytes + 128]u8 = undefined;
+    const response = if (cwd) |c|
+        try std.fmt.bufPrint(&response_buf, "{{\"type\":\"pane_cwd\",\"uuid\":\"{s}\",\"cwd\":\"{s}\"}}\n", .{ uuid, c })
+    else
+        try std.fmt.bufPrint(&response_buf, "{{\"type\":\"pane_cwd\",\"uuid\":\"{s}\",\"cwd\":null}}\n", .{uuid});
+
+    try conn.send(response);
+}
+
 /// Handle create_pane request
 pub fn handleCreatePane(
     ses_state: *state.SesState,
@@ -348,8 +380,10 @@ pub fn handlePaneInfo(
     if (pane.focused_from) |focused_uuid| {
         try writer.print(",\"focused_from\":\"{s}\"", .{focused_uuid});
     }
-    if (pane.cwd) |cwd| {
-        try writer.print(",\"cwd\":\"{s}\"", .{cwd});
+    // Get CWD: prefer /proc/<pid>/cwd (authoritative), fall back to synced cwd
+    const cwd = pane.getProcCwd() orelse pane.cwd;
+    if (cwd) |c| {
+        try writer.print(",\"cwd\":\"{s}\"", .{c});
     }
     if (pane.fg_process) |proc| {
         try writer.print(",\"fg_process\":\"{s}\"", .{proc});

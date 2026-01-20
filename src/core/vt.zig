@@ -93,8 +93,31 @@ pub const VT = struct {
     /// This uses ghostty's `RenderState` which duplicates any managed cell data
     /// required for rendering. Reading cells via `PageList` directly can be
     /// fragile when pins/pages are shifting due to scrollback or resize.
+    ///
+    /// SAFETY: When scrollback is very large, this can fail or return invalid data.
+    /// Callers should check the returned RenderState's rows/cols are reasonable.
     pub fn getRenderState(self: *VT) !*const ghostty.RenderState {
+        // Clear previous state before updating to free memory from previous large scrollback
+        self.render_state.deinit(self.allocator);
+        self.render_state = .empty;
+
+        // Update render state - this allocates based on current VT dimensions
         try self.render_state.update(self.allocator, &self.terminal);
+
+        // Validate the RenderState dimensions are reasonable
+        // Large scrollback can cause rows to become extremely large
+        const MAX_REASONABLE_ROWS: usize = 10000;
+        const MAX_REASONABLE_COLS: usize = 1000;
+
+        if (self.render_state.rows > MAX_REASONABLE_ROWS or
+            self.render_state.cols > MAX_REASONABLE_COLS)
+        {
+            // RenderState has invalid dimensions - likely due to corrupted scrollback
+            // Return empty state to prevent rendering corruption
+            self.render_state.deinit(self.allocator);
+            self.render_state = .empty;
+        }
+
         return &self.render_state;
     }
 };
