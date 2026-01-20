@@ -53,8 +53,7 @@ This is the foundation for:
 
 - Tabs
 - Splits
-- Floating panes
-  - Includes sticky floats that survive mux restarts
+- Floating panes (see dedicated section below)
 - Pane adoption
   - Adopt an orphaned pane into the current mux
   - Swap panes or destroy the current pane during adopt
@@ -63,6 +62,183 @@ This is the foundation for:
   - Confirm dialogs
   - Picker/choose dialogs
   - Pane-level and mux-level notifications
+
+### Floats
+
+Floats are overlay panes that appear on top of your splits. They are toggled via `Alt+<key>` bindings and support several powerful behaviors.
+
+#### Float Settings
+
+Each float can be configured with these settings:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `key` | required | Keybinding (e.g., `f` for `Alt+f`) |
+| `command` | shell | Command to run (null = default shell) |
+| `pwd` | false | Each directory gets its own instance |
+| `sticky` | false | Survives mux restarts |
+| `special` | true | Global float (false = tab-bound) |
+| `destroy` | false | Kill float when hidden |
+| `alone` | false | Hide all other floats when shown |
+
+#### pwd: Directory-Specific Floats
+
+When `pwd: true`, each directory gets its own independent instance of the float.
+
+- Toggle `Alt+f` in `/home/user/project-a` → opens float A
+- Toggle `Alt+f` in `/home/user/project-b` → opens float B (different instance)
+- Go back to `/home/user/project-a` and toggle → shows float A again
+
+This is useful for tools like fzf, file browsers, or any context where you want per-directory state.
+
+#### sticky: Persistent Floats
+
+When `sticky: true`, the float survives mux restarts.
+
+- You open a sticky float in `/home/user/project`
+- You exit the mux (or it crashes)
+- You start a new mux in the same directory
+- The float is automatically restored with its full state
+
+Sticky floats are matched by directory + key combination. The session daemon keeps them alive in a half-attached state until a new mux reclaims them.
+
+Combine with `pwd: true` for directory-specific persistent floats.
+
+#### special: Global vs Tab-Bound
+
+- `special: true` (default): Float is global, visible across all tabs. Uses a per-tab visibility bitmask.
+- `special: false`: Float is bound to the tab it was created on. Only visible on that tab.
+
+Note: `pwd` floats are always global regardless of this setting.
+
+#### destroy: Auto-Cleanup
+
+When `destroy: true`, the float is killed when hidden instead of just becoming invisible.
+
+- Only applies to tab-bound floats (`special: false`, `pwd: false`)
+- Useful for one-shot commands or dialogs
+- Pwd and special floats ignore this setting (they need persistence)
+
+#### alone: Modal Mode
+
+When `alone: true`, showing this float automatically hides all other floats on the current tab.
+
+Useful for creating modal-like overlays that demand focus.
+
+#### Sizing and Position
+
+Floats support percentage-based layout:
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `width` | 60 | Width as % of terminal (10-100) |
+| `height` | 60 | Height as % of terminal (10-100) |
+| `pos_x` | 50 | Horizontal position (0=left, 50=center, 100=right) |
+| `pos_y` | 50 | Vertical position (0=top, 50=center, 100=bottom) |
+| `padding_x` | 1 | Left/right padding inside border |
+| `padding_y` | 0 | Top/bottom padding inside border |
+
+#### Border Style
+
+Each float can have custom border characters and colors:
+
+```json
+{
+  "style": {
+    "top_left": "╭",
+    "top_right": "╮",
+    "bottom_left": "╰",
+    "bottom_right": "╯",
+    "horizontal": "─",
+    "vertical": "│"
+  },
+  "color": {
+    "active": 2,
+    "passive": 8
+  }
+}
+```
+
+You can also embed a status module in the border:
+
+```json
+{
+  "style": {
+    "position": "topcenter",
+    "module": "time"
+  }
+}
+```
+
+Positions: `topleft`, `topcenter`, `topright`, `bottomleft`, `bottomcenter`, `bottomright`
+
+#### Example Configuration
+
+```json
+{
+  "floats": [
+    {
+      "key": "f",
+      "command": "fzf",
+      "pwd": true,
+      "sticky": true,
+      "width": 80,
+      "height": 70
+    },
+    {
+      "key": "g",
+      "command": "lazygit",
+      "pwd": true,
+      "sticky": true,
+      "width": 90,
+      "height": 90
+    },
+    {
+      "key": "t",
+      "special": false,
+      "destroy": true,
+      "width": 40,
+      "height": 30,
+      "pos_x": 100,
+      "pos_y": 0
+    },
+    {
+      "key": "h",
+      "command": "hexa-help",
+      "alone": true,
+      "width": 70,
+      "height": 50
+    }
+  ]
+}
+```
+
+This gives you:
+
+- `Alt+f`: fzf with per-directory instances that persist across restarts
+- `Alt+g`: lazygit with per-directory instances that persist across restarts
+- `Alt+t`: A tab-local scratch terminal in the top-right that dies when hidden
+- `Alt+h`: A help overlay that hides everything else when shown
+
+#### Float Defaults
+
+The first entry in `floats` without a `key` field sets defaults for all floats:
+
+```json
+{
+  "floats": [
+    {
+      "width": 60,
+      "height": 60,
+      "padding_x": 1,
+      "padding_y": 0,
+      "color": { "active": 2, "passive": 8 }
+    },
+    { "key": "f", "command": "fzf", "pwd": true },
+    { "key": "g", "command": "lazygit", "pwd": true }
+  ]
+}
+```
 
 ### Persistent scrollback
 
