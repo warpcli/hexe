@@ -90,10 +90,13 @@ pub fn save(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
 }
 
 pub fn load(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
-    const path = try ipc.getSesStatePath(allocator);
-    defer allocator.free(path);
+    // Use page_allocator for path to avoid potential GPA issues after fork
+    const path = try ipc.getSesStatePath(std.heap.page_allocator);
+    defer std.heap.page_allocator.free(path);
 
-    const file = std.fs.openFileAbsolute(path, .{}) catch return;
+    const file = std.fs.openFileAbsolute(path, .{}) catch {
+        return;
+    };
     defer file.close();
 
     const data = try file.readToEndAlloc(allocator, 8 * 1024 * 1024);

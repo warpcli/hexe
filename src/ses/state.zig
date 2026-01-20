@@ -159,6 +159,7 @@ pub const DetachedMuxState = struct {
 };
 
 /// Main ses state - the PTY holder
+/// Note: Uses page_allocator internally to avoid GPA issues after fork/daemonization
 pub const SesState = struct {
     allocator: std.mem.Allocator,
     panes: std.AutoHashMap([32]u8, Pane),
@@ -168,12 +169,14 @@ pub const SesState = struct {
     orphan_timeout_hours: u32,
     dirty: bool,
 
-    pub fn init(allocator: std.mem.Allocator) SesState {
+    pub fn init(_: std.mem.Allocator) SesState {
+        // Always use page_allocator to avoid GPA issues after fork/daemonization
+        const page_alloc = std.heap.page_allocator;
         return .{
-            .allocator = allocator,
-            .panes = std.AutoHashMap([32]u8, Pane).init(allocator),
+            .allocator = page_alloc,
+            .panes = std.AutoHashMap([32]u8, Pane).init(page_alloc),
             .clients = .empty,
-            .detached_sessions = std.AutoHashMap([16]u8, DetachedMuxState).init(allocator),
+            .detached_sessions = std.AutoHashMap([16]u8, DetachedMuxState).init(page_alloc),
             .next_client_id = 1,
             .orphan_timeout_hours = 24,
             .dirty = false,

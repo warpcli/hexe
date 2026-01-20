@@ -38,6 +38,7 @@ pub const ResponseType = enum {
 };
 
 /// Server that handles mux connections
+/// Note: Uses page_allocator internally to avoid GPA issues after fork/daemonization
 pub const Server = struct {
     allocator: std.mem.Allocator,
     socket: ipc.Server,
@@ -46,18 +47,20 @@ pub const Server = struct {
     // Track pending pop requests: mux_fd -> cli_fd
     pending_pop_requests: std.AutoHashMap(posix.fd_t, posix.fd_t),
 
-    pub fn init(allocator: std.mem.Allocator, ses_state: *state.SesState) !Server {
-        const socket_path = try ipc.getSesSocketPath(allocator);
-        defer allocator.free(socket_path);
+    pub fn init(_: std.mem.Allocator, ses_state: *state.SesState) !Server {
+        // Use page_allocator for everything to avoid GPA issues after fork
+        const page_alloc = std.heap.page_allocator;
+        const socket_path = try ipc.getSesSocketPath(page_alloc);
+        defer page_alloc.free(socket_path);
 
-        const socket = try ipc.Server.init(allocator, socket_path);
+        const socket = try ipc.Server.init(page_alloc, socket_path);
 
         return Server{
-            .allocator = allocator,
+            .allocator = page_alloc,
             .socket = socket,
             .ses_state = ses_state,
             .running = true,
-            .pending_pop_requests = std.AutoHashMap(posix.fd_t, posix.fd_t).init(allocator),
+            .pending_pop_requests = std.AutoHashMap(posix.fd_t, posix.fd_t).init(page_alloc),
         };
     }
 
@@ -68,11 +71,13 @@ pub const Server = struct {
 
     /// Main server loop - handles connections and messages
     pub fn run(self: *Server) !void {
+        // Use page_allocator for poll_fds to avoid GPA issues after fork
+        const page_alloc = std.heap.page_allocator;
         var poll_fds: std.ArrayList(posix.pollfd) = .empty;
-        defer poll_fds.deinit(self.allocator);
+        defer poll_fds.deinit(page_alloc);
 
         // Add server socket
-        try poll_fds.append(self.allocator, .{
+        try poll_fds.append(page_alloc, .{
             .fd = self.socket.getFd(),
             .events = posix.POLL.IN,
             .revents = 0,
@@ -108,7 +113,7 @@ pub const Server = struct {
             // Check server socket for new connections
             if (poll_fds.items[0].revents & posix.POLL.IN != 0) {
                 if (self.socket.tryAccept() catch null) |conn| {
-                    try poll_fds.append(self.allocator, .{
+                    try poll_fds.append(page_alloc, .{
                         .fd = conn.fd,
                         .events = posix.POLL.IN,
                         .revents = 0,
@@ -171,8 +176,9 @@ pub const Server = struct {
 
     /// Handle a message from a client
     fn handleMessage(self: *Server, conn: *ipc.Connection, client_id: ?usize, fd: posix.fd_t, msg: []const u8) !void {
-        // Parse JSON message
-        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, msg, .{}) catch {
+        // Parse JSON message - use page_allocator to avoid GPA issues after fork
+        const page_alloc = std.heap.page_allocator;
+        const parsed = std.json.parseFromSlice(std.json.Value, page_alloc, msg, .{}) catch {
             try self.sendError(conn, "invalid_json");
             return;
         };

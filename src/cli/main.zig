@@ -46,6 +46,23 @@ pub fn main() !void {
     const com_notify_broadcast = try com_notify.flag("b", "broadcast", null);
     const com_notify_msg = try com_notify.stringPositional(null);
 
+    const com_send = try com_cmd.newCommand("send", "Send keystrokes to pane");
+    const com_send_uuid = try com_send.string("u", "uuid", null);
+    const com_send_creator = try com_send.flag("c", "creator", null);
+    const com_send_last = try com_send.flag("l", "last", null);
+    const com_send_broadcast = try com_send.flag("b", "broadcast", null);
+    const com_send_enter = try com_send.flag("e", "enter", null);
+    const com_send_ctrl = try com_send.string("C", "ctrl", null);
+    const com_send_text = try com_send.stringPositional(null);
+    // Suppress unused warnings for now
+    _ = com_send_uuid;
+    _ = com_send_creator;
+    _ = com_send_last;
+    _ = com_send_broadcast;
+    _ = com_send_enter;
+    _ = com_send_ctrl;
+    _ = com_send_text;
+
     // SES subcommands
     const ses_daemon = try ses_cmd.newCommand("daemon", "Start the session daemon");
     const ses_daemon_fg = try ses_daemon.flag("f", "foreground", null);

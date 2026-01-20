@@ -75,6 +75,7 @@ pub fn run(args: SesArgs) !void {
     }
 
     // Now create GPA AFTER fork - this ensures clean allocator state
+    // Note: GPA still has issues after fork, so we use page_allocator for most operations
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -88,9 +89,6 @@ pub fn run(args: SesArgs) !void {
 
     // Initialize server
     var srv = server.Server.init(allocator, &ses_state) catch |err| {
-        if (!args.daemon) {
-            std.debug.print("ses: server init failed: {}\n", .{err});
-        }
         return err;
     };
     defer srv.deinit();
@@ -107,9 +105,6 @@ pub fn run(args: SesArgs) !void {
 
     // Run server
     srv.run() catch |err| {
-        if (!args.daemon) {
-            std.debug.print("Server error: {}\n", .{err});
-        }
         return err;
     };
 }
@@ -471,11 +466,19 @@ fn daemonize() !void {
 
     // We are now the daemon process
 
-    // Redirect stdin/stdout/stderr to /dev/null
+    // Redirect stdin/stdout to /dev/null, stderr to debug log
     const devnull = posix.open("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch return;
     posix.dup2(devnull, posix.STDIN_FILENO) catch {};
     posix.dup2(devnull, posix.STDOUT_FILENO) catch {};
-    posix.dup2(devnull, posix.STDERR_FILENO) catch {};
+    // Keep stderr for debugging - write to a log file
+    const logfd = posix.open("/tmp/hexa-ses-debug.log", .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch {
+        posix.dup2(devnull, posix.STDERR_FILENO) catch {};
+        if (devnull > 2) posix.close(devnull);
+        std.posix.chdir("/") catch {};
+        return;
+    };
+    posix.dup2(logfd, posix.STDERR_FILENO) catch {};
+    if (logfd > 2) posix.close(logfd);
     if (devnull > 2) {
         posix.close(devnull);
     }
