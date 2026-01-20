@@ -2,7 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const ipc = @import("ipc.zig");
 
-pub const MAX_FRAME_LEN: usize = 32 * 1024;
+pub const MAX_FRAME_LEN: usize = 4 * 1024 * 1024;
 
 pub const FrameType = enum(u8) {
     output = 1,
@@ -41,10 +41,22 @@ pub const Reader = struct {
     frame_len: usize = 0,
     payload_buf: [MAX_FRAME_LEN]u8 = undefined,
     payload_len: usize = 0,
+    skipping: bool = false,
+    skip_len: usize = 0,
 
     pub fn feed(self: *Reader, data: []const u8, ctx: *anyopaque, on_frame: *const fn (*anyopaque, Frame) void) void {
         var i: usize = 0;
         while (i < data.len) {
+            if (self.skipping) {
+                const take = @min(self.skip_len, data.len - i);
+                self.skip_len -= take;
+                i += take;
+                if (self.skip_len == 0) {
+                    self.skipping = false;
+                    self.header_len = 0;
+                }
+                continue;
+            }
             if (self.header_len < self.header.len) {
                 const take = @min(self.header.len - self.header_len, data.len - i);
                 @memcpy(self.header[self.header_len .. self.header_len + take], data[i .. i + take]);
@@ -57,10 +69,9 @@ pub const Reader = struct {
                     self.payload_len = 0;
 
                     if (self.frame_len > MAX_FRAME_LEN) {
-                        self.header_len = 0;
-                        self.frame_len = 0;
-                        self.payload_len = 0;
-                        return;
+                        self.skipping = true;
+                        self.skip_len = self.frame_len;
+                        continue;
                     }
 
                     if (self.frame_len == 0) {
