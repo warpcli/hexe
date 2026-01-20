@@ -7,17 +7,21 @@ pub const SesClient = struct {
     allocator: std.mem.Allocator,
     conn: ?core.ipc.Connection,
     just_started_daemon: bool,
+    debug: bool,
+    log_file: ?[]const u8,
 
     // Registration info
     session_id: [32]u8, // mux UUID as hex string
     session_name: []const u8, // Pokemon name
     keepalive: bool,
 
-    pub fn init(allocator: std.mem.Allocator, session_id: [32]u8, session_name: []const u8, keepalive: bool) SesClient {
+    pub fn init(allocator: std.mem.Allocator, session_id: [32]u8, session_name: []const u8, keepalive: bool, debug: bool, log_file: ?[]const u8) SesClient {
         return .{
             .allocator = allocator,
             .conn = null,
             .just_started_daemon = false,
+            .debug = debug,
+            .log_file = log_file,
             .session_id = session_id,
             .session_name = session_name,
             .keepalive = keepalive,
@@ -138,9 +142,24 @@ pub const SesClient = struct {
 
     /// Start the ses daemon
     fn startSes(self: *SesClient) !void {
-        _ = self;
         // Fork and exec hexe ses daemon
-        var child = std.process.Child.init(&[_][]const u8{ "hexe", "ses", "daemon" }, std.heap.page_allocator);
+        var args_list: std.ArrayList([]const u8) = .empty;
+        defer args_list.deinit(self.allocator);
+
+        try args_list.append(self.allocator, "hexe");
+        try args_list.append(self.allocator, "ses");
+        try args_list.append(self.allocator, "daemon");
+        if (self.debug) {
+            try args_list.append(self.allocator, "--debug");
+        }
+        if (self.log_file) |path| {
+            if (path.len > 0) {
+                try args_list.append(self.allocator, "--logfile");
+                try args_list.append(self.allocator, path);
+            }
+        }
+
+        var child = std.process.Child.init(args_list.items, std.heap.page_allocator);
         child.spawn() catch |err| {
             std.debug.print("Failed to start ses daemon: {}\n", .{err});
             return err;

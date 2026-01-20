@@ -59,6 +59,7 @@ pub fn main() !void {
     const ses_daemon = try ses_cmd.newCommand("daemon", "Start the session daemon");
     const ses_daemon_fg = try ses_daemon.flag("f", "foreground", null);
     const ses_daemon_dbg = try ses_daemon.flag("d", "debug", null);
+    const ses_daemon_log = try ses_daemon.string("L", "logfile", null);
     _ = try ses_cmd.newCommand("info", "Show daemon info");
 
     // POD subcommands (mostly for ses-internal use)
@@ -68,13 +69,19 @@ pub fn main() !void {
     const pod_daemon_shell = try pod_daemon.string("S", "shell", null);
     const pod_daemon_cwd = try pod_daemon.string("C", "cwd", null);
     const pod_daemon_fg = try pod_daemon.flag("f", "foreground", null);
+    const pod_daemon_dbg = try pod_daemon.flag("d", "debug", null);
+    const pod_daemon_log = try pod_daemon.string("L", "logfile", null);
 
     // MUX subcommands
     const mux_new = try mux_cmd.newCommand("new", "Create new multiplexer session");
     const mux_new_name = try mux_new.string("n", "name", null);
+    const mux_new_dbg = try mux_new.flag("d", "debug", null);
+    const mux_new_log = try mux_new.string("L", "logfile", null);
 
     const mux_attach = try mux_cmd.newCommand("attach", "Attach to existing session");
     const mux_attach_name = try mux_attach.stringPositional(null);
+    const mux_attach_dbg = try mux_attach.flag("d", "debug", null);
+    const mux_attach_log = try mux_attach.string("L", "logfile", null);
 
     // POP subcommands
     const shp_prompt = try shp_cmd.newCommand("prompt", "Render shell prompt");
@@ -157,15 +164,15 @@ pub fn main() !void {
         } else if (found_com and found_list) {
             print("Usage: hexe com list [OPTIONS]\n\nList all sessions and panes\n\nOptions:\n  -d, --details  Show extra details\n", .{});
         } else if (found_ses and found_daemon) {
-            print("Usage: hexe ses daemon [OPTIONS]\n\nStart the session daemon\n\nOptions:\n  -f, --foreground  Run in foreground (don't daemonize)\n  -d, --debug       Enable debug output\n", .{});
+            print("Usage: hexe ses daemon [OPTIONS]\n\nStart the session daemon\n\nOptions:\n  -f, --foreground     Run in foreground (don't daemonize)\n  -d, --debug          Enable debug output\n  -L, --logfile <PATH> Log debug output to PATH\n", .{});
         } else if (found_ses and found_info) {
             print("Usage: hexe ses info\n\nShow daemon status and socket path\n", .{});
         } else if (found_pod and found_daemon) {
-            print("Usage: hexe pod daemon [OPTIONS]\n\nStart a per-pane pod daemon (normally launched by ses)\n\nOptions:\n  -u, --uuid <UUID>    Pane UUID (32 hex chars)\n  -s, --socket <PATH>  Pod unix socket path\n  -S, --shell <CMD>    Shell/command to run\n  -C, --cwd <DIR>      Working directory\n  -f, --foreground     Run in foreground (prints pod_ready JSON)\n", .{});
+            print("Usage: hexe pod daemon [OPTIONS]\n\nStart a per-pane pod daemon (normally launched by ses)\n\nOptions:\n  -u, --uuid <UUID>     Pane UUID (32 hex chars)\n  -s, --socket <PATH>   Pod unix socket path\n  -S, --shell <CMD>     Shell/command to run\n  -C, --cwd <DIR>       Working directory\n  -f, --foreground      Run in foreground (prints pod_ready JSON)\n  -d, --debug           Enable debug output\n  -L, --logfile <PATH>  Log debug output to PATH\n", .{});
         } else if (found_mux and found_new) {
-            print("Usage: hexe mux new [OPTIONS]\n\nCreate new multiplexer session\n\nOptions:\n  -n, --name <NAME>  Session name\n", .{});
+            print("Usage: hexe mux new [OPTIONS]\n\nCreate new multiplexer session\n\nOptions:\n  -n, --name <NAME>     Session name\n  -d, --debug           Enable debug output\n  -L, --logfile <PATH>  Log debug output to PATH\n", .{});
         } else if (found_mux and found_attach) {
-            print("Usage: hexe mux attach <name>\n\nAttach to existing session by name or UUID prefix\n", .{});
+            print("Usage: hexe mux attach [OPTIONS] <name>\n\nAttach to existing session by name or UUID prefix\n\nOptions:\n  -d, --debug           Enable debug output\n  -L, --logfile <PATH>  Log debug output to PATH\n", .{});
         } else if (found_shp and found_prompt) {
             print("Usage: hexe shp prompt [OPTIONS]\n\nRender shell prompt\n\nOptions:\n  -s, --status <N>    Exit status of last command\n  -d, --duration <N>  Duration of last command in ms\n  -r, --right         Render right prompt\n  -S, --shell <SHELL> Shell type (bash, zsh, fish)\n  -j, --jobs <N>      Number of background jobs\n", .{});
         } else if (found_shp and found_init) {
@@ -239,7 +246,7 @@ pub fn main() !void {
         for (ses_cmd.commands.items) |cmd| {
             if (cmd.happened) {
                 if (std.mem.eql(u8, cmd.name, "daemon")) {
-                    try runSesDaemon(ses_daemon_fg.*, ses_daemon_dbg.*);
+                    try runSesDaemon(ses_daemon_fg.*, ses_daemon_dbg.*, ses_daemon_log.*);
                 } else if (std.mem.eql(u8, cmd.name, "info")) {
                     try runSesInfo(allocator);
                 }
@@ -254,14 +261,16 @@ pub fn main() !void {
                 pod_daemon_socket.*,
                 pod_daemon_shell.*,
                 pod_daemon_cwd.*,
+                pod_daemon_dbg.*,
+                pod_daemon_log.*,
             );
         }
         return;
     } else if (mux_cmd.happened) {
         if (mux_new.happened) {
-            try runMuxNew(mux_new_name.*);
+            try runMuxNew(mux_new_name.*, mux_new_dbg.*, mux_new_log.*);
         } else if (mux_attach.happened) {
-            try runMuxAttach(mux_attach_name.*);
+            try runMuxAttach(mux_attach_name.*, mux_attach_dbg.*, mux_attach_log.*);
         }
     } else if (shp_cmd.happened) {
         if (shp_prompt.happened) {
@@ -284,9 +293,9 @@ pub fn main() !void {
 // SES handlers
 // ============================================================================
 
-fn runSesDaemon(foreground: bool, debug: bool) !void {
+fn runSesDaemon(foreground: bool, debug: bool, log_file: []const u8) !void {
     // Call ses run() - daemon mode unless foreground flag is set
-    try ses.run(.{ .daemon = !foreground, .debug = debug });
+    try ses.run(.{ .daemon = !foreground, .debug = debug, .log_file = if (log_file.len > 0) log_file else null });
 }
 
 fn runSesInfo(allocator: std.mem.Allocator) !void {
@@ -309,7 +318,7 @@ fn runSesInfo(allocator: std.mem.Allocator) !void {
 // POD handlers
 // ============================================================================
 
-fn runPodDaemon(foreground: bool, uuid: []const u8, socket_path: []const u8, shell: []const u8, cwd: []const u8) !void {
+fn runPodDaemon(foreground: bool, uuid: []const u8, socket_path: []const u8, shell: []const u8, cwd: []const u8, debug: bool, log_file: []const u8) !void {
     if (uuid.len == 0 or socket_path.len == 0) {
         print("Error: --uuid and --socket required\n", .{});
         return;
@@ -321,6 +330,8 @@ fn runPodDaemon(foreground: bool, uuid: []const u8, socket_path: []const u8, she
         .socket_path = socket_path,
         .shell = if (shell.len > 0) shell else null,
         .cwd = if (cwd.len > 0) cwd else null,
+        .debug = debug,
+        .log_file = if (log_file.len > 0) log_file else null,
         .emit_ready = foreground,
     });
 }
@@ -329,18 +340,22 @@ fn runPodDaemon(foreground: bool, uuid: []const u8, socket_path: []const u8, she
 // MUX handlers
 // ============================================================================
 
-fn runMuxNew(name: []const u8) !void {
+fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8) !void {
     // Call mux run() directly
     try mux.run(.{
         .name = if (name.len > 0) name else null,
+        .debug = debug,
+        .log_file = if (log_file.len > 0) log_file else null,
     });
 }
 
-fn runMuxAttach(name: []const u8) !void {
+fn runMuxAttach(name: []const u8, debug: bool, log_file: []const u8) !void {
     if (name.len > 0) {
         // Call mux run() directly with attach option
         try mux.run(.{
             .attach = name,
+            .debug = debug,
+            .log_file = if (log_file.len > 0) log_file else null,
         });
     } else {
         print("Error: session name required\n", .{});

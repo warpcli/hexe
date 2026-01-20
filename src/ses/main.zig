@@ -10,6 +10,7 @@ const persist = @import("persist.zig");
 pub const SesArgs = struct {
     daemon: bool = false,
     debug: bool = false,
+    log_file: ?[]const u8 = null,
     list: bool = false,
     full: bool = false,
     notify_message: ?[]const u8 = null,
@@ -18,6 +19,7 @@ pub const SesArgs = struct {
 
 /// Debug logging - only outputs when debug mode is enabled
 pub var debug_enabled: bool = false;
+pub var log_file_path: ?[]const u8 = null;
 
 pub fn debugLog(comptime fmt: []const u8, args: anytype) void {
     if (!debug_enabled) return;
@@ -46,8 +48,9 @@ pub fn run(args: SesArgs) !void {
         return;
     }
 
-    // Enable debug mode if requested
+    // Enable debug mode and optional logging
     debug_enabled = args.debug;
+    log_file_path = if (args.log_file) |path| if (path.len > 0) path else null else null;
 
     // Avoid multiple daemons: if ses socket is connectable, exit.
     {
@@ -71,7 +74,7 @@ pub fn run(args: SesArgs) !void {
 
     // Daemonize BEFORE creating GPA
     if (args.daemon) {
-        try daemonize();
+        try daemonize(log_file_path);
     }
 
     // Now create GPA AFTER fork - this ensures clean allocator state
@@ -129,6 +132,16 @@ pub fn main() !void {
             ses_args.list = true;
         } else if (std.mem.eql(u8, arg, "--full") or std.mem.eql(u8, arg, "-f")) {
             ses_args.full = true;
+        } else if (std.mem.eql(u8, arg, "--debug")) {
+            ses_args.debug = true;
+        } else if (std.mem.eql(u8, arg, "--logfile") or std.mem.eql(u8, arg, "-L")) {
+            if (i + 1 < args.len) {
+                i += 1;
+                ses_args.log_file = args[i];
+            } else {
+                print("Error: --logfile requires a path\n", .{});
+                return;
+            }
         } else if (std.mem.eql(u8, arg, "--notify") or std.mem.eql(u8, arg, "-n")) {
             // Next arg is the message
             if (i + 1 < args.len) {
@@ -172,6 +185,8 @@ fn printUsage() !void {
         \\  -d, --daemon       Run as a background daemon
         \\  -l, --list         List connected muxes and their panes
         \\  -f, --full         Show full tree (use with --list)
+        \\  --debug            Enable debug output
+        \\  -L, --logfile PATH Log debug output to PATH
         \\  -n, --notify MSG   Send notification to all connected muxes
         \\  -u, --uuid UUID    Target specific mux or pane (use with --notify)
         \\  -h, --help         Show this help message
@@ -448,7 +463,7 @@ fn printLayoutTree(_: std.json.ObjectMap, _: []const u8, _: usize) void {
     // Layout tree printing is optional - the pane list above shows the essentials
 }
 
-fn daemonize() !void {
+fn daemonize(log_file: ?[]const u8) !void {
     // First fork
     const pid1 = try posix.fork();
     if (pid1 != 0) {
@@ -473,7 +488,9 @@ fn daemonize() !void {
     posix.dup2(devnull, posix.STDIN_FILENO) catch {};
     posix.dup2(devnull, posix.STDOUT_FILENO) catch {};
     // Keep stderr for debugging - write to a log file
-    const logfd = posix.open("/tmp/hexe-ses-debug.log", .{ .ACCMODE = .WRONLY, .CREAT = true, .TRUNC = true }, 0o644) catch {
+    const log_path = log_file orelse "/tmp/hexe-ses-debug.log";
+    const append = log_file != null;
+    const logfd = posix.open(log_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = append, .TRUNC = !append }, 0o644) catch {
         posix.dup2(devnull, posix.STDERR_FILENO) catch {};
         if (devnull > 2) posix.close(devnull);
         std.posix.chdir("/") catch {};

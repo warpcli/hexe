@@ -582,6 +582,13 @@ pub const SesState = struct {
             try args_list.append(self.allocator, "--cwd");
             try args_list.append(self.allocator, dir);
         }
+        if (ses.debug_enabled) {
+            try args_list.append(self.allocator, "--debug");
+        }
+        if (ses.log_file_path) |path| {
+            try args_list.append(self.allocator, "--logfile");
+            try args_list.append(self.allocator, path);
+        }
         try args_list.append(self.allocator, "--foreground");
 
         var child = std.process.Child.init(args_list.items, self.allocator);

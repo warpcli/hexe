@@ -10,6 +10,8 @@ pub const PodArgs = struct {
     socket_path: []const u8,
     shell: ?[]const u8 = null,
     cwd: ?[]const u8 = null,
+    debug: bool = false,
+    log_file: ?[]const u8 = null,
     /// When true, print a single JSON line on stdout once ready.
     emit_ready: bool = false,
 };
@@ -25,13 +27,21 @@ pub fn run(args: PodArgs) !void {
     if (args.uuid.len != 32) return error.InvalidUuid;
 
     const sh = args.shell orelse (posix.getenv("SHELL") orelse "/bin/sh");
+    const default_log: []const u8 = "/tmp/hexe-pod-debug.log";
+    const log_path = if (args.log_file) |path| if (path.len > 0) path else null else if (args.debug) default_log else null;
 
     if (args.daemon) {
-        try daemonize();
+        try daemonize(log_path);
+    } else if (log_path) |path| {
+        redirectStderrToLog(path);
     }
 
     var pod = try Pod.init(allocator, args.uuid, args.socket_path, sh, args.cwd);
     defer pod.deinit();
+
+    if (args.debug) {
+        std.debug.print("[pod] started uuid={s} socket={s}\n", .{ args.uuid[0..@min(args.uuid.len, 8)], args.socket_path });
+    }
 
     if (args.emit_ready) {
         // IMPORTANT: write handshake to stdout (ses reads stdout).
@@ -44,7 +54,7 @@ pub fn run(args: PodArgs) !void {
     try pod.run();
 }
 
-fn daemonize() !void {
+fn daemonize(log_file: ?[]const u8) !void {
     // First fork
     const pid1 = try posix.fork();
     if (pid1 != 0) posix.exit(0);
@@ -59,10 +69,27 @@ fn daemonize() !void {
     const devnull = posix.open("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch return;
     posix.dup2(devnull, posix.STDIN_FILENO) catch {};
     posix.dup2(devnull, posix.STDOUT_FILENO) catch {};
-    posix.dup2(devnull, posix.STDERR_FILENO) catch {};
+    if (log_file) |path| {
+        const logfd = posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch {
+            posix.dup2(devnull, posix.STDERR_FILENO) catch {};
+            if (devnull > 2) posix.close(devnull);
+            std.posix.chdir("/") catch {};
+            return;
+        };
+        posix.dup2(logfd, posix.STDERR_FILENO) catch {};
+        if (logfd > 2) posix.close(logfd);
+    } else {
+        posix.dup2(devnull, posix.STDERR_FILENO) catch {};
+    }
     if (devnull > 2) posix.close(devnull);
 
     std.posix.chdir("/") catch {};
+}
+
+fn redirectStderrToLog(log_path: []const u8) void {
+    const logfd = posix.open(log_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch return;
+    posix.dup2(logfd, posix.STDERR_FILENO) catch {};
+    if (logfd > 2) posix.close(logfd);
 }
 
 const RingBuffer = struct {

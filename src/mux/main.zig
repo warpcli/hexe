@@ -26,6 +26,13 @@ const OrphanedPaneInfo = ses_client.OrphanedPaneInfo;
 const notification = @import("notification.zig");
 const NotificationManager = notification.NotificationManager;
 
+var debug_enabled: bool = false;
+
+fn debugLog(comptime fmt: []const u8, args: anytype) void {
+    if (!debug_enabled) return;
+    std.debug.print("[mux] " ++ fmt ++ "\n", args);
+}
+
 /// Pending action that needs confirmation
 const PendingAction = enum {
     exit,
@@ -107,7 +114,7 @@ const State = struct {
     osc_reply_in_progress: bool,
     osc_reply_prev_esc: bool,
 
-    fn init(allocator: std.mem.Allocator, width: u16, height: u16) !State {
+    fn init(allocator: std.mem.Allocator, width: u16, height: u16, debug: bool, log_file: ?[]const u8) !State {
         const cfg = core.Config.load(allocator);
         const pop_cfg = pop.PopConfig.load(allocator);
         const status_h: u16 = if (cfg.tabs.status.enabled) 1 else 0;
@@ -142,7 +149,7 @@ const State = struct {
             .layout_width = width,
             .layout_height = layout_h,
             .renderer = try Renderer.init(allocator, width, height),
-            .ses_client = SesClient.init(allocator, uuid, session_name, true), // keepalive=true by default
+            .ses_client = SesClient.init(allocator, uuid, session_name, true, debug, log_file), // keepalive=true by default
             .notifications = NotificationManager.initWithPopConfig(allocator, pop_cfg.carrier.notification),
             .popups = pop.PopupManager.init(allocator),
             .pending_action = null,
@@ -1084,6 +1091,8 @@ pub const MuxArgs = struct {
     attach: ?[]const u8 = null,
     notify_message: ?[]const u8 = null,
     list: bool = false,
+    debug: bool = false,
+    log_file: ?[]const u8 = null,
 };
 
 /// Entry point for mux - can be called directly from unified CLI
@@ -1101,7 +1110,7 @@ pub fn run(mux_args: MuxArgs) !void {
         // Temporary connection for listing - generate a dummy UUID and name
         const tmp_uuid = core.ipc.generateUuid();
         const tmp_name = core.ipc.generateSessionName();
-        var ses = SesClient.init(allocator, tmp_uuid, tmp_name, false); // keepalive=false for temp connection
+        var ses = SesClient.init(allocator, tmp_uuid, tmp_name, false, false, null); // keepalive=false for temp connection
         defer ses.deinit();
         ses.connect() catch {
             std.debug.print("Could not connect to ses daemon\n", .{});
@@ -1144,19 +1153,16 @@ pub fn run(mux_args: MuxArgs) !void {
         // Will be handled after state init
     }
 
-    // Redirect stderr to /dev/null to suppress ghostty warnings
-    // that would otherwise corrupt the display
-    const devnull = std.fs.openFileAbsolute("/dev/null", .{ .mode = .write_only }) catch null;
-    if (devnull) |f| {
-        posix.dup2(f.handle, posix.STDERR_FILENO) catch {};
-        f.close();
-    }
+    // Redirect stderr to a log file or /dev/null to avoid display corruption
+    redirectStderr(mux_args.log_file);
+    debug_enabled = mux_args.debug;
+    debugLog("started", .{});
 
     // Get terminal size
     const size = terminal.getTermSize();
 
     // Initialize state
-    var state = try State.init(allocator, size.cols, size.rows);
+    var state = try State.init(allocator, size.cols, size.rows, mux_args.debug, mux_args.log_file);
     defer state.deinit();
 
     // Set custom session name if provided
@@ -1179,6 +1185,7 @@ pub fn run(mux_args: MuxArgs) !void {
 
     // Connect to ses daemon FIRST (start it if needed)
     state.ses_client.connect() catch {};
+    debugLog("ses connected (started={})", .{state.ses_client.just_started_daemon});
 
     // Show notification if we just started the daemon
     if (state.ses_client.just_started_daemon) {
@@ -1232,10 +1239,35 @@ pub fn main() !void {
         } else if ((std.mem.eql(u8, arg, "--name") or std.mem.eql(u8, arg, "-N")) and i + 1 < args.len) {
             i += 1;
             mux_args.name = args[i];
+        } else if (std.mem.eql(u8, arg, "--debug") or std.mem.eql(u8, arg, "-d")) {
+            mux_args.debug = true;
+        } else if ((std.mem.eql(u8, arg, "--logfile") or std.mem.eql(u8, arg, "-L")) and i + 1 < args.len) {
+            i += 1;
+            mux_args.log_file = args[i];
         }
     }
 
     try run(mux_args);
+}
+
+fn redirectStderr(log_file: ?[]const u8) void {
+    var redirected = false;
+    if (log_file) |path| {
+        if (path.len > 0) {
+            const logfd = posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch null;
+            if (logfd) |fd| {
+                posix.dup2(fd, posix.STDERR_FILENO) catch {};
+                if (fd > 2) posix.close(fd);
+                redirected = true;
+            }
+        }
+    }
+
+    if (redirected) return;
+
+    const devnull = std.fs.openFileAbsolute("/dev/null", .{ .mode = .write_only }) catch return;
+    posix.dup2(devnull.handle, posix.STDERR_FILENO) catch {};
+    devnull.close();
 }
 
 fn runMainLoop(state: *State) !void {
