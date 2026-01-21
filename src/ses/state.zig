@@ -602,9 +602,22 @@ pub const SesState = struct {
         var stdout_file = child.stdout orelse return error.PodNoStdout;
         defer stdout_file.close();
 
+        const spawn_timeout_ms: i64 = 2000;
+        const deadline_ms = std.time.milliTimestamp() + spawn_timeout_ms;
+        const stdout_fd = stdout_file.handle;
+
         var line_buf: [512]u8 = undefined;
         var pos: usize = 0;
         while (pos < line_buf.len) {
+            const remaining_ms = deadline_ms - std.time.milliTimestamp();
+            if (remaining_ms <= 0) return error.PodSpawnTimeout;
+
+            var pfd = [_]posix.pollfd{.{ .fd = stdout_fd, .events = posix.POLL.IN, .revents = 0 }};
+            const rc = posix.poll(&pfd, @intCast(remaining_ms)) catch |err| return err;
+            if (rc == 0) return error.PodSpawnTimeout;
+            if (pfd[0].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) return error.PodNoHandshake;
+            if (pfd[0].revents & posix.POLL.IN == 0) continue;
+
             var one: [1]u8 = undefined;
             const n = try stdout_file.read(&one);
             if (n == 0) break;
