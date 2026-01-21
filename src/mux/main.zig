@@ -70,6 +70,11 @@ const Tab = struct {
     }
 };
 
+const PendingFloatRequest = struct {
+    fd: posix.fd_t,
+    result_path: ?[]u8,
+};
+
 const State = struct {
     allocator: std.mem.Allocator,
     config: core.Config,
@@ -114,7 +119,7 @@ const State = struct {
     osc_reply_in_progress: bool,
     osc_reply_prev_esc: bool,
 
-    pending_float_requests: std.AutoHashMap([32]u8, posix.fd_t),
+    pending_float_requests: std.AutoHashMap([32]u8, PendingFloatRequest),
 
     fn init(allocator: std.mem.Allocator, width: u16, height: u16, debug: bool, log_file: ?[]const u8) !State {
         const cfg = core.Config.load(allocator);
@@ -172,7 +177,7 @@ const State = struct {
             .osc_reply_in_progress = false,
             .osc_reply_prev_esc = false,
 
-            .pending_float_requests = std.AutoHashMap([32]u8, posix.fd_t).init(allocator),
+            .pending_float_requests = std.AutoHashMap([32]u8, PendingFloatRequest).init(allocator),
         };
     }
 
@@ -233,7 +238,10 @@ const State = struct {
         self.popups.deinit();
         var req_it = self.pending_float_requests.iterator();
         while (req_it.next()) |entry| {
-            _ = posix.close(entry.value_ptr.*);
+            _ = posix.close(entry.value_ptr.fd);
+            if (entry.value_ptr.result_path) |path| {
+                self.allocator.free(path);
+            }
         }
         self.pending_float_requests.deinit();
         if (self.ipc_server) |*srv| {
@@ -1210,6 +1218,71 @@ fn getLayoutPath(state: *State, pane: *Pane) !?[]const u8 {
     return null;
 }
 
+fn escapeForShell(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(allocator);
+
+    try out.append(allocator, '\'');
+    for (value) |ch| {
+        if (ch == '\'') {
+            try out.appendSlice(allocator, "'\\''");
+        } else {
+            try out.append(allocator, ch);
+        }
+    }
+    try out.append(allocator, '\'');
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn mergeEnvLines(allocator: std.mem.Allocator, env: ?[]const []const u8, extra: ?[]const []const u8) !?[]const []const u8 {
+    const env_len = if (env) |v| v.len else 0;
+    const extra_len = if (extra) |v| v.len else 0;
+    if (env_len + extra_len == 0) return null;
+    const out = try allocator.alloc([]const u8, env_len + extra_len);
+    var i: usize = 0;
+    if (env) |v| {
+        for (v) |item| {
+            out[i] = item;
+            i += 1;
+        }
+    }
+    if (extra) |v| {
+        for (v) |item| {
+            out[i] = item;
+            i += 1;
+        }
+    }
+    return out;
+}
+
+fn appendEnvExport(list: *std.ArrayList(u8), allocator: std.mem.Allocator, line: []const u8) !void {
+    const eq = std.mem.indexOfScalar(u8, line, '=') orelse return;
+    if (eq == 0) return;
+    const key = line[0..eq];
+    if (!isValidEnvKey(key)) return;
+    const value = line[eq + 1 ..];
+
+    const escaped = try escapeForShell(allocator, value);
+    defer allocator.free(escaped);
+
+    try list.appendSlice(allocator, "export ");
+    try list.appendSlice(allocator, key);
+    try list.appendSlice(allocator, "=");
+    try list.appendSlice(allocator, escaped);
+    try list.appendSlice(allocator, "; ");
+}
+
+fn isValidEnvKey(key: []const u8) bool {
+    if (key.len == 0) return false;
+    const first = key[0];
+    if (!((first >= 'A' and first <= 'Z') or (first >= 'a' and first <= 'z') or first == '_')) return false;
+    for (key[1..]) |ch| {
+        if (!((ch >= 'A' and ch <= 'Z') or (ch >= 'a' and ch <= 'z') or (ch >= '0' and ch <= '9') or ch == '_')) return false;
+    }
+    return true;
+}
+
 fn writeJsonEscaped(writer: anytype, value: []const u8) !void {
     for (value) |ch| {
         switch (ch) {
@@ -1231,12 +1304,28 @@ fn writeJsonEscaped(writer: anytype, value: []const u8) !void {
 
 fn handleBlockingFloatCompletion(state: *State, pane: *Pane) void {
     const entry = state.pending_float_requests.fetchRemove(pane.uuid) orelse return;
-    var conn = core.ipc.Connection{ .fd = entry.value };
+    var conn = core.ipc.Connection{ .fd = entry.value.fd };
     defer conn.close();
 
     const exit_code = pane.getExitCode();
-    const stdout = pane.captureOutput(state.allocator) catch null;
+    var stdout: ?[]u8 = null;
     defer if (stdout) |out| state.allocator.free(out);
+
+    if (entry.value.result_path) |path| {
+        const content = std.fs.cwd().readFileAlloc(state.allocator, path, 1024 * 1024) catch null;
+        if (content) |buf| {
+            const trimmed = std.mem.trimRight(u8, buf, " \n\r\t");
+            if (trimmed.len > 0) {
+                stdout = state.allocator.dupe(u8, trimmed) catch null;
+            }
+            state.allocator.free(buf);
+        }
+        std.fs.cwd().deleteFile(path) catch {};
+        state.allocator.free(path);
+    }
+    if (stdout == null) {
+        stdout = pane.captureOutput(state.allocator) catch null;
+    }
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(state.allocator);
@@ -1463,7 +1552,7 @@ fn runMainLoop(state: *State) !void {
 
     // Build poll fds
     var poll_fds: [17]posix.pollfd = undefined; // stdin + up to 16 panes
-    var buffer: [131072]u8 = undefined; // Larger buffer for efficiency
+    var buffer: [1024 * 1024]u8 = undefined; // Larger buffer for efficiency
 
     // Frame timing
     var last_render: i64 = std.time.milliTimestamp();
@@ -2471,10 +2560,48 @@ fn handleIpcConnection(state: *State, buffer: []u8) void {
             return;
         }
 
+        const wait_for_exit = if (root.get("wait")) |v| v.bool else false;
+
+        var result_path: ?[]u8 = null;
+        defer if (result_path) |path| state.allocator.free(path);
         var env_list: std.ArrayList([]const u8) = .empty;
-        defer env_list.deinit(state.allocator);
+        defer {
+            for (env_list.items) |env_line| {
+                state.allocator.free(env_line);
+            }
+            env_list.deinit(state.allocator);
+        }
         var extra_env_list: std.ArrayList([]const u8) = .empty;
         defer extra_env_list.deinit(state.allocator);
+        var owned_extra_env: std.ArrayList([]u8) = .empty;
+        defer {
+            for (owned_extra_env.items) |owned| {
+                state.allocator.free(owned);
+            }
+            owned_extra_env.deinit(state.allocator);
+        }
+
+        if (root.get("env_file")) |env_file_val| {
+            if (env_file_val == .string and env_file_val.string.len > 0) {
+                const file = std.fs.cwd().openFile(env_file_val.string, .{}) catch null;
+                if (file) |env_file| {
+                    defer env_file.close();
+                    const content = env_file.readToEndAlloc(state.allocator, 4 * 1024 * 1024) catch null;
+                    if (content) |buf| {
+                        defer state.allocator.free(buf);
+                        var it = std.mem.splitScalar(u8, buf, '\n');
+                        while (it.next()) |entry_line| {
+                            if (entry_line.len == 0) continue;
+                            const owned_line = state.allocator.dupe(u8, entry_line) catch null;
+                            if (owned_line) |line_copy| {
+                                env_list.append(state.allocator, line_copy) catch {};
+                            }
+                        }
+                    }
+                }
+                std.fs.cwd().deleteFile(env_file_val.string) catch {};
+            }
+        }
 
         if (root.get("env")) |env_val| {
             if (env_val == .array) {
@@ -2496,10 +2623,29 @@ fn handleIpcConnection(state: *State, buffer: []u8) void {
             }
         }
 
+        if (wait_for_exit) {
+            if (root.get("result_file")) |rf_val| {
+                if (rf_val == .string and rf_val.string.len > 0) {
+                    result_path = state.allocator.dupe(u8, rf_val.string) catch null;
+                }
+            }
+            if (result_path == null) {
+                const tmp_uuid = core.ipc.generateUuid();
+                result_path = std.fmt.allocPrint(state.allocator, "/tmp/hexe-float-{s}.result", .{tmp_uuid}) catch null;
+            }
+            if (result_path) |path| {
+                const entry = std.fmt.allocPrint(state.allocator, "HEXE_FLOAT_RESULT_FILE={s}", .{path}) catch null;
+                if (entry) |env_entry| {
+                    owned_extra_env.append(state.allocator, env_entry) catch {};
+                    extra_env_list.append(state.allocator, env_entry) catch {};
+                }
+            }
+        }
+
         const env_items: ?[]const []const u8 = if (env_list.items.len > 0) env_list.items else null;
         const extra_env_items: ?[]const []const u8 = if (extra_env_list.items.len > 0) extra_env_list.items else null;
 
-        const wait_for_exit = if (root.get("wait")) |v| v.bool else false;
+        const command_to_run = command;
 
         const old_uuid = state.getCurrentFocusedUuid();
         const focused_pane = if (state.active_floating) |idx| blk: {
@@ -2521,7 +2667,7 @@ fn handleIpcConnection(state: *State, buffer: []u8) void {
             state.syncPaneUnfocus(tiled);
         }
 
-        const new_uuid = createAdhocFloat(state, command, spawn_cwd, env_items, extra_env_items, !wait_for_exit) catch |err| {
+        const new_uuid = createAdhocFloat(state, command_to_run, spawn_cwd, env_items, extra_env_items, !wait_for_exit) catch |err| {
             const msg = std.fmt.allocPrint(state.allocator, "{{\"type\":\"error\",\"message\":\"{s}\"}}", .{@errorName(err)}) catch return;
             defer state.allocator.free(msg);
             conn.sendLine(msg) catch {};
@@ -2537,7 +2683,8 @@ fn handleIpcConnection(state: *State, buffer: []u8) void {
             if (state.floats.items.len > 0) {
                 state.floats.items[state.floats.items.len - 1].capture_output = true;
             }
-            state.pending_float_requests.put(new_uuid, conn.fd) catch {
+            const stored_path = if (result_path) |path| state.allocator.dupe(u8, path) catch null else null;
+            state.pending_float_requests.put(new_uuid, .{ .fd = conn.fd, .result_path = stored_path }) catch {
                 conn.sendLine("{\"type\":\"error\",\"message\":\"float_wait_failed\"}") catch {};
                 return;
             };
@@ -3407,10 +3554,14 @@ fn createAdhocFloat(
             defer state.allocator.free(result.socket_path);
             try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.socket_path, result.uuid);
         } else |_| {
-            try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, command, cwd);
+            const merged_env = mergeEnvLines(state.allocator, env, extra_env) catch null;
+            defer if (merged_env) |slice| state.allocator.free(slice);
+            try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, command, cwd, merged_env);
         }
     } else {
-        try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, command, cwd);
+        const merged_env = mergeEnvLines(state.allocator, env, extra_env) catch null;
+        defer if (merged_env) |slice| state.allocator.free(slice);
+        try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, command, cwd, merged_env);
     }
 
     pane.floating = true;
@@ -3492,10 +3643,10 @@ fn createNamedFloat(state: *State, float_def: *const core.FloatDef, current_dir:
             try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.socket_path, result.uuid);
         } else |_| {
             // Fall back to local spawn
-            try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command, current_dir);
+            try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command, current_dir, null);
         }
     } else {
-        try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command, current_dir);
+        try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command, current_dir, null);
     }
 
     pane.floating = true;

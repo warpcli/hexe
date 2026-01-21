@@ -87,6 +87,7 @@ pub fn main() !void {
     const mux_float_uuid = try mux_float.string("u", "uuid", null);
     const mux_float_command = try mux_float.string("c", "command", null);
     const mux_float_cwd = try mux_float.string("", "cwd", null);
+    const mux_float_result_file = try mux_float.string("", "result-file", null);
     const mux_float_pass_env = try mux_float.flag("", "pass-env", null);
     const mux_float_extra_env = try mux_float.string("", "extra-env", null);
 
@@ -183,7 +184,7 @@ pub fn main() !void {
         } else if (found_mux and found_attach) {
             print("Usage: hexe mux attach [OPTIONS] <name>\n\nAttach to existing session by name or UUID prefix\n\nOptions:\n  -d, --debug           Enable debug output\n  -L, --logfile <PATH>  Log debug output to PATH\n", .{});
         } else if (found_mux and found_float) {
-            print("Usage: hexe mux float [OPTIONS]\n\nSpawn a transient float pane (blocking)\n\nOptions:\n  -u, --uuid <UUID>            Target mux UUID (optional if inside mux)\n  -c, --command <COMMAND>      Command to run in the float\n      --cwd <PATH>             Working directory for the float\n      --pass-env               Send current environment to the pod\n      --extra-env <KEY=VAL,..>  Extra environment variables (comma-separated)\n", .{});
+            print("Usage: hexe mux float [OPTIONS]\n\nSpawn a transient float pane (blocking)\n\nOptions:\n  -u, --uuid <UUID>            Target mux UUID (optional if inside mux)\n  -c, --command <COMMAND>      Command to run in the float\n      --cwd <PATH>             Working directory for the float\n      --result-file <PATH>     Read selection from PATH after exit\n      --pass-env               Send current environment to the pod\n      --extra-env <KEY=VAL,..>  Extra environment variables (comma-separated)\n", .{});
         } else if (found_shp and found_prompt) {
             print("Usage: hexe shp prompt [OPTIONS]\n\nRender shell prompt\n\nOptions:\n  -s, --status <N>    Exit status of last command\n  -d, --duration <N>  Duration of last command in ms\n  -r, --right         Render right prompt\n  -S, --shell <SHELL> Shell type (bash, zsh, fish)\n  -j, --jobs <N>      Number of background jobs\n", .{});
         } else if (found_shp and found_init) {
@@ -288,6 +289,7 @@ pub fn main() !void {
                 mux_float_uuid.*,
                 mux_float_command.*,
                 mux_float_cwd.*,
+                mux_float_result_file.*,
                 mux_float_pass_env.*,
                 mux_float_extra_env.*,
             );
@@ -387,6 +389,7 @@ fn runMuxFloat(
     mux_uuid: []const u8,
     command: []const u8,
     cwd: []const u8,
+    result_file: []const u8,
     pass_env: bool,
     extra_env: []const u8,
 ) !void {
@@ -408,6 +411,30 @@ fn runMuxFloat(
     };
     defer if (mux_uuid.len > 0) allocator.free(socket_path);
 
+    var env_json: std.ArrayList(u8) = .empty;
+    defer env_json.deinit(allocator);
+    var env_file_path: ?[]u8 = null;
+    defer if (env_file_path) |path| allocator.free(path);
+    if (pass_env) {
+        const tmp_uuid = core.ipc.generateUuid();
+        env_file_path = std.fmt.allocPrint(allocator, "/tmp/hexe-float-env-{s}.env", .{tmp_uuid}) catch null;
+        if (env_file_path) |path| {
+            const file = std.fs.cwd().createFile(path, .{ .truncate = true }) catch null;
+            if (file) |env_file| {
+                defer env_file.close();
+                var env_map = std.process.getEnvMap(allocator) catch std.process.EnvMap.init(allocator);
+                defer env_map.deinit();
+                var it = env_map.iterator();
+                while (it.next()) |entry| {
+                    env_file.writeAll(entry.key_ptr.*) catch {};
+                    env_file.writeAll("=") catch {};
+                    env_file.writeAll(entry.value_ptr.*) catch {};
+                    env_file.writeAll("\n") catch {};
+                }
+            }
+        }
+    }
+
     var client = ipc.Client.connect(socket_path) catch |err| {
         if (err == error.ConnectionRefused or err == error.FileNotFound) {
             print("mux is not running\n", .{});
@@ -416,26 +443,6 @@ fn runMuxFloat(
         return err;
     };
     defer client.close();
-
-    var env_json: std.ArrayList(u8) = .empty;
-    defer env_json.deinit(allocator);
-    if (pass_env) {
-        var env_map = std.process.getEnvMap(allocator) catch std.process.EnvMap.init(allocator);
-        defer env_map.deinit();
-        try env_json.appendSlice(allocator, "[");
-        var first = true;
-        var it = env_map.iterator();
-        while (it.next()) |entry| {
-            if (!first) try env_json.appendSlice(allocator, ",");
-            try env_json.appendSlice(allocator, "\"");
-            try appendJsonEscaped(&env_json, allocator, entry.key_ptr.*);
-            try env_json.appendSlice(allocator, "=");
-            try appendJsonEscaped(&env_json, allocator, entry.value_ptr.*);
-            try env_json.appendSlice(allocator, "\"");
-            first = false;
-        }
-        try env_json.appendSlice(allocator, "]");
-    }
 
     var extra_env_json: std.ArrayList(u8) = .empty;
     defer extra_env_json.deinit(allocator);
@@ -467,6 +474,16 @@ fn runMuxFloat(
         try writeJsonEscaped(writer, cwd);
         try writer.writeAll("\"");
     }
+    if (result_file.len > 0) {
+        try writer.writeAll(",\"result_file\":\"");
+        try writeJsonEscaped(writer, result_file);
+        try writer.writeAll("\"");
+    }
+    if (env_file_path) |path| {
+        try writer.writeAll(",\"env_file\":\"");
+        try writeJsonEscaped(writer, path);
+        try writer.writeAll("\"");
+    }
     if (env_json.items.len > 0) {
         try writer.print(",\"env\":{s}", .{env_json.items});
     }
@@ -476,7 +493,10 @@ fn runMuxFloat(
     try writer.writeAll("}");
 
     var conn = client.toConnection();
-    try conn.sendLine(msg_buf.items);
+    conn.sendLine(msg_buf.items) catch |err| {
+        print("Error: {s}\n", .{@errorName(err)});
+        return;
+    };
 
     var resp_buf: [65536]u8 = undefined;
     const response = conn.recvLine(&resp_buf) catch null;
