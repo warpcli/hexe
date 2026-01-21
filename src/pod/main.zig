@@ -288,8 +288,13 @@ const Pod = struct {
             }
 
             // Client input.
+            // IMPORTANT: handle HUP/ERR first and ensure we never deref a client
+            // after it has been closed in the same poll cycle.
             if (self.client != null and poll_fds[2].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) != 0) {
-                if (poll_fds[2].revents & posix.POLL.IN != 0) {
+                if (poll_fds[2].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
+                    self.client.?.close();
+                    self.client = null;
+                } else if (poll_fds[2].revents & posix.POLL.IN != 0) {
                     const n = posix.read(self.client.?.fd, buf) catch |err| switch (err) {
                         error.WouldBlock => 0,
                         else => return err,
@@ -301,10 +306,6 @@ const Pod = struct {
                         const slice = buf[0..n];
                         self.reader.feed(slice, @ptrCast(self), podFrameCallback);
                     }
-                }
-                if (poll_fds[2].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
-                    self.client.?.close();
-                    self.client = null;
                 }
             }
         }

@@ -214,8 +214,25 @@ pub const Pty = struct {
 
             // Force kill if still alive
             _ = std.c.kill(self.child_pid, std.c.SIG.KILL);
-            _ = posix.waitpid(self.child_pid, 0);
-            self.child_reaped = true;
+
+            // Never block forever here. If the process is stuck in D-state,
+            // even SIGKILL won't terminate it and a blocking waitpid() would
+            // hang the caller.
+            const kill_deadline_ms: i64 = std.time.milliTimestamp() + 250;
+            while (true) {
+                const r = posix.waitpid(self.child_pid, posix.W.NOHANG);
+                if (r.pid != 0) {
+                    self.child_reaped = true;
+                    return;
+                }
+                if (std.time.milliTimestamp() >= kill_deadline_ms) {
+                    // Give up on reaping to avoid a hard hang.
+                    // This may leave a zombie if the process exits later; the
+                    // proper fix is a dedicated reaper (SIGCHLD handling).
+                    return;
+                }
+                std.Thread.sleep(10 * std.time.ns_per_ms);
+            }
         }
     }
 
