@@ -241,7 +241,20 @@ pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator:
     if (root.get("pid")) |pid| {
         print("  Shell PID: {d}\n", .{pid.integer});
     }
-    if (root.get("fg_process")) |proc| {
+    if (root.get("base_process")) |proc| {
+        if (root.get("base_pid")) |pid| {
+            print("  Base Process: {s} (pid={d})\n", .{ proc.string, pid.integer });
+        } else {
+            print("  Base Process: {s}\n", .{proc.string});
+        }
+    }
+    if (root.get("active_process")) |proc| {
+        if (root.get("active_pid")) |pid| {
+            print("  Active Process: {s} (pid={d})\n", .{ proc.string, pid.integer });
+        } else {
+            print("  Active Process: {s}\n", .{proc.string});
+        }
+    } else if (root.get("fg_process")) |proc| {
         if (root.get("fg_pid")) |pid| {
             print("  Process: {s} (pid={d})\n", .{ proc.string, pid.integer });
         } else {

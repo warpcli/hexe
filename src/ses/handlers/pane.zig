@@ -414,6 +414,8 @@ pub fn handlePaneInfo(
         try writer.print(",\"cwd\":\"{s}\"", .{c});
     }
     if (pane.getProcForegroundProcess()) |fg| {
+        try writer.print(",\"active_process\":\"{s}\"", .{fg.name});
+        try writer.print(",\"active_pid\":{d}", .{fg.pid});
         try writer.print(",\"fg_process\":\"{s}\"", .{fg.name});
         try writer.print(",\"fg_pid\":{d}", .{fg.pid});
     } else if (pane.fg_process) |proc| {
@@ -426,6 +428,12 @@ pub fn handlePaneInfo(
     }
     if (pane.fg_pid) |pid| {
         try writer.print(",\"fg_pid\":{d}", .{pid});
+    }
+    if (pane.getProcProcessName()) |proc| {
+        try writer.print(",\"base_process\":\"{s}\"", .{proc});
+        try writer.print(",\"base_pid\":{d}", .{pane.child_pid});
+    } else {
+        try writer.print(",\"base_pid\":{d}", .{pane.child_pid});
     }
     try writer.print(",\"cursor_x\":{d},\"cursor_y\":{d}", .{ pane.cursor_x, pane.cursor_y });
 
