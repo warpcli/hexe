@@ -1323,9 +1323,6 @@ fn handleBlockingFloatCompletion(state: *State, pane: *Pane) void {
         std.fs.cwd().deleteFile(path) catch {};
         state.allocator.free(path);
     }
-    if (stdout == null) {
-        stdout = pane.captureOutput(state.allocator) catch null;
-    }
 
     var buf: std.ArrayList(u8) = .empty;
     defer buf.deinit(state.allocator);
