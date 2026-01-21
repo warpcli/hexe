@@ -446,6 +446,9 @@ pub fn handlePaneInfo(
         try writer.print(",\"base_pid\":{d}", .{pane.child_pid});
     }
     try writer.print(",\"cursor_x\":{d},\"cursor_y\":{d}", .{ pane.cursor_x, pane.cursor_y });
+    try writer.print(",\"cursor_style\":{d}", .{pane.cursor_style});
+    try writer.print(",\"cursor_visible\":{}", .{pane.cursor_visible});
+    try writer.print(",\"alt_screen\":{}", .{pane.alt_screen});
 
     try writer.writeAll("}\n");
     try conn.send(stream.getWritten());
@@ -542,6 +545,25 @@ pub fn handleUpdatePaneAux(
     if (root.get("cursor_y")) |v| {
         switch (v) {
             .integer => |i| pane.cursor_y = @intCast(@max(0, i)),
+            else => {},
+        }
+    }
+
+    if (root.get("cursor_style")) |v| {
+        switch (v) {
+            .integer => |i| pane.cursor_style = @intCast(@max(0, i)),
+            else => {},
+        }
+    }
+    if (root.get("cursor_visible")) |v| {
+        switch (v) {
+            .bool => |b| pane.cursor_visible = b,
+            else => {},
+        }
+    }
+    if (root.get("alt_screen")) |v| {
+        switch (v) {
+            .bool => |b| pane.alt_screen = b,
             else => {},
         }
     }

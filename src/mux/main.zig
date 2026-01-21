@@ -943,6 +943,9 @@ const State = struct {
 
         const pane_type: SesClient.PaneType = if (pane.floating) .float else .split;
         const cursor = pane.getCursorPos();
+        const cursor_style = pane.vt.getCursorStyle();
+        const cursor_visible = pane.vt.isCursorVisible();
+        const alt_screen = pane.vt.inAltScreen();
         const layout_path = getLayoutPath(self, pane) catch null;
         defer if (layout_path) |path| self.allocator.free(path);
         // For new panes, focused_from = created_from (focus moved from parent to new pane)
@@ -955,6 +958,9 @@ const State = struct {
             created_from,
             focused_from,
             .{ .x = cursor.x, .y = cursor.y },
+            cursor_style,
+            cursor_visible,
+            alt_screen,
             .{ .cols = pane.width, .rows = pane.height },
             pane.getRealCwd(),
             pane.getFgProcess(),
@@ -977,6 +983,9 @@ const State = struct {
                     p.*.focused = false;
                     const pane_type: SesClient.PaneType = if (p.*.floating) .float else .split;
                     const cursor = p.*.getCursorPos();
+                    const cursor_style = p.*.vt.getCursorStyle();
+                    const cursor_visible = p.*.vt.isCursorVisible();
+                    const alt_screen = p.*.vt.inAltScreen();
                     const layout_path = getLayoutPath(self, p.*) catch null;
                     defer if (layout_path) |path| self.allocator.free(path);
                     self.ses_client.updatePaneAux(
@@ -987,6 +996,9 @@ const State = struct {
                         null,
                         null,
                         .{ .x = cursor.x, .y = cursor.y },
+                        cursor_style,
+                        cursor_visible,
+                        alt_screen,
                         .{ .cols = p.*.width, .rows = p.*.height },
                         null,
                         null,
@@ -1002,6 +1014,9 @@ const State = struct {
             if (fp.uuid[0] != 0) {
                 fp.focused = false;
                 const cursor = fp.getCursorPos();
+                const cursor_style = fp.vt.getCursorStyle();
+                const cursor_visible = fp.vt.isCursorVisible();
+                const alt_screen = fp.vt.inAltScreen();
                 const layout_path = getLayoutPath(self, fp) catch null;
                 defer if (layout_path) |path| self.allocator.free(path);
                 self.ses_client.updatePaneAux(
@@ -1012,6 +1027,9 @@ const State = struct {
                     null,
                     null,
                     .{ .x = cursor.x, .y = cursor.y },
+                    cursor_style,
+                    cursor_visible,
+                    alt_screen,
                     .{ .cols = fp.width, .rows = fp.height },
                     null,
                     null,
@@ -1035,6 +1053,9 @@ const State = struct {
         pane.focused = true;
         const pane_type: SesClient.PaneType = if (pane.floating) .float else .split;
         const cursor = pane.getCursorPos();
+        const cursor_style = pane.vt.getCursorStyle();
+        const cursor_visible = pane.vt.isCursorVisible();
+        const alt_screen = pane.vt.inAltScreen();
         const layout_path = getLayoutPath(self, pane) catch null;
         defer if (layout_path) |path| self.allocator.free(path);
         self.ses_client.updatePaneAux(
@@ -1045,6 +1066,9 @@ const State = struct {
             null, // don't update created_from on focus change
             focused_from,
             .{ .x = cursor.x, .y = cursor.y },
+            cursor_style,
+            cursor_visible,
+            alt_screen,
             .{ .cols = pane.width, .rows = pane.height },
             pane.getRealCwd(),
             pane.getFgProcess(),
@@ -1066,6 +1090,9 @@ const State = struct {
 
         const pane_type: SesClient.PaneType = if (pane.floating) .float else .split;
         const cursor = pane.getCursorPos();
+        const cursor_style = pane.vt.getCursorStyle();
+        const cursor_visible = pane.vt.isCursorVisible();
+        const alt_screen = pane.vt.inAltScreen();
         const layout_path = getLayoutPath(self, pane) catch null;
         defer if (layout_path) |path| self.allocator.free(path);
         self.ses_client.updatePaneAux(
@@ -1076,6 +1103,9 @@ const State = struct {
             null,
             null,
             .{ .x = cursor.x, .y = cursor.y },
+            cursor_style,
+            cursor_visible,
+            alt_screen,
             .{ .cols = pane.width, .rows = pane.height },
             pane.getRealCwd(),
             pane.getFgProcess(),
@@ -1135,6 +1165,9 @@ const State = struct {
 
         const pane_type: SesClient.PaneType = if (p.floating) .float else .split;
         const cursor = p.getCursorPos();
+        const cursor_style = p.vt.getCursorStyle();
+        const cursor_visible = p.vt.isCursorVisible();
+        const alt_screen = p.vt.inAltScreen();
         const layout_path = getLayoutPath(self, p) catch null;
         defer if (layout_path) |path| self.allocator.free(path);
         self.ses_client.updatePaneAux(
@@ -1145,6 +1178,9 @@ const State = struct {
             null, // don't update created_from
             null, // don't update focused_from
             .{ .x = cursor.x, .y = cursor.y },
+            cursor_style,
+            cursor_visible,
+            alt_screen,
             .{ .cols = p.width, .rows = p.height },
             p.getRealCwd(), // Use cached CWD after refresh
             null,
@@ -1427,7 +1463,7 @@ fn runMainLoop(state: *State) !void {
 
     // Build poll fds
     var poll_fds: [17]posix.pollfd = undefined; // stdin + up to 16 panes
-    var buffer: [32768]u8 = undefined; // Larger buffer for efficiency
+    var buffer: [131072]u8 = undefined; // Larger buffer for efficiency
 
     // Frame timing
     var last_render: i64 = std.time.milliTimestamp();
@@ -1657,6 +1693,7 @@ fn runMainLoop(state: *State) !void {
             const was_active = if (state.active_floating) |af| af == fi else false;
 
             const pane = state.floats.orderedRemove(fi);
+            handleBlockingFloatCompletion(state, pane);
             pane.deinit();
             state.allocator.destroy(pane);
             state.needs_render = true;
@@ -1867,6 +1904,9 @@ fn handleInput(state: *State, input_bytes: []const u8) void {
                                                         if (replaced) {
                                                             const pane_type: SesClient.PaneType = if (pane.floating) .float else .split;
                                                             const cursor = pane.getCursorPos();
+                                                            const cursor_style = pane.vt.getCursorStyle();
+                                                            const cursor_visible = pane.vt.isCursorVisible();
+                                                            const alt_screen = pane.vt.inAltScreen();
                                                             const layout_path = getLayoutPath(state, pane) catch null;
                                                             defer if (layout_path) |path| state.allocator.free(path);
                                                             state.ses_client.updatePaneAux(
@@ -1877,6 +1917,9 @@ fn handleInput(state: *State, input_bytes: []const u8) void {
                                                                 old_aux.created_from,
                                                                 old_aux.focused_from,
                                                                 .{ .x = cursor.x, .y = cursor.y },
+                                                                cursor_style,
+                                                                cursor_visible,
+                                                                alt_screen,
                                                                 .{ .cols = pane.width, .rows = pane.height },
                                                                 pane.getPwd(),
                                                                 null,
@@ -2463,7 +2506,12 @@ fn handleIpcConnection(state: *State, buffer: []u8) void {
             if (idx < state.floats.items.len) break :blk state.floats.items[idx];
             break :blk @as(?*Pane, null);
         } else state.currentLayout().getFocusedPane();
-        const spawn_cwd = if (focused_pane) |pane| state.getSpawnCwd(pane) else null;
+        var spawn_cwd = if (focused_pane) |pane| state.getSpawnCwd(pane) else null;
+        if (root.get("cwd")) |cwd_val| {
+            if (cwd_val == .string and cwd_val.string.len > 0) {
+                spawn_cwd = cwd_val.string;
+            }
+        }
 
         if (state.active_floating) |idx| {
             if (idx < state.floats.items.len) {
@@ -2486,6 +2534,9 @@ fn handleIpcConnection(state: *State, buffer: []u8) void {
         state.needs_render = true;
 
         if (wait_for_exit) {
+            if (state.floats.items.len > 0) {
+                state.floats.items[state.floats.items.len - 1].capture_output = true;
+            }
             state.pending_float_requests.put(new_uuid, conn.fd) catch {
                 conn.sendLine("{\"type\":\"error\",\"message\":\"float_wait_failed\"}") catch {};
                 return;
@@ -2793,6 +2844,9 @@ fn performDisown(state: *State) void {
                     // Sync inherited auxiliary info to the new pane
                     const pane_type: SesClient.PaneType = if (p.floating) .float else .split;
                     const cursor = p.getCursorPos();
+                    const cursor_style = p.vt.getCursorStyle();
+                    const cursor_visible = p.vt.isCursorVisible();
+                    const alt_screen = p.vt.inAltScreen();
                     const layout_path = getLayoutPath(state, p) catch null;
                     defer if (layout_path) |path| state.allocator.free(path);
                     state.ses_client.updatePaneAux(
@@ -2803,6 +2857,9 @@ fn performDisown(state: *State) void {
                         old_aux.created_from, // Inherit creator
                         old_aux.focused_from, // Inherit last focus
                         .{ .x = cursor.x, .y = cursor.y },
+                        cursor_style,
+                        cursor_visible,
+                        alt_screen,
                         .{ .cols = p.width, .rows = p.height },
                         cwd,
                         null,
@@ -3350,10 +3407,10 @@ fn createAdhocFloat(
             defer state.allocator.free(result.socket_path);
             try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.socket_path, result.uuid);
         } else |_| {
-            try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, command);
+            try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, command, cwd);
         }
     } else {
-        try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, command);
+        try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, command, cwd);
     }
 
     pane.floating = true;
@@ -3435,10 +3492,10 @@ fn createNamedFloat(state: *State, float_def: *const core.FloatDef, current_dir:
             try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.socket_path, result.uuid);
         } else |_| {
             // Fall back to local spawn
-            try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command);
+            try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command, current_dir);
         }
     } else {
-        try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command);
+        try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command, current_dir);
     }
 
     pane.floating = true;

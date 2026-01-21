@@ -445,6 +445,9 @@ pub const SesClient = struct {
         created_from: ?[32]u8,
         focused_from: ?[32]u8,
         cursor_pos: ?struct { x: u16, y: u16 },
+        cursor_style: ?u8,
+        cursor_visible: ?bool,
+        in_alt_screen: ?bool,
         size: ?struct { cols: u16, rows: u16 },
         cwd: ?[]const u8,
         fg_process: ?[]const u8,
@@ -483,6 +486,16 @@ pub const SesClient = struct {
 
         if (cursor_pos) |pos| {
             try writer.print(",\"cursor_x\":{d},\"cursor_y\":{d}", .{ pos.x, pos.y });
+        }
+
+        if (cursor_style) |style| {
+            try writer.print(",\"cursor_style\":{d}", .{style});
+        }
+        if (cursor_visible) |visible| {
+            try writer.print(",\"cursor_visible\":{}", .{visible});
+        }
+        if (in_alt_screen) |alt| {
+            try writer.print(",\"alt_screen\":{}", .{alt});
         }
 
         if (size) |s| {

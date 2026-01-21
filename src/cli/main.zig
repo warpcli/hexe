@@ -86,6 +86,7 @@ pub fn main() !void {
     const mux_float = try mux_cmd.newCommand("float", "Spawn a transient float pane");
     const mux_float_uuid = try mux_float.string("u", "uuid", null);
     const mux_float_command = try mux_float.string("c", "command", null);
+    const mux_float_cwd = try mux_float.string("", "cwd", null);
     const mux_float_pass_env = try mux_float.flag("", "pass-env", null);
     const mux_float_extra_env = try mux_float.string("", "extra-env", null);
 
@@ -182,7 +183,7 @@ pub fn main() !void {
         } else if (found_mux and found_attach) {
             print("Usage: hexe mux attach [OPTIONS] <name>\n\nAttach to existing session by name or UUID prefix\n\nOptions:\n  -d, --debug           Enable debug output\n  -L, --logfile <PATH>  Log debug output to PATH\n", .{});
         } else if (found_mux and found_float) {
-            print("Usage: hexe mux float [OPTIONS]\n\nSpawn a transient float pane (blocking)\n\nOptions:\n  -u, --uuid <UUID>            Target mux UUID (optional if inside mux)\n  -c, --command <COMMAND>      Command to run in the float\n      --pass-env               Send current environment to the pod\n      --extra-env <KEY=VAL,..>  Extra environment variables (comma-separated)\n", .{});
+            print("Usage: hexe mux float [OPTIONS]\n\nSpawn a transient float pane (blocking)\n\nOptions:\n  -u, --uuid <UUID>            Target mux UUID (optional if inside mux)\n  -c, --command <COMMAND>      Command to run in the float\n      --cwd <PATH>             Working directory for the float\n      --pass-env               Send current environment to the pod\n      --extra-env <KEY=VAL,..>  Extra environment variables (comma-separated)\n", .{});
         } else if (found_shp and found_prompt) {
             print("Usage: hexe shp prompt [OPTIONS]\n\nRender shell prompt\n\nOptions:\n  -s, --status <N>    Exit status of last command\n  -d, --duration <N>  Duration of last command in ms\n  -r, --right         Render right prompt\n  -S, --shell <SHELL> Shell type (bash, zsh, fish)\n  -j, --jobs <N>      Number of background jobs\n", .{});
         } else if (found_shp and found_init) {
@@ -286,6 +287,7 @@ pub fn main() !void {
                 allocator,
                 mux_float_uuid.*,
                 mux_float_command.*,
+                mux_float_cwd.*,
                 mux_float_pass_env.*,
                 mux_float_extra_env.*,
             );
@@ -384,6 +386,7 @@ fn runMuxFloat(
     allocator: std.mem.Allocator,
     mux_uuid: []const u8,
     command: []const u8,
+    cwd: []const u8,
     pass_env: bool,
     extra_env: []const u8,
 ) !void {
@@ -425,9 +428,9 @@ fn runMuxFloat(
         while (it.next()) |entry| {
             if (!first) try env_json.appendSlice(allocator, ",");
             try env_json.appendSlice(allocator, "\"");
-            try env_json.appendSlice(allocator, entry.key_ptr.*);
+            try appendJsonEscaped(&env_json, allocator, entry.key_ptr.*);
             try env_json.appendSlice(allocator, "=");
-            try env_json.appendSlice(allocator, entry.value_ptr.*);
+            try appendJsonEscaped(&env_json, allocator, entry.value_ptr.*);
             try env_json.appendSlice(allocator, "\"");
             first = false;
         }
@@ -445,7 +448,7 @@ fn runMuxFloat(
             if (trimmed.len == 0) continue;
             if (!first) try extra_env_json.appendSlice(allocator, ",");
             try extra_env_json.appendSlice(allocator, "\"");
-            try extra_env_json.appendSlice(allocator, trimmed);
+            try appendJsonEscaped(&extra_env_json, allocator, trimmed);
             try extra_env_json.appendSlice(allocator, "\"");
             first = false;
         }
@@ -456,7 +459,14 @@ fn runMuxFloat(
     defer msg_buf.deinit(allocator);
     var writer = msg_buf.writer(allocator);
     try writer.writeAll("{\"type\":\"float\",\"wait\":true");
-    try writer.print(",\"command\":\"{s}\"", .{command});
+    try writer.writeAll(",\"command\":\"");
+    try writeJsonEscaped(writer, command);
+    try writer.writeAll("\"");
+    if (cwd.len > 0) {
+        try writer.writeAll(",\"cwd\":\"");
+        try writeJsonEscaped(writer, cwd);
+        try writer.writeAll("\"");
+    }
     if (env_json.items.len > 0) {
         try writer.print(",\"env\":{s}", .{env_json.items});
     }
@@ -500,6 +510,44 @@ fn runMuxFloat(
     }
 
     print("Unexpected response from mux\n", .{});
+}
+
+fn appendJsonEscaped(list: *std.ArrayList(u8), allocator: std.mem.Allocator, value: []const u8) !void {
+    for (value) |ch| {
+        switch (ch) {
+            '"' => try list.appendSlice(allocator, "\\\""),
+            '\\' => try list.appendSlice(allocator, "\\\\"),
+            '\n' => try list.appendSlice(allocator, "\\n"),
+            '\r' => try list.appendSlice(allocator, "\\r"),
+            '\t' => try list.appendSlice(allocator, "\\t"),
+            else => {
+                if (ch < 0x20) {
+                    try list.append(allocator, ' ');
+                } else {
+                    try list.append(allocator, ch);
+                }
+            },
+        }
+    }
+}
+
+fn writeJsonEscaped(writer: anytype, value: []const u8) !void {
+    for (value) |ch| {
+        switch (ch) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => {
+                if (ch < 0x20) {
+                    try writer.writeByte(' ');
+                } else {
+                    try writer.writeByte(ch);
+                }
+            },
+        }
+    }
 }
 
 // ============================================================================

@@ -298,6 +298,15 @@ pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator:
             print("  Cursor: {d},{d}\n", .{ cx.integer, cy.integer });
         }
     }
+    if (root.get("cursor_style")) |cs| {
+        print("  Cursor Style: {d}\n", .{cs.integer});
+    }
+    if (root.get("cursor_visible")) |cv| {
+        print("  Cursor Visible: {}\n", .{cv.bool});
+    }
+    if (root.get("alt_screen")) |alt| {
+        print("  Alt Screen: {}\n", .{alt.bool});
+    }
 }
 
 pub fn runNotify(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, last: bool, broadcast: bool, message: []const u8) !void {

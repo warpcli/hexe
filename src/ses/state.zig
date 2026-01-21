@@ -49,6 +49,11 @@ pub const Pane = struct {
     // Cursor position (synced from mux, screen coordinates)
     cursor_x: u16 = 0,
     cursor_y: u16 = 0,
+    // Cursor style and visibility (synced from mux)
+    cursor_style: u8 = 0,
+    cursor_visible: bool = true,
+    // Alt screen state (synced from mux)
+    alt_screen: bool = false,
     // Pane window size (synced from mux)
     cols: u16 = 0,
     rows: u16 = 0,

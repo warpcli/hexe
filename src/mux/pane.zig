@@ -21,6 +21,14 @@ const PodBackend = struct {
     }
 };
 
+const QueryState = enum {
+    idle,
+    esc,
+    csi,
+    dcs,
+    dcs_esc,
+};
+
 const Backend = union(enum) {
     local: core.Pty,
     pod: PodBackend,
@@ -78,6 +86,9 @@ pub const Pane = struct {
     ses_cwd: ?[]const u8 = null,
     // Exit status for local panes (set when process exits)
     exit_status: ?u32 = null,
+    // Capture raw output for blocking floats
+    capture_output: bool = false,
+    captured_output: std.ArrayList(u8) = .empty,
     // For tab-bound floats: which tab owns this float
     // null = global float (special=true or pwd=true)
     parent_tab: ?usize = null,
@@ -89,6 +100,11 @@ pub const Pane = struct {
     // Keep last bytes so we can detect escape sequences across boundaries.
     esc_tail: [3]u8 = .{ 0, 0, 0 },
     esc_tail_len: u8 = 0,
+
+    // Track terminal query sequences (DSR/DECRQSS).
+    query_state: QueryState = .idle,
+    query_buf: [64]u8 = undefined,
+    query_len: u8 = 0,
 
     // OSC passthrough (clipboard, colors, etc.)
     osc_buf: std.ArrayList(u8) = .empty,
@@ -140,14 +156,24 @@ pub const Pane = struct {
     }
 
     pub fn init(self: *Pane, allocator: std.mem.Allocator, id: u16, x: u16, y: u16, width: u16, height: u16) !void {
-        return self.initWithCommand(allocator, id, x, y, width, height, null);
+        return self.initWithCommand(allocator, id, x, y, width, height, null, null);
     }
 
-    pub fn initWithCommand(self: *Pane, allocator: std.mem.Allocator, id: u16, x: u16, y: u16, width: u16, height: u16, command: ?[]const u8) !void {
+    pub fn initWithCommand(
+        self: *Pane,
+        allocator: std.mem.Allocator,
+        id: u16,
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+        command: ?[]const u8,
+        cwd: ?[]const u8,
+    ) !void {
         self.* = .{ .allocator = allocator, .id = id, .x = x, .y = y, .width = width, .height = height };
 
         const cmd = command orelse (posix.getenv("SHELL") orelse "/bin/sh");
-        var pty = try core.Pty.spawn(cmd);
+        var pty = try core.Pty.spawnWithCwd(cmd, cwd);
         errdefer pty.close();
         try pty.setSize(width, height);
 
@@ -197,6 +223,7 @@ pub const Pane = struct {
             .pod => |*pod| pod.deinit(self.allocator),
         }
         self.vt.deinit();
+        self.captured_output.deinit(self.allocator);
         if (self.pwd_dir) |dir| {
             self.allocator.free(dir);
         }
@@ -329,6 +356,10 @@ pub const Pane = struct {
     }
 
     fn processOutput(self: *Pane, data: []const u8) void {
+        if (self.capture_output) {
+            self.appendCapturedOutput(data);
+        }
+        self.handleTerminalQueries(data);
         self.forwardOsc(data);
 
         if (containsClearSeq(self.esc_tail[0..self.esc_tail_len], data)) {
@@ -409,14 +440,157 @@ pub const Pane = struct {
                         self.handleOsc52(self.osc_buf.items);
                     }
                     if (isOscQuery(self.osc_buf.items)) {
-                        self.osc_expect_response = true;
+                        if (!self.handleOscQuery(self.osc_buf.items, code)) {
+                            self.osc_expect_response = true;
+                            const stdout = std.fs.File.stdout();
+                            stdout.writeAll(self.osc_buf.items) catch {};
+                        }
+                    } else {
+                        const stdout = std.fs.File.stdout();
+                        stdout.writeAll(self.osc_buf.items) catch {};
                     }
-                    const stdout = std.fs.File.stdout();
-                    stdout.writeAll(self.osc_buf.items) catch {};
                 }
 
                 self.osc_buf.clearRetainingCapacity();
             }
+        }
+    }
+
+    fn handleOscQuery(self: *Pane, seq: []const u8, code: u32) bool {
+        _ = seq;
+        if (!(code == 10 or code == 11 or code == 12)) return false;
+
+        const color = switch (code) {
+            10 => "ffff/ffff/ffff",
+            11 => "0000/0000/0000",
+            12 => "ffff/ffff/ffff",
+            else => "0000/0000/0000",
+        };
+
+        var buf: [48]u8 = undefined;
+        const resp = std.fmt.bufPrint(&buf, "\x1b]{d};rgb:{s}\x07", .{ code, color }) catch return true;
+        self.write(resp) catch {};
+        return true;
+    }
+
+    fn handleTerminalQueries(self: *Pane, data: []const u8) void {
+        for (data) |b| {
+            switch (self.query_state) {
+                .idle => {
+                    if (b == 0x1b) self.query_state = .esc;
+                },
+                .esc => {
+                    if (b == '[') {
+                        self.query_state = .csi;
+                        self.query_len = 0;
+                    } else if (b == 'P') {
+                        self.query_state = .dcs;
+                        self.query_len = 0;
+                    } else {
+                        self.query_state = .idle;
+                    }
+                },
+                .csi => {
+                    if (b >= 0x40 and b <= 0x7e) {
+                        self.handleCsiQuery(b, self.query_buf[0..self.query_len]);
+                        self.query_state = .idle;
+                    } else if (self.query_len < self.query_buf.len) {
+                        self.query_buf[self.query_len] = b;
+                        self.query_len += 1;
+                    } else {
+                        self.query_state = .idle;
+                    }
+                },
+                .dcs => {
+                    if (b == 0x1b) {
+                        self.query_state = .dcs_esc;
+                    } else if (self.query_len < self.query_buf.len) {
+                        self.query_buf[self.query_len] = b;
+                        self.query_len += 1;
+                    } else {
+                        self.query_state = .idle;
+                    }
+                },
+                .dcs_esc => {
+                    if (b == '\\') {
+                        self.handleDcsQuery(self.query_buf[0..self.query_len]);
+                        self.query_state = .idle;
+                    } else {
+                        if (self.query_len + 2 <= self.query_buf.len) {
+                            self.query_buf[self.query_len] = 0x1b;
+                            self.query_len += 1;
+                            self.query_buf[self.query_len] = b;
+                            self.query_len += 1;
+                            self.query_state = .dcs;
+                        } else {
+                            self.query_state = .idle;
+                        }
+                    }
+                },
+            }
+        }
+    }
+
+    fn handleCsiQuery(self: *Pane, final: u8, params: []const u8) void {
+        if (final == 'n') {
+            var p = params;
+            if (p.len > 0 and p[0] == '?') {
+                p = p[1..];
+            }
+            if (p.len == 0) return;
+
+            const first = std.mem.indexOfScalar(u8, p, ';') orelse p.len;
+            const value = std.fmt.parseInt(u16, p[0..first], 10) catch return;
+
+            if (value == 5 or value == 0 or value == 1) {
+                self.write("\x1b[0n") catch {};
+                return;
+            }
+            if (value == 6) {
+                const cursor = self.vt.getCursor();
+                var buf: [32]u8 = undefined;
+                const row: u16 = cursor.y + 1;
+                const col: u16 = cursor.x + 1;
+                const resp = std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{ row, col }) catch return;
+                self.write(resp) catch {};
+            }
+            return;
+        }
+
+        if (final == 'c') {
+            const is_secondary = params.len > 0 and params[0] == '>';
+            var buf: [32]u8 = undefined;
+            if (is_secondary) {
+                const resp = std.fmt.bufPrint(&buf, "\x1b[>0;0;0c", .{}) catch return;
+                self.write(resp) catch {};
+            } else {
+                const resp = std.fmt.bufPrint(&buf, "\x1b[?1;2c", .{}) catch return;
+                self.write(resp) catch {};
+            }
+        }
+    }
+
+    fn handleDcsQuery(self: *Pane, params: []const u8) void {
+        if (!std.mem.startsWith(u8, params, "$q")) return;
+        const query = std.mem.trim(u8, params[2..], " ");
+
+        if (std.mem.eql(u8, query, "q")) {
+            const style = self.vt.getCursorStyle();
+            var buf: [64]u8 = undefined;
+            const resp = std.fmt.bufPrint(&buf, "\x1bP1$r q{d}\x1b\\", .{style}) catch return;
+            self.write(resp) catch {};
+            return;
+        }
+
+        if (std.mem.eql(u8, query, "m")) {
+            self.write("\x1bP1$r 0m\x1b\\") catch {};
+            return;
+        }
+
+        if (std.mem.eql(u8, query, "r")) {
+            var buf: [64]u8 = undefined;
+            const resp = std.fmt.bufPrint(&buf, "\x1bP1$r 1;{d}r\x1b\\", .{self.height}) catch return;
+            self.write(resp) catch {};
         }
     }
 
@@ -625,6 +799,10 @@ pub const Pane = struct {
     }
 
     pub fn captureOutput(self: *Pane, allocator: std.mem.Allocator) ![]u8 {
+        if (self.capture_output and self.captured_output.items.len > 0) {
+            return try extractLastLineFromOutput(allocator, self.captured_output.items);
+        }
+
         const state = try self.getRenderState();
         const row_slice = state.row_data.slice();
         if (row_slice.len == 0 or state.cols == 0) {
@@ -670,6 +848,131 @@ pub const Pane = struct {
         }
 
         return allocator.dupe(u8, "");
+    }
+
+    fn appendCapturedOutput(self: *Pane, data: []const u8) void {
+        const MAX_CAPTURED_OUTPUT: usize = 1024 * 1024;
+        if (data.len >= MAX_CAPTURED_OUTPUT) {
+            self.captured_output.clearRetainingCapacity();
+            const start = data.len - MAX_CAPTURED_OUTPUT;
+            self.captured_output.appendSlice(self.allocator, data[start..]) catch {};
+            return;
+        }
+
+        if (self.captured_output.items.len + data.len > MAX_CAPTURED_OUTPUT) {
+            self.captured_output.clearRetainingCapacity();
+        }
+
+        self.captured_output.appendSlice(self.allocator, data) catch {};
+    }
+
+    fn extractLastLineFromOutput(allocator: std.mem.Allocator, data: []const u8) ![]u8 {
+        if (try extractLastLineFromSlice(allocator, cropAfterAltScreenExit(data))) |line| {
+            return line;
+        }
+        return (try extractLastLineFromSlice(allocator, data)) orelse allocator.dupe(u8, "");
+    }
+
+    fn extractLastLineFromSlice(allocator: std.mem.Allocator, slice: []const u8) !?[]u8 {
+        var clean: std.ArrayList(u8) = .empty;
+        defer clean.deinit(allocator);
+
+        var i: usize = 0;
+        while (i < slice.len) {
+            const b = slice[i];
+            if (b == 0x1b) {
+                if (i + 1 < slice.len and slice[i + 1] == '[') {
+                    i += 2;
+                    while (i < slice.len) : (i += 1) {
+                        const c = slice[i];
+                        if (c >= 0x40 and c <= 0x7e) {
+                            i += 1;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if (i + 1 < slice.len and slice[i + 1] == ']') {
+                    i += 2;
+                    while (i < slice.len) : (i += 1) {
+                        if (slice[i] == 0x07) {
+                            i += 1;
+                            break;
+                        }
+                        if (slice[i] == 0x1b and i + 1 < slice.len and slice[i + 1] == '\\') {
+                            i += 2;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if (i + 1 < slice.len and slice[i + 1] == 'P') {
+                    i += 2;
+                    while (i < slice.len) : (i += 1) {
+                        if (slice[i] == 0x1b and i + 1 < slice.len and slice[i + 1] == '\\') {
+                            i += 2;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                if (i + 1 < slice.len and (slice[i + 1] == 'G' or slice[i + 1] == '^' or slice[i + 1] == '_')) {
+                    i += 2;
+                    while (i < slice.len) : (i += 1) {
+                        if (slice[i] == 0x1b and i + 1 < slice.len and slice[i + 1] == '\\') {
+                            i += 2;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                i += 1;
+                continue;
+            }
+
+            if (b == '\r') {
+                try clean.append(allocator, '\n');
+                i += 1;
+                continue;
+            }
+
+            if (b == '\n' or b == '\t' or b >= 0x20) {
+                try clean.append(allocator, b);
+            }
+            i += 1;
+        }
+
+        var it = std.mem.splitScalar(u8, clean.items, '\n');
+        var last: []const u8 = "";
+        while (it.next()) |line| {
+            const trimmed = std.mem.trimRight(u8, line, " ");
+            if (trimmed.len > 0) last = trimmed;
+        }
+        if (last.len == 0) return null;
+        return @as(?[]u8, try allocator.dupe(u8, last));
+    }
+
+    fn cropAfterAltScreenExit(data: []const u8) []const u8 {
+        const seqs = [_][]const u8{
+            "\x1b[?1049l",
+            "\x1b[?47l",
+            "\x1b[?1047l",
+        };
+
+        var max_idx: ?usize = null;
+        for (seqs) |seq| {
+            if (std.mem.lastIndexOf(u8, data, seq)) |idx| {
+                const end = idx + seq.len;
+                if (max_idx == null or end > max_idx.?) {
+                    max_idx = end;
+                }
+            }
+        }
+
+        if (max_idx) |start| {
+            if (start < data.len) return data[start..];
+        }
+        return data;
     }
 
     /// Get the underlying ghostty terminal.
