@@ -9,7 +9,10 @@ const ICON_AHEAD = "⇡";
 const ICON_BEHIND = "⇣";
 const ICON_DIVERGED = "⇕";
 const ICON_UNTRACKED = "?";
-const ICON_STASHED = "$";
+// NOTE: Avoid '$' here because most shells treat '$<n>' in prompts as
+// parameter expansion (e.g. zsh expands $1). That can surface as weird
+// strings like ".reset-prompt" depending on the shell state.
+const ICON_STASHED = "≡";
 const ICON_MODIFIED = "!";
 const ICON_STAGED = "+";
 const ICON_RENAMED = "»";

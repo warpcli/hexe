@@ -191,13 +191,14 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
                 // Determine target under the cursor (prefer floats).
                 const target = findFocusableAt(state, ev.x, ev.y);
+                const forward_to_app = if (target) |t| t.pane.vt.inAltScreen() else false;
 
                 // Wheel scroll (64/65):
                 // - In alt screen: forward to the app (btop, cmatrix, etc)
                 // - Otherwise: use mux scrollback
                 if (!ev.is_release and (ev.btn == 64 or ev.btn == 65)) {
                     if (target) |t| {
-                        if (t.pane.vt.inAltScreen()) {
+                        if (forward_to_app) {
                             // Forward to app.
                             t.pane.write(raw) catch {};
                         } else {
@@ -222,36 +223,48 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                     continue;
                 }
 
-                // Left button press focuses, but we still forward the mouse event
-                // to the pane so applications that use the mouse keep working.
+                // Left button press always focuses.
+                // Only forward the click to the app if the target is in alt-screen.
                 if (!ev.is_release and (ev.btn & 3) == 0) {
                     if (target) |t| {
                         focusTarget(state, t);
-                        t.pane.write(raw) catch {};
+                        if (forward_to_app) {
+                            t.pane.write(raw) catch {};
+                        }
                     } else {
                         // Nothing hit; forward to current focus.
                         if (state.active_floating) |afi| {
                             if (afi < state.floats.items.len) {
-                                state.floats.items[afi].write(raw) catch {};
+                                if (state.floats.items[afi].vt.inAltScreen()) {
+                                    state.floats.items[afi].write(raw) catch {};
+                                }
                             }
                         } else if (state.currentLayout().getFocusedPane()) |p| {
-                            p.write(raw) catch {};
+                            if (p.vt.inAltScreen()) {
+                                p.write(raw) catch {};
+                            }
                         }
                     }
                     i += ev.consumed;
                     continue;
                 }
 
-                // Other mouse events (including release): forward to the current focus
-                // or the pane under cursor if we can find it.
+                // Other mouse events (including release):
+                // Only forward when the target is in alt-screen.
                 if (target) |t| {
-                    t.pane.write(raw) catch {};
+                    if (forward_to_app) {
+                        t.pane.write(raw) catch {};
+                    }
                 } else if (state.active_floating) |afi| {
                     if (afi < state.floats.items.len) {
-                        state.floats.items[afi].write(raw) catch {};
+                        if (state.floats.items[afi].vt.inAltScreen()) {
+                            state.floats.items[afi].write(raw) catch {};
+                        }
                     }
                 } else if (state.currentLayout().getFocusedPane()) |p| {
-                    p.write(raw) catch {};
+                    if (p.vt.inAltScreen()) {
+                        p.write(raw) catch {};
+                    }
                 }
 
                 i += ev.consumed;
