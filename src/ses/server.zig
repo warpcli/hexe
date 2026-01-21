@@ -203,6 +203,9 @@ pub const Server = struct {
         } else if (std.mem.eql(u8, type_str, "list_orphaned")) {
             try pane_handlers.handleListOrphaned(self.allocator, self.ses_state, conn);
             return;
+        } else if (std.mem.eql(u8, type_str, "pane_info")) {
+            try pane_handlers.handlePaneInfo(self.ses_state, conn, root, sendErrorFn);
+            return;
         } else if (std.mem.eql(u8, type_str, "disconnect")) {
             if (client_id) |cid| {
                 const mode = if (root.get("mode")) |m| m.string else "graceful";

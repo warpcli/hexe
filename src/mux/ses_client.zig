@@ -175,13 +175,21 @@ pub const SesClient = struct {
 
     /// Create a new pane via ses.
     /// Returns the pane UUID and the pod socket path (owned; caller frees).
-    pub fn createPane(self: *SesClient, shell: ?[]const u8, cwd: ?[]const u8, sticky_pwd: ?[]const u8, sticky_key: ?u8) !struct { uuid: [32]u8, socket_path: []u8, pid: posix.pid_t } {
+    pub fn createPane(
+        self: *SesClient,
+        shell: ?[]const u8,
+        cwd: ?[]const u8,
+        sticky_pwd: ?[]const u8,
+        sticky_key: ?u8,
+        env: ?[]const []const u8,
+        extra_env: ?[]const []const u8,
+    ) !struct { uuid: [32]u8, socket_path: []u8, pid: posix.pid_t } {
         const conn = &(self.conn orelse return error.NotConnected);
 
         // Build request JSON
-        var buf: [1024]u8 = undefined;
-        var stream = std.io.fixedBufferStream(&buf);
-        var writer = stream.writer();
+        var buf: std.ArrayList(u8) = .empty;
+        defer buf.deinit(self.allocator);
+        var writer = buf.writer(self.allocator);
 
         try writer.writeAll("{\"type\":\"create_pane\"");
         if (shell) |s| {
@@ -196,9 +204,25 @@ pub const SesClient = struct {
         if (sticky_key) |key| {
             try writer.print(",\"sticky_key\":\"{c}\"", .{key});
         }
+        if (env) |vars| {
+            try writer.writeAll(",\"env\":[");
+            for (vars, 0..) |entry, i| {
+                if (i > 0) try writer.writeAll(",");
+                try writer.print("\"{s}\"", .{entry});
+            }
+            try writer.writeAll("]");
+        }
+        if (extra_env) |vars| {
+            try writer.writeAll(",\"extra_env\":[");
+            for (vars, 0..) |entry, i| {
+                if (i > 0) try writer.writeAll(",");
+                try writer.print("\"{s}\"", .{entry});
+            }
+            try writer.writeAll("]");
+        }
         try writer.writeAll("}");
 
-        try conn.sendLine(stream.getWritten());
+        try conn.sendLine(buf.items);
 
         // Receive response
         var resp_buf: [1024]u8 = undefined;

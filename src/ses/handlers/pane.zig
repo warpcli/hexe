@@ -58,8 +58,36 @@ pub fn handleCreatePane(
     else
         null;
 
+    var env_list: std.ArrayList([]const u8) = .empty;
+    defer env_list.deinit(ses_state.allocator);
+    var extra_env_list: std.ArrayList([]const u8) = .empty;
+    defer extra_env_list.deinit(ses_state.allocator);
+
+    if (root.get("env")) |env_val| {
+        if (env_val == .array) {
+            for (env_val.array.items) |entry| {
+                if (entry == .string and entry.string.len > 0) {
+                    try env_list.append(ses_state.allocator, entry.string);
+                }
+            }
+        }
+    }
+
+    if (root.get("extra_env")) |extra_val| {
+        if (extra_val == .array) {
+            for (extra_val.array.items) |entry| {
+                if (entry == .string and entry.string.len > 0) {
+                    try extra_env_list.append(ses_state.allocator, entry.string);
+                }
+            }
+        }
+    }
+
+    const env_items: ?[]const []const u8 = if (env_list.items.len > 0) env_list.items else null;
+    const extra_env_items: ?[]const []const u8 = if (extra_env_list.items.len > 0) extra_env_list.items else null;
+
     // Create pane
-    const pane = try ses_state.createPane(client_id, shell, cwd, sticky_pwd, sticky_key);
+    const pane = try ses_state.createPane(client_id, shell, cwd, sticky_pwd, sticky_key, env_items, extra_env_items);
     ses_state.markDirty();
     ses.debugLog("pane created: {s} (pid={d})", .{ pane.uuid[0..8], pane.child_pid });
 
@@ -385,8 +413,16 @@ pub fn handlePaneInfo(
     if (cwd) |c| {
         try writer.print(",\"cwd\":\"{s}\"", .{c});
     }
-    if (pane.fg_process) |proc| {
+    if (pane.getProcForegroundProcess()) |fg| {
+        try writer.print(",\"fg_process\":\"{s}\"", .{fg.name});
+        try writer.print(",\"fg_pid\":{d}", .{fg.pid});
+    } else if (pane.fg_process) |proc| {
         try writer.print(",\"fg_process\":\"{s}\"", .{proc});
+    } else if (pane.getProcProcessName()) |proc| {
+        try writer.print(",\"fg_process\":\"{s}\"", .{proc});
+        if (pane.fg_pid == null) {
+            try writer.print(",\"fg_pid\":{d}", .{pane.child_pid});
+        }
     }
     if (pane.fg_pid) |pid| {
         try writer.print(",\"fg_pid\":{d}", .{pid});

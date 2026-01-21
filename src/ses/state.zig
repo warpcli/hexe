@@ -72,6 +72,8 @@ pub const Pane = struct {
 
     // Static buffer for getProcCwd to avoid returning dangling pointer
     var proc_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    var proc_comm_buf: [128]u8 = undefined;
+    var proc_stat_buf: [512]u8 = undefined;
 
     /// Get current working directory from /proc/<child_pid>/cwd
     /// This is the authoritative CWD from OS, not dependent on shell OSC 7
@@ -82,6 +84,64 @@ pub const Pane = struct {
         const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{self.child_pid}) catch return null;
         const link = posix.readlink(path, &proc_cwd_buf) catch return null;
         return link;
+    }
+
+    fn readProcComm(self: *const Pane, pid: i32) ?[]const u8 {
+        _ = self;
+        if (pid <= 0) return null;
+
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/comm", .{pid}) catch return null;
+        const file = std.fs.openFileAbsolute(path, .{}) catch return null;
+        defer file.close();
+
+        const len = file.read(&proc_comm_buf) catch return null;
+        if (len == 0) return null;
+        const end = if (proc_comm_buf[len - 1] == '\n') len - 1 else len;
+        return proc_comm_buf[0..end];
+    }
+
+    /// Get process name from /proc/<child_pid>/comm.
+    pub fn getProcProcessName(self: *const Pane) ?[]const u8 {
+        if (self.child_pid == 0) return null;
+        return self.readProcComm(@intCast(self.child_pid));
+    }
+
+    /// Get foreground process group PID from /proc/<child_pid>/stat.
+    pub fn getProcForegroundPid(self: *const Pane) ?i32 {
+        if (self.child_pid == 0) return null;
+
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{self.child_pid}) catch return null;
+        const file = std.fs.openFileAbsolute(path, .{}) catch return null;
+        defer file.close();
+
+        const len = file.read(&proc_stat_buf) catch return null;
+        if (len == 0) return null;
+        const stat = proc_stat_buf[0..len];
+
+        const right_paren = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return null;
+        if (right_paren + 2 >= stat.len) return null;
+        const rest = stat[right_paren + 2 ..];
+
+        var it = std.mem.tokenizeScalar(u8, rest, ' ');
+        var idx: usize = 0;
+        while (it.next()) |tok| {
+            idx += 1;
+            if (idx == 6) {
+                const tpgid = std.fmt.parseInt(i32, tok, 10) catch return null;
+                if (tpgid <= 0) return null;
+                return tpgid;
+            }
+        }
+
+        return null;
+    }
+
+    pub fn getProcForegroundProcess(self: *const Pane) ?struct { name: []const u8, pid: i32 } {
+        const fg_pid = self.getProcForegroundPid() orelse return null;
+        const name = self.readProcComm(fg_pid) orelse return null;
+        return .{ .name = name, .pid = fg_pid };
     }
 };
 
@@ -516,11 +576,13 @@ pub const SesState = struct {
         cwd: ?[]const u8,
         sticky_pwd: ?[]const u8,
         sticky_key: ?u8,
+        env: ?[]const []const u8,
+        extra_env: ?[]const []const u8,
     ) !*Pane {
         const uuid = ipc.generateUuid();
         const pod_socket_path = try ipc.getPodSocketPath(self.allocator, &uuid);
 
-        const spawn = try self.spawnPod(uuid, pod_socket_path, shell, cwd);
+        const spawn = try self.spawnPod(uuid, pod_socket_path, shell, cwd, env, extra_env);
 
         // Copy sticky_pwd if provided
         const owned_pwd: ?[]const u8 = if (sticky_pwd) |pwd|
@@ -562,6 +624,8 @@ pub const SesState = struct {
         pod_socket_path: []const u8,
         shell: []const u8,
         cwd: ?[]const u8,
+        env: ?[]const []const u8,
+        extra_env: ?[]const []const u8,
     ) !struct { pod_pid: posix.pid_t, child_pid: posix.pid_t } {
         var args_list: std.ArrayList([]const u8) = .empty;
         defer args_list.deinit(self.allocator);
@@ -595,6 +659,35 @@ pub const SesState = struct {
         child.stdin_behavior = .Ignore;
         child.stderr_behavior = .Ignore;
         child.stdout_behavior = .Pipe;
+
+        var env_map_storage: ?std.process.EnvMap = null;
+        defer if (env_map_storage) |*map| map.deinit();
+
+        if (env != null or extra_env != null) {
+            var env_map = if (env == null)
+                try std.process.getEnvMap(self.allocator)
+            else
+                std.process.EnvMap.init(self.allocator);
+
+            if (env) |vars| {
+                for (vars) |entry| {
+                    const sep = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+                    if (sep == 0 or sep + 1 > entry.len) continue;
+                    try env_map.put(entry[0..sep], entry[sep + 1 ..]);
+                }
+            }
+
+            if (extra_env) |vars| {
+                for (vars) |entry| {
+                    const sep = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
+                    if (sep == 0 or sep + 1 > entry.len) continue;
+                    try env_map.put(entry[0..sep], entry[sep + 1 ..]);
+                }
+            }
+
+            env_map_storage = env_map;
+            child.env_map = &env_map_storage.?;
+        }
 
         try child.spawn();
         const pod_pid: posix.pid_t = @intCast(child.id);

@@ -1740,7 +1740,7 @@ fn handleInput(state: *State, input_bytes: []const u8) void {
                                                         .focused_from = null,
                                                     };
                                                     state.ses_client.killPane(pane.uuid) catch {};
-                                                    if (state.ses_client.createPane(null, cwd, null, null)) |result| {
+                                                    if (state.ses_client.createPane(null, cwd, null, null, null, null)) |result| {
                                                         defer state.allocator.free(result.socket_path);
                                                         var replaced = true;
                                                         pane.replaceWithPod(result.socket_path, result.uuid) catch {
@@ -2294,7 +2294,141 @@ fn handleIpcConnection(state: *State, buffer: []u8) void {
             );
             state.needs_render = true;
         }
+    } else if (std.mem.eql(u8, msg_type, "float")) {
+        const command_val = root.get("command") orelse {
+            conn.sendLine("{\"type\":\"error\",\"message\":\"missing_command\"}") catch {};
+            return;
+        };
+        const command = command_val.string;
+        if (command.len == 0) {
+            conn.sendLine("{\"type\":\"error\",\"message\":\"empty_command\"}") catch {};
+            return;
+        }
+
+        var env_list: std.ArrayList([]const u8) = .empty;
+        defer env_list.deinit(state.allocator);
+        var extra_env_list: std.ArrayList([]const u8) = .empty;
+        defer extra_env_list.deinit(state.allocator);
+
+        if (root.get("env")) |env_val| {
+            if (env_val == .array) {
+                for (env_val.array.items) |entry| {
+                    if (entry == .string and entry.string.len > 0) {
+                        env_list.append(state.allocator, entry.string) catch {};
+                    }
+                }
+            }
+        }
+
+        if (root.get("extra_env")) |extra_val| {
+            if (extra_val == .array) {
+                for (extra_val.array.items) |entry| {
+                    if (entry == .string and entry.string.len > 0) {
+                        extra_env_list.append(state.allocator, entry.string) catch {};
+                    }
+                }
+            }
+        }
+
+        const env_items: ?[]const []const u8 = if (env_list.items.len > 0) env_list.items else null;
+        const extra_env_items: ?[]const []const u8 = if (extra_env_list.items.len > 0) extra_env_list.items else null;
+
+        var report_uuid: ?[32]u8 = null;
+        if (root.get("report_back_to")) |rv| {
+            if (rv == .string and rv.string.len == 32) {
+                var uuid: [32]u8 = undefined;
+                @memcpy(&uuid, rv.string[0..32]);
+                report_uuid = uuid;
+            }
+        }
+
+        const old_uuid = state.getCurrentFocusedUuid();
+        const focused_pane = if (state.active_floating) |idx| blk: {
+            if (idx < state.floats.items.len) break :blk state.floats.items[idx];
+            break :blk @as(?*Pane, null);
+        } else state.currentLayout().getFocusedPane();
+        const spawn_cwd = if (focused_pane) |pane| state.getSpawnCwd(pane) else null;
+
+        if (state.active_floating) |idx| {
+            if (idx < state.floats.items.len) {
+                state.syncPaneUnfocus(state.floats.items[idx]);
+            }
+        } else if (state.currentLayout().getFocusedPane()) |tiled| {
+            state.syncPaneUnfocus(tiled);
+        }
+
+        const new_uuid = createAdhocFloat(state, command, spawn_cwd, env_items, extra_env_items) catch |err| {
+            const msg = std.fmt.allocPrint(state.allocator, "{{\"type\":\"error\",\"message\":\"{s}\"}}", .{@errorName(err)}) catch return;
+            defer state.allocator.free(msg);
+            conn.sendLine(msg) catch {};
+            return;
+        };
+
+        if (state.floats.items.len > 0) {
+            state.syncPaneFocus(state.floats.items[state.floats.items.len - 1], old_uuid);
+        }
+        state.needs_render = true;
+
+        var resp_buf: [96]u8 = undefined;
+        const response = std.fmt.bufPrint(&resp_buf, "{{\"type\":\"float_created\",\"uuid\":\"{s}\"}}", .{new_uuid}) catch return;
+        conn.sendLine(response) catch {};
+
+        const target_uuid = report_uuid orelse old_uuid orelse state.getCurrentFocusedUuid();
+        if (target_uuid) |uuid| {
+            const msg = std.fmt.allocPrint(state.allocator, "Float spawned: {s}", .{new_uuid[0..8]}) catch return;
+            defer state.allocator.free(msg);
+            notifyPaneByUuid(state, uuid, msg);
+        }
     }
+}
+
+fn notifyPaneByUuid(state: *State, uuid: [32]u8, message: []const u8) void {
+    var found = false;
+
+    for (state.tabs.items) |*tab| {
+        var pane_it = tab.layout.splitIterator();
+        while (pane_it.next()) |pane| {
+            if (std.mem.eql(u8, &pane.*.uuid, &uuid)) {
+                const msg_copy = state.allocator.dupe(u8, message) catch return;
+                pane.*.notifications.showWithOptions(
+                    msg_copy,
+                    pane.*.notifications.default_duration_ms,
+                    pane.*.notifications.default_style,
+                    true,
+                );
+                found = true;
+                break;
+            }
+        }
+        if (found) break;
+    }
+
+    if (!found) {
+        for (state.floats.items) |pane| {
+            if (std.mem.eql(u8, &pane.uuid, &uuid)) {
+                const msg_copy = state.allocator.dupe(u8, message) catch return;
+                pane.notifications.showWithOptions(
+                    msg_copy,
+                    pane.notifications.default_duration_ms,
+                    pane.notifications.default_style,
+                    true,
+                );
+                found = true;
+                break;
+            }
+        }
+    }
+
+    if (!found) {
+        const msg_copy = state.allocator.dupe(u8, message) catch return;
+        state.notifications.showWithOptions(
+            msg_copy,
+            state.notifications.default_duration_ms,
+            state.notifications.default_style,
+            true,
+        );
+    }
+    state.needs_render = true;
 }
 
 /// Handle Alt+Arrow for directional pane navigation
@@ -2580,7 +2714,7 @@ fn performDisown(state: *State) void {
                 state.ses_client.orphanPane(p.uuid) catch {};
 
                 // Create a new shell via ses in the same directory and replace the pane's backend
-                if (state.ses_client.createPane(null, cwd, null, null)) |result| {
+                if (state.ses_client.createPane(null, cwd, null, null, null, null)) |result| {
                     defer state.allocator.free(result.socket_path);
                     p.replaceWithPod(result.socket_path, result.uuid) catch {
                         state.notifications.show("Disown failed: couldn't replace pane");
@@ -3101,6 +3235,88 @@ fn resizeFloatingPanes(state: *State) void {
     }
 }
 
+fn createAdhocFloat(
+    state: *State,
+    command: []const u8,
+    cwd: ?[]const u8,
+    env: ?[]const []const u8,
+    extra_env: ?[]const []const u8,
+) ![32]u8 {
+    const pane = try state.allocator.create(Pane);
+    errdefer state.allocator.destroy(pane);
+
+    const cfg = &state.config;
+    const width_pct: u16 = cfg.float_width_percent;
+    const height_pct: u16 = cfg.float_height_percent;
+    const pos_x_pct: u16 = 50;
+    const pos_y_pct: u16 = 50;
+    const pad_x_cfg: u16 = cfg.float_padding_x;
+    const pad_y_cfg: u16 = cfg.float_padding_y;
+    const border_color = cfg.float_color;
+
+    const avail_h = state.term_height - state.status_height;
+    const outer_w = state.term_width * width_pct / 100;
+    const outer_h = avail_h * height_pct / 100;
+    const max_x = state.term_width -| outer_w;
+    const max_y = avail_h -| outer_h;
+    const outer_x = max_x * pos_x_pct / 100;
+    const outer_y = max_y * pos_y_pct / 100;
+
+    const pad_x: u16 = 1 + pad_x_cfg;
+    const pad_y: u16 = 1 + pad_y_cfg;
+    const content_x = outer_x + pad_x;
+    const content_y = outer_y + pad_y;
+    const content_w = outer_w -| (pad_x * 2);
+    const content_h = outer_h -| (pad_y * 2);
+
+    const id: u16 = @intCast(100 + state.floats.items.len);
+
+    if (state.ses_client.isConnected()) {
+        if (state.ses_client.createPane(command, cwd, null, null, env, extra_env)) |result| {
+            defer state.allocator.free(result.socket_path);
+            try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.socket_path, result.uuid);
+        } else |_| {
+            try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, command);
+        }
+    } else {
+        try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, command);
+    }
+
+    pane.floating = true;
+    pane.focused = true;
+    pane.float_key = 0;
+    pane.visible = true;
+
+    pane.border_x = outer_x;
+    pane.border_y = outer_y;
+    pane.border_w = outer_w;
+    pane.border_h = outer_h;
+    pane.border_color = border_color;
+
+    pane.float_width_pct = @intCast(width_pct);
+    pane.float_height_pct = @intCast(height_pct);
+    pane.float_pos_x_pct = @intCast(pos_x_pct);
+    pane.float_pos_y_pct = @intCast(pos_y_pct);
+    pane.float_pad_x = @intCast(pad_x_cfg);
+    pane.float_pad_y = @intCast(pad_y_cfg);
+
+    pane.parent_tab = state.active_tab;
+    pane.sticky = false;
+
+    if (state.config.float_style_default) |*style| {
+        pane.float_style = style;
+    }
+
+    pane.configureNotificationsFromPop(&state.pop_config.pane.notification);
+
+    try state.floats.append(state.allocator, pane);
+    state.active_floating = state.floats.items.len - 1;
+    state.syncPaneAux(pane, null);
+    state.syncStateToSes();
+
+    return pane.uuid;
+}
+
 fn createNamedFloat(state: *State, float_def: *const core.FloatDef, current_dir: ?[]const u8, parent_uuid: ?[32]u8) !void {
     const pane = try state.allocator.create(Pane);
     errdefer state.allocator.destroy(pane);
@@ -3140,7 +3356,7 @@ fn createNamedFloat(state: *State, float_def: *const core.FloatDef, current_dir:
 
     // Try to create pane via ses if available
     if (state.ses_client.isConnected()) {
-        if (state.ses_client.createPane(float_def.command, current_dir, null, null)) |result| {
+        if (state.ses_client.createPane(float_def.command, current_dir, null, null, null, null)) |result| {
             defer state.allocator.free(result.socket_path);
             try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.socket_path, result.uuid);
         } else |_| {

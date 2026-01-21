@@ -114,7 +114,7 @@ pub const Layout = struct {
         // Try to create pane via ses if available
         if (self.ses_client) |ses| {
             if (ses.isConnected()) {
-                const result = ses.createPane(null, cwd, null, null) catch {
+                const result = ses.createPane(null, cwd, null, null, null, null) catch {
                     // Fall back to local spawn
                     try pane.init(self.allocator, id, self.x, self.y, self.width, self.height);
                     pane.focused = true;
@@ -180,7 +180,7 @@ pub const Layout = struct {
         // Try to create pane via ses if available
         if (self.ses_client) |ses| {
             if (ses.isConnected()) {
-                if (ses.createPane(null, cwd, null, null)) |result| {
+                if (ses.createPane(null, cwd, null, null, null, null)) |result| {
                     defer ses.allocator.free(result.socket_path);
                     try new_pane.initWithPod(self.allocator, new_id, new_x, new_y, new_width, new_height, result.socket_path, result.uuid);
                 } else |_| {

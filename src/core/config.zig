@@ -165,6 +165,7 @@ pub const Config = struct {
     float_padding_x: u8 = 1, // left/right padding inside border
     float_padding_y: u8 = 0, // top/bottom padding inside border
     float_color: BorderColor = .{}, // border colors (active/passive)
+    float_style_default: ?FloatStyle = null,
 
     // Named floats
     floats: []FloatDef = &[_]FloatDef{},
@@ -267,6 +268,7 @@ pub const Config = struct {
             var def_pad_x: ?u8 = null;
             var def_pad_y: ?u8 = null;
             var def_color: ?BorderColor = null;
+            var def_style: ?FloatStyle = null;
 
             for (json_floats, 0..) |jf, idx| {
                 // First entry without key = defaults
@@ -283,12 +285,16 @@ pub const Config = struct {
                         if (jc.passive) |p| c.passive = @intCast(@min(255, @max(0, p)));
                         def_color = c;
                     }
+                    if (jf.style) |js| {
+                        def_style = parseFloatStyle(allocator, js);
+                    }
                     // Apply defaults to config
                     if (def_width) |w| config.float_width_percent = w;
                     if (def_height) |h| config.float_height_percent = h;
                     if (def_pad_x) |p| config.float_padding_x = p;
                     if (def_pad_y) |p| config.float_padding_y = p;
                     if (def_color) |c| config.float_color = c;
+                    if (def_style) |s| config.float_style_default = s;
                     continue;
                 }
 
@@ -307,55 +313,7 @@ pub const Config = struct {
                 } else null;
 
                 // Parse style if present
-                const style: ?FloatStyle = if (jf.style) |js| blk: {
-                    var result = FloatStyle{};
-
-                    // Border appearance
-                    if (js.top_left) |s| if (s.len > 0) {
-                        result.top_left = std.unicode.utf8Decode(s) catch 0x256D;
-                    };
-                    if (js.top_right) |s| if (s.len > 0) {
-                        result.top_right = std.unicode.utf8Decode(s) catch 0x256E;
-                    };
-                    if (js.bottom_left) |s| if (s.len > 0) {
-                        result.bottom_left = std.unicode.utf8Decode(s) catch 0x2570;
-                    };
-                    if (js.bottom_right) |s| if (s.len > 0) {
-                        result.bottom_right = std.unicode.utf8Decode(s) catch 0x256F;
-                    };
-                    if (js.horizontal) |s| if (s.len > 0) {
-                        result.horizontal = std.unicode.utf8Decode(s) catch 0x2500;
-                    };
-                    if (js.vertical) |s| if (s.len > 0) {
-                        result.vertical = std.unicode.utf8Decode(s) catch 0x2502;
-                    };
-
-                    // Optional module
-                    if (js.position) |pos_str| {
-                        result.position = std.meta.stringToEnum(FloatStylePosition, pos_str);
-                    }
-                    if (js.name) |mod_name| {
-                        var outputs: []const OutputDef = &[_]OutputDef{};
-                        if (js.outputs) |json_outputs| {
-                            var output_list: std.ArrayList(OutputDef) = .empty;
-                            for (json_outputs) |jo| {
-                                output_list.append(allocator, .{
-                                    .style = if (jo.style) |st| allocator.dupe(u8, st) catch "" else "",
-                                    .format = if (jo.format) |ft| allocator.dupe(u8, ft) catch "$output" else "$output",
-                                }) catch continue;
-                            }
-                            outputs = output_list.toOwnedSlice(allocator) catch &[_]OutputDef{};
-                        }
-                        result.module = .{
-                            .name = allocator.dupe(u8, mod_name) catch "",
-                            .outputs = outputs,
-                            .command = if (js.command) |cmd| allocator.dupe(u8, cmd) catch null else null,
-                            .when = if (js.when) |w| allocator.dupe(u8, w) catch null else null,
-                        };
-                    }
-
-                    break :blk result;
-                } else null;
+                const style: ?FloatStyle = if (jf.style) |js| parseFloatStyle(allocator, js) else null;
 
                 const destroy = jf.destroy orelse false;
                 // If destroy is set and special not explicitly provided, default special to false
@@ -376,7 +334,7 @@ pub const Config = struct {
                     .padding_x = if (jf.padding_x) |v| @intCast(@min(10, @max(0, v))) else def_pad_x,
                     .padding_y = if (jf.padding_y) |v| @intCast(@min(10, @max(0, v))) else def_pad_y,
                     .color = color orelse def_color,
-                    .style = style,
+                    .style = style orelse def_style,
                 }) catch continue;
             }
             config.floats = float_list.toOwnedSlice(allocator) catch &[_]FloatDef{};
@@ -548,6 +506,54 @@ const JsonFloatStyle = struct {
     command: ?[]const u8 = null,
     when: ?[]const u8 = null,
 };
+
+fn parseFloatStyle(allocator: std.mem.Allocator, js: JsonFloatStyle) ?FloatStyle {
+    var result = FloatStyle{};
+
+    if (js.top_left) |s| if (s.len > 0) {
+        result.top_left = std.unicode.utf8Decode(s) catch 0x256D;
+    };
+    if (js.top_right) |s| if (s.len > 0) {
+        result.top_right = std.unicode.utf8Decode(s) catch 0x256E;
+    };
+    if (js.bottom_left) |s| if (s.len > 0) {
+        result.bottom_left = std.unicode.utf8Decode(s) catch 0x2570;
+    };
+    if (js.bottom_right) |s| if (s.len > 0) {
+        result.bottom_right = std.unicode.utf8Decode(s) catch 0x256F;
+    };
+    if (js.horizontal) |s| if (s.len > 0) {
+        result.horizontal = std.unicode.utf8Decode(s) catch 0x2500;
+    };
+    if (js.vertical) |s| if (s.len > 0) {
+        result.vertical = std.unicode.utf8Decode(s) catch 0x2502;
+    };
+
+    if (js.position) |pos_str| {
+        result.position = std.meta.stringToEnum(FloatStylePosition, pos_str);
+    }
+    if (js.name) |mod_name| {
+        var outputs: []const OutputDef = &[_]OutputDef{};
+        if (js.outputs) |json_outputs| {
+            var output_list: std.ArrayList(OutputDef) = .empty;
+            for (json_outputs) |jo| {
+                output_list.append(allocator, .{
+                    .style = if (jo.style) |st| allocator.dupe(u8, st) catch "" else "",
+                    .format = if (jo.format) |ft| allocator.dupe(u8, ft) catch "$output" else "$output",
+                }) catch continue;
+            }
+            outputs = output_list.toOwnedSlice(allocator) catch &[_]OutputDef{};
+        }
+        result.module = .{
+            .name = allocator.dupe(u8, mod_name) catch "",
+            .outputs = outputs,
+            .command = if (js.command) |cmd| allocator.dupe(u8, cmd) catch null else null,
+            .when = if (js.when) |w| allocator.dupe(u8, w) catch null else null,
+        };
+    }
+
+    return result;
+}
 
 const JsonFloatPane = struct {
     key: []const u8 = "",

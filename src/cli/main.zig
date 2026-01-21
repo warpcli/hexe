@@ -83,6 +83,13 @@ pub fn main() !void {
     const mux_attach_dbg = try mux_attach.flag("d", "debug", null);
     const mux_attach_log = try mux_attach.string("L", "logfile", null);
 
+    const mux_float = try mux_cmd.newCommand("float", "Spawn a transient float pane");
+    const mux_float_uuid = try mux_float.string("u", "uuid", null);
+    const mux_float_command = try mux_float.string("c", "command", null);
+    const mux_float_pass_env = try mux_float.flag("", "pass-env", null);
+    const mux_float_extra_env = try mux_float.string("", "extra-env", null);
+    const mux_float_report = try mux_float.string("", "report-back-to", null);
+
     // POP subcommands
     const shp_prompt = try shp_cmd.newCommand("prompt", "Render shell prompt");
     const shp_prompt_status = try shp_prompt.int("s", "status", null);
@@ -124,6 +131,7 @@ pub fn main() !void {
     var found_info = false;
     var found_new = false;
     var found_attach = false;
+    var found_float = false;
     var found_prompt = false;
     var found_init = false;
     var found_pop = false;
@@ -145,6 +153,7 @@ pub fn main() !void {
         if (std.mem.eql(u8, arg, "info")) found_info = true;
         if (std.mem.eql(u8, arg, "new")) found_new = true;
         if (std.mem.eql(u8, arg, "attach")) found_attach = true;
+        if (std.mem.eql(u8, arg, "float")) found_float = true;
         if (std.mem.eql(u8, arg, "prompt")) found_prompt = true;
         if (std.mem.eql(u8, arg, "init")) found_init = true;
         if (std.mem.eql(u8, arg, "pop")) found_pop = true;
@@ -173,6 +182,8 @@ pub fn main() !void {
             print("Usage: hexe mux new [OPTIONS]\n\nCreate new multiplexer session\n\nOptions:\n  -n, --name <NAME>     Session name\n  -d, --debug           Enable debug output\n  -L, --logfile <PATH>  Log debug output to PATH\n", .{});
         } else if (found_mux and found_attach) {
             print("Usage: hexe mux attach [OPTIONS] <name>\n\nAttach to existing session by name or UUID prefix\n\nOptions:\n  -d, --debug           Enable debug output\n  -L, --logfile <PATH>  Log debug output to PATH\n", .{});
+        } else if (found_mux and found_float) {
+            print("Usage: hexe mux float [OPTIONS]\n\nSpawn a transient float pane\n\nOptions:\n  -u, --uuid <UUID>            Target mux UUID (optional if inside mux)\n  -c, --command <COMMAND>      Command to run in the float\n      --pass-env               Send current environment to the pod\n      --extra-env <KEY=VAL,..>  Extra environment variables (comma-separated)\n      --report-back-to <UUID>  Pane UUID to notify with created float UUID\n", .{});
         } else if (found_shp and found_prompt) {
             print("Usage: hexe shp prompt [OPTIONS]\n\nRender shell prompt\n\nOptions:\n  -s, --status <N>    Exit status of last command\n  -d, --duration <N>  Duration of last command in ms\n  -r, --right         Render right prompt\n  -S, --shell <SHELL> Shell type (bash, zsh, fish)\n  -j, --jobs <N>      Number of background jobs\n", .{});
         } else if (found_shp and found_init) {
@@ -192,7 +203,7 @@ pub fn main() !void {
         } else if (found_pod) {
             print("Usage: hexe pod <command>\n\nPer-pane PTY daemon (internal)\n\nCommands:\n  daemon  Start a per-pane pod daemon\n", .{});
         } else if (found_mux) {
-            print("Usage: hexe mux <command>\n\nTerminal multiplexer\n\nCommands:\n  new     Create new multiplexer session\n  attach  Attach to existing session\n", .{});
+            print("Usage: hexe mux <command>\n\nTerminal multiplexer\n\nCommands:\n  new     Create new multiplexer session\n  attach  Attach to existing session\n  float   Spawn a transient float pane\n", .{});
         } else if (found_shp) {
             print("Usage: hexe shp <command>\n\nShell prompt renderer\n\nCommands:\n  prompt  Render shell prompt\n  init    Print shell initialization script\n", .{});
         } else {
@@ -271,6 +282,15 @@ pub fn main() !void {
             try runMuxNew(mux_new_name.*, mux_new_dbg.*, mux_new_log.*);
         } else if (mux_attach.happened) {
             try runMuxAttach(mux_attach_name.*, mux_attach_dbg.*, mux_attach_log.*);
+        } else if (mux_float.happened) {
+            try runMuxFloat(
+                allocator,
+                mux_float_uuid.*,
+                mux_float_command.*,
+                mux_float_pass_env.*,
+                mux_float_extra_env.*,
+                mux_float_report.*,
+            );
         }
     } else if (shp_cmd.happened) {
         if (shp_prompt.happened) {
@@ -360,6 +380,132 @@ fn runMuxAttach(name: []const u8, debug: bool, log_file: []const u8) !void {
     } else {
         print("Error: session name required\n", .{});
     }
+}
+
+fn runMuxFloat(
+    allocator: std.mem.Allocator,
+    mux_uuid: []const u8,
+    command: []const u8,
+    pass_env: bool,
+    extra_env: []const u8,
+    report_back_to: []const u8,
+) !void {
+    if (command.len == 0) {
+        print("Error: --command is required\n", .{});
+        return;
+    }
+
+    var socket_path_buf: ?[]const u8 = null;
+    if (mux_uuid.len > 0) {
+        socket_path_buf = try ipc.getMuxSocketPath(allocator, mux_uuid);
+    } else {
+        socket_path_buf = std.posix.getenv("HEXE_MUX_SOCKET");
+    }
+
+    const socket_path = socket_path_buf orelse {
+        print("Error: --uuid required (or run inside hexe mux)\n", .{});
+        return;
+    };
+    defer if (mux_uuid.len > 0) allocator.free(socket_path);
+
+    var client = ipc.Client.connect(socket_path) catch |err| {
+        if (err == error.ConnectionRefused or err == error.FileNotFound) {
+            print("mux is not running\n", .{});
+            return;
+        }
+        return err;
+    };
+    defer client.close();
+
+    var env_json: std.ArrayList(u8) = .empty;
+    defer env_json.deinit(allocator);
+    if (pass_env) {
+        var env_map = std.process.getEnvMap(allocator) catch std.process.EnvMap.init(allocator);
+        defer env_map.deinit();
+        try env_json.appendSlice(allocator, "[");
+        var first = true;
+        var it = env_map.iterator();
+        while (it.next()) |entry| {
+            if (!first) try env_json.appendSlice(allocator, ",");
+            try env_json.appendSlice(allocator, "\"");
+            try env_json.appendSlice(allocator, entry.key_ptr.*);
+            try env_json.appendSlice(allocator, "=");
+            try env_json.appendSlice(allocator, entry.value_ptr.*);
+            try env_json.appendSlice(allocator, "\"");
+            first = false;
+        }
+        try env_json.appendSlice(allocator, "]");
+    }
+
+    var extra_env_json: std.ArrayList(u8) = .empty;
+    defer extra_env_json.deinit(allocator);
+    if (extra_env.len > 0) {
+        try extra_env_json.appendSlice(allocator, "[");
+        var it = std.mem.splitScalar(u8, extra_env, ',');
+        var first = true;
+        while (it.next()) |item| {
+            const trimmed = std.mem.trim(u8, item, " ");
+            if (trimmed.len == 0) continue;
+            if (!first) try extra_env_json.appendSlice(allocator, ",");
+            try extra_env_json.appendSlice(allocator, "\"");
+            try extra_env_json.appendSlice(allocator, trimmed);
+            try extra_env_json.appendSlice(allocator, "\"");
+            first = false;
+        }
+        try extra_env_json.appendSlice(allocator, "]");
+    }
+
+    const report_uuid = if (report_back_to.len > 0) report_back_to else (std.posix.getenv("HEXE_PANE_UUID") orelse "");
+
+    var msg_buf: std.ArrayList(u8) = .empty;
+    defer msg_buf.deinit(allocator);
+    var writer = msg_buf.writer(allocator);
+    try writer.writeAll("{\"type\":\"float\"");
+    try writer.print(",\"command\":\"{s}\"", .{command});
+    if (env_json.items.len > 0) {
+        try writer.print(",\"env\":{s}", .{env_json.items});
+    }
+    if (extra_env_json.items.len > 0) {
+        try writer.print(",\"extra_env\":{s}", .{extra_env_json.items});
+    }
+    if (report_uuid.len == 32) {
+        try writer.print(",\"report_back_to\":\"{s}\"", .{report_uuid});
+    }
+    try writer.writeAll("}");
+
+    var conn = client.toConnection();
+    try conn.sendLine(msg_buf.items);
+
+    var resp_buf: [4096]u8 = undefined;
+    const response = conn.recvLine(&resp_buf) catch null;
+    if (response == null) {
+        print("No response from mux\n", .{});
+        return;
+    }
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, response.?, .{}) catch {
+        print("Invalid response from mux\n", .{});
+        return;
+    };
+    defer parsed.deinit();
+
+    const root = parsed.value.object;
+    if (root.get("type")) |t| {
+        if (std.mem.eql(u8, t.string, "float_created")) {
+            if (root.get("uuid")) |u| {
+                print("{s}\n", .{u.string});
+            }
+            return;
+        }
+        if (std.mem.eql(u8, t.string, "error")) {
+            if (root.get("message")) |m| {
+                print("Error: {s}\n", .{m.string});
+            }
+            return;
+        }
+    }
+
+    print("Unexpected response from mux\n", .{});
 }
 
 // ============================================================================
