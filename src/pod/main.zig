@@ -1,8 +1,18 @@
 const std = @import("std");
 const posix = std.posix;
 
+const c = @cImport({
+    @cInclude("fcntl.h");
+});
+
 const core = @import("core");
 const pod_protocol = core.pod_protocol;
+
+fn setBlocking(fd: posix.fd_t) void {
+    const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch return;
+    const new_flags: usize = flags & ~@as(usize, @intCast(c.O_NONBLOCK));
+    _ = posix.fcntl(fd, posix.F.SETFL, new_flags) catch {};
+}
 
 pub const PodArgs = struct {
     daemon: bool = true,
@@ -228,8 +238,8 @@ const Pod = struct {
     }
 
     pub fn deinit(self: *Pod) void {
-        if (self.client) |*c| {
-            c.close();
+        if (self.client) |*client| {
+            client.close();
         }
         self.server.deinit();
         self.pty.close();
@@ -261,7 +271,7 @@ const Pod = struct {
                 @intCast(posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR);
             poll_fds[1] = .{ .fd = self.pty.master_fd, .events = pty_events, .revents = 0 };
             // client (optional)
-            poll_fds[2] = .{ .fd = if (self.client) |c| c.fd else -1, .events = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR, .revents = 0 };
+            poll_fds[2] = .{ .fd = if (self.client) |client_conn| client_conn.fd else -1, .events = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR, .revents = 0 };
 
             _ = posix.poll(&poll_fds, 1000) catch |err| {
                 if (err == error.Interrupted) continue;
@@ -273,6 +283,13 @@ const Pod = struct {
                 if (self.server.tryAccept() catch null) |conn| {
                     if (self.client == null) {
                         // No existing client - this is the main mux connection
+                        // IMPORTANT: core.ipc.Server.tryAccept accepts with SOCK_NONBLOCK,
+                        // which makes the accepted client fd non-blocking. Under heavy
+                        // output, writes can return WouldBlock and we would otherwise
+                        // close the mux connection, making the mux think the pane died.
+                        //
+                        // For the main mux connection we want blocking semantics.
+                        setBlocking(conn.fd);
                         self.client = conn;
                         // Replay backlog.
                         const n = self.backlog.copyOut(backlog_tmp);
@@ -352,9 +369,9 @@ const Pod = struct {
                     self.backlog.clear();
                 }
                 self.backlog.append(data);
-                if (self.client) |*c| {
-                    pod_protocol.writeFrame(c, .output, data) catch {
-                        c.close();
+                if (self.client) |*client| {
+                    pod_protocol.writeFrame(client, .output, data) catch {
+                        client.close();
                         self.client = null;
                     };
                 }
