@@ -167,7 +167,7 @@ fn printInit(shell: []const u8, no_comms: bool) !void {
                 \\# Hexe shell->mux communication hooks (Bash)
                 \\__hexe_exit_intent() {
                 \\    [[ -n "$HEXE_MUX_SOCKET" && -n "$HEXE_PANE_UUID" ]] || return 0
-                \\    hexe com exit-intent >/dev/null 2>/dev/null
+                \\    hexe shp exit-intent >/dev/null 2>/dev/null
                 \\    return $?
                 \\}
                 \\
@@ -190,7 +190,7 @@ fn printInit(shell: []const u8, no_comms: bool) !void {
                 \\        cmd="${BASH_REMATCH[1]}"
                 \\    fi
                 \\    local jobs_count=$(jobs -p 2>/dev/null | wc -l)
-                \\    hexe com shell-event --cmd="$cmd" --status=$exit_status --duration=$duration --cwd="$PWD" --jobs=$jobs_count >/dev/null 2>/dev/null
+                \\    hexe shp shell-event --cmd="$cmd" --status=$exit_status --duration=$duration --cwd="$PWD" --jobs=$jobs_count >/dev/null 2>/dev/null
                 \\    unset __hexe_start
                 \\}
                 \\
@@ -254,7 +254,7 @@ fn printInit(shell: []const u8, no_comms: bool) !void {
                 \\
                 \\__hexe_exit_intent() {
                 \\    [[ -n "$HEXE_MUX_SOCKET" && -n "$HEXE_PANE_UUID" ]] || return 0
-                \\    hexe com exit-intent >/dev/null 2>/dev/null
+                \\    hexe shp exit-intent >/dev/null 2>/dev/null
                 \\    return $?
                 \\}
                 \\
@@ -272,7 +272,7 @@ fn printInit(shell: []const u8, no_comms: bool) !void {
                 \\    [[ -n "$HEXE_MUX_SOCKET" && -n "$HEXE_PANE_UUID" ]] || { unset __hexe_start; return 0; }
                 \\    # OSC 7 cwd sync
                 \\    printf '\033]7;file://%s%s\007' "${HOST:-localhost}" "$PWD" 2>/dev/null
-                \\    hexe com shell-event --cmd="$__hexe_last_cmd" --status=$exit_status --duration=$duration --cwd="$PWD" --jobs=${(M)#jobstates} >/dev/null 2>/dev/null
+                \\    hexe shp shell-event --cmd="$__hexe_last_cmd" --status=$exit_status --duration=$duration --cwd="$PWD" --jobs=${(M)#jobstates} >/dev/null 2>/dev/null
                 \\    unset __hexe_start
                 \\}
                 \\
@@ -331,7 +331,7 @@ fn printInit(shell: []const u8, no_comms: bool) !void {
                 \\    if not set -q HEXE_PANE_UUID
                 \\        return 0
                 \\    end
-                \\    hexe com exit-intent >/dev/null 2>/dev/null
+                \\    hexe shp exit-intent >/dev/null 2>/dev/null
                 \\    return $status
                 \\end
                 \\
@@ -372,7 +372,7 @@ fn printInit(shell: []const u8, no_comms: bool) !void {
                 \\    # OSC 7 cwd sync
                 \\    printf '\033]7;file://%s%s\007' "$hostname" "$PWD" 2>/dev/null
                 \\    set -l jobs_count (count (jobs -p))
-                \\    hexe com shell-event --cmd="$cmdline" --status=$status --duration=$CMD_DURATION --cwd="$PWD" --jobs=$jobs_count >/dev/null 2>/dev/null
+                \\    hexe shp shell-event --cmd="$cmdline" --status=$status --duration=$CMD_DURATION --cwd="$PWD" --jobs=$jobs_count >/dev/null 2>/dev/null
                 \\end
                 \\
             );

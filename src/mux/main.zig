@@ -99,24 +99,9 @@ pub fn run(mux_args: MuxArgs) !void {
     var state = try State.init(allocator, size.cols, size.rows, mux_args.debug, mux_args.log_file);
     defer state.deinit();
 
-    // Debug: show config status
-    {
-        var buf: [256]u8 = undefined;
-        if (state.config.status_message) |err_msg| {
-            const msg = std.fmt.bufPrint(&buf, "Config: {s}", .{err_msg}) catch "config error";
-            state.notifications.showFor(msg, 10000);
-        } else {
-            const msg = std.fmt.bufPrint(&buf, "Binds: {d}, Floats: {d}", .{
-                state.config.input.binds.len,
-                state.config.floats.len,
-            }) catch "config: ?";
-            state.notifications.showFor(msg, 5000);
-        }
-    }
-
     // Show notification for config status.
     switch (state.config.status) {
-        .missing => state.notifications.showFor("Config not found (~/.config/hexe/config.lua), using defaults", 5000),
+        .missing => state.notifications.showFor("Config not found (~/.config/hexe/mux.lua), using defaults", 5000),
         .@"error" => {
             if (state.config.status_message) |msg| {
                 const err_msg = std.fmt.allocPrint(allocator, "Config error: {s}", .{msg}) catch null;

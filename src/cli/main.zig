@@ -6,7 +6,7 @@ const mux = @import("mux");
 const ses = @import("ses");
 const pod = @import("pod");
 const shp = @import("shp");
-const com = @import("commands/com.zig");
+const cli_cmds = @import("commands/com.zig");
 
 const print = std.debug.print;
 
@@ -23,53 +23,27 @@ pub fn main() !void {
     defer parser.deinit();
 
     // Top-level subcommands only
-    const com_cmd = try parser.newCommand("com", "Communication with sessions and panes");
     const ses_cmd = try parser.newCommand("ses", "Session daemon management");
     const pod_cmd = try parser.newCommand("pod", "Per-pane PTY daemon (internal)");
     const mux_cmd = try parser.newCommand("mux", "Terminal multiplexer");
     const shp_cmd = try parser.newCommand("shp", "Shell prompt renderer");
     const pop_cmd = try parser.newCommand("pop", "Popup overlays");
 
-    // COM subcommands
-    const com_list = try com_cmd.newCommand("list", "List all sessions and panes");
-    const com_list_details = try com_list.flag("d", "details", null);
-
-    const com_info = try com_cmd.newCommand("info", "Show current pane info");
-    const com_info_uuid = try com_info.string("u", "uuid", null);
-    const com_info_creator = try com_info.flag("c", "creator", null);
-    const com_info_last = try com_info.flag("l", "last", null);
-
-    const com_notify = try com_cmd.newCommand("notify", "Send notification");
-    const com_notify_uuid = try com_notify.string("u", "uuid", null);
-    const com_notify_creator = try com_notify.flag("c", "creator", null);
-    const com_notify_last = try com_notify.flag("l", "last", null);
-    const com_notify_broadcast = try com_notify.flag("b", "broadcast", null);
-    const com_notify_msg = try com_notify.stringPositional(null);
-
-    const com_send = try com_cmd.newCommand("send", "Send keystrokes to pane");
-    const com_send_uuid = try com_send.string("u", "uuid", null);
-    const com_send_creator = try com_send.flag("c", "creator", null);
-    const com_send_last = try com_send.flag("l", "last", null);
-    const com_send_broadcast = try com_send.flag("b", "broadcast", null);
-    const com_send_enter = try com_send.flag("e", "enter", null);
-    const com_send_ctrl = try com_send.string("C", "ctrl", null);
-    const com_send_text = try com_send.stringPositional(null);
-
-    const com_exit_intent = try com_cmd.newCommand("exit-intent", "Ask mux permission before shell exits");
-
-    const com_shell_event = try com_cmd.newCommand("shell-event", "Send shell command metadata to mux/ses");
-    const com_shell_event_cmd = try com_shell_event.string("", "cmd", null);
-    const com_shell_event_status = try com_shell_event.int("", "status", null);
-    const com_shell_event_duration = try com_shell_event.int("", "duration", null);
-    const com_shell_event_cwd = try com_shell_event.string("", "cwd", null);
-    const com_shell_event_jobs = try com_shell_event.int("", "jobs", null);
-
     // SES subcommands
     const ses_daemon = try ses_cmd.newCommand("daemon", "Start the session daemon");
     const ses_daemon_fg = try ses_daemon.flag("f", "foreground", null);
     const ses_daemon_dbg = try ses_daemon.flag("d", "debug", null);
     const ses_daemon_log = try ses_daemon.string("L", "logfile", null);
-    _ = try ses_cmd.newCommand("info", "Show daemon info");
+
+    const ses_status = try ses_cmd.newCommand("status", "Show daemon info");
+
+    const ses_list = try ses_cmd.newCommand("list", "List all sessions and panes");
+    const ses_list_details = try ses_list.flag("d", "details", null);
+
+    const ses_info = try ses_cmd.newCommand("info", "Show information about a pane");
+    const ses_info_uuid = try ses_info.string("u", "uuid", null);
+    const ses_info_creator = try ses_info.flag("c", "creator", null);
+    const ses_info_last = try ses_info.flag("l", "last", null);
 
     // POD subcommands (mostly for ses-internal use)
     const pod_daemon = try pod_cmd.newCommand("daemon", "Start a per-pane pod daemon");
@@ -103,6 +77,22 @@ pub fn main() !void {
     const mux_float_extra_env = try mux_float.string("", "extra-env", null);
     const mux_float_isolated = try mux_float.flag("", "isolated", null);
 
+    const mux_notify = try mux_cmd.newCommand("notify", "Send notification");
+    const mux_notify_uuid = try mux_notify.string("u", "uuid", null);
+    const mux_notify_creator = try mux_notify.flag("c", "creator", null);
+    const mux_notify_last = try mux_notify.flag("l", "last", null);
+    const mux_notify_broadcast = try mux_notify.flag("b", "broadcast", null);
+    const mux_notify_msg = try mux_notify.stringPositional(null);
+
+    const mux_send = try mux_cmd.newCommand("send", "Send keystrokes to pane");
+    const mux_send_uuid = try mux_send.string("u", "uuid", null);
+    const mux_send_creator = try mux_send.flag("c", "creator", null);
+    const mux_send_last = try mux_send.flag("l", "last", null);
+    const mux_send_broadcast = try mux_send.flag("b", "broadcast", null);
+    const mux_send_enter = try mux_send.flag("e", "enter", null);
+    const mux_send_ctrl = try mux_send.string("C", "ctrl", null);
+    const mux_send_text = try mux_send.stringPositional(null);
+
     // POP subcommands
     const shp_prompt = try shp_cmd.newCommand("prompt", "Render shell prompt");
     const shp_prompt_status = try shp_prompt.int("s", "status", null);
@@ -114,6 +104,15 @@ pub fn main() !void {
     const shp_init = try shp_cmd.newCommand("init", "Print shell initialization script");
     const shp_init_shell = try shp_init.stringPositional(null);
     const shp_init_no_comms = try shp_init.flag("", "no-comms", null);
+
+    const shp_exit_intent = try shp_cmd.newCommand("exit-intent", "Ask mux permission before shell exits");
+
+    const shp_shell_event = try shp_cmd.newCommand("shell-event", "Send shell command metadata to the current mux");
+    const shp_shell_event_cmd = try shp_shell_event.string("", "cmd", null);
+    const shp_shell_event_status = try shp_shell_event.int("", "status", null);
+    const shp_shell_event_duration = try shp_shell_event.int("", "duration", null);
+    const shp_shell_event_cwd = try shp_shell_event.string("", "cwd", null);
+    const shp_shell_event_jobs = try shp_shell_event.int("", "jobs", null);
 
     // POP subcommands
     const pop_notify = try pop_cmd.newCommand("notify", "Show notification");
@@ -134,7 +133,6 @@ pub fn main() !void {
 
     // Check for help flag manually to avoid argonaut segfault
     var has_help = false;
-    var found_com = false;
     var found_ses = false;
     var found_pod = false;
     var found_mux = false;
@@ -143,6 +141,7 @@ pub fn main() !void {
     var found_notify = false;
     var found_daemon = false;
     var found_info = false;
+    var found_status = false;
     var found_new = false;
     var found_attach = false;
     var found_float = false;
@@ -157,13 +156,13 @@ pub fn main() !void {
 
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) has_help = true;
-        if (std.mem.eql(u8, arg, "com")) found_com = true;
         if (std.mem.eql(u8, arg, "ses")) found_ses = true;
         if (std.mem.eql(u8, arg, "pod")) found_pod = true;
         if (std.mem.eql(u8, arg, "mux")) found_mux = true;
         if (std.mem.eql(u8, arg, "shp")) found_shp = true;
         if (std.mem.eql(u8, arg, "list")) found_list = true;
         if (std.mem.eql(u8, arg, "info")) found_info = true;
+        if (std.mem.eql(u8, arg, "status")) found_status = true;
         if (std.mem.eql(u8, arg, "notify")) found_notify = true;
         if (std.mem.eql(u8, arg, "daemon")) found_daemon = true;
         if (std.mem.eql(u8, arg, "info")) found_info = true;
@@ -182,22 +181,22 @@ pub fn main() !void {
 
     if (has_help) {
         // Show help for the most specific command found (manual strings to avoid argonaut crash)
-        if (found_com and found_send) {
-            print("Usage: hexe com send [OPTIONS] [text]\n\nSend keystrokes to pane (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>  Target specific pane\n  -c, --creator      Send to pane that created current pane\n  -l, --last         Send to previously focused pane\n  -b, --broadcast    Broadcast to all attached panes\n  -e, --enter        Append Enter key after text\n  -C, --ctrl <char>  Send Ctrl+<char> (e.g., -C c for Ctrl+C)\n", .{});
-        } else if (found_com and found_exit_intent) {
-            print("Usage: hexe com exit-intent\n\nAsk the current mux session whether the shell should be allowed to exit.\nIntended for shell keybindings (exit/Ctrl+D) to avoid last-pane death.\n\nExit codes: 0=allow, 1=deny\n", .{});
-        } else if (found_com and found_shell_event) {
-            print("Usage: hexe com shell-event [--cmd <TEXT>] [--status <N>] [--duration <MS>] [--cwd <PATH>] [--jobs <N>]\n\nSend shell command metadata to the current mux session.\nUsed by shell integration to power statusbar + `hexe com info`.\n\nNotes:\n  - No-op outside a mux session\n  - If mux is unreachable, exits 0\n", .{});
-        } else if (found_com and found_notify) {
-            print("Usage: hexe com notify [OPTIONS] <message>\n\nSend notification (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>  Target specific mux or pane\n  -c, --creator      Send to pane that created current pane\n  -l, --last         Send to previously focused pane\n  -b, --broadcast    Broadcast to all muxes\n", .{});
-        } else if (found_com and found_info) {
-            print("Usage: hexe com info [OPTIONS]\n\nShow information about a pane\n\nOptions:\n  -u, --uuid <UUID>  Query specific pane by UUID (works from anywhere)\n  -c, --creator      Print only the creator pane UUID\n  -l, --last         Print only the last focused pane UUID\n\nWithout --uuid, queries current pane (requires running inside mux)\n", .{});
-        } else if (found_com and found_list) {
-            print("Usage: hexe com list [OPTIONS]\n\nList all sessions and panes\n\nOptions:\n  -d, --details  Show extra details\n", .{});
+        if (found_mux and found_send) {
+            print("Usage: hexe mux send [OPTIONS] [text]\n\nSend keystrokes to pane (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>  Target specific pane\n  -c, --creator      Send to pane that created current pane\n  -l, --last         Send to previously focused pane\n  -b, --broadcast    Broadcast to all attached panes\n  -e, --enter        Append Enter key after text\n  -C, --ctrl <char>  Send Ctrl+<char> (e.g., -C c for Ctrl+C)\n", .{});
+        } else if (found_mux and found_notify) {
+            print("Usage: hexe mux notify [OPTIONS] <message>\n\nSend notification (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>  Target specific mux or pane\n  -c, --creator      Send to pane that created current pane\n  -l, --last         Send to previously focused pane\n  -b, --broadcast    Broadcast to all muxes\n", .{});
+        } else if (found_ses and found_list) {
+            print("Usage: hexe ses list [OPTIONS]\n\nList all sessions and panes\n\nOptions:\n  -d, --details  Show extra details\n", .{});
+        } else if (found_ses and found_info) {
+            print("Usage: hexe ses info [OPTIONS]\n\nShow information about a pane\n\nOptions:\n  -u, --uuid <UUID>  Query specific pane by UUID (works from anywhere)\n  -c, --creator      Print only the creator pane UUID\n  -l, --last         Print only the last focused pane UUID\n\nWithout --uuid, queries current pane (requires running inside mux)\n", .{});
+        } else if (found_ses and found_status) {
+            print("Usage: hexe ses status\n\nShow daemon status and socket path\n", .{});
+        } else if (found_shp and found_exit_intent) {
+            print("Usage: hexe shp exit-intent\n\nAsk the current mux session whether the shell should be allowed to exit.\nIntended for shell keybindings (exit/Ctrl+D) to avoid last-pane death.\n\nExit codes: 0=allow, 1=deny\n", .{});
+        } else if (found_shp and found_shell_event) {
+            print("Usage: hexe shp shell-event [--cmd <TEXT>] [--status <N>] [--duration <MS>] [--cwd <PATH>] [--jobs <N>]\n\nSend shell command metadata to the current mux session.\nUsed by shell integration to power statusbar + `hexe ses info`.\n\nNotes:\n  - No-op outside a mux session\n  - If mux is unreachable, exits 0\n", .{});
         } else if (found_ses and found_daemon) {
             print("Usage: hexe ses daemon [OPTIONS]\n\nStart the session daemon\n\nOptions:\n  -f, --foreground     Run in foreground (don't daemonize)\n  -d, --debug          Enable debug output\n  -L, --logfile <PATH> Log debug output to PATH\n", .{});
-        } else if (found_ses and found_info) {
-            print("Usage: hexe ses info\n\nShow daemon status and socket path\n", .{});
         } else if (found_pod and found_daemon) {
             print("Usage: hexe pod daemon [OPTIONS]\n\nStart a per-pane pod daemon (normally launched by ses)\n\nOptions:\n  -u, --uuid <UUID>     Pane UUID (32 hex chars)\n  -n, --name <NAME>     Human-friendly pane name (for `ps`)\n  -s, --socket <PATH>   Pod unix socket path\n  -S, --shell <CMD>     Shell/command to run\n  -C, --cwd <DIR>       Working directory\n  -f, --foreground      Run in foreground (prints pod_ready JSON)\n  -d, --debug           Enable debug output\n  -L, --logfile <PATH>  Log debug output to PATH\n", .{});
         } else if (found_mux and found_new) {
@@ -218,18 +217,16 @@ pub fn main() !void {
             print("Usage: hexe pop choose [OPTIONS] <message>\n\nSelect from options (blocking)\n\nOptions:\n  -u, --uuid <UUID>      Target mux/tab/pane UUID\n  -t, --timeout <MS>     Auto-cancel after milliseconds\n  -i, --items <ITEMS>    Comma-separated list of options\n\nExit codes: 0=selected (index on stdout), 1=cancelled/timeout\n", .{});
         } else if (found_pop) {
             print("Usage: hexe pop <command>\n\nPopup overlays\n\nCommands:\n  notify   Show notification\n  confirm  Yes/No dialog\n  choose   Select from options\n", .{});
-        } else if (found_com) {
-            print("Usage: hexe com <command>\n\nCommunication with sessions and panes\n\nCommands:\n  list         List all sessions and panes\n  info         Show current pane info\n  notify       Send notification\n  send         Send keystrokes to pane\n  exit-intent  Ask mux permission before shell exits\n  shell-event  Send shell metadata to mux\n", .{});
         } else if (found_ses) {
-            print("Usage: hexe ses <command>\n\nSession daemon management\n\nCommands:\n  daemon  Start the session daemon\n  info    Show daemon info\n", .{});
+            print("Usage: hexe ses <command>\n\nSession daemon management\n\nCommands:\n  daemon  Start the session daemon\n  status  Show daemon info\n  list    List sessions and panes\n  info    Show pane info\n", .{});
         } else if (found_pod) {
             print("Usage: hexe pod <command>\n\nPer-pane PTY daemon (internal)\n\nCommands:\n  daemon  Start a per-pane pod daemon\n", .{});
         } else if (found_mux) {
-            print("Usage: hexe mux <command>\n\nTerminal multiplexer\n\nCommands:\n  new     Create new multiplexer session\n  attach  Attach to existing session\n  float   Spawn a transient float pane\n", .{});
+            print("Usage: hexe mux <command>\n\nTerminal multiplexer\n\nCommands:\n  new     Create new multiplexer session\n  attach  Attach to existing session\n  float   Spawn a transient float pane\n  notify  Send notification\n  send    Send keystrokes to pane\n", .{});
         } else if (found_shp) {
-            print("Usage: hexe shp <command>\n\nShell prompt renderer\n\nCommands:\n  prompt  Render shell prompt\n  init    Print shell initialization script\n", .{});
+            print("Usage: hexe shp <command>\n\nShell prompt renderer\n\nCommands:\n  prompt       Render shell prompt\n  init         Print shell initialization script\n  exit-intent  Ask mux permission before shell exits\n  shell-event  Send shell metadata to mux\n", .{});
         } else {
-            print("Usage: hexe <command>\n\nHexe terminal multiplexer\n\nCommands:\n  com  Communication with sessions and panes\n  ses  Session daemon management\n  pod  Per-pane PTY daemon (internal)\n  mux  Terminal multiplexer\n  shp  Shell prompt renderer\n  pop  Popup overlays\n", .{});
+            print("Usage: hexe <command>\n\nHexe terminal multiplexer\n\nCommands:\n  ses  Session daemon management\n  pod  Per-pane PTY daemon (internal)\n  mux  Terminal multiplexer\n  shp  Shell prompt renderer\n  pop  Popup overlays\n", .{});
         }
         return;
     }
@@ -251,9 +248,6 @@ pub fn main() !void {
             } else if (ses_cmd.happened) {
                 const help = try ses_cmd.usage(null);
                 print("{s}\n", .{help});
-            } else if (com_cmd.happened) {
-                const help = try com_cmd.usage(null);
-                print("{s}\n", .{help});
             } else {
                 const help = try parser.usage(null);
                 print("{s}\n", .{help});
@@ -264,31 +258,15 @@ pub fn main() !void {
     };
 
     // Route to handlers
-    if (com_cmd.happened) {
-        if (com_list.happened) {
-            try com.runList(allocator, com_list_details.*);
-        } else if (com_info.happened) {
-            try com.runInfo(allocator, com_info_uuid.*, com_info_creator.*, com_info_last.*);
-        } else if (com_notify.happened) {
-            try com.runNotify(allocator, com_notify_uuid.*, com_notify_creator.*, com_notify_last.*, com_notify_broadcast.*, com_notify_msg.*);
-        } else if (com_send.happened) {
-            try com.runSend(allocator, com_send_uuid.*, com_send_creator.*, com_send_last.*, com_send_broadcast.*, com_send_enter.*, com_send_ctrl.*, com_send_text.*);
-        } else if (com_exit_intent.happened) {
-            try com.runExitIntent(allocator);
-        } else if (com_shell_event.happened) {
-            try com.runShellEvent(allocator, com_shell_event_cmd.*, com_shell_event_status.*, com_shell_event_duration.*, com_shell_event_cwd.*, com_shell_event_jobs.*);
-        }
-    } else if (ses_cmd.happened) {
-        // Check which ses subcommand
-        for (ses_cmd.commands.items) |cmd| {
-            if (cmd.happened) {
-                if (std.mem.eql(u8, cmd.name, "daemon")) {
-                    try runSesDaemon(ses_daemon_fg.*, ses_daemon_dbg.*, ses_daemon_log.*);
-                } else if (std.mem.eql(u8, cmd.name, "info")) {
-                    try runSesInfo(allocator);
-                }
-                return;
-            }
+    if (ses_cmd.happened) {
+        if (ses_daemon.happened) {
+            try runSesDaemon(ses_daemon_fg.*, ses_daemon_dbg.*, ses_daemon_log.*);
+        } else if (ses_status.happened) {
+            try runSesStatus(allocator);
+        } else if (ses_list.happened) {
+            try cli_cmds.runList(allocator, ses_list_details.*);
+        } else if (ses_info.happened) {
+            try cli_cmds.runInfo(allocator, ses_info_uuid.*, ses_info_creator.*, ses_info_last.*);
         }
     } else if (pod_cmd.happened) {
         if (pod_daemon.happened) {
@@ -321,12 +299,43 @@ pub fn main() !void {
                 mux_float_extra_env.*,
                 mux_float_isolated.*,
             );
+        } else if (mux_notify.happened) {
+            try cli_cmds.runNotify(
+                allocator,
+                mux_notify_uuid.*,
+                mux_notify_creator.*,
+                mux_notify_last.*,
+                mux_notify_broadcast.*,
+                mux_notify_msg.*,
+            );
+        } else if (mux_send.happened) {
+            try cli_cmds.runSend(
+                allocator,
+                mux_send_uuid.*,
+                mux_send_creator.*,
+                mux_send_last.*,
+                mux_send_broadcast.*,
+                mux_send_enter.*,
+                mux_send_ctrl.*,
+                mux_send_text.*,
+            );
         }
     } else if (shp_cmd.happened) {
         if (shp_prompt.happened) {
             try runShpPrompt(shp_prompt_status.*, shp_prompt_duration.*, shp_prompt_right.*, shp_prompt_shell.*, shp_prompt_jobs.*);
         } else if (shp_init.happened) {
             try runShpInit(shp_init_shell.*, shp_init_no_comms.*);
+        } else if (shp_exit_intent.happened) {
+            try cli_cmds.runExitIntent(allocator);
+        } else if (shp_shell_event.happened) {
+            try cli_cmds.runShellEvent(
+                allocator,
+                shp_shell_event_cmd.*,
+                shp_shell_event_status.*,
+                shp_shell_event_duration.*,
+                shp_shell_event_cwd.*,
+                shp_shell_event_jobs.*,
+            );
         }
     } else if (pop_cmd.happened) {
         if (pop_notify.happened) {
@@ -348,7 +357,7 @@ fn runSesDaemon(foreground: bool, debug: bool, log_file: []const u8) !void {
     try ses.run(.{ .daemon = !foreground, .debug = debug, .log_file = if (log_file.len > 0) log_file else null });
 }
 
-fn runSesInfo(allocator: std.mem.Allocator) !void {
+fn runSesStatus(allocator: std.mem.Allocator) !void {
     const socket_path = try ipc.getSesSocketPath(allocator);
     defer allocator.free(socket_path);
 

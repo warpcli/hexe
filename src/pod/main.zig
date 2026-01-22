@@ -311,7 +311,7 @@ const Pod = struct {
                         self.backlog.clear();
                         self.pty_paused = false;
                     } else {
-                        // Already have a client - this is an input-only connection (e.g., hexe com send)
+                        // Already have a client - this is an input-only connection (e.g., hexe mux send)
                         // Read any input frames and process them, then close
                         var input_buf: [4096]u8 = undefined;
                         const n = posix.read(conn.fd, &input_buf) catch 0;
