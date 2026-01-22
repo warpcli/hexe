@@ -277,7 +277,10 @@ pub const Config = struct {
         binds: []const Bind = &[_]Bind{},
 
         // Default timings
-        hold_ms: i64 = 350,
+        hold_ms: i64 = 600,
+        // If the same chord's primary key is pressed again within this window
+        // (while modifiers remain logically held), treat it as repeat mode.
+        repeat_ms: i64 = 100,
         double_tap_ms: i64 = 250,
     };
 
@@ -335,6 +338,7 @@ pub const Config = struct {
         if (json.input) |inp| {
             if (inp.timing) |t| {
                 if (t.hold_ms) |v| config.input.hold_ms = v;
+                if (t.repeat_ms) |v| config.input.repeat_ms = v;
                 if (t.double_tap_ms) |v| config.input.double_tap_ms = v;
             }
             if (inp.binds) |binds| {
@@ -942,6 +946,7 @@ const JsonConfig = struct {
     input: ?struct {
         timing: ?struct {
             hold_ms: ?i64 = null,
+            repeat_ms: ?i64 = null,
             double_tap_ms: ?i64 = null,
         } = null,
         binds: ?[]const JsonBind = null,

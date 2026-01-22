@@ -265,7 +265,7 @@ pub const State = struct {
         }
     }
 
-    pub const PendingKeyTimerKind = enum { delayed_press, hold, hold_fired, repeat_wait, repeat_active, double_tap_wait };
+    pub const PendingKeyTimerKind = enum { delayed_press, tap_pending, hold, hold_fired, repeat_wait, repeat_active, double_tap_wait };
 
     pub const PendingKeyTimer = struct {
         kind: PendingKeyTimerKind,
@@ -281,6 +281,7 @@ pub const State = struct {
         for (self.key_timers.items) |t| {
             if (t.kind == .hold_fired) continue;
             if (t.kind == .repeat_wait or t.kind == .repeat_active) continue;
+            if (t.kind == .tap_pending) continue;
             if (t.deadline_ms <= now_ms) return now_ms;
             const d = t.deadline_ms;
             if (next == null or d < next.?) next = d;

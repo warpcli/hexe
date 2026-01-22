@@ -376,7 +376,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
             if (keybinds.parseKittyKeyEvent(inp[i..])) |ke| {
                 if (keybinds.bindWhenFromKittyEventType(ke.event_type)) |when| {
                     // Try mux binds first.
-                    if (keybinds.handleKeyEvent(state, ke.mods, ke.key, when, false, true)) {
+                    if (keybinds.handleKeyEvent(state, ke.mods, ke.key, when, false, ke.has_event_type)) {
                         i += ke.consumed;
                         continue;
                     }
@@ -404,7 +404,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
             // Handle it here so it doesn't leak into the shell.
             if (keybinds.parseKittyLegacyArrowEvent(inp[i..])) |ke| {
                 if (keybinds.bindWhenFromKittyEventType(ke.event_type)) |when| {
-                    if (keybinds.handleKeyEvent(state, ke.mods, ke.key, when, false, true)) {
+                    if (keybinds.handleKeyEvent(state, ke.mods, ke.key, when, false, ke.has_event_type)) {
                         i += ke.consumed;
                         continue;
                     }
