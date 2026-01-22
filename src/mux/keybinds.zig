@@ -562,35 +562,31 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
 
     // Repeat: only fire repeat binds, don't participate in double tap.
     if (when == .repeat) {
-        // Mark chord as actively repeating so we never forward it to panes.
-        // Also cancel any pending hold for the same chord.
+        // Under the "primary key controls the chord" model, repeat mode is entered
+        // by a second press within repeat_ms (not by the terminal's auto-repeat).
+        // Therefore, ignore repeat events unless a repeat_active marker exists.
+
+        var has_active = false;
+        var i: usize = 0;
+        while (i < state.key_timers.items.len) {
+            if (state.key_timers.items[i].kind == .repeat_active and state.key_timers.items[i].mods == mods_eff and keyEq(state.key_timers.items[i].key, key)) {
+                has_active = true;
+                // Keep repeat mode alive while repeats arrive.
+                state.key_timers.items[i].deadline_ms = now_ms + cfg.input.repeat_ms;
+                break;
+            }
+            i += 1;
+        }
+        if (!has_active) return true;
+
         cancelTimer(state, .tap_pending, mods_eff, key);
         cancelTimer(state, .hold, mods_eff, key);
         cancelTimer(state, .hold_fired, mods_eff, key);
 
-        var converted = false;
-        var i: usize = 0;
-        while (i < state.key_timers.items.len) {
-            if (state.key_timers.items[i].mods == mods_eff and keyEq(state.key_timers.items[i].key, key)) {
-                if (state.key_timers.items[i].kind == .repeat_wait) {
-                    state.key_timers.items[i].kind = .repeat_active;
-                    converted = true;
-                    break;
-                }
-                if (state.key_timers.items[i].kind == .repeat_active) {
-                    converted = true;
-                    break;
-                }
-            }
-            i += 1;
-        }
-        // converted is only used to ensure we have a repeat_active marker; ok if false.
-
         if (findBestBind(state, mods_eff, key, .repeat, allow_only_tabs, focus_ctx)) |b| {
             return dispatchAction(state, b.action);
         }
-        // If no repeat binding exists, treat as press (useful for repeated focus moves).
-        return handleKeyEvent(state, mods_eff, key, .press, allow_only_tabs, defer_to_release);
+        return true;
     }
 
     // Hold scheduling (press only)
@@ -612,6 +608,24 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
     // - Otherwise: TAP (fire press action on release)
     var chord_deferred = false;
     if (when == .press and defer_to_release and mods_eff != 0) {
+        // If we are already in repeat_active (from rapid presses), treat this press as a repeat.
+        {
+            var j: usize = 0;
+            while (j < state.key_timers.items.len) {
+                const t = state.key_timers.items[j];
+                if (t.kind == .repeat_active and t.mods == mods_eff and keyEq(t.key, key)) {
+                    if (t.deadline_ms > now_ms) {
+                        state.key_timers.items[j].deadline_ms = now_ms + cfg.input.repeat_ms;
+                        return handleKeyEvent(state, mods_eff, key, .repeat, allow_only_tabs, defer_to_release);
+                    }
+                    // Expired repeat mode.
+                    _ = state.key_timers.orderedRemove(j);
+                    break;
+                }
+                j += 1;
+            }
+        }
+
         const press_bind = findBestBind(state, mods_eff, key, .press, allow_only_tabs, focus_ctx);
         const have_repeat = hasBind(state, mods_eff, key, .repeat, focus_ctx);
         const have_hold = hasBind(state, mods_eff, key, .hold, focus_ctx);
@@ -624,6 +638,7 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
                     if (state.key_timers.items[k].deadline_ms > now_ms) {
                         // Activate repeat mode.
                         state.key_timers.items[k].kind = .repeat_active;
+                        state.key_timers.items[k].deadline_ms = now_ms + cfg.input.repeat_ms;
                         cancelTimer(state, .tap_pending, mods_eff, key);
                         cancelTimer(state, .hold, mods_eff, key);
                         cancelTimer(state, .hold_fired, mods_eff, key);
@@ -762,6 +777,24 @@ fn dispatchAction(state: *State, action: BindAction) bool {
             }
             state.needs_render = true;
             state.syncStateToSes();
+            return true;
+        },
+        .split_resize => |dir_kind| {
+            // Only applies to split panes (floats should ignore).
+            if (state.active_floating != null) return true;
+            const dir: ?layout_mod.Layout.Direction = switch (dir_kind) {
+                .up => .up,
+                .down => .down,
+                .left => .left,
+                .right => .right,
+                else => null,
+            };
+            if (dir == null) return true;
+            if (state.currentLayout().resizeFocused(dir.?, 1)) {
+                state.needs_render = true;
+                state.renderer.invalidate();
+                state.force_full_render = true;
+            }
             return true;
         },
         .tab_new => {

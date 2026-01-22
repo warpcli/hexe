@@ -219,6 +219,7 @@ pub const Config = struct {
         pane_adopt,
         split_h,
         split_v,
+        split_resize,
         tab_new,
         tab_next,
         tab_prev,
@@ -235,6 +236,7 @@ pub const Config = struct {
         pane_adopt,
         split_h,
         split_v,
+        split_resize: BindKeyKind, // up/down/left/right (resize divider)
         tab_new,
         tab_next,
         tab_prev,
@@ -624,6 +626,12 @@ pub const Config = struct {
                 if (std.mem.eql(u8, t, "pane.adopt")) break :blk .pane_adopt;
                 if (std.mem.eql(u8, t, "split.h")) break :blk .split_h;
                 if (std.mem.eql(u8, t, "split.v")) break :blk .split_v;
+                if (std.mem.eql(u8, t, "split.resize")) {
+                    const dir = jb.action.dir orelse continue;
+                    const d = std.meta.stringToEnum(BindKeyKind, dir) orelse continue;
+                    if (d != .up and d != .down and d != .left and d != .right) continue;
+                    break :blk .{ .split_resize = d };
+                }
                 if (std.mem.eql(u8, t, "tab.new")) break :blk .tab_new;
                 if (std.mem.eql(u8, t, "tab.next")) break :blk .tab_next;
                 if (std.mem.eql(u8, t, "tab.prev")) break :blk .tab_prev;
@@ -712,17 +720,14 @@ const JsonBorderColor = struct {
     active: ?i64 = null,
     passive: ?i64 = null,
 };
-
 const JsonXY = struct {
     x: ?i64 = null,
     y: ?i64 = null,
 };
-
 const JsonSize = struct {
     width: ?i64 = null,
     height: ?i64 = null,
 };
-
 const JsonFloatStyle = struct {
     // Legacy border appearance (still accepted)
     top_left: ?[]const u8 = null,
@@ -755,11 +760,9 @@ const JsonFloatStyle = struct {
             right_t: ?[]const u8 = null,
         } = null,
     } = null,
-
     shadow: ?struct {
         color: ?i64 = null,
     } = null,
-
     title: ?struct {
         position: ?[]const u8 = null,
         outputs: ?[]const JsonOutput = null,
@@ -767,12 +770,9 @@ const JsonFloatStyle = struct {
         when: ?[]const u8 = null,
     } = null,
 };
-
 fn parseFloatStyle(allocator: std.mem.Allocator, js: JsonFloatStyle) ?FloatStyle {
     var result = FloatStyle{};
-
     const border_chars = if (js.border) |b| b.chars else null;
-
     if (if (border_chars) |bc| bc.top_left else null) |ch| if (ch.len > 0) {
         result.top_left = std.unicode.utf8Decode(ch) catch 0x256D;
     } else if (js.top_left) |ch2| if (ch2.len > 0) {
@@ -936,12 +936,10 @@ const JsonNotificationStyleConfig = struct {
     alignment: ?[]const u8 = null,
     duration_ms: ?i64 = null,
 };
-
 const JsonNotificationConfig = struct {
     mux: ?JsonNotificationStyleConfig = null,
     pane: ?JsonNotificationStyleConfig = null,
 };
-
 const JsonConfig = struct {
     input: ?struct {
         timing: ?struct {
@@ -975,8 +973,7 @@ const JsonBind = struct {
         // for float_toggle
         float: ?[]const u8 = null,
         // for float_nudge
-        // for focus_move
-        // for focus_move
+        // for float_nudge / focus_move / split_resize
         dir: ?[]const u8 = null,
     },
 };

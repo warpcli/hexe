@@ -420,6 +420,86 @@ pub const Layout = struct {
 
     pub const Direction = enum { up, down, left, right };
 
+    pub fn resizeFocused(self: *Layout, dir: Direction, step_cells: u16) bool {
+        // Adjust the nearest split divider that borders the focused pane in the
+        // requested direction (i3/tmux-style resize).
+        if (self.root == null) return false;
+        if (self.splits.count() <= 1) return false;
+
+        const focused_id = self.focused_split_id;
+        const root = self.root.?;
+
+        const Helper = struct {
+            const Target = struct {
+                split: *LayoutNode.Split,
+                inc_ratio: bool,
+            };
+
+            const RecResult = struct {
+                found: bool,
+                target: ?Target,
+            };
+
+            fn rec(node: *LayoutNode, pane_id: u16, want: Direction) RecResult {
+                return switch (node.*) {
+                    .pane => |id| .{ .found = id == pane_id, .target = null },
+                    .split => |*sp| blk: {
+                        const left_res: RecResult = rec(sp.first, pane_id, want);
+                        const right_res: RecResult = if (!left_res.found)
+                            rec(sp.second, pane_id, want)
+                        else
+                            .{ .found = false, .target = null };
+
+                        const found = left_res.found or right_res.found;
+                        if (!found) break :blk .{ .found = false, .target = null };
+
+                        if (left_res.target) |t| break :blk .{ .found = true, .target = t };
+                        if (right_res.target) |t| break :blk .{ .found = true, .target = t };
+
+                        const focused_in_first = left_res.found;
+                        const want_split_dir: SplitDir = switch (want) {
+                            .left, .right => .horizontal,
+                            .up, .down => .vertical,
+                        };
+                        const need_in_first: bool = switch (want) {
+                            .right, .down => true,
+                            .left, .up => false,
+                        };
+                        if (sp.dir != want_split_dir) break :blk .{ .found = true, .target = null };
+                        if (focused_in_first != need_in_first) break :blk .{ .found = true, .target = null };
+
+                        const inc_ratio: bool = switch (want) {
+                            .right, .down => true,
+                            .left, .up => false,
+                        };
+                        break :blk .{ .found = true, .target = .{ .split = sp, .inc_ratio = inc_ratio } };
+                    },
+                };
+            }
+        };
+
+        const res = Helper.rec(root, focused_id, dir);
+        if (res.target == null) return false;
+
+        const t = res.target.?;
+        const axis: u16 = switch (dir) {
+            .left, .right => self.width,
+            .up, .down => self.height,
+        };
+        if (axis == 0) return false;
+        const delta: f32 = @as(f32, @floatFromInt(step_cells)) / @as(f32, @floatFromInt(axis));
+
+        var r = t.split.ratio;
+        if (t.inc_ratio) r += delta else r -= delta;
+
+        // Clamp to keep both sides usable.
+        if (r < 0.1) r = 0.1;
+        if (r > 0.9) r = 0.9;
+        t.split.ratio = r;
+        self.recalculateLayout();
+        return true;
+    }
+
     /// Close the focused pane
     pub fn closeFocused(self: *Layout) bool {
         if (self.splits.count() <= 1) return false;
