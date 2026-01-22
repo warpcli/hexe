@@ -213,6 +213,94 @@ If you want Hexe to handle `Alt+Arrow` everywhere except inside Neovim (so Neovi
 
 Then Neovim can call `hexe mux focus left|right|up|down` when it needs to move between mux panes.
 
+## Conditional `when` (Prompt + Status Modules)
+
+Hexe supports conditional rendering for:
+
+- `shp.prompt` modules (shell prompt)
+- `mux.tabs.status` modules (mux status bar)
+
+The condition is configured via a `when = { ... }` table.
+
+Important:
+- `when` must be a table (no string form)
+- conditions are ANDed: if multiple providers are present, all must pass
+
+### Prompt Modules (`shp.prompt`)
+
+Supported providers:
+- `bash`: run a bash condition (exit code 0 = show)
+- `lua`: run a Lua chunk that returns a boolean
+
+Example:
+
+```lua
+{
+  name = "ssh",
+  command = "echo //",
+  when = {
+    bash = "[[ -n $SSH_CONNECTION ]]",
+  },
+  outputs = {
+    { style = "bg:237 italic fg:15", format = " $output" },
+  },
+}
+```
+
+For `lua`, the chunk must `return true/false`. A `ctx` table is provided:
+- `ctx.cwd`
+- `ctx.exit_status`
+- `ctx.cmd_duration_ms`
+- `ctx.jobs`
+- `ctx.terminal_width`
+
+Example:
+
+```lua
+when = {
+  lua = "return (ctx.exit_status or 0) ~= 0",
+}
+```
+
+### Status Bar Modules (`mux.tabs.status`)
+
+Supported providers:
+- `hexe`: a list of built-in mux predicates (ANDed)
+- `bash`: run a bash condition (rate-limited)
+- `lua`: run a Lua chunk that returns a boolean (rate-limited)
+
+Example:
+
+```lua
+{
+  name = "running_anim/knight_rider?width=10&step=30&hold=20",
+  when = {
+    hexe = { "process_running", "not_alt_screen" },
+  },
+  outputs = {
+    { format = " $output" },
+  },
+}
+```
+
+`hexe` tokens available:
+- `process_running`
+- `not_process_running`
+- `alt_screen`
+- `not_alt_screen`
+- `jobs_nonzero`
+- `has_last_cmd`
+- `last_status_nonzero`
+
+For statusbar `lua`, `ctx` includes:
+- `ctx.shell_running`
+- `ctx.alt_screen`
+- `ctx.jobs`
+- `ctx.last_status`
+- `ctx.last_command`
+- `ctx.cwd`
+- `ctx.now_ms`
+
 ## Terminal support and fallback behavior
 
 Hexe uses progressive enhancement:
