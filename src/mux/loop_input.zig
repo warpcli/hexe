@@ -15,98 +15,28 @@ const loop_ipc = @import("loop_ipc.zig");
 const TabFocusKind = @import("state.zig").TabFocusKind;
 const statusbar = @import("statusbar.zig");
 const keybinds = @import("keybinds.zig");
+const input_csi_u = @import("input_csi_u.zig");
 
 fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
-    const ESC: u8 = 0x1b;
-
-    var scratch: [8192]u8 = undefined;
-    var n: usize = 0;
-
-    const flush = struct {
-        fn go(state_: *State, buf: *[8192]u8, len: *usize) void {
-            if (len.* == 0) return;
-            keybinds.forwardInputToFocusedPane(state_, buf[0..len.*]);
-            len.* = 0;
-        }
-    }.go;
-
-    var i: usize = 0;
-    while (i < bytes.len) {
-        if (bytes[i] == ESC and i + 1 < bytes.len and bytes[i + 1] == '[') {
-            // CSI-u / kitty text keys
-            if (keybinds.parseKittyKeyEvent(bytes[i..])) |ke| {
-                // Never forward release events into the app.
-                if (keybinds.bindWhenFromKittyEventType(ke.event_type)) |when| {
-                    if (when == .release) {
-                        i += ke.consumed;
-                        continue;
-                    }
-                }
-
-                var out: [8]u8 = undefined;
-                if (keybinds.translateKittyToLegacy(&out, ke)) |out_len| {
-                    flush(state, &scratch, &n);
-                    keybinds.forwardInputToFocusedPane(state, out[0..out_len]);
-                    i += ke.consumed;
-                    continue;
-                }
-
-                // Can't translate: drop the sequence rather than leaking it.
-                i += ke.consumed;
-                continue;
-            }
-
-            // Kitty legacy functional arrows with optional event types
-            if (keybinds.parseKittyLegacyArrowEvent(bytes[i..])) |ke| {
-                if (keybinds.bindWhenFromKittyEventType(ke.event_type)) |when| {
-                    if (when == .release) {
-                        i += ke.consumed;
-                        continue;
-                    }
-                }
-
-                var out: [16]u8 = undefined;
-                if (keybinds.translateArrowToLegacy(&out, ke.mods, ke.key)) |out_len| {
-                    flush(state, &scratch, &n);
-                    keybinds.forwardInputToFocusedPane(state, out[0..out_len]);
-                }
-                i += ke.consumed;
-                continue;
-            }
-
-            // Last-resort: if it looks like a CSI-u key event, swallow it.
-            if (i + 2 < bytes.len and bytes[i + 2] >= '0' and bytes[i + 2] <= '9') {
-                var j: usize = i + 2;
-                const end = @min(bytes.len, i + 128);
-                while (j < end and bytes[j] != 'u') : (j += 1) {}
-                if (j < end and bytes[j] == 'u') {
-                    i = j + 1;
-                    continue;
-                }
-            }
-        }
-
-        // Plain byte, buffer it.
-        if (n < scratch.len) {
-            scratch[n] = bytes[i];
-            n += 1;
-        } else {
-            flush(state, &scratch, &n);
-        }
-        i += 1;
-    }
-    flush(state, &scratch, &n);
+    input_csi_u.forwardSanitizedToFocusedPane(state, bytes);
 }
 
-fn mergeStdinTail(state: *State, input_bytes: []const u8, buf: *[4096 + 256]u8) []const u8 {
-    if (state.stdin_tail_len == 0) return input_bytes;
+fn mergeStdinTail(state: *State, input_bytes: []const u8) struct { merged: []const u8, owned: ?[]u8 } {
+    if (state.stdin_tail_len == 0) return .{ .merged = input_bytes, .owned = null };
 
     const tl: usize = @intCast(state.stdin_tail_len);
-    @memcpy(buf[0..tl], state.stdin_tail[0..tl]);
-    @memcpy(buf[tl .. tl + input_bytes.len], input_bytes);
+    const total = tl + input_bytes.len;
+    var tmp = state.allocator.alloc(u8, total) catch {
+        // Allocation failure: drop tail rather than corrupt memory.
+        state.stdin_tail_len = 0;
+        return .{ .merged = input_bytes, .owned = null };
+    };
+    @memcpy(tmp[0..tl], state.stdin_tail[0..tl]);
+    @memcpy(tmp[tl..total], input_bytes);
     state.stdin_tail_len = 0;
-    return buf[0 .. tl + input_bytes.len];
+    return .{ .merged = tmp, .owned = tmp };
 }
+
 
 fn stashIncompleteEscapeTail(state: *State, inp: []const u8) []const u8 {
     const ESC: u8 = 0x1b;
@@ -180,10 +110,10 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     if (input_bytes.len == 0) return;
 
     // Stdin reads can split escape sequences. Merge with any pending tail first.
-    var merged_buf: [4096 + 256]u8 = undefined;
-    const merged = mergeStdinTail(state, input_bytes, &merged_buf);
+    const merged_res = mergeStdinTail(state, input_bytes);
+    defer if (merged_res.owned) |m| state.allocator.free(m);
 
-    const slice = consumeOscReplyFromTerminal(state, merged);
+    const slice = consumeOscReplyFromTerminal(state, merged_res.merged);
     if (slice.len == 0) return;
 
     // Don't process (or forward) partial escape sequences.
@@ -355,6 +285,23 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
         var i: usize = 0;
         while (i < inp.len) {
+            // If some external layer injects CSI-u key events, translate them to
+            // mux binds / legacy bytes so Alt bindings keep working and no garbage
+            // is forwarded into the shell.
+            if (input_csi_u.parse(inp[i..])) |ev| {
+                if (ev.event_type != 3) {
+                    if (keybinds.handleKeyEvent(state, ev.mods, ev.key, .press, false, false)) {
+                        i += ev.consumed;
+                        continue;
+                    }
+                    var out: [8]u8 = undefined;
+                    if (input_csi_u.translateToLegacy(&out, ev)) |out_len| {
+                        keybinds.forwardInputToFocusedPane(state, out[0..out_len]);
+                    }
+                }
+                i += ev.consumed;
+                continue;
+            }
             // Mouse events (SGR): click-to-focus and status-bar tab switching.
             if (input.parseMouseEvent(inp[i..])) |ev| {
                 const raw = inp[i .. i + ev.consumed];
@@ -453,57 +400,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 continue;
             }
 
-            // Check for Alt+key (ESC followed by key).
-            // Kitty keyboard protocol may encode Alt+<key> as CSI ... u instead.
-            if (keybinds.parseKittyKeyEvent(inp[i..])) |ke| {
-                if (keybinds.bindWhenFromKittyEventType(ke.event_type)) |when| {
-                    // Try mux binds first.
-                    if (keybinds.handleKeyEvent(state, ke.mods, ke.key, when, false, ke.has_event_type)) {
-                        i += ke.consumed;
-                        continue;
-                    }
-
-                    // Release events are mux-only for now.
-                    if (when == .release) {
-                        i += ke.consumed;
-                        continue;
-                    }
-                }
-
-                // Not a mux bind: translate to legacy bytes and forward to focused pane.
-                var out: [8]u8 = undefined;
-                const out_len = keybinds.translateKittyToLegacy(&out, ke) orelse 0;
-                if (out_len > 0) {
-                    keybinds.forwardInputToFocusedPane(state, out[0..out_len]);
-                    i += ke.consumed;
-                    continue;
-                }
-                // If we can't translate, let it fall through (some apps may support CSI-u).
-            }
-
-            // Some terminals encode arrow keys using a kitty legacy form with event types:
-            // ESC [ 1 ; <mod> : <event> <A|B|C|D>
-            // Handle it here so it doesn't leak into the shell.
-            if (keybinds.parseKittyLegacyArrowEvent(inp[i..])) |ke| {
-                if (keybinds.bindWhenFromKittyEventType(ke.event_type)) |when| {
-                    if (keybinds.handleKeyEvent(state, ke.mods, ke.key, when, false, ke.has_event_type)) {
-                        i += ke.consumed;
-                        continue;
-                    }
-                    if (when == .release) {
-                        i += ke.consumed;
-                        continue;
-                    }
-                }
-
-                // Not handled by mux: forward a normal arrow sequence.
-                var out: [16]u8 = undefined;
-                if (keybinds.translateArrowToLegacy(&out, ke.mods, ke.key)) |n| {
-                    keybinds.forwardInputToFocusedPane(state, out[0..n]);
-                    i += ke.consumed;
-                    continue;
-                }
-            }
+            // No kitty keyboard protocol support.
             if (inp[i] == 0x1b and i + 1 < inp.len) {
                 const next = inp[i + 1];
                 // Check for CSI sequences (ESC [).

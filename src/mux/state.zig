@@ -113,6 +113,7 @@ pub const State = struct {
     // Keybinding timers (hold/double-tap delayed press)
     key_timers: std.ArrayList(PendingKeyTimer),
 
+
     pub fn init(allocator: std.mem.Allocator, width: u16, height: u16, debug: bool, log_file: ?[]const u8) !State {
         const cfg = core.Config.load(allocator);
         const pop_cfg = pop.PopConfig.load(allocator);

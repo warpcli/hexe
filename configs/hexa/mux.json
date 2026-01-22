@@ -3,7 +3,7 @@
     "timing": { "hold_ms": 400, "double_tap_ms": 250 },
     "binds": [
       { "mods": ["alt"], "key": "q", "context": {"focus": "any"}, "action": {"type": "mux.quit"} },
-      { "when": "release", "mods": ["alt", "shift"], "key": "d", "context": {"focus": "any"}, "action": {"type": "mux.detach"} },
+      { "mods": ["alt", "shift"], "key": "d", "context": {"focus": "any"}, "action": {"type": "mux.detach"} },
 
       { "mods": ["alt"], "key": "z", "context": {"focus": "any"}, "action": {"type": "pane.disown"} },
       { "mods": ["alt"], "key": "a", "context": {"focus": "any"}, "action": {"type": "pane.adopt"} },
@@ -21,20 +21,10 @@
       { "mods": ["alt"], "key": "left", "context": {"focus": "any"}, "action": {"type": "focus.move", "dir": "left"} },
       { "mods": ["alt"], "key": "right", "context": {"focus": "any"}, "action": {"type": "focus.move", "dir": "right"} },
 
-      { "when": "press", "mods": ["alt"], "key": "up", "context": {"focus": "float"}, "action": {"type": "float.nudge", "dir": "up"} },
-      { "when": "press", "mods": ["alt"], "key": "down", "context": {"focus": "float"}, "action": {"type": "float.nudge", "dir": "down"} },
-      { "when": "press", "mods": ["alt"], "key": "left", "context": {"focus": "float"}, "action": {"type": "float.nudge", "dir": "left"} },
-      { "when": "press", "mods": ["alt"], "key": "right", "context": {"focus": "float"}, "action": {"type": "float.nudge", "dir": "right"} },
-
-      { "when": "repeat", "mods": ["alt"], "key": "up", "context": {"focus": "any"}, "action": {"type": "focus.move", "dir": "up"} },
-      { "when": "repeat", "mods": ["alt"], "key": "down", "context": {"focus": "any"}, "action": {"type": "focus.move", "dir": "down"} },
-      { "when": "repeat", "mods": ["alt"], "key": "left", "context": {"focus": "any"}, "action": {"type": "focus.move", "dir": "left"} },
-      { "when": "repeat", "mods": ["alt"], "key": "right", "context": {"focus": "any"}, "action": {"type": "focus.move", "dir": "right"} },
-
-      { "when": "repeat", "mods": ["alt"], "key": "up", "context": {"focus": "float"}, "action": {"type": "float.nudge", "dir": "up"} },
-      { "when": "repeat", "mods": ["alt"], "key": "down", "context": {"focus": "float"}, "action": {"type": "float.nudge", "dir": "down"} },
-      { "when": "repeat", "mods": ["alt"], "key": "left", "context": {"focus": "float"}, "action": {"type": "float.nudge", "dir": "left"} },
-      { "when": "repeat", "mods": ["alt"], "key": "right", "context": {"focus": "float"}, "action": {"type": "float.nudge", "dir": "right"} },
+      { "mods": ["alt", "shift"], "key": "k", "context": {"focus": "float"}, "action": {"type": "float.nudge", "dir": "up"} },
+      { "mods": ["alt", "shift"], "key": "j", "context": {"focus": "float"}, "action": {"type": "float.nudge", "dir": "down"} },
+      { "mods": ["alt", "shift"], "key": "h", "context": {"focus": "float"}, "action": {"type": "float.nudge", "dir": "left"} },
+      { "mods": ["alt", "shift"], "key": "l", "context": {"focus": "float"}, "action": {"type": "float.nudge", "dir": "right"} },
 
       { "mods": ["alt"], "key": "space", "context": {"focus": "any"}, "action": {"type": "float.toggle", "float": "0"} }
     ]

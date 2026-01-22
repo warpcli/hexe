@@ -17,272 +17,6 @@ pub const BindKeyKind = core.Config.BindKeyKind;
 pub const BindAction = core.Config.BindAction;
 pub const FocusContext = core.Config.FocusContext;
 
-pub const KittyKeyEvent = struct {
-    consumed: usize,
-    mods: u8,
-    key: BindKey,
-    event_type: u8, // 1 press, 2 repeat, 3 release
-    has_event_type: bool,
-};
-
-pub fn bindWhenFromKittyEventType(et: u8) ?BindWhen {
-    return switch (et) {
-        1 => .press,
-        2 => .repeat,
-        3 => .release,
-        else => null,
-    };
-}
-
-// Parse kitty keyboard protocol legacy functional key encoding for arrow keys:
-//   ESC [ 1 ; <mod> [:<event>] <A|B|C|D>
-// Used by some terminals when the kitty protocol is enabled.
-pub fn parseKittyLegacyArrowEvent(inp: []const u8) ?KittyKeyEvent {
-    if (inp.len < 6) return null;
-    if (inp[0] != 0x1b or inp[1] != '[') return null;
-    if (inp[2] != '1' or inp[3] != ';') return null;
-
-    var idx: usize = 4;
-    var mod_val: u32 = 0;
-    var have_mod = false;
-    while (idx < inp.len) : (idx += 1) {
-        const ch = inp[idx];
-        if (ch >= '0' and ch <= '9') {
-            have_mod = true;
-            mod_val = mod_val * 10 + @as(u32, ch - '0');
-            continue;
-        }
-        break;
-    }
-    if (!have_mod) return null;
-    if (idx >= inp.len) return null;
-
-    var event_type: u32 = 1;
-    var has_event_type = false;
-    if (inp[idx] == ':') {
-        idx += 1;
-        has_event_type = true;
-        var ev: u32 = 0;
-        var have_ev = false;
-        while (idx < inp.len) : (idx += 1) {
-            const ch = inp[idx];
-            if (ch >= '0' and ch <= '9') {
-                have_ev = true;
-                ev = ev * 10 + @as(u32, ch - '0');
-                continue;
-            }
-            break;
-        }
-        if (have_ev) event_type = ev;
-        if (idx >= inp.len) return null;
-    }
-
-    const final = inp[idx];
-    const key: BindKey = switch (final) {
-        'A' => .up,
-        'B' => .down,
-        'C' => .right,
-        'D' => .left,
-        else => return null,
-    };
-
-    // Map modifiers: xterm-style mask is (mod-1): shift=1, alt=2, ctrl=4, super=8
-    const xmask: u32 = if (mod_val > 0) mod_val - 1 else 0;
-    var mods: u8 = 0;
-    if ((xmask & 2) != 0) mods |= 1; // alt
-    if ((xmask & 4) != 0) mods |= 2; // ctrl
-    if ((xmask & 1) != 0) mods |= 4; // shift
-    if ((xmask & 8) != 0) mods |= 8; // super
-
-    return .{
-        .consumed = idx + 1,
-        .mods = mods,
-        .key = key,
-        .event_type = @intCast(@min(255, event_type)),
-        .has_event_type = has_event_type,
-    };
-}
-
-pub fn translateArrowToLegacy(out: *[16]u8, mods: u8, key: BindKey) ?usize {
-    const final: u8 = switch (@as(BindKeyKind, key)) {
-        .up => 'A',
-        .down => 'B',
-        .right => 'C',
-        .left => 'D',
-        else => return null,
-    };
-
-    var xmask: u8 = 0;
-    if ((mods & 4) != 0) xmask |= 1; // shift
-    if ((mods & 1) != 0) xmask |= 2; // alt
-    if ((mods & 2) != 0) xmask |= 4; // ctrl
-    if ((mods & 8) != 0) xmask |= 8; // super
-    const mod_val: u8 = xmask + 1;
-
-    var n: usize = 0;
-    out[n] = 0x1b;
-    n += 1;
-    out[n] = '[';
-    n += 1;
-
-    if (mod_val == 1) {
-        out[n] = final;
-        n += 1;
-        return n;
-    }
-
-    // ESC [ 1 ; <mod> <final>
-    out[n] = '1';
-    n += 1;
-    out[n] = ';';
-    n += 1;
-    // mod is 1..16, print as decimal
-    if (mod_val >= 10) {
-        out[n] = '1';
-        n += 1;
-        out[n] = '0' + (mod_val - 10);
-        n += 1;
-    } else {
-        out[n] = '0' + mod_val;
-        n += 1;
-    }
-    out[n] = final;
-    n += 1;
-    return n;
-}
-
-// Parse kitty keyboard protocol (CSI ... u) key events.
-// Minimal subset for Hexe:
-// - key codepoint (ASCII)
-// - modifier value (xterm style mod-1 mask)
-// - optional event type (:1 press, :2 repeat, :3 release)
-pub fn parseKittyKeyEvent(inp: []const u8) ?KittyKeyEvent {
-    if (inp.len < 4) return null;
-    if (inp[0] != 0x1b or inp[1] != '[') return null;
-
-    var idx: usize = 2;
-    var keycode: u32 = 0;
-    var have_digit = false;
-    while (idx < inp.len) : (idx += 1) {
-        const ch = inp[idx];
-        if (ch >= '0' and ch <= '9') {
-            have_digit = true;
-            keycode = keycode * 10 + @as(u32, ch - '0');
-            continue;
-        }
-        break;
-    }
-    if (!have_digit) return null;
-    if (idx >= inp.len) return null;
-
-    // Optional alternate key codes: :shifted:base_layout (ignore but consume)
-    if (inp[idx] == ':') {
-        while (idx < inp.len and inp[idx] != ';' and inp[idx] != 'u') : (idx += 1) {}
-        if (idx >= inp.len) return null;
-    }
-
-    var mod_val: u32 = 1;
-    var event_type: u32 = 1;
-    var has_event_type = false;
-
-    if (inp[idx] == 'u') {
-        idx += 1;
-    } else if (inp[idx] == ';') {
-        idx += 1;
-
-        // Modifiers can be empty (defaults to 1).
-        var mv: u32 = 0;
-        var have_mv = false;
-        while (idx < inp.len) : (idx += 1) {
-            const ch = inp[idx];
-            if (ch >= '0' and ch <= '9') {
-                have_mv = true;
-                mv = mv * 10 + @as(u32, ch - '0');
-                continue;
-            }
-            break;
-        }
-        if (have_mv) mod_val = mv;
-
-        if (idx < inp.len and inp[idx] == ':') {
-            idx += 1;
-            has_event_type = true;
-            var ev: u32 = 0;
-            var have_ev = false;
-            while (idx < inp.len) : (idx += 1) {
-                const ch = inp[idx];
-                if (ch >= '0' and ch <= '9') {
-                    have_ev = true;
-                    ev = ev * 10 + @as(u32, ch - '0');
-                    continue;
-                }
-                break;
-            }
-            if (have_ev) event_type = ev;
-        }
-
-        // Optional third field: text-as-codepoints. Ignore but consume.
-        if (idx < inp.len and inp[idx] == ';') {
-            idx += 1;
-            while (idx < inp.len and inp[idx] != 'u') : (idx += 1) {}
-            if (idx >= inp.len or inp[idx] != 'u') return null;
-            idx += 1;
-        } else {
-            if (idx >= inp.len or inp[idx] != 'u') return null;
-            idx += 1;
-        }
-    } else {
-        return null;
-    }
-
-    // Map modifiers: xterm-style mask is (mod-1): shift=1, alt=2, ctrl=4, super=8
-    const xmask: u32 = if (mod_val > 0) mod_val - 1 else 0;
-    var mods: u8 = 0;
-    if ((xmask & 2) != 0) mods |= 1; // alt
-    if ((xmask & 4) != 0) mods |= 2; // ctrl
-    if ((xmask & 1) != 0) mods |= 4; // shift
-    if ((xmask & 8) != 0) mods |= 8; // super
-
-    const key: BindKey = blk: {
-        if (keycode == 32) break :blk .space;
-        if (keycode <= 0x7f) break :blk .{ .char = @intCast(keycode) };
-        return null;
-    };
-
-    return .{ .consumed = idx, .mods = mods, .key = key, .event_type = @intCast(@min(255, event_type)), .has_event_type = has_event_type };
-}
-
-pub fn translateKittyToLegacy(out: *[8]u8, ev: KittyKeyEvent) ?usize {
-    // Only supports char + space for now.
-    var ch: u8 = switch (@as(BindKeyKind, ev.key)) {
-        .space => ' ',
-        .char => ev.key.char,
-        else => return null,
-    };
-
-    // Apply shift for ASCII letters (best effort).
-    if ((ev.mods & 4) != 0) {
-        if (ch >= 'a' and ch <= 'z') ch = ch - 'a' + 'A';
-    }
-
-    // Apply ctrl mapping for ASCII letters.
-    if ((ev.mods & 2) != 0) {
-        if (ch >= 'a' and ch <= 'z') {
-            ch = ch - 'a' + 1;
-        } else if (ch >= 'A' and ch <= 'Z') {
-            ch = ch - 'A' + 1;
-        }
-    }
-
-    var n: usize = 0;
-    if ((ev.mods & 1) != 0) {
-        out[n] = 0x1b;
-        n += 1;
-    }
-    out[n] = ch;
-    n += 1;
-    return n;
-}
 
 pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
     if (state.active_floating) |idx| {
@@ -399,11 +133,34 @@ fn findStoredModsForKey(state: *State, key: BindKey, focus_ctx: FocusContext) ?u
 }
 
 fn forwardKeyAsLegacy(state: *State, mods: u8, key: BindKey) void {
-    const ev: KittyKeyEvent = .{ .consumed = 0, .mods = mods, .key = key, .event_type = 3, .has_event_type = true };
     var out: [8]u8 = undefined;
-    if (translateKittyToLegacy(&out, ev)) |n| {
-        forwardInputToFocusedPane(state, out[0..n]);
+    var n: usize = 0;
+
+    // Best-effort mapping used only when a key interaction was deferred.
+    // In legacy terminals we generally won't defer, but keep this safe.
+    switch (@as(BindKeyKind, key)) {
+        .space => {
+            out[n] = ' ';
+            n += 1;
+        },
+        .char => {
+            var ch: u8 = key.char;
+            if ((mods & 4) != 0 and ch >= 'a' and ch <= 'z') ch = ch - 'a' + 'A';
+            if ((mods & 2) != 0) {
+                if (ch >= 'a' and ch <= 'z') ch = ch - 'a' + 1;
+                if (ch >= 'A' and ch <= 'Z') ch = ch - 'A' + 1;
+            }
+            if ((mods & 1) != 0) {
+                out[n] = 0x1b;
+                n += 1;
+            }
+            out[n] = ch;
+            n += 1;
+        },
+        else => return,
     }
+
+    if (n > 0) forwardInputToFocusedPane(state, out[0..n]);
 }
 
 fn scheduleTimer(state: *State, kind: State.PendingKeyTimerKind, deadline_ms: i64, mods: u8, key: BindKey, action: BindAction, focus_ctx: FocusContext) void {
