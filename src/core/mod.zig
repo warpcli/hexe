@@ -5,6 +5,10 @@ pub const vt = @import("vt.zig");
 pub const config = @import("config.zig");
 pub const ipc = @import("ipc.zig");
 pub const pod_protocol = @import("pod_protocol.zig");
+pub const lua_runtime = @import("lua_runtime.zig");
+
+pub const LuaRuntime = lua_runtime.LuaRuntime;
+pub const ConfigStatus = lua_runtime.ConfigStatus;
 
 pub const Pty = pty.Pty;
 pub const VT = vt.VT;

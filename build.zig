@@ -16,6 +16,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     })) |argonaut_dep| argonaut_dep.module("argonaut") else null;
 
+    // Get ziglua dependency for embedded Lua
+    const ziglua_dep = b.lazyDependency("ziglua", .{
+        .target = target,
+        .optimize = optimize,
+    });
+
     // Create core module
     const core_module = b.createModule(.{
         .root_source_file = b.path("src/core/mod.zig"),
@@ -26,6 +32,10 @@ pub fn build(b: *std.Build) void {
     if (ghostty_vt_mod) |vt| {
         core_module.addImport("ghostty-vt", vt);
     }
+    if (ziglua_dep) |dep| {
+        const zlua_mod = dep.module("zlua");
+        core_module.addImport("zlua", zlua_mod);
+    }
 
     // Create shp module (shell prompt/status bar segments)
     const shp_module = b.createModule(.{
@@ -33,6 +43,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    shp_module.addImport("core", core_module);
 
     // Create pop module (popup/overlay system)
     const pop_module = b.createModule(.{
@@ -40,6 +51,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    pop_module.addImport("core", core_module);
 
     // Create mux module for unified CLI
     const mux_module = b.createModule(.{

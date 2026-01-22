@@ -1,30 +1,30 @@
 const std = @import("std");
 const posix = std.posix;
+const core = @import("core");
+const lua_runtime = core.lua_runtime;
+const LuaRuntime = core.LuaRuntime;
 const segment = @import("segment.zig");
 const segments_mod = @import("segments/mod.zig");
 const Style = @import("style.zig").Style;
 
-// JSON structures for config parsing
-const JsonOutput = struct {
-    style: ?[]const u8 = null,
-    format: ?[]const u8 = null,
+// Config structures for Lua parsing
+const OutputDef = struct {
+    style: []const u8,
+    format: []const u8,
 };
 
-const JsonModule = struct {
+const ModuleDef = struct {
     name: []const u8,
-    priority: ?i64 = null,
-    outputs: ?[]const JsonOutput = null,
-    command: ?[]const u8 = null,
-    when: ?[]const u8 = null,
+    priority: i64,
+    outputs: []const OutputDef,
+    command: ?[]const u8,
+    when: ?[]const u8,
 };
 
-const JsonPrompt = struct {
-    left: ?[]const JsonModule = null,
-    right: ?[]const JsonModule = null,
-};
-
-const JsonConfig = struct {
-    prompt: ?JsonPrompt = null,
+const ShpConfig = struct {
+    left: []const ModuleDef,
+    right: []const ModuleDef,
+    has_config: bool,
 };
 
 /// Arguments for shp commands
@@ -183,7 +183,7 @@ fn printInit(shell: []const u8, no_comms: bool) !void {
                 \\    fi
                 \\    [[ -n "$HEXE_MUX_SOCKET" && -n "$HEXE_PANE_UUID" ]] || { unset __hexe_start; return 0; }
                 \\    # OSC 7 cwd sync
-                \\    printf '\\e]7;file://%s%s\\a' "${HOSTNAME:-localhost}" "$PWD" 2>/dev/null
+                \\    printf '\033]7;file://%s%s\007' "${HOSTNAME:-localhost}" "$PWD" 2>/dev/null
                 \\    local hist="$(history 1 2>/dev/null)"
                 \\    local cmd="$hist"
                 \\    if [[ $hist =~ ^[[:space:]]*[0-9]+[[:space:]]*(.*)$ ]]; then
@@ -271,7 +271,7 @@ fn printInit(shell: []const u8, no_comms: bool) !void {
                 \\    fi
                 \\    [[ -n "$HEXE_MUX_SOCKET" && -n "$HEXE_PANE_UUID" ]] || { unset __hexe_start; return 0; }
                 \\    # OSC 7 cwd sync
-                \\    printf '\\e]7;file://%s%s\\a' "${HOST:-localhost}" "$PWD" 2>/dev/null
+                \\    printf '\033]7;file://%s%s\007' "${HOST:-localhost}" "$PWD" 2>/dev/null
                 \\    hexe com shell-event --cmd="$__hexe_last_cmd" --status=$exit_status --duration=$duration --cwd="$PWD" --jobs=${(M)#jobstates} >/dev/null 2>/dev/null
                 \\    unset __hexe_start
                 \\}
@@ -370,7 +370,7 @@ fn printInit(shell: []const u8, no_comms: bool) !void {
                 \\    end
                 \\    set -l cmdline (string join " " -- $argv)
                 \\    # OSC 7 cwd sync
-                \\    printf '\\e]7;file://%s%s\\a' "$hostname" "$PWD" 2>/dev/null
+                \\    printf '\033]7;file://%s%s\007' "$hostname" "$PWD" 2>/dev/null
                 \\    set -l jobs_count (count (jobs -p))
                 \\    hexe com shell-event --cmd="$cmdline" --status=$status --duration=$CMD_DURATION --cwd="$PWD" --jobs=$jobs_count >/dev/null 2>/dev/null
                 \\end
@@ -430,17 +430,12 @@ fn renderPrompt(allocator: std.mem.Allocator, args: []const []const u8) !void {
 
     // Try to load config
     const config = loadConfig(allocator);
-    defer if (config) |c| c.deinit();
 
-    if (config) |cfg| {
-        if (cfg.value.prompt) |prompt| {
-            const modules = if (is_right) prompt.right else prompt.left;
-            if (modules) |mods| {
-                if (mods.len > 0) {
-                    try renderModulesSimple(&ctx, mods, stdout, is_zsh);
-                    return;
-                }
-            }
+    if (config.has_config) {
+        const modules = if (is_right) config.right else config.left;
+        if (modules.len > 0) {
+            try renderModulesSimple(&ctx, modules, stdout, is_zsh);
+            return;
         }
     }
 
@@ -476,32 +471,115 @@ fn writeSegment(stdout: std.fs.File, seg: segment.Segment, is_zsh: bool) !void {
     }
 }
 
-fn loadConfig(allocator: std.mem.Allocator) ?std.json.Parsed(JsonConfig) {
-    const path = getConfigPath(allocator) catch return null;
+fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
+    var config = ShpConfig{
+        .left = &[_]ModuleDef{},
+        .right = &[_]ModuleDef{},
+        .has_config = false,
+    };
+
+    const path = lua_runtime.getConfigPath(allocator, "config.lua") catch return config;
     defer allocator.free(path);
 
-    const file = std.fs.openFileAbsolute(path, .{}) catch return null;
-    defer file.close();
+    var runtime = LuaRuntime.init(allocator) catch {
+        const stderr = std.fs.File.stderr();
+        stderr.writeAll("shp: failed to initialize Lua\n") catch {};
+        return config;
+    };
+    defer runtime.deinit();
 
-    const content = file.readToEndAlloc(allocator, 1024 * 1024) catch return null;
-    defer allocator.free(content); // Safe now since we use alloc_always
+    runtime.loadConfig(path) catch |err| {
+        switch (err) {
+            error.FileNotFound => {
+                // Silent - missing config is fine
+            },
+            else => {
+                const stderr = std.fs.File.stderr();
+                stderr.writeAll("shp: config error") catch {};
+                if (runtime.last_error) |msg| {
+                    stderr.writeAll(": ") catch {};
+                    stderr.writeAll(msg) catch {};
+                }
+                stderr.writeAll("\n") catch {};
+            },
+        }
+        return config;
+    };
 
-    return std.json.parseFromSlice(JsonConfig, allocator, content, .{
-        .allocate = .alloc_always, // Force allocation of strings so we can free content
-    }) catch null;
-}
+    // Access the "shp" section of the config table
+    if (!runtime.pushTable(-1, "shp")) {
+        return config;
+    }
+    defer runtime.pop();
 
-fn getConfigPath(allocator: std.mem.Allocator) ![]const u8 {
-    const config_home = posix.getenv("XDG_CONFIG_HOME");
-    if (config_home) |ch| {
-        return std.fmt.allocPrint(allocator, "{s}/hexe/shp.json", .{ch});
+    config.has_config = true;
+
+    // Parse prompt.left and prompt.right
+    if (runtime.pushTable(-1, "prompt")) {
+        config.left = parseModules(&runtime, allocator, "left");
+        config.right = parseModules(&runtime, allocator, "right");
+        runtime.pop();
     }
 
-    const home = posix.getenv("HOME") orelse return error.NoHome;
-    return std.fmt.allocPrint(allocator, "{s}/.config/hexe/shp.json", .{home});
+    return config;
 }
 
-fn renderModulesSimple(ctx: *segment.Context, modules: []const JsonModule, stdout: std.fs.File, is_zsh: bool) !void {
+fn parseModules(runtime: *LuaRuntime, allocator: std.mem.Allocator, key: [:0]const u8) []const ModuleDef {
+    if (!runtime.pushTable(-1, key)) {
+        return &[_]ModuleDef{};
+    }
+    defer runtime.pop();
+
+    var list = std.ArrayList(ModuleDef).empty;
+    const len = runtime.getArrayLen(-1);
+
+    for (1..len + 1) |i| {
+        if (runtime.pushArrayElement(-1, i)) {
+            if (parseModule(runtime, allocator)) |mod| {
+                list.append(allocator, mod) catch {};
+            }
+            runtime.pop();
+        }
+    }
+
+    return list.toOwnedSlice(allocator) catch &[_]ModuleDef{};
+}
+
+fn parseModule(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?ModuleDef {
+    const name = runtime.getStringAlloc(-1, "name") orelse return null;
+
+    return ModuleDef{
+        .name = name,
+        .priority = runtime.getInt(i64, -1, "priority") orelse 50,
+        .outputs = parseOutputs(runtime, allocator),
+        .command = runtime.getStringAlloc(-1, "command"),
+        .when = runtime.getStringAlloc(-1, "when"),
+    };
+}
+
+fn parseOutputs(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const OutputDef {
+    if (!runtime.pushTable(-1, "outputs")) {
+        return &[_]OutputDef{};
+    }
+    defer runtime.pop();
+
+    var list = std.ArrayList(OutputDef).empty;
+    const len = runtime.getArrayLen(-1);
+
+    for (1..len + 1) |i| {
+        if (runtime.pushArrayElement(-1, i)) {
+            list.append(allocator, .{
+                .style = runtime.getStringAlloc(-1, "style") orelse "",
+                .format = runtime.getStringAlloc(-1, "format") orelse "$output",
+            }) catch {};
+            runtime.pop();
+        }
+    }
+
+    return list.toOwnedSlice(allocator) catch &[_]OutputDef{};
+}
+
+fn renderModulesSimple(ctx: *segment.Context, modules: []const ModuleDef, stdout: std.fs.File, is_zsh: bool) !void {
     const alloc = std.heap.page_allocator;
 
     // Known built-in segments that return null when they have nothing to show
@@ -520,7 +598,7 @@ fn renderModulesSimple(ctx: *segment.Context, modules: []const JsonModule, stdou
 
     // Thread function for running a module's commands
     const ThreadContext = struct {
-        mod: *const JsonModule,
+        mod: *const ModuleDef,
         result: *ModuleResult,
         alloc: std.mem.Allocator,
     };
@@ -630,11 +708,8 @@ fn renderModulesSimple(ctx: *segment.Context, modules: []const JsonModule, stdou
         results[i].output = output_text;
 
         // Calculate width from outputs
-        if (mod.outputs) |outputs| {
-            for (outputs) |out| {
-                const format = out.format orelse "$output";
-                results[i].width += calcFormatWidth(format, output_text);
-            }
+        for (mod.outputs) |out| {
+            results[i].width += calcFormatWidth(out.format, output_text);
         }
     }
 
@@ -652,10 +727,10 @@ fn renderModulesSimple(ctx: *segment.Context, modules: []const JsonModule, stdou
     // Sort by priority (insertion sort - small array)
     for (1..mod_count) |i| {
         const key = priority_order[i];
-        const key_priority = modules[key].priority orelse 50;
+        const key_priority = modules[key].priority;
         var j: usize = i;
         while (j > 0) {
-            const prev_priority = modules[priority_order[j - 1]].priority orelse 50;
+            const prev_priority = modules[priority_order[j - 1]].priority;
             if (prev_priority <= key_priority) break;
             priority_order[j] = priority_order[j - 1];
             j -= 1;
@@ -680,19 +755,16 @@ fn renderModulesSimple(ctx: *segment.Context, modules: []const JsonModule, stdou
 
         const output_text = results[i].output orelse "";
 
-        if (mod.outputs) |outputs| {
-            for (outputs) |out| {
-                const style = Style.parse(out.style orelse "");
-                const format = out.format orelse "$output";
+        for (mod.outputs) |out| {
+            const style = Style.parse(out.style);
 
-                try writeStyleDirect(stdout, style, is_zsh);
-                try writeFormat(stdout, format, output_text);
+            try writeStyleDirect(stdout, style, is_zsh);
+            try writeFormat(stdout, out.format, output_text);
 
-                if (!style.isEmpty()) {
-                    if (is_zsh) try stdout.writeAll("%{");
-                    try stdout.writeAll("\x1b[0m");
-                    if (is_zsh) try stdout.writeAll("%}");
-                }
+            if (!style.isEmpty()) {
+                if (is_zsh) try stdout.writeAll("%{");
+                try stdout.writeAll("\x1b[0m");
+                if (is_zsh) try stdout.writeAll("%}");
             }
         }
     }

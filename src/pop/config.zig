@@ -1,5 +1,8 @@
 const std = @import("std");
-const posix = std.posix;
+const core = @import("core");
+const lua_runtime = core.lua_runtime;
+const LuaRuntime = core.LuaRuntime;
+const ConfigStatus = core.ConfigStatus;
 
 /// Notification style configuration
 pub const NotificationStyle = struct {
@@ -54,10 +57,12 @@ pub const PaneConfig = struct {
     choose: ChooseStyle = .{},
 };
 
-/// Pop configuration - loaded from ~/.config/hexe/pop.json
+/// Pop configuration - loaded from ~/.config/hexe/pop.lua
 pub const PopConfig = struct {
     carrier: CarrierConfig = .{},
     pane: PaneConfig = .{},
+    status: ConfigStatus = .loaded,
+    status_message: ?[]const u8 = null,
 
     _allocator: ?std.mem.Allocator = null,
 
@@ -65,32 +70,35 @@ pub const PopConfig = struct {
         var config = PopConfig{};
         config._allocator = allocator;
 
-        const path = getConfigPath(allocator) catch return config;
+        const path = lua_runtime.getConfigPath(allocator, "config.lua") catch return config;
         defer allocator.free(path);
 
-        const file = std.fs.openFileAbsolute(path, .{}) catch return config;
-        defer file.close();
+        var runtime = LuaRuntime.init(allocator) catch {
+            config.status = .@"error";
+            config.status_message = allocator.dupe(u8, "failed to initialize Lua") catch null;
+            return config;
+        };
+        defer runtime.deinit();
 
-        const content = file.readToEndAlloc(allocator, 1024 * 1024) catch return config;
-        defer allocator.free(content);
+        runtime.loadConfig(path) catch |err| {
+            switch (err) {
+                error.FileNotFound => {
+                    config.status = .missing;
+                },
+                else => {
+                    config.status = .@"error";
+                    if (runtime.last_error) |msg| {
+                        config.status_message = allocator.dupe(u8, msg) catch null;
+                    }
+                },
+            }
+            return config;
+        };
 
-        const parsed = std.json.parseFromSlice(JsonPopConfig, allocator, content, .{}) catch return config;
-        defer parsed.deinit();
-
-        const json = parsed.value;
-
-        // Apply carrier settings
-        if (json.carrier) |c| {
-            applyNotificationStyle(&config.carrier.notification, c.notification, allocator);
-            applyConfirmStyle(&config.carrier.confirm, c.confirm, allocator);
-            applyChooseStyle(&config.carrier.choose, c.choose);
-        }
-
-        // Apply pane settings
-        if (json.pane) |p| {
-            applyNotificationStyle(&config.pane.notification, p.notification, allocator);
-            applyConfirmStyle(&config.pane.confirm, p.confirm, allocator);
-            applyChooseStyle(&config.pane.choose, p.choose);
+        // Access the "pop" section of the config table
+        if (runtime.pushTable(-1, "pop")) {
+            parsePopConfig(&runtime, &config, allocator);
+            runtime.pop();
         }
 
         return config;
@@ -102,92 +110,79 @@ pub const PopConfig = struct {
     }
 };
 
-fn applyNotificationStyle(target: *NotificationStyle, source: ?JsonNotificationStyle, allocator: std.mem.Allocator) void {
-    const s = source orelse return;
-    if (s.fg) |v| target.fg = @intCast(@min(255, @max(0, v)));
-    if (s.bg) |v| target.bg = @intCast(@min(255, @max(0, v)));
-    if (s.bold) |v| target.bold = v;
-    if (s.padding_x) |v| target.padding_x = @intCast(@min(10, @max(0, v)));
-    if (s.padding_y) |v| target.padding_y = @intCast(@min(10, @max(0, v)));
-    if (s.offset) |v| target.offset = @intCast(@min(20, @max(0, v)));
-    if (s.alignment) |v| target.alignment = allocator.dupe(u8, v) catch "center";
-    if (s.duration_ms) |v| target.duration_ms = @intCast(@min(60000, @max(100, v)));
+fn parsePopConfig(runtime: *LuaRuntime, config: *PopConfig, allocator: std.mem.Allocator) void {
+    // Parse carrier section
+    if (runtime.pushTable(-1, "carrier")) {
+        parseCarrierConfig(runtime, &config.carrier, allocator);
+        runtime.pop();
+    }
+
+    // Parse pane section
+    if (runtime.pushTable(-1, "pane")) {
+        parsePaneConfig(runtime, &config.pane, allocator);
+        runtime.pop();
+    }
 }
 
-fn applyConfirmStyle(target: *ConfirmStyle, source: ?JsonConfirmStyle, allocator: std.mem.Allocator) void {
-    const s = source orelse return;
-    if (s.fg) |v| target.fg = @intCast(@min(255, @max(0, v)));
-    if (s.bg) |v| target.bg = @intCast(@min(255, @max(0, v)));
-    if (s.bold) |v| target.bold = v;
-    if (s.padding_x) |v| target.padding_x = @intCast(@min(10, @max(0, v)));
-    if (s.padding_y) |v| target.padding_y = @intCast(@min(10, @max(0, v)));
-    if (s.yes_label) |v| target.yes_label = allocator.dupe(u8, v) catch "Yes";
-    if (s.no_label) |v| target.no_label = allocator.dupe(u8, v) catch "No";
+fn parseCarrierConfig(runtime: *LuaRuntime, carrier: *CarrierConfig, allocator: std.mem.Allocator) void {
+    if (runtime.pushTable(-1, "notification")) {
+        parseNotificationStyle(runtime, &carrier.notification, allocator);
+        runtime.pop();
+    }
+    if (runtime.pushTable(-1, "confirm")) {
+        parseConfirmStyle(runtime, &carrier.confirm, allocator);
+        runtime.pop();
+    }
+    if (runtime.pushTable(-1, "choose")) {
+        parseChooseStyle(runtime, &carrier.choose);
+        runtime.pop();
+    }
 }
 
-fn applyChooseStyle(target: *ChooseStyle, source: ?JsonChooseStyle) void {
-    const s = source orelse return;
-    if (s.fg) |v| target.fg = @intCast(@min(255, @max(0, v)));
-    if (s.bg) |v| target.bg = @intCast(@min(255, @max(0, v)));
-    if (s.highlight_fg) |v| target.highlight_fg = @intCast(@min(255, @max(0, v)));
-    if (s.highlight_bg) |v| target.highlight_bg = @intCast(@min(255, @max(0, v)));
-    if (s.bold) |v| target.bold = v;
-    if (s.padding_x) |v| target.padding_x = @intCast(@min(10, @max(0, v)));
-    if (s.padding_y) |v| target.padding_y = @intCast(@min(10, @max(0, v)));
-    if (s.visible_count) |v| target.visible_count = @intCast(@min(50, @max(1, v)));
+fn parsePaneConfig(runtime: *LuaRuntime, pane: *PaneConfig, allocator: std.mem.Allocator) void {
+    if (runtime.pushTable(-1, "notification")) {
+        parseNotificationStyle(runtime, &pane.notification, allocator);
+        runtime.pop();
+    }
+    if (runtime.pushTable(-1, "confirm")) {
+        parseConfirmStyle(runtime, &pane.confirm, allocator);
+        runtime.pop();
+    }
+    if (runtime.pushTable(-1, "choose")) {
+        parseChooseStyle(runtime, &pane.choose);
+        runtime.pop();
+    }
 }
 
-fn getConfigPath(allocator: std.mem.Allocator) ![]const u8 {
-    const home = posix.getenv("HOME") orelse return error.NoHome;
-    return std.fmt.allocPrint(allocator, "{s}/.config/hexe/pop.json", .{home});
+fn parseNotificationStyle(runtime: *LuaRuntime, style: *NotificationStyle, allocator: std.mem.Allocator) void {
+    style.fg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "fg", 0, 255, style.fg);
+    style.bg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "bg", 0, 255, style.bg);
+    if (runtime.getBool(-1, "bold")) |v| style.bold = v;
+    style.padding_x = lua_runtime.parseConstrainedInt(runtime, u8, -1, "padding_x", 0, 10, style.padding_x);
+    style.padding_y = lua_runtime.parseConstrainedInt(runtime, u8, -1, "padding_y", 0, 10, style.padding_y);
+    style.offset = lua_runtime.parseConstrainedInt(runtime, u8, -1, "offset", 0, 20, style.offset);
+    if (runtime.getStringAlloc(-1, "alignment")) |v| style.alignment = v else _ = allocator;
+    style.duration_ms = lua_runtime.parseConstrainedInt(runtime, u32, -1, "duration_ms", 100, 60000, style.duration_ms);
 }
 
-// JSON parsing types
-const JsonNotificationStyle = struct {
-    fg: ?i32 = null,
-    bg: ?i32 = null,
-    bold: ?bool = null,
-    padding_x: ?i32 = null,
-    padding_y: ?i32 = null,
-    offset: ?i32 = null,
-    alignment: ?[]const u8 = null,
-    duration_ms: ?i32 = null,
-};
+fn parseConfirmStyle(runtime: *LuaRuntime, style: *ConfirmStyle, allocator: std.mem.Allocator) void {
+    style.fg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "fg", 0, 255, style.fg);
+    style.bg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "bg", 0, 255, style.bg);
+    if (runtime.getBool(-1, "bold")) |v| style.bold = v;
+    style.padding_x = lua_runtime.parseConstrainedInt(runtime, u8, -1, "padding_x", 0, 10, style.padding_x);
+    style.padding_y = lua_runtime.parseConstrainedInt(runtime, u8, -1, "padding_y", 0, 10, style.padding_y);
+    if (runtime.getStringAlloc(-1, "yes_label")) |v| style.yes_label = v;
+    if (runtime.getStringAlloc(-1, "no_label")) |v| style.no_label = v;
+    _ = allocator;
+}
 
-const JsonConfirmStyle = struct {
-    fg: ?i32 = null,
-    bg: ?i32 = null,
-    bold: ?bool = null,
-    padding_x: ?i32 = null,
-    padding_y: ?i32 = null,
-    yes_label: ?[]const u8 = null,
-    no_label: ?[]const u8 = null,
-};
-
-const JsonChooseStyle = struct {
-    fg: ?i32 = null,
-    bg: ?i32 = null,
-    highlight_fg: ?i32 = null,
-    highlight_bg: ?i32 = null,
-    bold: ?bool = null,
-    padding_x: ?i32 = null,
-    padding_y: ?i32 = null,
-    visible_count: ?i32 = null,
-};
-
-const JsonCarrierConfig = struct {
-    notification: ?JsonNotificationStyle = null,
-    confirm: ?JsonConfirmStyle = null,
-    choose: ?JsonChooseStyle = null,
-};
-
-const JsonPaneConfig = struct {
-    notification: ?JsonNotificationStyle = null,
-    confirm: ?JsonConfirmStyle = null,
-    choose: ?JsonChooseStyle = null,
-};
-
-const JsonPopConfig = struct {
-    carrier: ?JsonCarrierConfig = null,
-    pane: ?JsonPaneConfig = null,
-};
+fn parseChooseStyle(runtime: *LuaRuntime, style: *ChooseStyle) void {
+    style.fg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "fg", 0, 255, style.fg);
+    style.bg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "bg", 0, 255, style.bg);
+    style.highlight_fg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "highlight_fg", 0, 255, style.highlight_fg);
+    style.highlight_bg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "highlight_bg", 0, 255, style.highlight_bg);
+    if (runtime.getBool(-1, "bold")) |v| style.bold = v;
+    style.padding_x = lua_runtime.parseConstrainedInt(runtime, u8, -1, "padding_x", 0, 10, style.padding_x);
+    style.padding_y = lua_runtime.parseConstrainedInt(runtime, u8, -1, "padding_y", 0, 10, style.padding_y);
+    style.visible_count = lua_runtime.parseConstrainedInt(runtime, u8, -1, "visible_count", 1, 50, style.visible_count);
+}

@@ -1,5 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
+const lua_runtime = @import("lua_runtime.zig");
+const LuaRuntime = lua_runtime.LuaRuntime;
 
 /// Output definition for status modules (style + format pair)
 pub const OutputDef = struct {
@@ -174,6 +176,9 @@ pub const NotificationConfig = struct {
     },
 };
 
+/// Panes configuration (placeholder for future use)
+pub const PanesConfig = struct {};
+
 pub const Config = struct {
     pub const KeyMod = enum {
         alt,
@@ -288,6 +293,10 @@ pub const Config = struct {
         double_tap_ms: i64 = 250,
     };
 
+    // Config status for notifications
+    status: lua_runtime.ConfigStatus = .loaded,
+    status_message: ?[]const u8 = null,
+
     input: InputConfig = .{},
 
     // Confirmation popups
@@ -324,244 +333,37 @@ pub const Config = struct {
         var config = Config{};
         config._allocator = allocator;
 
-        const path = getConfigPath(allocator) catch return config;
+        const path = lua_runtime.getConfigPath(allocator, "config.lua") catch return config;
         defer allocator.free(path);
 
-        const file = std.fs.openFileAbsolute(path, .{}) catch return config;
-        defer file.close();
+        var runtime = LuaRuntime.init(allocator) catch {
+            config.status = .@"error";
+            config.status_message = allocator.dupe(u8, "failed to initialize Lua") catch null;
+            return config;
+        };
+        defer runtime.deinit();
 
-        const content = file.readToEndAlloc(allocator, 1024 * 1024) catch return config;
-        defer allocator.free(content);
-
-        const parsed = std.json.parseFromSlice(JsonConfig, allocator, content, .{}) catch return config;
-        defer parsed.deinit();
-
-        const json = parsed.value;
-
-        // Parse input binds (no legacy key config)
-        if (json.input) |inp| {
-            if (inp.timing) |t| {
-                if (t.hold_ms) |v| config.input.hold_ms = v;
-                if (t.repeat_ms) |v| config.input.repeat_ms = v;
-                if (t.double_tap_ms) |v| config.input.double_tap_ms = v;
-            }
-            if (inp.binds) |binds| {
-                config.input.binds = parseBinds(allocator, binds);
-            }
-        }
-
-        // Apply confirmation settings
-        if (json.confirm_on_exit) |v| config.confirm_on_exit = v;
-        if (json.confirm_on_detach) |v| config.confirm_on_detach = v;
-        if (json.confirm_on_disown) |v| config.confirm_on_disown = v;
-        if (json.confirm_on_close) |v| config.confirm_on_close = v;
-
-        // Parse panes config
-        if (json.tabs) |p| {
-            // Status bar
-            if (p.status) |s| {
-                if (s.enabled) |e| {
-                    config.tabs.status.enabled = e;
-                }
-                if (s.left) |left_mods| {
-                    config.tabs.status.left = parseStatusModules(allocator, left_mods);
-                }
-                if (s.center) |center_mods| {
-                    config.tabs.status.center = parseStatusModules(allocator, center_mods);
-                }
-                if (s.right) |right_mods| {
-                    config.tabs.status.right = parseStatusModules(allocator, right_mods);
-                }
-            }
-        }
-
-        // Parse floats array (first keyless entry = defaults)
-        if (json.floats) |json_floats| {
-            var float_list: std.ArrayList(FloatDef) = .empty;
-
-            // Check for defaults (first entry without key)
-            var def_width: ?u8 = null;
-            var def_height: ?u8 = null;
-            var def_pos_x: ?u8 = null;
-            var def_pos_y: ?u8 = null;
-            var def_pad_x: ?u8 = null;
-            var def_pad_y: ?u8 = null;
-            var def_color: ?BorderColor = null;
-            var def_style: ?FloatStyle = null;
-            var def_attrs = FloatAttributes{};
-
-            for (json_floats, 0..) |jf, idx| {
-                // First entry without key = defaults
-                if (idx == 0 and jf.key.len == 0) {
-                    if (jf.size) |sz| {
-                        if (sz.width) |v| def_width = @intCast(@min(100, @max(10, v)));
-                        if (sz.height) |v| def_height = @intCast(@min(100, @max(10, v)));
+        runtime.loadConfig(path) catch |err| {
+            switch (err) {
+                error.FileNotFound => {
+                    config.status = .missing;
+                },
+                else => {
+                    config.status = .@"error";
+                    if (runtime.last_error) |msg| {
+                        config.status_message = allocator.dupe(u8, msg) catch null;
                     }
-                    if (jf.width) |v| def_width = @intCast(@min(100, @max(10, v)));
-                    if (jf.height) |v| def_height = @intCast(@min(100, @max(10, v)));
-
-                    if (jf.position) |p| {
-                        if (p.x) |v| def_pos_x = @intCast(@min(100, @max(0, v)));
-                        if (p.y) |v| def_pos_y = @intCast(@min(100, @max(0, v)));
-                    }
-                    if (jf.pos_x) |v| def_pos_x = @intCast(@min(100, @max(0, v)));
-                    if (jf.pos_y) |v| def_pos_y = @intCast(@min(100, @max(0, v)));
-
-                    if (jf.padding) |p| {
-                        if (p.x) |v| def_pad_x = @intCast(@min(10, @max(0, v)));
-                        if (p.y) |v| def_pad_y = @intCast(@min(10, @max(0, v)));
-                    }
-                    if (jf.padding_x) |v| def_pad_x = @intCast(@min(10, @max(0, v)));
-                    if (jf.padding_y) |v| def_pad_y = @intCast(@min(10, @max(0, v)));
-
-                    const border_color = if (jf.style) |st| if (st.border) |b| b.color else null else null;
-                    if (border_color orelse jf.color) |jc| {
-                        var c = BorderColor{};
-                        if (jc.active) |a| c.active = @intCast(@min(255, @max(0, a)));
-                        if (jc.passive) |p| c.passive = @intCast(@min(255, @max(0, p)));
-                        def_color = c;
-                    }
-
-                    if (jf.style) |js| {
-                        def_style = parseFloatStyle(allocator, js);
-                    }
-                    if (jf.attributes) |a| {
-                        if (a.exclusive orelse a.alone) |v| def_attrs.exclusive = v;
-                        if (a.per_cwd orelse a.pwd) |v| def_attrs.per_cwd = v;
-                        if (a.sticky) |v| def_attrs.sticky = v;
-                        if (a.global orelse a.special) |v| def_attrs.global = v;
-                        if (a.destroy orelse a.destroy_on_hide) |v| def_attrs.destroy = v;
-                        if (a.isolated) |v| def_attrs.isolated = v;
-                        if (def_attrs.destroy and a.global == null and a.special == null) {
-                            def_attrs.global = false;
-                        }
-                    }
-                    // Apply defaults to config
-                    if (def_width) |w| config.float_width_percent = w;
-                    if (def_height) |h| config.float_height_percent = h;
-                    if (def_pad_x) |p| config.float_padding_x = p;
-                    if (def_pad_y) |p| config.float_padding_y = p;
-                    if (def_color) |c| config.float_color = c;
-                    if (def_style) |s| config.float_style_default = s;
-                    continue;
-                }
-
-                const key: u8 = if (jf.key.len > 0) jf.key[0] else continue;
-                const command: ?[]const u8 = if (jf.command) |cmd|
-                    allocator.dupe(u8, cmd) catch null
-                else
-                    null;
-
-                // Parse color if present
-                const border_color = if (jf.style) |st| if (st.border) |b| b.color else null else null;
-                const color: ?BorderColor = if (border_color orelse jf.color) |jc| blk: {
-                    var c = BorderColor{};
-                    if (jc.active) |a| c.active = @intCast(@min(255, @max(0, a)));
-                    if (jc.passive) |p| c.passive = @intCast(@min(255, @max(0, p)));
-                    break :blk c;
-                } else null;
-
-                // Parse style if present
-                const style: ?FloatStyle = if (jf.style) |js| parseFloatStyle(allocator, js) else null;
-
-                var attrs = def_attrs;
-                if (jf.attributes) |a| {
-                    if (a.exclusive orelse a.alone) |v| attrs.exclusive = v;
-                    if (a.per_cwd orelse a.pwd) |v| attrs.per_cwd = v;
-                    if (a.sticky) |v| attrs.sticky = v;
-                    if (a.destroy orelse a.destroy_on_hide) |v| attrs.destroy = v;
-                    if (a.global orelse a.special) |v| attrs.global = v;
-                    if (a.isolated) |v| attrs.isolated = v;
-                    // If destroy is set and global not explicitly provided, default global to false.
-                    if (attrs.destroy and a.global == null and a.special == null) {
-                        attrs.global = false;
-                    }
-                }
-
-                float_list.append(allocator, .{
-                    .key = key,
-                    .command = command,
-                    .title = if (jf.title) |t| allocator.dupe(u8, t) catch null else null,
-                    .attributes = attrs,
-                    .width_percent = if (if (jf.size) |sz| sz.width else null) |v| @intCast(@min(100, @max(10, v))) else if (jf.width) |v| @intCast(@min(100, @max(10, v))) else def_width,
-                    .height_percent = if (if (jf.size) |sz| sz.height else null) |v| @intCast(@min(100, @max(10, v))) else if (jf.height) |v| @intCast(@min(100, @max(10, v))) else def_height,
-                    .pos_x = if (if (jf.position) |p| p.x else null) |v| @intCast(@min(100, @max(0, v))) else if (jf.pos_x) |v| @intCast(@min(100, @max(0, v))) else def_pos_x,
-                    .pos_y = if (if (jf.position) |p| p.y else null) |v| @intCast(@min(100, @max(0, v))) else if (jf.pos_y) |v| @intCast(@min(100, @max(0, v))) else def_pos_y,
-                    .padding_x = if (if (jf.padding) |p| p.x else null) |v| @intCast(@min(10, @max(0, v))) else if (jf.padding_x) |v| @intCast(@min(10, @max(0, v))) else def_pad_x,
-                    .padding_y = if (if (jf.padding) |p| p.y else null) |v| @intCast(@min(10, @max(0, v))) else if (jf.padding_y) |v| @intCast(@min(10, @max(0, v))) else def_pad_y,
-                    .color = color orelse def_color,
-                    .style = style orelse def_style,
-                }) catch continue;
+                },
             }
-            config.floats = float_list.toOwnedSlice(allocator) catch &[_]FloatDef{};
-        }
+            return config;
+        };
 
-        // Parse splits config
-        if (json.splits) |sp| {
-            // Color
-            if (sp.color) |jc| {
-                if (jc.active) |a| config.splits.color.active = @intCast(@min(255, @max(0, a)));
-                if (jc.passive) |p| config.splits.color.passive = @intCast(@min(255, @max(0, p)));
-            }
-            // Simple separators
-            if (sp.separator_v) |s| if (s.len > 0) {
-                config.splits.separator_v = std.unicode.utf8Decode(s) catch 0x2502;
-            };
-            if (sp.separator_h) |s| if (s.len > 0) {
-                config.splits.separator_h = std.unicode.utf8Decode(s) catch 0x2500;
-            };
-            // Full style
-            if (sp.style) |js| {
-                var style = SplitStyle{};
-                if (js.vertical) |s| if (s.len > 0) {
-                    style.vertical = std.unicode.utf8Decode(s) catch 0x2502;
-                };
-                if (js.horizontal) |s| if (s.len > 0) {
-                    style.horizontal = std.unicode.utf8Decode(s) catch 0x2500;
-                };
-                if (js.cross) |s| if (s.len > 0) {
-                    style.cross = std.unicode.utf8Decode(s) catch 0x253C;
-                };
-                if (js.top_t) |s| if (s.len > 0) {
-                    style.top_t = std.unicode.utf8Decode(s) catch 0x252C;
-                };
-                if (js.bottom_t) |s| if (s.len > 0) {
-                    style.bottom_t = std.unicode.utf8Decode(s) catch 0x2534;
-                };
-                if (js.left_t) |s| if (s.len > 0) {
-                    style.left_t = std.unicode.utf8Decode(s) catch 0x251C;
-                };
-                if (js.right_t) |s| if (s.len > 0) {
-                    style.right_t = std.unicode.utf8Decode(s) catch 0x2524;
-                };
-                config.splits.style = style;
-            }
-        }
-
-        // Parse notifications config (dual-realm: mux and pane)
-        if (json.notifications) |n| {
-            // Parse mux realm config
-            if (n.mux) |m| {
-                if (m.fg) |v| config.notifications.mux.fg = @intCast(@min(255, @max(0, v)));
-                if (m.bg) |v| config.notifications.mux.bg = @intCast(@min(255, @max(0, v)));
-                if (m.bold) |v| config.notifications.mux.bold = v;
-                if (m.padding_x) |v| config.notifications.mux.padding_x = @intCast(@min(10, @max(0, v)));
-                if (m.padding_y) |v| config.notifications.mux.padding_y = @intCast(@min(10, @max(0, v)));
-                if (m.offset) |v| config.notifications.mux.offset = @intCast(@min(20, @max(0, v)));
-                if (m.duration_ms) |v| config.notifications.mux.duration_ms = @intCast(@min(60000, @max(100, v)));
-                if (m.alignment) |v| config.notifications.mux.alignment = allocator.dupe(u8, v) catch "center";
-            }
-            // Parse pane realm config
-            if (n.pane) |p| {
-                if (p.fg) |v| config.notifications.pane.fg = @intCast(@min(255, @max(0, v)));
-                if (p.bg) |v| config.notifications.pane.bg = @intCast(@min(255, @max(0, v)));
-                if (p.bold) |v| config.notifications.pane.bold = v;
-                if (p.padding_x) |v| config.notifications.pane.padding_x = @intCast(@min(10, @max(0, v)));
-                if (p.padding_y) |v| config.notifications.pane.padding_y = @intCast(@min(10, @max(0, v)));
-                if (p.offset) |v| config.notifications.pane.offset = @intCast(@min(20, @max(0, v)));
-                if (p.duration_ms) |v| config.notifications.pane.duration_ms = @intCast(@min(60000, @max(100, v)));
-                if (p.alignment) |v| config.notifications.pane.alignment = allocator.dupe(u8, v) catch "center";
-            }
+        // Access the "mux" section of the config table
+        if (runtime.pushTable(-1, "mux")) {
+            parseConfig(&runtime, &config, allocator);
+            runtime.pop();
+        } else {
+            config.status_message = allocator.dupe(u8, "no 'mux' section in config") catch null;
         }
 
         return config;
@@ -569,6 +371,9 @@ pub const Config = struct {
 
     pub fn deinit(self: *Config) void {
         if (self._allocator) |alloc| {
+            if (self.status_message) |msg| {
+                alloc.free(msg);
+            }
             if (self.input.binds.len > 0) {
                 alloc.free(self.input.binds);
             }
@@ -592,409 +397,561 @@ pub const Config = struct {
         }
         return null;
     }
+};
 
-    fn parseBinds(allocator: std.mem.Allocator, json_binds: []const JsonBind) []const Bind {
-        var list: std.ArrayList(Bind) = .empty;
+// ===== Lua config parsing =====
 
-        for (json_binds) |jb| {
-            const mods_mask = modsMaskFromStrings(jb.mods);
+fn parseConfig(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocator) void {
+    // Parse input section
+    if (runtime.pushTable(-1, "input")) {
+        parseInputConfig(runtime, config, allocator);
+        runtime.pop();
+    }
 
-            const when: BindWhen = if (jb.when) |w|
-                (std.meta.stringToEnum(BindWhen, w) orelse .press)
-            else
-                .press;
+    // Confirmation settings
+    if (runtime.getBool(-1, "confirm_on_exit")) |v| config.confirm_on_exit = v;
+    if (runtime.getBool(-1, "confirm_on_detach")) |v| config.confirm_on_detach = v;
+    if (runtime.getBool(-1, "confirm_on_disown")) |v| config.confirm_on_disown = v;
+    if (runtime.getBool(-1, "confirm_on_close")) |v| config.confirm_on_close = v;
 
-            const key: BindKey = blk: {
-                if (jb.key.len == 1) break :blk .{ .char = jb.key[0] };
-                if (std.mem.eql(u8, jb.key, "space")) break :blk .space;
-                if (std.mem.eql(u8, jb.key, "up")) break :blk .up;
-                if (std.mem.eql(u8, jb.key, "down")) break :blk .down;
-                if (std.mem.eql(u8, jb.key, "left")) break :blk .left;
-                if (std.mem.eql(u8, jb.key, "right")) break :blk .right;
-                // Unknown -> skip
-                continue;
-            };
+    // Parse floats
+    if (runtime.pushTable(-1, "floats")) {
+        parseFloats(runtime, config, allocator);
+        runtime.pop();
+    }
 
-            var ctx = BindContext{};
-            if (jb.context) |c| {
-                if (c.focus) |f| {
-                    ctx.focus = std.meta.stringToEnum(FocusContext, f) orelse .any;
-                }
+    // Parse splits
+    if (runtime.pushTable(-1, "splits")) {
+        parseSplits(runtime, config);
+        runtime.pop();
+    }
+
+    // Parse tabs
+    if (runtime.pushTable(-1, "tabs")) {
+        parseTabs(runtime, config, allocator);
+        runtime.pop();
+    }
+
+    // Parse notifications
+    if (runtime.pushTable(-1, "notifications")) {
+        parseNotifications(runtime, config, allocator);
+        runtime.pop();
+    }
+}
+
+fn parseInputConfig(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocator) void {
+    // Parse timing
+    if (runtime.pushTable(-1, "timing")) {
+        if (runtime.getInt(i64, -1, "hold_ms")) |v| config.input.hold_ms = v;
+        if (runtime.getInt(i64, -1, "repeat_ms")) |v| config.input.repeat_ms = v;
+        if (runtime.getInt(i64, -1, "double_tap_ms")) |v| config.input.double_tap_ms = v;
+        runtime.pop();
+    }
+
+    // Parse binds array
+    if (runtime.pushTable(-1, "binds")) {
+        config.input.binds = parseBinds(runtime, allocator);
+        runtime.pop();
+    }
+}
+
+fn parseBinds(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const Config.Bind {
+    var list = std.ArrayList(Config.Bind).empty;
+
+    const len = runtime.getArrayLen(-1);
+    for (1..len + 1) |i| {
+        if (runtime.pushArrayElement(-1, i)) {
+            if (parseBind(runtime)) |bind| {
+                list.append(allocator, bind) catch {};
             }
-
-            const action: BindAction = blk: {
-                const t = jb.action.type;
-                if (std.mem.eql(u8, t, "mux.quit")) break :blk .mux_quit;
-                if (std.mem.eql(u8, t, "mux.detach")) break :blk .mux_detach;
-                if (std.mem.eql(u8, t, "pane.disown")) break :blk .pane_disown;
-                if (std.mem.eql(u8, t, "pane.adopt")) break :blk .pane_adopt;
-                if (std.mem.eql(u8, t, "split.h")) break :blk .split_h;
-                if (std.mem.eql(u8, t, "split.v")) break :blk .split_v;
-                if (std.mem.eql(u8, t, "split.resize")) {
-                    const dir = jb.action.dir orelse continue;
-                    const d = std.meta.stringToEnum(BindKeyKind, dir) orelse continue;
-                    if (d != .up and d != .down and d != .left and d != .right) continue;
-                    break :blk .{ .split_resize = d };
-                }
-                if (std.mem.eql(u8, t, "tab.new")) break :blk .tab_new;
-                if (std.mem.eql(u8, t, "tab.next")) break :blk .tab_next;
-                if (std.mem.eql(u8, t, "tab.prev")) break :blk .tab_prev;
-                if (std.mem.eql(u8, t, "tab.close")) break :blk .tab_close;
-                if (std.mem.eql(u8, t, "float.toggle")) {
-                    const fk = jb.action.float orelse continue;
-                    if (fk.len != 1) continue;
-                    break :blk .{ .float_toggle = fk[0] };
-                }
-                if (std.mem.eql(u8, t, "float.nudge")) {
-                    const dir = jb.action.dir orelse continue;
-                    const d = std.meta.stringToEnum(BindKeyKind, dir) orelse continue;
-                    if (d != .up and d != .down and d != .left and d != .right) continue;
-                    break :blk .{ .float_nudge = d };
-                }
-                if (std.mem.eql(u8, t, "focus.move")) {
-                    const dir = jb.action.dir orelse continue;
-                    const d = std.meta.stringToEnum(BindKeyKind, dir) orelse continue;
-                    if (d != .up and d != .down and d != .left and d != .right) continue;
-                    break :blk .{ .focus_move = d };
-                }
-                continue;
-            };
-
-            list.append(allocator, .{
-                .when = when,
-                .mods = mods_mask,
-                .key = key,
-                .context = ctx,
-                .action = action,
-                .hold_ms = jb.hold_ms,
-                .double_tap_ms = jb.double_tap_ms,
-            }) catch continue;
+            runtime.pop();
         }
-
-        return list.toOwnedSlice(allocator) catch &[_]Bind{};
     }
 
-    fn parseStatusModules(allocator: std.mem.Allocator, json_mods: []const JsonStatusModule) []const StatusModule {
-        var list: std.ArrayList(StatusModule) = .empty;
-        for (json_mods) |jm| {
-            // Parse outputs array
-            var outputs: []const OutputDef = &[_]OutputDef{};
-            if (jm.outputs) |json_outputs| {
-                var output_list: std.ArrayList(OutputDef) = .empty;
-                for (json_outputs) |jo| {
-                    output_list.append(allocator, .{
-                        .style = if (jo.style) |s| allocator.dupe(u8, s) catch "" else "",
-                        .format = if (jo.format) |f| allocator.dupe(u8, f) catch "$output" else "$output",
-                    }) catch continue;
-                }
-                outputs = output_list.toOwnedSlice(allocator) catch &[_]OutputDef{};
+    return list.toOwnedSlice(allocator) catch &[_]Config.Bind{};
+}
+
+fn parseBind(runtime: *LuaRuntime) ?Config.Bind {
+    // Parse key (required)
+    const key_str = runtime.getString(-1, "key") orelse return null;
+    const key: Config.BindKey = blk: {
+        if (key_str.len == 1) break :blk .{ .char = key_str[0] };
+        if (std.mem.eql(u8, key_str, "space")) break :blk .space;
+        if (std.mem.eql(u8, key_str, "up")) break :blk .up;
+        if (std.mem.eql(u8, key_str, "down")) break :blk .down;
+        if (std.mem.eql(u8, key_str, "left")) break :blk .left;
+        if (std.mem.eql(u8, key_str, "right")) break :blk .right;
+        return null;
+    };
+
+    // Parse action (required)
+    const action: Config.BindAction = blk: {
+        // Action can be a string or a table with type field
+        if (runtime.typeOf(-1) == .table) {
+            if (runtime.pushTable(-1, "action")) {
+                defer runtime.pop();
+                const action_type = runtime.getString(-1, "type") orelse return null;
+                break :blk parseAction(runtime, action_type) orelse return null;
             }
-
-            list.append(allocator, .{
-                .name = allocator.dupe(u8, jm.name) catch continue,
-                .priority = if (jm.priority) |p| @intCast(@max(1, @min(255, p))) else 50,
-                .outputs = outputs,
-                .command = if (jm.command) |c| allocator.dupe(u8, c) catch null else null,
-                .when = if (jm.when) |w| allocator.dupe(u8, w) catch null else null,
-                .active_style = if (jm.active_style) |s| allocator.dupe(u8, s) catch "bg:1 fg:0" else "bg:1 fg:0",
-                .inactive_style = if (jm.inactive_style) |s| allocator.dupe(u8, s) catch "bg:237 fg:250" else "bg:237 fg:250",
-                .separator = if (jm.separator) |s| allocator.dupe(u8, s) catch " | " else " | ",
-                .separator_style = if (jm.separator_style) |s| allocator.dupe(u8, s) catch "fg:7" else "fg:7",
-                .tab_title = if (jm.tab_title) |s| allocator.dupe(u8, s) catch "basename" else "basename",
-                .left_arrow = if (jm.left_arrow) |s| allocator.dupe(u8, s) catch "" else "",
-                .right_arrow = if (jm.right_arrow) |s| allocator.dupe(u8, s) catch "" else "",
-            }) catch continue;
         }
-        return list.toOwnedSlice(allocator) catch &[_]StatusModule{};
+        // Try direct action string
+        const action_str = runtime.getString(-1, "action") orelse return null;
+        break :blk parseSimpleAction(action_str) orelse return null;
+    };
+
+    // Parse mods (array of modifier values to OR together, or single number)
+    var mods: u8 = 0;
+    if (runtime.pushTable(-1, "mods")) {
+        const len = runtime.getArrayLen(-1);
+        for (1..len + 1) |i| {
+            if (runtime.pushArrayElement(-1, i)) {
+                if (runtime.toIntAt(u8, -1)) |m| {
+                    mods |= m;
+                }
+                runtime.pop();
+            }
+        }
+        runtime.pop();
+    } else if (runtime.getInt(u8, -1, "mods")) |m| {
+        mods = m;
     }
 
-    fn getConfigPath(allocator: std.mem.Allocator) ![]const u8 {
-        const config_home = posix.getenv("XDG_CONFIG_HOME");
-        if (config_home) |ch| {
-            return std.fmt.allocPrint(allocator, "{s}/hexe/mux.json", .{ch});
+    // Parse when
+    const when: Config.BindWhen = if (runtime.getString(-1, "when")) |w|
+        std.meta.stringToEnum(Config.BindWhen, w) orelse .press
+    else
+        .press;
+
+    // Parse context
+    var context = Config.BindContext{};
+    if (runtime.pushTable(-1, "context")) {
+        if (runtime.getString(-1, "focus")) |f| {
+            context.focus = std.meta.stringToEnum(Config.FocusContext, f) orelse .any;
+        }
+        runtime.pop();
+    }
+
+    return Config.Bind{
+        .when = when,
+        .mods = mods,
+        .key = key,
+        .context = context,
+        .action = action,
+        .hold_ms = runtime.getInt(i64, -1, "hold_ms"),
+        .double_tap_ms = runtime.getInt(i64, -1, "double_tap_ms"),
+    };
+}
+
+fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction {
+    if (std.mem.eql(u8, action_type, "mux.quit")) return .mux_quit;
+    if (std.mem.eql(u8, action_type, "mux.detach")) return .mux_detach;
+    if (std.mem.eql(u8, action_type, "pane.disown")) return .pane_disown;
+    if (std.mem.eql(u8, action_type, "pane.adopt")) return .pane_adopt;
+    if (std.mem.eql(u8, action_type, "split.h")) return .split_h;
+    if (std.mem.eql(u8, action_type, "split.v")) return .split_v;
+    if (std.mem.eql(u8, action_type, "tab.new")) return .tab_new;
+    if (std.mem.eql(u8, action_type, "tab.next")) return .tab_next;
+    if (std.mem.eql(u8, action_type, "tab.prev")) return .tab_prev;
+    if (std.mem.eql(u8, action_type, "tab.close")) return .tab_close;
+
+    if (std.mem.eql(u8, action_type, "split.resize")) {
+        const dir = runtime.getString(-1, "dir") orelse return null;
+        const d = std.meta.stringToEnum(Config.BindKeyKind, dir) orelse return null;
+        if (d != .up and d != .down and d != .left and d != .right) return null;
+        return .{ .split_resize = d };
+    }
+    if (std.mem.eql(u8, action_type, "float.toggle")) {
+        const fk = runtime.getString(-1, "float") orelse return null;
+        if (fk.len != 1) return null;
+        return .{ .float_toggle = fk[0] };
+    }
+    if (std.mem.eql(u8, action_type, "float.nudge")) {
+        const dir = runtime.getString(-1, "dir") orelse return null;
+        const d = std.meta.stringToEnum(Config.BindKeyKind, dir) orelse return null;
+        if (d != .up and d != .down and d != .left and d != .right) return null;
+        return .{ .float_nudge = d };
+    }
+    if (std.mem.eql(u8, action_type, "focus.move")) {
+        const dir = runtime.getString(-1, "dir") orelse return null;
+        const d = std.meta.stringToEnum(Config.BindKeyKind, dir) orelse return null;
+        if (d != .up and d != .down and d != .left and d != .right) return null;
+        return .{ .focus_move = d };
+    }
+
+    return null;
+}
+
+fn parseSimpleAction(action: []const u8) ?Config.BindAction {
+    if (std.mem.eql(u8, action, "mux.quit")) return .mux_quit;
+    if (std.mem.eql(u8, action, "mux.detach")) return .mux_detach;
+    if (std.mem.eql(u8, action, "pane.disown")) return .pane_disown;
+    if (std.mem.eql(u8, action, "pane.adopt")) return .pane_adopt;
+    if (std.mem.eql(u8, action, "split.h")) return .split_h;
+    if (std.mem.eql(u8, action, "split.v")) return .split_v;
+    if (std.mem.eql(u8, action, "tab.new")) return .tab_new;
+    if (std.mem.eql(u8, action, "tab.next")) return .tab_next;
+    if (std.mem.eql(u8, action, "tab.prev")) return .tab_prev;
+    if (std.mem.eql(u8, action, "tab.close")) return .tab_close;
+    return null;
+}
+
+fn parseFloats(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocator) void {
+    var float_list = std.ArrayList(FloatDef).empty;
+
+    // Default values (from first keyless entry)
+    var def_width: ?u8 = null;
+    var def_height: ?u8 = null;
+    var def_pos_x: ?u8 = null;
+    var def_pos_y: ?u8 = null;
+    var def_pad_x: ?u8 = null;
+    var def_pad_y: ?u8 = null;
+    var def_color: ?BorderColor = null;
+    var def_style: ?FloatStyle = null;
+    var def_attrs = FloatAttributes{};
+
+    const len = runtime.getArrayLen(-1);
+    for (1..len + 1) |i| {
+        if (!runtime.pushArrayElement(-1, i)) continue;
+        defer runtime.pop();
+
+        const key_str = runtime.getString(-1, "key") orelse "";
+
+        // First entry without key = defaults
+        if (i == 1 and key_str.len == 0) {
+            parseFloatDefaults(runtime, &def_width, &def_height, &def_pos_x, &def_pos_y, &def_pad_x, &def_pad_y, &def_color, &def_style, &def_attrs, allocator);
+            // Apply to config defaults
+            if (def_width) |w| config.float_width_percent = w;
+            if (def_height) |h| config.float_height_percent = h;
+            if (def_pad_x) |p| config.float_padding_x = p;
+            if (def_pad_y) |p| config.float_padding_y = p;
+            if (def_color) |c| config.float_color = c;
+            if (def_style) |s| config.float_style_default = s;
+            continue;
         }
 
-        const home = posix.getenv("HOME") orelse return error.NoHome;
-        return std.fmt.allocPrint(allocator, "{s}/.config/hexe/mux.json", .{home});
+        if (key_str.len == 0) continue;
+        const key = key_str[0];
+
+        const command = runtime.getStringAlloc(-1, "command");
+        const title = runtime.getStringAlloc(-1, "title");
+
+        // Parse attributes
+        var attrs = def_attrs;
+        if (runtime.pushTable(-1, "attributes")) {
+            if (runtime.getBool(-1, "exclusive")) |v| attrs.exclusive = v;
+            if (runtime.getBool(-1, "per_cwd")) |v| attrs.per_cwd = v;
+            if (runtime.getBool(-1, "sticky")) |v| attrs.sticky = v;
+            if (runtime.getBool(-1, "global")) |v| attrs.global = v;
+            if (runtime.getBool(-1, "destroy")) |v| attrs.destroy = v;
+            if (runtime.getBool(-1, "isolated")) |v| attrs.isolated = v;
+            runtime.pop();
+        }
+
+        // Parse per-float overrides
+        var width: ?u8 = def_width;
+        var height: ?u8 = def_height;
+        var pos_x: ?u8 = def_pos_x;
+        var pos_y: ?u8 = def_pos_y;
+        var pad_x: ?u8 = def_pad_x;
+        var pad_y: ?u8 = def_pad_y;
+        var color: ?BorderColor = def_color;
+        var style: ?FloatStyle = def_style;
+
+        if (runtime.pushTable(-1, "size")) {
+            if (runtime.getInt(u8, -1, "width")) |v| width = constrainPercent(v, 10, 100);
+            if (runtime.getInt(u8, -1, "height")) |v| height = constrainPercent(v, 10, 100);
+            runtime.pop();
+        }
+        if (runtime.getInt(u8, -1, "width")) |v| width = constrainPercent(v, 10, 100);
+        if (runtime.getInt(u8, -1, "height")) |v| height = constrainPercent(v, 10, 100);
+
+        if (runtime.pushTable(-1, "position")) {
+            if (runtime.getInt(u8, -1, "x")) |v| pos_x = constrainPercent(v, 0, 100);
+            if (runtime.getInt(u8, -1, "y")) |v| pos_y = constrainPercent(v, 0, 100);
+            runtime.pop();
+        }
+        if (runtime.getInt(u8, -1, "pos_x")) |v| pos_x = constrainPercent(v, 0, 100);
+        if (runtime.getInt(u8, -1, "pos_y")) |v| pos_y = constrainPercent(v, 0, 100);
+
+        if (runtime.pushTable(-1, "padding")) {
+            if (runtime.getInt(u8, -1, "x")) |v| pad_x = constrainPercent(v, 0, 10);
+            if (runtime.getInt(u8, -1, "y")) |v| pad_y = constrainPercent(v, 0, 10);
+            runtime.pop();
+        }
+        if (runtime.getInt(u8, -1, "padding_x")) |v| pad_x = constrainPercent(v, 0, 10);
+        if (runtime.getInt(u8, -1, "padding_y")) |v| pad_y = constrainPercent(v, 0, 10);
+
+        if (runtime.pushTable(-1, "color")) {
+            var c = color orelse BorderColor{};
+            if (runtime.getInt(u8, -1, "active")) |v| c.active = v;
+            if (runtime.getInt(u8, -1, "passive")) |v| c.passive = v;
+            color = c;
+            runtime.pop();
+        }
+
+        if (runtime.pushTable(-1, "style")) {
+            style = parseFloatStyle(runtime, allocator);
+            runtime.pop();
+        }
+
+        float_list.append(allocator, .{
+            .key = key,
+            .command = command,
+            .title = title,
+            .attributes = attrs,
+            .width_percent = width,
+            .height_percent = height,
+            .pos_x = pos_x,
+            .pos_y = pos_y,
+            .padding_x = pad_x,
+            .padding_y = pad_y,
+            .color = color,
+            .style = style,
+        }) catch continue;
     }
-};
 
-// JSON structure for parsing
-const JsonBorderColor = struct {
-    active: ?i64 = null,
-    passive: ?i64 = null,
-};
-const JsonXY = struct {
-    x: ?i64 = null,
-    y: ?i64 = null,
-};
-const JsonSize = struct {
-    width: ?i64 = null,
-    height: ?i64 = null,
-};
-const JsonFloatStyle = struct {
-    // Legacy border appearance (still accepted)
-    top_left: ?[]const u8 = null,
-    top_right: ?[]const u8 = null,
-    bottom_left: ?[]const u8 = null,
-    bottom_right: ?[]const u8 = null,
-    horizontal: ?[]const u8 = null,
-    vertical: ?[]const u8 = null,
-    // Legacy title module (still accepted)
-    position: ?[]const u8 = null, // topleft, topcenter, topright, bottomleft, bottomcenter, bottomright
-    name: ?[]const u8 = null, // module name (e.g. "time", "cpu")
-    outputs: ?[]const JsonOutput = null,
-    command: ?[]const u8 = null,
-    when: ?[]const u8 = null,
+    config.floats = float_list.toOwnedSlice(allocator) catch &[_]FloatDef{};
+}
 
-    // New hierarchical style config
-    border: ?struct {
-        color: ?JsonBorderColor = null,
-        chars: ?struct {
-            top_left: ?[]const u8 = null,
-            top_right: ?[]const u8 = null,
-            bottom_left: ?[]const u8 = null,
-            bottom_right: ?[]const u8 = null,
-            horizontal: ?[]const u8 = null,
-            vertical: ?[]const u8 = null,
-            cross: ?[]const u8 = null,
-            top_t: ?[]const u8 = null,
-            bottom_t: ?[]const u8 = null,
-            left_t: ?[]const u8 = null,
-            right_t: ?[]const u8 = null,
-        } = null,
-    } = null,
-    shadow: ?struct {
-        color: ?i64 = null,
-    } = null,
-    title: ?struct {
-        position: ?[]const u8 = null,
-        outputs: ?[]const JsonOutput = null,
-        command: ?[]const u8 = null,
-        when: ?[]const u8 = null,
-    } = null,
-};
-fn parseFloatStyle(allocator: std.mem.Allocator, js: JsonFloatStyle) ?FloatStyle {
+fn parseFloatDefaults(
+    runtime: *LuaRuntime,
+    width: *?u8,
+    height: *?u8,
+    pos_x: *?u8,
+    pos_y: *?u8,
+    pad_x: *?u8,
+    pad_y: *?u8,
+    color: *?BorderColor,
+    style: *?FloatStyle,
+    attrs: *FloatAttributes,
+    allocator: std.mem.Allocator,
+) void {
+    if (runtime.pushTable(-1, "size")) {
+        if (runtime.getInt(u8, -1, "width")) |v| width.* = constrainPercent(v, 10, 100);
+        if (runtime.getInt(u8, -1, "height")) |v| height.* = constrainPercent(v, 10, 100);
+        runtime.pop();
+    }
+    if (runtime.getInt(u8, -1, "width")) |v| width.* = constrainPercent(v, 10, 100);
+    if (runtime.getInt(u8, -1, "height")) |v| height.* = constrainPercent(v, 10, 100);
+
+    if (runtime.pushTable(-1, "position")) {
+        if (runtime.getInt(u8, -1, "x")) |v| pos_x.* = constrainPercent(v, 0, 100);
+        if (runtime.getInt(u8, -1, "y")) |v| pos_y.* = constrainPercent(v, 0, 100);
+        runtime.pop();
+    }
+    if (runtime.getInt(u8, -1, "pos_x")) |v| pos_x.* = constrainPercent(v, 0, 100);
+    if (runtime.getInt(u8, -1, "pos_y")) |v| pos_y.* = constrainPercent(v, 0, 100);
+
+    if (runtime.pushTable(-1, "padding")) {
+        if (runtime.getInt(u8, -1, "x")) |v| pad_x.* = constrainPercent(v, 0, 10);
+        if (runtime.getInt(u8, -1, "y")) |v| pad_y.* = constrainPercent(v, 0, 10);
+        runtime.pop();
+    }
+    if (runtime.getInt(u8, -1, "padding_x")) |v| pad_x.* = constrainPercent(v, 0, 10);
+    if (runtime.getInt(u8, -1, "padding_y")) |v| pad_y.* = constrainPercent(v, 0, 10);
+
+    if (runtime.pushTable(-1, "color")) {
+        var c = BorderColor{};
+        if (runtime.getInt(u8, -1, "active")) |v| c.active = v;
+        if (runtime.getInt(u8, -1, "passive")) |v| c.passive = v;
+        color.* = c;
+        runtime.pop();
+    }
+
+    if (runtime.pushTable(-1, "style")) {
+        style.* = parseFloatStyle(runtime, allocator);
+        runtime.pop();
+    }
+
+    if (runtime.pushTable(-1, "attributes")) {
+        if (runtime.getBool(-1, "exclusive")) |v| attrs.exclusive = v;
+        if (runtime.getBool(-1, "per_cwd")) |v| attrs.per_cwd = v;
+        if (runtime.getBool(-1, "sticky")) |v| attrs.sticky = v;
+        if (runtime.getBool(-1, "global")) |v| attrs.global = v;
+        if (runtime.getBool(-1, "destroy")) |v| attrs.destroy = v;
+        if (runtime.getBool(-1, "isolated")) |v| attrs.isolated = v;
+        runtime.pop();
+    }
+}
+
+fn parseFloatStyle(runtime: *LuaRuntime, allocator: std.mem.Allocator) FloatStyle {
     var result = FloatStyle{};
-    const border_chars = if (js.border) |b| b.chars else null;
-    if (if (border_chars) |bc| bc.top_left else null) |ch| if (ch.len > 0) {
-        result.top_left = std.unicode.utf8Decode(ch) catch 0x256D;
-    } else if (js.top_left) |ch2| if (ch2.len > 0) {
-        result.top_left = std.unicode.utf8Decode(ch2) catch 0x256D;
-    };
-    if (if (border_chars) |bc| bc.top_right else null) |ch| if (ch.len > 0) {
-        result.top_right = std.unicode.utf8Decode(ch) catch 0x256E;
-    } else if (js.top_right) |ch2| if (ch2.len > 0) {
-        result.top_right = std.unicode.utf8Decode(ch2) catch 0x256E;
-    };
-    if (if (border_chars) |bc| bc.bottom_left else null) |ch| if (ch.len > 0) {
-        result.bottom_left = std.unicode.utf8Decode(ch) catch 0x2570;
-    } else if (js.bottom_left) |ch2| if (ch2.len > 0) {
-        result.bottom_left = std.unicode.utf8Decode(ch2) catch 0x2570;
-    };
-    if (if (border_chars) |bc| bc.bottom_right else null) |ch| if (ch.len > 0) {
-        result.bottom_right = std.unicode.utf8Decode(ch) catch 0x256F;
-    } else if (js.bottom_right) |ch2| if (ch2.len > 0) {
-        result.bottom_right = std.unicode.utf8Decode(ch2) catch 0x256F;
-    };
-    if (if (border_chars) |bc| bc.horizontal else null) |ch| if (ch.len > 0) {
-        result.horizontal = std.unicode.utf8Decode(ch) catch 0x2500;
-    } else if (js.horizontal) |ch2| if (ch2.len > 0) {
-        result.horizontal = std.unicode.utf8Decode(ch2) catch 0x2500;
-    };
-    if (if (border_chars) |bc| bc.vertical else null) |ch| if (ch.len > 0) {
-        result.vertical = std.unicode.utf8Decode(ch) catch 0x2502;
-    } else if (js.vertical) |ch2| if (ch2.len > 0) {
-        result.vertical = std.unicode.utf8Decode(ch2) catch 0x2502;
-    };
 
-    if (if (border_chars) |bc| bc.cross else null) |ch| if (ch.len > 0) {
-        result.cross = std.unicode.utf8Decode(ch) catch 0x253C;
-    };
-    if (if (border_chars) |bc| bc.top_t else null) |ch| if (ch.len > 0) {
-        result.top_t = std.unicode.utf8Decode(ch) catch 0x252C;
-    };
-    if (if (border_chars) |bc| bc.bottom_t else null) |ch| if (ch.len > 0) {
-        result.bottom_t = std.unicode.utf8Decode(ch) catch 0x2534;
-    };
-    if (if (border_chars) |bc| bc.left_t else null) |ch| if (ch.len > 0) {
-        result.left_t = std.unicode.utf8Decode(ch) catch 0x251C;
-    };
-    if (if (border_chars) |bc| bc.right_t else null) |ch| if (ch.len > 0) {
-        result.right_t = std.unicode.utf8Decode(ch) catch 0x2524;
-    };
-
-    if (js.shadow) |sh| {
-        if (sh.color) |c| {
-            result.shadow_color = @intCast(@min(255, @max(0, c)));
+    // Border characters
+    if (runtime.pushTable(-1, "border")) {
+        if (runtime.pushTable(-1, "chars")) {
+            result.top_left = lua_runtime.parseUnicodeChar(runtime, -1, "top_left", 0x256D);
+            result.top_right = lua_runtime.parseUnicodeChar(runtime, -1, "top_right", 0x256E);
+            result.bottom_left = lua_runtime.parseUnicodeChar(runtime, -1, "bottom_left", 0x2570);
+            result.bottom_right = lua_runtime.parseUnicodeChar(runtime, -1, "bottom_right", 0x256F);
+            result.horizontal = lua_runtime.parseUnicodeChar(runtime, -1, "horizontal", 0x2500);
+            result.vertical = lua_runtime.parseUnicodeChar(runtime, -1, "vertical", 0x2502);
+            result.cross = lua_runtime.parseUnicodeChar(runtime, -1, "cross", 0x253C);
+            result.top_t = lua_runtime.parseUnicodeChar(runtime, -1, "top_t", 0x252C);
+            result.bottom_t = lua_runtime.parseUnicodeChar(runtime, -1, "bottom_t", 0x2534);
+            result.left_t = lua_runtime.parseUnicodeChar(runtime, -1, "left_t", 0x251C);
+            result.right_t = lua_runtime.parseUnicodeChar(runtime, -1, "right_t", 0x2524);
+            runtime.pop();
         }
+        runtime.pop();
     }
 
-    const title_pos = if (js.title) |t| t.position else null;
-    if (title_pos) |pos_str| {
-        result.position = std.meta.stringToEnum(FloatStylePosition, pos_str);
-    } else if (js.position) |pos_str| {
+    // Legacy flat border chars
+    result.top_left = lua_runtime.parseUnicodeChar(runtime, -1, "top_left", result.top_left);
+    result.top_right = lua_runtime.parseUnicodeChar(runtime, -1, "top_right", result.top_right);
+    result.bottom_left = lua_runtime.parseUnicodeChar(runtime, -1, "bottom_left", result.bottom_left);
+    result.bottom_right = lua_runtime.parseUnicodeChar(runtime, -1, "bottom_right", result.bottom_right);
+    result.horizontal = lua_runtime.parseUnicodeChar(runtime, -1, "horizontal", result.horizontal);
+    result.vertical = lua_runtime.parseUnicodeChar(runtime, -1, "vertical", result.vertical);
+
+    // Shadow
+    if (runtime.pushTable(-1, "shadow")) {
+        if (runtime.getInt(u8, -1, "color")) |c| result.shadow_color = c;
+        runtime.pop();
+    }
+
+    // Title
+    if (runtime.pushTable(-1, "title")) {
+        if (runtime.getString(-1, "position")) |pos_str| {
+            result.position = std.meta.stringToEnum(FloatStylePosition, pos_str);
+        }
+        result.module = parseStatusModule(runtime, allocator);
+        runtime.pop();
+    }
+
+    // Legacy flat position
+    if (runtime.getString(-1, "position")) |pos_str| {
         result.position = std.meta.stringToEnum(FloatStylePosition, pos_str);
     }
 
-    // Title widget: either legacy `name` or new `style.title` section.
-    const has_title_cfg = (js.title != null) or (js.outputs != null) or (js.command != null) or (js.when != null);
-    const default_name: []const u8 = "";
-    const mod_name = js.name orelse (if (has_title_cfg) default_name else null);
-    if (mod_name) |mn| {
-        var outputs: []const OutputDef = &[_]OutputDef{};
-        const title_outputs = if (js.title) |t| t.outputs else null;
-        const legacy_outputs = js.outputs;
-        const outputs_src = title_outputs orelse legacy_outputs;
-        if (outputs_src) |json_outputs| {
-            var output_list: std.ArrayList(OutputDef) = .empty;
-            for (json_outputs) |jo| {
-                output_list.append(allocator, .{
-                    .style = if (jo.style) |st| allocator.dupe(u8, st) catch "" else "",
-                    .format = if (jo.format) |ft| allocator.dupe(u8, ft) catch "$output" else "$output",
-                }) catch continue;
-            }
-            outputs = output_list.toOwnedSlice(allocator) catch &[_]OutputDef{};
-        }
-
-        const cmd_src = if (js.title) |t| t.command else js.command;
-        const when_src = if (js.title) |t| t.when else js.when;
-        result.module = .{
-            .name = allocator.dupe(u8, mn) catch "",
-            .outputs = outputs,
-            .command = if (cmd_src) |cmd| allocator.dupe(u8, cmd) catch null else null,
-            .when = if (when_src) |w| allocator.dupe(u8, w) catch null else null,
-        };
-    }
     return result;
 }
 
-const JsonFloatPane = struct {
-    key: []const u8 = "",
-    command: ?[]const u8 = null,
-    title: ?[]const u8 = null,
-    attributes: ?struct {
-        // Preferred names
-        exclusive: ?bool = null,
-        per_cwd: ?bool = null,
-        sticky: ?bool = null,
-        global: ?bool = null,
-        destroy: ?bool = null,
-        isolated: ?bool = null,
-        // Legacy names (still accepted inside attributes)
-        alone: ?bool = null,
-        pwd: ?bool = null,
-        special: ?bool = null,
-        destroy_on_hide: ?bool = null,
-    } = null,
-    // Legacy flat fields (still accepted)
-    width: ?i64 = null,
-    height: ?i64 = null,
-    pos_x: ?i64 = null,
-    pos_y: ?i64 = null,
-    padding_x: ?i64 = null,
-    padding_y: ?i64 = null,
-    color: ?JsonBorderColor = null,
-    // New hierarchical fields
-    size: ?JsonSize = null,
-    position: ?JsonXY = null,
-    padding: ?JsonXY = null,
-    style: ?JsonFloatStyle = null,
-};
-const JsonSplitStyle = struct {
-    vertical: ?[]const u8 = null,
-    horizontal: ?[]const u8 = null,
-    cross: ?[]const u8 = null,
-    top_t: ?[]const u8 = null,
-    bottom_t: ?[]const u8 = null,
-    left_t: ?[]const u8 = null,
-    right_t: ?[]const u8 = null,
-};
+fn parseSplits(runtime: *LuaRuntime, config: *Config) void {
+    if (runtime.pushTable(-1, "color")) {
+        if (runtime.getInt(u8, -1, "active")) |v| config.splits.color.active = v;
+        if (runtime.getInt(u8, -1, "passive")) |v| config.splits.color.passive = v;
+        runtime.pop();
+    }
 
-const JsonSplitsConfig = struct {
-    color: ?JsonBorderColor = null,
-    separator_v: ?[]const u8 = null,
-    separator_h: ?[]const u8 = null,
-    style: ?JsonSplitStyle = null,
-};
+    config.splits.separator_v = lua_runtime.parseUnicodeChar(runtime, -1, "separator_v", config.splits.separator_v);
+    config.splits.separator_h = lua_runtime.parseUnicodeChar(runtime, -1, "separator_h", config.splits.separator_h);
 
-const JsonTabsConfig = struct {
-    status: ?struct {
-        enabled: ?bool = null,
-        left: ?[]const JsonStatusModule = null,
-        center: ?[]const JsonStatusModule = null,
-        right: ?[]const JsonStatusModule = null,
-    } = null,
-};
+    if (runtime.pushTable(-1, "style")) {
+        var style = SplitStyle{};
+        style.vertical = lua_runtime.parseUnicodeChar(runtime, -1, "vertical", 0x2502);
+        style.horizontal = lua_runtime.parseUnicodeChar(runtime, -1, "horizontal", 0x2500);
+        style.cross = lua_runtime.parseUnicodeChar(runtime, -1, "cross", 0x253C);
+        style.top_t = lua_runtime.parseUnicodeChar(runtime, -1, "top_t", 0x252C);
+        style.bottom_t = lua_runtime.parseUnicodeChar(runtime, -1, "bottom_t", 0x2534);
+        style.left_t = lua_runtime.parseUnicodeChar(runtime, -1, "left_t", 0x251C);
+        style.right_t = lua_runtime.parseUnicodeChar(runtime, -1, "right_t", 0x2524);
+        config.splits.style = style;
+        runtime.pop();
+    }
+}
 
-const JsonNotificationStyleConfig = struct {
-    fg: ?i64 = null,
-    bg: ?i64 = null,
-    bold: ?bool = null,
-    padding_x: ?i64 = null,
-    padding_y: ?i64 = null,
-    offset: ?i64 = null,
-    alignment: ?[]const u8 = null,
-    duration_ms: ?i64 = null,
-};
-const JsonNotificationConfig = struct {
-    mux: ?JsonNotificationStyleConfig = null,
-    pane: ?JsonNotificationStyleConfig = null,
-};
-const JsonConfig = struct {
-    input: ?struct {
-        timing: ?struct {
-            hold_ms: ?i64 = null,
-            repeat_ms: ?i64 = null,
-            double_tap_ms: ?i64 = null,
-        } = null,
-        binds: ?[]const JsonBind = null,
-    } = null,
-    confirm_on_exit: ?bool = null,
-    confirm_on_detach: ?bool = null,
-    confirm_on_disown: ?bool = null,
-    confirm_on_close: ?bool = null,
-    floats: ?[]const JsonFloatPane = null,
-    splits: ?JsonSplitsConfig = null,
-    tabs: ?JsonTabsConfig = null,
-    notifications: ?JsonNotificationConfig = null,
-};
+fn parseTabs(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocator) void {
+    if (runtime.pushTable(-1, "status")) {
+        if (runtime.getBool(-1, "enabled")) |v| config.tabs.status.enabled = v;
 
-const JsonBind = struct {
-    when: ?[]const u8 = null,
-    mods: ?[]const []const u8 = null,
-    key: []const u8,
-    hold_ms: ?i64 = null,
-    double_tap_ms: ?i64 = null,
-    context: ?struct {
-        focus: ?[]const u8 = null,
-    } = null,
-    action: struct {
-        type: []const u8,
-        // for float_toggle
-        float: ?[]const u8 = null,
-        // for float_nudge
-        // for float_nudge / focus_move / split_resize
-        dir: ?[]const u8 = null,
-    },
-};
+        if (runtime.pushTable(-1, "left")) {
+            config.tabs.status.left = parseStatusModules(runtime, allocator);
+            runtime.pop();
+        }
+        if (runtime.pushTable(-1, "center")) {
+            config.tabs.status.center = parseStatusModules(runtime, allocator);
+            runtime.pop();
+        }
+        if (runtime.pushTable(-1, "right")) {
+            config.tabs.status.right = parseStatusModules(runtime, allocator);
+            runtime.pop();
+        }
+        runtime.pop();
+    }
+}
 
-const JsonOutput = struct {
-    style: ?[]const u8 = null,
-    format: ?[]const u8 = null,
-};
+fn parseStatusModules(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const StatusModule {
+    var list = std.ArrayList(StatusModule).empty;
 
-const JsonStatusModule = struct {
-    name: []const u8,
-    priority: ?i64 = null,
-    outputs: ?[]const JsonOutput = null,
-    command: ?[]const u8 = null,
-    when: ?[]const u8 = null,
-    active_style: ?[]const u8 = null,
-    inactive_style: ?[]const u8 = null,
-    separator: ?[]const u8 = null,
-    separator_style: ?[]const u8 = null,
-    tab_title: ?[]const u8 = null,
-    left_arrow: ?[]const u8 = null,
-    right_arrow: ?[]const u8 = null,
-};
+    const len = runtime.getArrayLen(-1);
+    for (1..len + 1) |i| {
+        if (runtime.pushArrayElement(-1, i)) {
+            if (parseStatusModule(runtime, allocator)) |mod| {
+                list.append(allocator, mod) catch {};
+            }
+            runtime.pop();
+        }
+    }
+
+    return list.toOwnedSlice(allocator) catch &[_]StatusModule{};
+}
+
+fn parseStatusModule(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?StatusModule {
+    const name = runtime.getStringAlloc(-1, "name") orelse return null;
+
+    return StatusModule{
+        .name = name,
+        .priority = lua_runtime.parseConstrainedInt(runtime, u8, -1, "priority", 1, 255, 50),
+        .outputs = parseOutputs(runtime, allocator),
+        .command = runtime.getStringAlloc(-1, "command"),
+        .when = runtime.getStringAlloc(-1, "when"),
+        .active_style = runtime.getStringAlloc(-1, "active_style") orelse "bg:1 fg:0",
+        .inactive_style = runtime.getStringAlloc(-1, "inactive_style") orelse "bg:237 fg:250",
+        .separator = runtime.getStringAlloc(-1, "separator") orelse " | ",
+        .separator_style = runtime.getStringAlloc(-1, "separator_style") orelse "fg:7",
+        .tab_title = runtime.getStringAlloc(-1, "tab_title") orelse "basename",
+        .left_arrow = runtime.getStringAlloc(-1, "left_arrow") orelse "",
+        .right_arrow = runtime.getStringAlloc(-1, "right_arrow") orelse "",
+    };
+}
+
+fn parseOutputs(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const OutputDef {
+    if (!runtime.pushTable(-1, "outputs")) {
+        return &[_]OutputDef{};
+    }
+    defer runtime.pop();
+
+    var list = std.ArrayList(OutputDef).empty;
+
+    const len = runtime.getArrayLen(-1);
+    for (1..len + 1) |i| {
+        if (runtime.pushArrayElement(-1, i)) {
+            list.append(allocator, .{
+                .style = runtime.getStringAlloc(-1, "style") orelse "",
+                .format = runtime.getStringAlloc(-1, "format") orelse "$output",
+            }) catch {};
+            runtime.pop();
+        }
+    }
+
+    return list.toOwnedSlice(allocator) catch &[_]OutputDef{};
+}
+
+fn parseNotifications(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocator) void {
+    if (runtime.pushTable(-1, "mux")) {
+        parseNotificationStyle(runtime, &config.notifications.mux, allocator);
+        runtime.pop();
+    }
+    if (runtime.pushTable(-1, "pane")) {
+        parseNotificationStyle(runtime, &config.notifications.pane, allocator);
+        runtime.pop();
+    }
+}
+
+fn parseNotificationStyle(runtime: *LuaRuntime, style: *NotificationStyleConfig, allocator: std.mem.Allocator) void {
+    style.fg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "fg", 0, 255, style.fg);
+    style.bg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "bg", 0, 255, style.bg);
+    if (runtime.getBool(-1, "bold")) |v| style.bold = v;
+    style.padding_x = lua_runtime.parseConstrainedInt(runtime, u8, -1, "padding_x", 0, 10, style.padding_x);
+    style.padding_y = lua_runtime.parseConstrainedInt(runtime, u8, -1, "padding_y", 0, 10, style.padding_y);
+    style.offset = lua_runtime.parseConstrainedInt(runtime, u8, -1, "offset", 0, 20, style.offset);
+    style.duration_ms = lua_runtime.parseConstrainedInt(runtime, u32, -1, "duration_ms", 100, 60000, style.duration_ms);
+    if (runtime.getStringAlloc(-1, "alignment")) |v| style.alignment = v else _ = allocator;
+}
+
+fn constrainPercent(val: u8, min: u8, max: u8) u8 {
+    if (val < min) return min;
+    if (val > max) return max;
+    return val;
+}

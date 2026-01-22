@@ -18,6 +18,10 @@
             .url = "git+https://codeberg.org/OhMyDitzzy/argonaut#1d8779fe017aa7fd33774bf86c30d239a080d199",
             .hash = "argonaut-0.0.1-BgmCpIt6AQCUnRrUtsAg1AuaeuSE1tr7tlWpjXbDulXi",
         },
+        .ziglua = .{
+            .url = "git+https://github.com/natecraddock/ziglua#0.6.0",
+            .hash = "zlua-0.1.0-hGRpCww-BQCx3cX6zbKWfTgOx6B7Peo4P17RK2hm7-xV",
+        },
     },
     .fingerprint = 0x4c99ab0b473f252d,
 }
