@@ -27,6 +27,8 @@ pub const BufRange = struct {
     b: BufPos,
 };
 
+pub const EdgeScroll = enum { none, up, down };
+
 /// Pane-local selection state driven by mux mouse events.
 ///
 /// Internally we store Y positions in terminal "screen" coordinates so the
@@ -37,6 +39,9 @@ pub const MouseSelection = struct {
 
     active: bool = false,
     dragging: bool = false,
+
+    last_local: Pos = .{},
+    edge_scroll: EdgeScroll = .none,
 
     anchor: BufPos = .{},
     cursor: BufPos = .{},
@@ -54,6 +59,8 @@ pub const MouseSelection = struct {
         self.pane_uuid = pane_uuid;
         self.active = true;
         self.dragging = false;
+        self.last_local = .{ .x = local_x, .y = local_y };
+        self.edge_scroll = edgeFromLocalY(local_y, pane.height);
         self.anchor = .{ .x = local_x, .y = viewport_top + local_y };
         self.cursor = self.anchor;
         self.has_range = false;
@@ -63,6 +70,8 @@ pub const MouseSelection = struct {
         if (!self.active) return;
         const viewport_top = getViewportTopScreenY(pane);
         const next: BufPos = .{ .x = local_x, .y = viewport_top + local_y };
+        self.last_local = .{ .x = local_x, .y = local_y };
+        self.edge_scroll = edgeFromLocalY(local_y, pane.height);
         if (self.cursor.x != next.x or self.cursor.y != next.y) {
             self.dragging = true;
         }
@@ -72,6 +81,7 @@ pub const MouseSelection = struct {
     pub fn finish(self: *MouseSelection) void {
         if (!self.active) return;
         self.active = false;
+        self.edge_scroll = .none;
         if (self.dragging) {
             self.has_range = true;
             self.last_range = .{ .a = self.anchor, .b = self.cursor };
@@ -171,7 +181,7 @@ pub fn extractText(allocator: std.mem.Allocator, pane: *Pane, range: BufRange) !
     defer allocator.free(text_z);
 
     const slice = std.mem.sliceTo(text_z, 0);
-    return allocator.dupe(u8, slice);
+    return dupeTrimBlankLines(allocator, slice);
 }
 
 fn getViewportTopScreenY(pane: *Pane) u32 {
@@ -179,6 +189,62 @@ fn getViewportTopScreenY(pane: *Pane) u32 {
     const pin = screen.pages.getTopLeft(.viewport);
     const pt = screen.pages.pointFromPin(.screen, pin) orelse return 0;
     return pt.screen.y;
+}
+
+fn edgeFromLocalY(local_y: u16, pane_h: u16) EdgeScroll {
+    if (pane_h == 0) return .none;
+    // Start scrolling when cursor is in the top/bottom margin.
+    const margin: u16 = 1;
+    if (local_y <= margin) return .up;
+    if (local_y + margin >= pane_h - 1) return .down;
+    return .none;
+}
+
+fn isBlankLine(line: []const u8) bool {
+    const trimmed = std.mem.trim(u8, line, " \t\r");
+    return trimmed.len == 0;
+}
+
+fn dupeTrimBlankLines(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    if (text.len == 0) return allocator.dupe(u8, "");
+
+    // Find first non-blank line.
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i <= text.len) {
+        const line_end = std.mem.indexOfScalarPos(u8, text, i, '\n') orelse text.len;
+        const line = text[i..line_end];
+        if (!isBlankLine(line)) {
+            start = i;
+            break;
+        }
+        if (line_end == text.len) return allocator.dupe(u8, "");
+        i = line_end + 1;
+    }
+
+    // Find last non-blank line.
+    var end: usize = text.len;
+    var j: usize = text.len;
+    while (j > start) {
+        // Identify the start/end of the previous line.
+        const nl = std.mem.lastIndexOfScalar(u8, text[0..j], '\n');
+        const line_start: usize = if (nl) |p| p + 1 else 0;
+        const line_end: usize = j;
+        const line = text[line_start..line_end];
+        if (!isBlankLine(line)) {
+            end = line_end;
+            break;
+        }
+        if (nl) |p| {
+            if (p == 0) break;
+            j = p;
+        } else {
+            break;
+        }
+    }
+
+    if (start >= end) return allocator.dupe(u8, "");
+    return allocator.dupe(u8, text[start..end]);
 }
 
 fn bufToLocalClipped(p: BufPos, viewport_top: u32, pane_w: u16, pane_h: u16, is_start: bool) Pos {

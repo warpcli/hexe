@@ -367,10 +367,10 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                                                 continue;
                                             };
                                             defer state.allocator.free(bytes);
-                                            clipboard.copyToClipboard(state.allocator, bytes);
                                             if (bytes.len == 0) {
-                                                state.notifications.showFor("Copied empty selection", 1200);
+                                                state.notifications.showFor("No text selected", 1200);
                                             } else {
+                                                clipboard.copyToClipboard(state.allocator, bytes);
                                                 state.notifications.showFor("Copied selection", 1200);
                                             }
                                         }
@@ -420,6 +420,12 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                                 t.pane.scrollDown(3);
                             } else {
                                 // Unexpected wheel code.
+                            }
+
+                            // If we're actively selecting in this pane, update the
+                            // selection cursor so wheel-scrolling can extend it.
+                            if (state.mouse_selection.active and state.mouse_selection.pane_uuid != null and std.mem.eql(u8, &state.mouse_selection.pane_uuid.?, &t.pane.uuid)) {
+                                state.mouse_selection.update(t.pane, state.mouse_selection.last_local.x, state.mouse_selection.last_local.y);
                             }
                             state.needs_render = true;
                         }

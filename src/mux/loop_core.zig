@@ -208,6 +208,28 @@ pub fn runMainLoop(state: *State) !void {
 
         // Check if status bar needs periodic update.
         const now2 = std.time.milliTimestamp();
+
+        // Auto-scroll while selecting when the mouse is near the top/bottom.
+        // This allows selecting hidden content by holding the mouse at the edge.
+        if (state.mouse_selection.active and state.mouse_selection.edge_scroll != .none) {
+            const interval_ms: i64 = 30;
+            if (now2 - state.mouse_selection_last_autoscroll_ms >= interval_ms) {
+                state.mouse_selection_last_autoscroll_ms = now2;
+                if (state.mouse_selection.pane_uuid) |uuid| {
+                    if (state.findPaneByUuid(uuid)) |p| {
+                        switch (state.mouse_selection.edge_scroll) {
+                            .up => p.scrollUp(1),
+                            .down => p.scrollDown(1),
+                            .none => {},
+                        }
+                        // Recompute cursor in buffer coordinates for the current
+                        // viewport after the scroll.
+                        state.mouse_selection.update(p, state.mouse_selection.last_local.x, state.mouse_selection.last_local.y);
+                        state.needs_render = true;
+                    }
+                }
+            }
+        }
         if (now2 - last_status_update >= status_update_interval) {
             state.needs_render = true;
             last_status_update = now2;

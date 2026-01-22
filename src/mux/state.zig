@@ -123,6 +123,7 @@ pub const State = struct {
     pending_float_requests: std.AutoHashMap([32]u8, PendingFloatRequest),
 
     mouse_selection: mouse_selection.MouseSelection,
+    mouse_selection_last_autoscroll_ms: i64,
 
     /// Shell-provided metadata (last command, status, duration) keyed by pane UUID.
     pane_shell: std.AutoHashMap([32]u8, PaneShellInfo),
@@ -198,6 +199,7 @@ pub const State = struct {
             .pending_float_requests = std.AutoHashMap([32]u8, PendingFloatRequest).init(allocator),
 
             .mouse_selection = .{},
+            .mouse_selection_last_autoscroll_ms = 0,
 
             .pane_shell = std.AutoHashMap([32]u8, PaneShellInfo).init(allocator),
 
