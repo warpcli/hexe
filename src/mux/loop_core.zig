@@ -163,14 +163,35 @@ pub fn runMainLoop(state: *State) !void {
         const since_status = now - last_status_update;
         const want_anim = blk: {
             const uuid = state.getCurrentFocusedUuid() orelse break :blk false;
-            const info = state.getPaneShell(uuid) orelse break :blk false;
-            if (!info.running) break :blk false;
+
             // suppress while alt-screen is active
-            if (state.active_floating) |idx| {
-                if (idx < state.floats.items.len and state.floats.items[idx].vt.inAltScreen()) break :blk false;
-            } else if (state.currentLayout().getFocusedPane()) |pane| {
-                if (pane.vt.inAltScreen()) break :blk false;
+            const alt = if (state.active_floating) |idx| blk2: {
+                if (idx < state.floats.items.len) break :blk2 state.floats.items[idx].vt.inAltScreen();
+                break :blk2 false;
+            } else if (state.currentLayout().getFocusedPane()) |pane| pane.vt.inAltScreen() else false;
+            if (alt) break :blk false;
+
+            // Prefer direct fg_process; fallback to cached process name.
+            const fg = if (state.active_floating) |idx| blk3: {
+                if (idx < state.floats.items.len) {
+                    if (state.floats.items[idx].getFgProcess()) |p| break :blk3 p;
+                }
+                break :blk3 @as(?[]const u8, null);
+            } else if (state.currentLayout().getFocusedPane()) |pane| pane.getFgProcess() else null;
+
+            const proc_name = fg orelse blk4: {
+                if (state.getPaneProc(uuid)) |pi| {
+                    if (pi.name) |n| break :blk4 n;
+                }
+                break :blk4 @as(?[]const u8, null);
+            };
+            if (proc_name == null) break :blk false;
+
+            const shells = [_][]const u8{ "bash", "zsh", "fish", "sh", "dash", "nu", "xonsh", "pwsh", "cmd", "elvish" };
+            for (shells) |s| {
+                if (std.mem.eql(u8, proc_name.?, s)) break :blk false;
             }
+
             break :blk true;
         };
         const status_update_interval: i64 = if (want_anim) status_update_interval_anim else status_update_interval_base;
