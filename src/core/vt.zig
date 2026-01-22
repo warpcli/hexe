@@ -4,6 +4,13 @@ const std = @import("std");
 pub const ghostty = @import("ghostty-vt");
 pub const Terminal = ghostty.Terminal;
 
+// Ghostty's `max_scrollback` is measured in BYTES (rounded up to its internal
+// page size), not in lines.
+//
+// We set this to match the pod backlog size so the interactive in-mux
+// scrollback feels consistent with detach/reattach behavior.
+const DEFAULT_SCROLLBACK_BYTES: usize = 4 * 1024 * 1024;
+
 const ReadonlyStream = @TypeOf((@as(*Terminal, undefined)).vtStream());
 
 /// Thin wrapper around ghostty Terminal
@@ -23,7 +30,11 @@ pub const VT = struct {
     pub fn init(self: *VT, allocator: std.mem.Allocator, width: u16, height: u16) !void {
         self.* = .{ .allocator = allocator, .width = width, .height = height };
 
-        self.terminal = try Terminal.init(allocator, .{ .cols = width, .rows = height });
+        self.terminal = try Terminal.init(allocator, .{
+            .cols = width,
+            .rows = height,
+            .max_scrollback = DEFAULT_SCROLLBACK_BYTES,
+        });
         errdefer self.terminal.deinit(allocator);
 
         self.stream = self.terminal.vtStream();
