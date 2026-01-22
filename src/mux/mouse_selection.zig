@@ -164,6 +164,74 @@ pub fn applyOverlay(renderer: *Renderer, pane_x: u16, pane_y: u16, pane_w: u16, 
     }
 }
 
+/// Apply a selection overlay but avoid highlighting trailing whitespace.
+///
+/// When a multi-line selection covers the full width of a line (the typical
+/// "middle lines" case), the default overlay would invert all remaining cells
+/// to the right margin. This function trims the overlay to the last non-space
+/// cell on each visible row.
+pub fn applyOverlayTrimmed(renderer: *Renderer, render_state: *const ghostty.RenderState, pane_x: u16, pane_y: u16, pane_w: u16, pane_h: u16, range: Range) void {
+    if (pane_w == 0 or pane_h == 0) return;
+
+    const a = clampToPane(range.a.x, range.a.y, pane_w, pane_h);
+    const b = clampToPane(range.b.x, range.b.y, pane_w, pane_h);
+    const norm = normalizeRange(.{ .a = a, .b = b });
+
+    const row_slice = render_state.row_data.slice();
+    if (row_slice.len == 0 or render_state.cols == 0 or render_state.rows == 0) {
+        applyOverlay(renderer, pane_x, pane_y, pane_w, pane_h, range);
+        return;
+    }
+
+    const rows_max: u16 = @intCast(@min(@as(usize, pane_h), @min(@as(usize, render_state.rows), row_slice.len)));
+    const cols_max: u16 = @intCast(@min(@as(usize, pane_w), @as(usize, render_state.cols)));
+    if (rows_max == 0 or cols_max == 0) return;
+
+    const row_cells = row_slice.items(.cells);
+
+    var y: u16 = norm.start.y;
+    while (y <= norm.end.y and y < rows_max) : (y += 1) {
+        const start_x: u16 = if (y == norm.start.y) norm.start.x else 0;
+        var end_x: u16 = if (y == norm.end.y) norm.end.x else (cols_max - 1);
+
+        if (start_x >= cols_max) continue;
+        if (end_x >= cols_max) end_x = cols_max - 1;
+
+        // If the selection wants to cover to the right edge, trim it to the last
+        // non-blank cell on this row.
+        if (end_x == cols_max - 1) {
+            const cells_slice = row_cells[@intCast(y)].slice();
+            const raw_cells = cells_slice.items(.raw);
+            if (raw_cells.len == 0) continue;
+
+            var idx: i32 = @intCast(@min(@as(usize, cols_max), raw_cells.len) - 1);
+            const min_idx: i32 = @intCast(start_x);
+            var found: ?u16 = null;
+            while (idx >= min_idx) : (idx -= 1) {
+                const raw = raw_cells[@intCast(idx)];
+                if (raw.wide == .spacer_tail) continue;
+                var cp: u21 = raw.codepoint();
+                if (cp == 0 or cp < 32 or cp == 127) cp = ' ';
+                if (cp != ' ') {
+                    found = @intCast(idx);
+                    break;
+                }
+            }
+
+            // Entire row is blank in the selected span: don't highlight it.
+            if (found == null) continue;
+            end_x = found.?;
+        }
+
+        if (end_x < start_x) continue;
+
+        var x: u16 = start_x;
+        while (x <= end_x) : (x += 1) {
+            renderer.invertCell(pane_x + x, pane_y + y);
+        }
+    }
+}
+
 /// Extract selection text from the full terminal buffer (supports scrollback).
 ///
 /// This uses ghostty's `Screen.selectionString` to correctly unwrap soft wraps
