@@ -558,7 +558,7 @@ pub fn handleIpcConnection(state: *State, buffer: []u8) void {
 
         state.setPaneShell(uuid, cmd, cwd, status_opt, dur_opt, jobs_opt);
 
-        // Forward to ses so `hexe ses info` can show it.
+        // Forward to ses so `hexe mux info` can show it.
         state.ses_client.updatePaneShell(uuid, cmd, cwd, status_opt, dur_opt, jobs_opt) catch {};
 
         // Shell events often arrive with no pane output; force a re-render so

@@ -40,11 +40,6 @@ pub fn main() !void {
     const ses_list = try ses_cmd.newCommand("list", "List all sessions and panes");
     const ses_list_details = try ses_list.flag("d", "details", null);
 
-    const ses_info = try ses_cmd.newCommand("info", "Show information about a pane");
-    const ses_info_uuid = try ses_info.string("u", "uuid", null);
-    const ses_info_creator = try ses_info.flag("c", "creator", null);
-    const ses_info_last = try ses_info.flag("l", "last", null);
-
     // POD subcommands (mostly for ses-internal use)
     const pod_daemon = try pod_cmd.newCommand("daemon", "Start a per-pane pod daemon");
     const pod_daemon_uuid = try pod_daemon.string("u", "uuid", null);
@@ -92,6 +87,11 @@ pub fn main() !void {
     const mux_send_enter = try mux_send.flag("e", "enter", null);
     const mux_send_ctrl = try mux_send.string("C", "ctrl", null);
     const mux_send_text = try mux_send.stringPositional(null);
+
+    const mux_info = try mux_cmd.newCommand("info", "Show information about a pane");
+    const mux_info_uuid = try mux_info.string("u", "uuid", null);
+    const mux_info_creator = try mux_info.flag("c", "creator", null);
+    const mux_info_last = try mux_info.flag("l", "last", null);
 
     // POP subcommands
     const shp_prompt = try shp_cmd.newCommand("prompt", "Render shell prompt");
@@ -185,16 +185,16 @@ pub fn main() !void {
             print("Usage: hexe mux send [OPTIONS] [text]\n\nSend keystrokes to pane (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>  Target specific pane\n  -c, --creator      Send to pane that created current pane\n  -l, --last         Send to previously focused pane\n  -b, --broadcast    Broadcast to all attached panes\n  -e, --enter        Append Enter key after text\n  -C, --ctrl <char>  Send Ctrl+<char> (e.g., -C c for Ctrl+C)\n", .{});
         } else if (found_mux and found_notify) {
             print("Usage: hexe mux notify [OPTIONS] <message>\n\nSend notification (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>  Target specific mux or pane\n  -c, --creator      Send to pane that created current pane\n  -l, --last         Send to previously focused pane\n  -b, --broadcast    Broadcast to all muxes\n", .{});
+        } else if (found_mux and found_info) {
+            print("Usage: hexe mux info [OPTIONS]\n\nShow information about a pane\n\nOptions:\n  -u, --uuid <UUID>  Query specific pane by UUID (works from anywhere)\n  -c, --creator      Print only the creator pane UUID\n  -l, --last         Print only the last focused pane UUID\n\nWithout --uuid, queries current pane (requires running inside mux)\n", .{});
         } else if (found_ses and found_list) {
             print("Usage: hexe ses list [OPTIONS]\n\nList all sessions and panes\n\nOptions:\n  -d, --details  Show extra details\n", .{});
-        } else if (found_ses and found_info) {
-            print("Usage: hexe ses info [OPTIONS]\n\nShow information about a pane\n\nOptions:\n  -u, --uuid <UUID>  Query specific pane by UUID (works from anywhere)\n  -c, --creator      Print only the creator pane UUID\n  -l, --last         Print only the last focused pane UUID\n\nWithout --uuid, queries current pane (requires running inside mux)\n", .{});
         } else if (found_ses and found_status) {
             print("Usage: hexe ses status\n\nShow daemon status and socket path\n", .{});
         } else if (found_shp and found_exit_intent) {
             print("Usage: hexe shp exit-intent\n\nAsk the current mux session whether the shell should be allowed to exit.\nIntended for shell keybindings (exit/Ctrl+D) to avoid last-pane death.\n\nExit codes: 0=allow, 1=deny\n", .{});
         } else if (found_shp and found_shell_event) {
-            print("Usage: hexe shp shell-event [--cmd <TEXT>] [--status <N>] [--duration <MS>] [--cwd <PATH>] [--jobs <N>]\n\nSend shell command metadata to the current mux session.\nUsed by shell integration to power statusbar + `hexe ses info`.\n\nNotes:\n  - No-op outside a mux session\n  - If mux is unreachable, exits 0\n", .{});
+            print("Usage: hexe shp shell-event [--cmd <TEXT>] [--status <N>] [--duration <MS>] [--cwd <PATH>] [--jobs <N>]\n\nSend shell command metadata to the current mux session.\nUsed by shell integration to power statusbar + `hexe mux info`.\n\nNotes:\n  - No-op outside a mux session\n  - If mux is unreachable, exits 0\n", .{});
         } else if (found_ses and found_daemon) {
             print("Usage: hexe ses daemon [OPTIONS]\n\nStart the session daemon\n\nOptions:\n  -f, --foreground     Run in foreground (don't daemonize)\n  -d, --debug          Enable debug output\n  -L, --logfile <PATH> Log debug output to PATH\n", .{});
         } else if (found_pod and found_daemon) {
@@ -218,11 +218,11 @@ pub fn main() !void {
         } else if (found_pop) {
             print("Usage: hexe pop <command>\n\nPopup overlays\n\nCommands:\n  notify   Show notification\n  confirm  Yes/No dialog\n  choose   Select from options\n", .{});
         } else if (found_ses) {
-            print("Usage: hexe ses <command>\n\nSession daemon management\n\nCommands:\n  daemon  Start the session daemon\n  status  Show daemon info\n  list    List sessions and panes\n  info    Show pane info\n", .{});
+            print("Usage: hexe ses <command>\n\nSession daemon management\n\nCommands:\n  daemon  Start the session daemon\n  status  Show daemon info\n  list    List sessions and panes\n", .{});
         } else if (found_pod) {
             print("Usage: hexe pod <command>\n\nPer-pane PTY daemon (internal)\n\nCommands:\n  daemon  Start a per-pane pod daemon\n", .{});
         } else if (found_mux) {
-            print("Usage: hexe mux <command>\n\nTerminal multiplexer\n\nCommands:\n  new     Create new multiplexer session\n  attach  Attach to existing session\n  float   Spawn a transient float pane\n  notify  Send notification\n  send    Send keystrokes to pane\n", .{});
+            print("Usage: hexe mux <command>\n\nTerminal multiplexer\n\nCommands:\n  new     Create new multiplexer session\n  attach  Attach to existing session\n  float   Spawn a transient float pane\n  notify  Send notification\n  send    Send keystrokes to pane\n  info    Show pane info\n", .{});
         } else if (found_shp) {
             print("Usage: hexe shp <command>\n\nShell prompt renderer\n\nCommands:\n  prompt       Render shell prompt\n  init         Print shell initialization script\n  exit-intent  Ask mux permission before shell exits\n  shell-event  Send shell metadata to mux\n", .{});
         } else {
@@ -265,8 +265,6 @@ pub fn main() !void {
             try runSesStatus(allocator);
         } else if (ses_list.happened) {
             try cli_cmds.runList(allocator, ses_list_details.*);
-        } else if (ses_info.happened) {
-            try cli_cmds.runInfo(allocator, ses_info_uuid.*, ses_info_creator.*, ses_info_last.*);
         }
     } else if (pod_cmd.happened) {
         if (pod_daemon.happened) {
@@ -319,6 +317,8 @@ pub fn main() !void {
                 mux_send_ctrl.*,
                 mux_send_text.*,
             );
+        } else if (mux_info.happened) {
+            try cli_cmds.runInfo(allocator, mux_info_uuid.*, mux_info_creator.*, mux_info_last.*);
         }
     } else if (shp_cmd.happened) {
         if (shp_prompt.happened) {
