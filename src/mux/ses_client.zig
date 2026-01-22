@@ -146,9 +146,24 @@ pub const SesClient = struct {
         var args_list: std.ArrayList([]const u8) = .empty;
         defer args_list.deinit(self.allocator);
 
-        try args_list.append(self.allocator, "hexe");
+        const exe_path = try std.fs.selfExePathAlloc(self.allocator);
+        defer self.allocator.free(exe_path);
+
+        try args_list.append(self.allocator, exe_path);
         try args_list.append(self.allocator, "ses");
         try args_list.append(self.allocator, "daemon");
+
+        if (std.posix.getenv("HEXE_INSTANCE")) |inst| {
+            if (inst.len > 0) {
+                try args_list.append(self.allocator, "--instance");
+                try args_list.append(self.allocator, inst);
+            }
+        }
+        if (std.posix.getenv("HEXE_TEST_ONLY")) |v| {
+            if (v.len > 0 and !std.mem.eql(u8, v, "0")) {
+                try args_list.append(self.allocator, "--test-only");
+            }
+        }
         if (self.debug) {
             try args_list.append(self.allocator, "--debug");
         }

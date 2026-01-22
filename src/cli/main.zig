@@ -8,7 +8,46 @@ const pod = @import("pod");
 const shp = @import("shp");
 const cli_cmds = @import("commands/com.zig");
 
+const c = @cImport({
+    @cInclude("stdlib.h");
+});
+
 const print = std.debug.print;
+
+fn setEnvVar(key: []const u8, value: []const u8) void {
+    if (key.len == 0 or value.len == 0) return;
+    const key_z = std.heap.c_allocator.dupeZ(u8, key) catch return;
+    defer std.heap.c_allocator.free(key_z);
+    const value_z = std.heap.c_allocator.dupeZ(u8, value) catch return;
+    defer std.heap.c_allocator.free(value_z);
+    _ = c.setenv(key_z.ptr, value_z.ptr, 1);
+}
+
+fn hasInstanceEnv() bool {
+    if (std.posix.getenv("HEXE_INSTANCE")) |v| {
+        return v.len > 0;
+    }
+    return false;
+}
+
+fn setInstanceFromCli(name: []const u8) void {
+    if (name.len == 0) return;
+    setEnvVar("HEXE_INSTANCE", name);
+}
+
+fn setTestOnlyEnv() void {
+    setEnvVar("HEXE_TEST_ONLY", "1");
+}
+
+fn setGeneratedTestInstance() void {
+    const uuid = ipc.generateUuid();
+    var buf: [16]u8 = undefined;
+    @memcpy(buf[0..5], "test-");
+    @memcpy(buf[5..13], uuid[0..8]);
+    setEnvVar("HEXE_INSTANCE", buf[0..13]);
+    setTestOnlyEnv();
+    print("test instance: {s}\n", .{buf[0..13]});
+}
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -34,11 +73,15 @@ pub fn main() !void {
     const ses_daemon_fg = try ses_daemon.flag("f", "foreground", null);
     const ses_daemon_dbg = try ses_daemon.flag("d", "debug", null);
     const ses_daemon_log = try ses_daemon.string("L", "logfile", null);
+    const ses_daemon_instance = try ses_daemon.string("I", "instance", null);
+    const ses_daemon_test_only = try ses_daemon.flag("T", "test-only", null);
 
     const ses_status = try ses_cmd.newCommand("status", "Show daemon info");
+    const ses_status_instance = try ses_status.string("I", "instance", null);
 
     const ses_list = try ses_cmd.newCommand("list", "List all sessions and panes");
     const ses_list_details = try ses_list.flag("d", "details", null);
+    const ses_list_instance = try ses_list.string("I", "instance", null);
 
     // POD subcommands (mostly for ses-internal use)
     const pod_daemon = try pod_cmd.newCommand("daemon", "Start a per-pane pod daemon");
@@ -50,17 +93,22 @@ pub fn main() !void {
     const pod_daemon_fg = try pod_daemon.flag("f", "foreground", null);
     const pod_daemon_dbg = try pod_daemon.flag("d", "debug", null);
     const pod_daemon_log = try pod_daemon.string("L", "logfile", null);
+    const pod_daemon_instance = try pod_daemon.string("I", "instance", null);
+    const pod_daemon_test_only = try pod_daemon.flag("T", "test-only", null);
 
     // MUX subcommands
     const mux_new = try mux_cmd.newCommand("new", "Create new multiplexer session");
     const mux_new_name = try mux_new.string("n", "name", null);
     const mux_new_dbg = try mux_new.flag("d", "debug", null);
     const mux_new_log = try mux_new.string("L", "logfile", null);
+    const mux_new_instance = try mux_new.string("I", "instance", null);
+    const mux_new_test_only = try mux_new.flag("T", "test-only", null);
 
     const mux_attach = try mux_cmd.newCommand("attach", "Attach to existing session");
     const mux_attach_name = try mux_attach.stringPositional(null);
     const mux_attach_dbg = try mux_attach.flag("d", "debug", null);
     const mux_attach_log = try mux_attach.string("L", "logfile", null);
+    const mux_attach_instance = try mux_attach.string("I", "instance", null);
 
     const mux_float = try mux_cmd.newCommand("float", "Spawn a transient float pane");
     const mux_float_uuid = try mux_float.string("u", "uuid", null);
@@ -71,6 +119,7 @@ pub fn main() !void {
     const mux_float_pass_env = try mux_float.flag("", "pass-env", null);
     const mux_float_extra_env = try mux_float.string("", "extra-env", null);
     const mux_float_isolated = try mux_float.flag("", "isolated", null);
+    const mux_float_instance = try mux_float.string("I", "instance", null);
 
     const mux_notify = try mux_cmd.newCommand("notify", "Send notification");
     const mux_notify_uuid = try mux_notify.string("u", "uuid", null);
@@ -78,6 +127,7 @@ pub fn main() !void {
     const mux_notify_last = try mux_notify.flag("l", "last", null);
     const mux_notify_broadcast = try mux_notify.flag("b", "broadcast", null);
     const mux_notify_msg = try mux_notify.stringPositional(null);
+    const mux_notify_instance = try mux_notify.string("I", "instance", null);
 
     const mux_send = try mux_cmd.newCommand("send", "Send keystrokes to pane");
     const mux_send_uuid = try mux_send.string("u", "uuid", null);
@@ -87,11 +137,13 @@ pub fn main() !void {
     const mux_send_enter = try mux_send.flag("e", "enter", null);
     const mux_send_ctrl = try mux_send.string("C", "ctrl", null);
     const mux_send_text = try mux_send.stringPositional(null);
+    const mux_send_instance = try mux_send.string("I", "instance", null);
 
     const mux_info = try mux_cmd.newCommand("info", "Show information about a pane");
     const mux_info_uuid = try mux_info.string("u", "uuid", null);
     const mux_info_creator = try mux_info.flag("c", "creator", null);
     const mux_info_last = try mux_info.flag("l", "last", null);
+    const mux_info_instance = try mux_info.string("I", "instance", null);
 
     const mux_focus = try mux_cmd.newCommand("focus", "Move focus to adjacent pane");
     const mux_focus_dir = try mux_focus.stringPositional(null);
@@ -193,29 +245,29 @@ pub fn main() !void {
                 );
             } else
             if (found_mux and found_send) {
-                print("Usage: hexe mux send [OPTIONS] [text]\n\nSend keystrokes to pane (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>  Target specific pane\n  -c, --creator      Send to pane that created current pane\n  -l, --last         Send to previously focused pane\n  -b, --broadcast    Broadcast to all attached panes\n  -e, --enter        Append Enter key after text\n  -C, --ctrl <char>  Send Ctrl+<char> (e.g., -C c for Ctrl+C)\n", .{});
+                print("Usage: hexe mux send [OPTIONS] [text]\n\nSend keystrokes to pane (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>        Target specific pane\n  -c, --creator            Send to pane that created current pane\n  -l, --last               Send to previously focused pane\n  -b, --broadcast          Broadcast to all attached panes\n  -e, --enter              Append Enter key after text\n  -C, --ctrl <char>        Send Ctrl+<char> (e.g., -C c for Ctrl+C)\n  -I, --instance <NAME>    Target a specific instance\n", .{});
             } else if (found_mux and found_notify) {
-                print("Usage: hexe mux notify [OPTIONS] <message>\n\nSend notification (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>  Target specific mux or pane\n  -c, --creator      Send to pane that created current pane\n  -l, --last         Send to previously focused pane\n  -b, --broadcast    Broadcast to all muxes\n", .{});
+                print("Usage: hexe mux notify [OPTIONS] <message>\n\nSend notification (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>        Target specific mux or pane\n  -c, --creator            Send to pane that created current pane\n  -l, --last               Send to previously focused pane\n  -b, --broadcast          Broadcast to all muxes\n  -I, --instance <NAME>    Target a specific instance\n", .{});
             } else if (found_mux and found_info) {
-                print("Usage: hexe mux info [OPTIONS]\n\nShow information about a pane\n\nOptions:\n  -u, --uuid <UUID>  Query specific pane by UUID (works from anywhere)\n  -c, --creator      Print only the creator pane UUID\n  -l, --last         Print only the last focused pane UUID\n\nWithout --uuid, queries current pane (requires running inside mux)\n", .{});
+                print("Usage: hexe mux info [OPTIONS]\n\nShow information about a pane\n\nOptions:\n  -u, --uuid <UUID>        Query specific pane by UUID (works from anywhere)\n  -c, --creator            Print only the creator pane UUID\n  -l, --last               Print only the last focused pane UUID\n  -I, --instance <NAME>    Target a specific instance\n\nWithout --uuid, queries current pane (requires running inside mux)\n", .{});
             } else if (found_ses and found_list) {
-            print("Usage: hexe ses list [OPTIONS]\n\nList all sessions and panes\n\nOptions:\n  -d, --details  Show extra details\n", .{});
+            print("Usage: hexe ses list [OPTIONS]\n\nList all sessions and panes\n\nOptions:\n  -d, --details           Show extra details\n  -I, --instance <NAME>   Target a specific instance\n", .{});
         } else if (found_ses and found_status) {
-            print("Usage: hexe ses status\n\nShow daemon status and socket path\n", .{});
+            print("Usage: hexe ses status [OPTIONS]\n\nShow daemon status and socket path\n\nOptions:\n  -I, --instance <NAME>   Target a specific instance\n", .{});
         } else if (found_shp and found_exit_intent) {
             print("Usage: hexe shp exit-intent\n\nAsk the current mux session whether the shell should be allowed to exit.\nIntended for shell keybindings (exit/Ctrl+D) to avoid last-pane death.\n\nExit codes: 0=allow, 1=deny\n", .{});
         } else if (found_shp and found_shell_event) {
             print("Usage: hexe shp shell-event [--cmd <TEXT>] [--status <N>] [--duration <MS>] [--cwd <PATH>] [--jobs <N>]\n\nSend shell command metadata to the current mux session.\nUsed by shell integration to power statusbar + `hexe mux info`.\n\nNotes:\n  - No-op outside a mux session\n  - If mux is unreachable, exits 0\n", .{});
         } else if (found_ses and found_daemon) {
-            print("Usage: hexe ses daemon [OPTIONS]\n\nStart the session daemon\n\nOptions:\n  -f, --foreground     Run in foreground (don't daemonize)\n  -d, --debug          Enable debug output\n  -L, --logfile <PATH> Log debug output to PATH\n", .{});
+            print("Usage: hexe ses daemon [OPTIONS]\n\nStart the session daemon\n\nOptions:\n  -f, --foreground        Run in foreground (don't daemonize)\n  -d, --debug             Enable debug output\n  -L, --logfile <PATH>    Log debug output to PATH\n  -I, --instance <NAME>   Run under instance namespace\n  -T, --test-only         Mark as test-only (requires instance)\n", .{});
         } else if (found_pod and found_daemon) {
-            print("Usage: hexe pod daemon [OPTIONS]\n\nStart a per-pane pod daemon (normally launched by ses)\n\nOptions:\n  -u, --uuid <UUID>     Pane UUID (32 hex chars)\n  -n, --name <NAME>     Human-friendly pane name (for `ps`)\n  -s, --socket <PATH>   Pod unix socket path\n  -S, --shell <CMD>     Shell/command to run\n  -C, --cwd <DIR>       Working directory\n  -f, --foreground      Run in foreground (prints pod_ready JSON)\n  -d, --debug           Enable debug output\n  -L, --logfile <PATH>  Log debug output to PATH\n", .{});
+            print("Usage: hexe pod daemon [OPTIONS]\n\nStart a per-pane pod daemon (normally launched by ses)\n\nOptions:\n  -u, --uuid <UUID>        Pane UUID (32 hex chars)\n  -n, --name <NAME>        Human-friendly pane name (for `ps`)\n  -s, --socket <PATH>      Pod unix socket path\n  -S, --shell <CMD>        Shell/command to run\n  -C, --cwd <DIR>          Working directory\n  -f, --foreground         Run in foreground (prints pod_ready JSON)\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n  -I, --instance <NAME>    Run under instance namespace\n  -T, --test-only          Mark as test-only (requires instance)\n", .{});
         } else if (found_mux and found_new) {
-            print("Usage: hexe mux new [OPTIONS]\n\nCreate new multiplexer session\n\nOptions:\n  -n, --name <NAME>     Session name\n  -d, --debug           Enable debug output\n  -L, --logfile <PATH>  Log debug output to PATH\n", .{});
+            print("Usage: hexe mux new [OPTIONS]\n\nCreate new multiplexer session\n\nOptions:\n  -n, --name <NAME>        Session name\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n  -I, --instance <NAME>    Use instance namespace\n  -T, --test-only          Create an isolated test instance\n", .{});
         } else if (found_mux and found_attach) {
-            print("Usage: hexe mux attach [OPTIONS] <name>\n\nAttach to existing session by name or UUID prefix\n\nOptions:\n  -d, --debug           Enable debug output\n  -L, --logfile <PATH>  Log debug output to PATH\n", .{});
+            print("Usage: hexe mux attach [OPTIONS] <name>\n\nAttach to existing session by name or UUID prefix\n\nOptions:\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n  -I, --instance <NAME>    Target a specific instance\n", .{});
         } else if (found_mux and found_float) {
-            print("Usage: hexe mux float [OPTIONS]\n\nSpawn a transient float pane (blocking)\n\nOptions:\n  -u, --uuid <UUID>            Target mux UUID (optional if inside mux)\n  -c, --command <COMMAND>      Command to run in the float\n      --title <TEXT>           Border title for the float\n      --cwd <PATH>             Working directory for the float\n      --result-file <PATH>     Read selection from PATH after exit\n      --pass-env               Send current environment to the pod\n      --extra-env <KEY=VAL,..>  Extra environment variables (comma-separated)\n      --isolated               Run command with filesystem/cgroup isolation\n", .{});
+            print("Usage: hexe mux float [OPTIONS]\n\nSpawn a transient float pane (blocking)\n\nOptions:\n  -u, --uuid <UUID>             Target mux UUID (optional if inside mux)\n  -c, --command <COMMAND>       Command to run in the float\n      --title <TEXT>            Border title for the float\n      --cwd <PATH>              Working directory for the float\n      --result-file <PATH>      Read selection from PATH after exit\n      --pass-env                Send current environment to the pod\n      --extra-env <KEY=VAL,..>   Extra environment variables (comma-separated)\n      --isolated                Run command with filesystem/cgroup isolation\n  -I, --instance <NAME>         Target a specific instance\n", .{});
         } else if (found_shp and found_prompt) {
             print("Usage: hexe shp prompt [OPTIONS]\n\nRender shell prompt\n\nOptions:\n  -s, --status <N>    Exit status of last command\n  -d, --duration <N>  Duration of last command in ms\n  -r, --right         Render right prompt\n  -S, --shell <SHELL> Shell type (bash, zsh, fish)\n  -j, --jobs <N>      Number of background jobs\n", .{});
         } else if (found_shp and found_init) {
@@ -271,14 +323,32 @@ pub fn main() !void {
     // Route to handlers
     if (ses_cmd.happened) {
         if (ses_daemon.happened) {
+            if (ses_daemon_instance.*.len > 0) setInstanceFromCli(ses_daemon_instance.*);
+            if (ses_daemon_test_only.*) {
+                setTestOnlyEnv();
+                if (!hasInstanceEnv()) {
+                    print("Error: --test-only requires --instance or HEXE_INSTANCE\n", .{});
+                    return;
+                }
+            }
             try runSesDaemon(ses_daemon_fg.*, ses_daemon_dbg.*, ses_daemon_log.*);
         } else if (ses_status.happened) {
+            if (ses_status_instance.*.len > 0) setInstanceFromCli(ses_status_instance.*);
             try runSesStatus(allocator);
         } else if (ses_list.happened) {
+            if (ses_list_instance.*.len > 0) setInstanceFromCli(ses_list_instance.*);
             try cli_cmds.runList(allocator, ses_list_details.*);
         }
     } else if (pod_cmd.happened) {
         if (pod_daemon.happened) {
+            if (pod_daemon_instance.*.len > 0) setInstanceFromCli(pod_daemon_instance.*);
+            if (pod_daemon_test_only.*) {
+                setTestOnlyEnv();
+                if (!hasInstanceEnv()) {
+                    print("Error: --test-only requires --instance or HEXE_INSTANCE\n", .{});
+                    return;
+                }
+            }
             try runPodDaemon(
                 pod_daemon_fg.*,
                 pod_daemon_uuid.*,
@@ -293,10 +363,19 @@ pub fn main() !void {
         return;
     } else if (mux_cmd.happened) {
         if (mux_new.happened) {
+            if (mux_new_instance.*.len > 0) {
+                setInstanceFromCli(mux_new_instance.*);
+                if (mux_new_test_only.*) setTestOnlyEnv();
+            } else if (mux_new_test_only.*) {
+                // Always isolate test sessions, even if HEXE_INSTANCE is set in the environment.
+                setGeneratedTestInstance();
+            }
             try runMuxNew(mux_new_name.*, mux_new_dbg.*, mux_new_log.*);
         } else if (mux_attach.happened) {
+            if (mux_attach_instance.*.len > 0) setInstanceFromCli(mux_attach_instance.*);
             try runMuxAttach(mux_attach_name.*, mux_attach_dbg.*, mux_attach_log.*);
         } else if (mux_float.happened) {
+            if (mux_float_instance.*.len > 0) setInstanceFromCli(mux_float_instance.*);
             try runMuxFloat(
                 allocator,
                 mux_float_uuid.*,
@@ -309,6 +388,7 @@ pub fn main() !void {
                 mux_float_isolated.*,
             );
         } else if (mux_notify.happened) {
+            if (mux_notify_instance.*.len > 0) setInstanceFromCli(mux_notify_instance.*);
             try cli_cmds.runNotify(
                 allocator,
                 mux_notify_uuid.*,
@@ -318,6 +398,7 @@ pub fn main() !void {
                 mux_notify_msg.*,
             );
         } else if (mux_send.happened) {
+            if (mux_send_instance.*.len > 0) setInstanceFromCli(mux_send_instance.*);
             try cli_cmds.runSend(
                 allocator,
                 mux_send_uuid.*,
@@ -331,6 +412,7 @@ pub fn main() !void {
         } else if (mux_focus.happened) {
             try cli_cmds.runFocusMove(allocator, mux_focus_dir.*);
         } else if (mux_info.happened) {
+            if (mux_info_instance.*.len > 0) setInstanceFromCli(mux_info_instance.*);
             try cli_cmds.runInfo(allocator, mux_info_uuid.*, mux_info_creator.*, mux_info_last.*);
         }
     } else if (shp_cmd.happened) {

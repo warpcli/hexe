@@ -704,6 +704,21 @@ pub const SesState = struct {
         try args_list.append(self.allocator, exe_path);
         try args_list.append(self.allocator, "pod");
         try args_list.append(self.allocator, "daemon");
+
+        // Propagate instance/test-only flags for debugging/clarity.
+        // Runtime behavior is primarily controlled by environment (HEXE_INSTANCE).
+        if (posix.getenv("HEXE_INSTANCE")) |inst| {
+            if (inst.len > 0) {
+                try args_list.append(self.allocator, "--instance");
+                try args_list.append(self.allocator, inst);
+            }
+        }
+        if (posix.getenv("HEXE_TEST_ONLY")) |v| {
+            if (v.len > 0 and !std.mem.eql(u8, v, "0")) {
+                try args_list.append(self.allocator, "--test-only");
+            }
+        }
+
         try args_list.append(self.allocator, "--uuid");
         try args_list.append(self.allocator, uuid[0..]);
         try args_list.append(self.allocator, "--name");
@@ -733,7 +748,11 @@ pub const SesState = struct {
         var env_map_storage: ?std.process.EnvMap = null;
         defer if (env_map_storage) |*map| map.deinit();
 
-        if (env != null or extra_env != null) {
+        const instance_env = posix.getenv("HEXE_INSTANCE");
+        const test_only_env = posix.getenv("HEXE_TEST_ONLY");
+        const needs_runtime_env = (instance_env != null and instance_env.?.len > 0) or (test_only_env != null and test_only_env.?.len > 0);
+
+        if (env != null or extra_env != null or needs_runtime_env) {
             var env_map = if (env == null)
                 try std.process.getEnvMap(self.allocator)
             else
@@ -753,6 +772,15 @@ pub const SesState = struct {
                     if (sep == 0 or sep + 1 > entry.len) continue;
                     try env_map.put(entry[0..sep], entry[sep + 1 ..]);
                 }
+            }
+
+            // Force instance/test-only values from this ses process.
+            // This prevents user-provided env overrides from escaping the instance namespace.
+            if (instance_env) |inst| {
+                if (inst.len > 0) try env_map.put("HEXE_INSTANCE", inst);
+            }
+            if (test_only_env) |v| {
+                if (v.len > 0) try env_map.put("HEXE_TEST_ONLY", v);
             }
 
             env_map_storage = env_map;

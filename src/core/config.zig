@@ -890,7 +890,9 @@ fn parseFloatStyle(runtime: *LuaRuntime, allocator: std.mem.Allocator) FloatStyl
         if (runtime.getString(-1, "position")) |pos_str| {
             result.position = std.meta.stringToEnum(FloatStylePosition, pos_str);
         }
-        result.module = parseStatusModule(runtime, allocator);
+        // For float titles we allow omitting `name` and default to "title".
+        // The module outputs define styling for the title text.
+        result.module = parseStatusModuleWithDefaultName(runtime, allocator, "title");
         runtime.pop();
     }
 
@@ -900,6 +902,25 @@ fn parseFloatStyle(runtime: *LuaRuntime, allocator: std.mem.Allocator) FloatStyl
     }
 
     return result;
+}
+
+fn parseStatusModuleWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocator, default_name: []const u8) ?StatusModule {
+    const name = runtime.getStringAlloc(-1, "name") orelse allocator.dupe(u8, default_name) catch return null;
+
+    return StatusModule{
+        .name = name,
+        .priority = lua_runtime.parseConstrainedInt(runtime, u8, -1, "priority", 1, 255, 50),
+        .outputs = parseOutputs(runtime, allocator),
+        .command = runtime.getStringAlloc(-1, "command"),
+        .when = runtime.getStringAlloc(-1, "when"),
+        .active_style = runtime.getStringAlloc(-1, "active_style") orelse "bg:1 fg:0",
+        .inactive_style = runtime.getStringAlloc(-1, "inactive_style") orelse "bg:237 fg:250",
+        .separator = runtime.getStringAlloc(-1, "separator") orelse " | ",
+        .separator_style = runtime.getStringAlloc(-1, "separator_style") orelse "fg:7",
+        .tab_title = runtime.getStringAlloc(-1, "tab_title") orelse "basename",
+        .left_arrow = runtime.getStringAlloc(-1, "left_arrow") orelse "",
+        .right_arrow = runtime.getStringAlloc(-1, "right_arrow") orelse "",
+    };
 }
 
 fn parseSplits(runtime: *LuaRuntime, config: *Config) void {

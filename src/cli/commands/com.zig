@@ -41,6 +41,17 @@ fn printTreeNode(prefix: []const u8, symbol: []const u8, type_color: []const u8,
 }
 
 pub fn runList(allocator: std.mem.Allocator, details: bool) !void {
+    const inst = std.posix.getenv("HEXE_INSTANCE");
+    if (inst) |name| {
+        if (name.len > 0) {
+            print("Instance: {s}\n", .{name});
+        } else {
+            print("Instance: default\n", .{});
+        }
+    } else {
+        print("Instance: default\n", .{});
+    }
+
     const socket_path = try ipc.getSesSocketPath(allocator);
     defer allocator.free(socket_path);
 

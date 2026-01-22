@@ -359,10 +359,36 @@ pub fn generateTabName() []const u8 {
     return constellation_names[index];
 }
 
+fn sanitizeInstanceName(out: []u8, raw: []const u8) []const u8 {
+    // Keep instance names filesystem- and socket-friendly.
+    // NOTE: Unix domain socket paths have tight limits; keep this short.
+    const max_len: usize = @min(out.len, 24);
+    var n: usize = 0;
+    for (raw) |ch| {
+        if (n >= max_len) break;
+        const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_' or ch == '-' or ch == '.';
+        out[n] = if (ok) ch else '_';
+        n += 1;
+    }
+    return out[0..n];
+}
+
 /// Get the socket directory path
 pub fn getSocketDir(allocator: std.mem.Allocator) ![]const u8 {
     // Use XDG_RUNTIME_DIR if available, otherwise /tmp
     const runtime_dir = std.posix.getenv("XDG_RUNTIME_DIR") orelse "/tmp";
+
+    const instance_raw = std.posix.getenv("HEXE_INSTANCE");
+    if (instance_raw) |inst| {
+        if (inst.len > 0) {
+            var buf: [32]u8 = undefined;
+            const sanitized = sanitizeInstanceName(buf[0..], inst);
+            if (sanitized.len > 0) {
+                return std.fmt.allocPrint(allocator, "{s}/hexe/{s}", .{ runtime_dir, sanitized });
+            }
+        }
+    }
+
     return std.fmt.allocPrint(allocator, "{s}/hexe", .{runtime_dir});
 }
 
@@ -405,6 +431,20 @@ pub fn getSesStatePath(allocator: std.mem.Allocator) ![]const u8 {
         break :blk try std.fmt.allocPrint(allocator, "{s}/.local/state", .{home});
     };
     defer if (state_home_env == null) allocator.free(state_home);
+
+    const instance_raw = posix.getenv("HEXE_INSTANCE");
+    if (instance_raw) |inst| {
+        if (inst.len > 0) {
+            var buf: [32]u8 = undefined;
+            const sanitized = sanitizeInstanceName(buf[0..], inst);
+            if (sanitized.len > 0) {
+                const dir = try std.fmt.allocPrint(allocator, "{s}/hexe/{s}", .{ state_home, sanitized });
+                defer allocator.free(dir);
+                std.fs.cwd().makePath(dir) catch {};
+                return std.fmt.allocPrint(allocator, "{s}/hexe/{s}/ses_state.json", .{ state_home, sanitized });
+            }
+        }
+    }
 
     const dir = try std.fmt.allocPrint(allocator, "{s}/hexe", .{state_home});
     defer allocator.free(dir);
