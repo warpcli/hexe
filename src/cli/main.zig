@@ -93,6 +93,9 @@ pub fn main() !void {
     const mux_info_creator = try mux_info.flag("c", "creator", null);
     const mux_info_last = try mux_info.flag("l", "last", null);
 
+    const mux_focus = try mux_cmd.newCommand("focus", "Move focus to adjacent pane");
+    const mux_focus_dir = try mux_focus.stringPositional(null);
+
     // POP subcommands
     const shp_prompt = try shp_cmd.newCommand("prompt", "Render shell prompt");
     const shp_prompt_status = try shp_prompt.int("s", "status", null);
@@ -151,6 +154,7 @@ pub fn main() !void {
     var found_confirm = false;
     var found_choose = false;
     var found_send = false;
+    var found_focus = false;
     var found_exit_intent = false;
     var found_shell_event = false;
 
@@ -175,19 +179,26 @@ pub fn main() !void {
         if (std.mem.eql(u8, arg, "confirm")) found_confirm = true;
         if (std.mem.eql(u8, arg, "choose")) found_choose = true;
         if (std.mem.eql(u8, arg, "send")) found_send = true;
+        if (std.mem.eql(u8, arg, "focus")) found_focus = true;
         if (std.mem.eql(u8, arg, "exit-intent")) found_exit_intent = true;
         if (std.mem.eql(u8, arg, "shell-event")) found_shell_event = true;
     }
 
-    if (has_help) {
-        // Show help for the most specific command found (manual strings to avoid argonaut crash)
-        if (found_mux and found_send) {
-            print("Usage: hexe mux send [OPTIONS] [text]\n\nSend keystrokes to pane (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>  Target specific pane\n  -c, --creator      Send to pane that created current pane\n  -l, --last         Send to previously focused pane\n  -b, --broadcast    Broadcast to all attached panes\n  -e, --enter        Append Enter key after text\n  -C, --ctrl <char>  Send Ctrl+<char> (e.g., -C c for Ctrl+C)\n", .{});
-        } else if (found_mux and found_notify) {
-            print("Usage: hexe mux notify [OPTIONS] <message>\n\nSend notification (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>  Target specific mux or pane\n  -c, --creator      Send to pane that created current pane\n  -l, --last         Send to previously focused pane\n  -b, --broadcast    Broadcast to all muxes\n", .{});
-        } else if (found_mux and found_info) {
-            print("Usage: hexe mux info [OPTIONS]\n\nShow information about a pane\n\nOptions:\n  -u, --uuid <UUID>  Query specific pane by UUID (works from anywhere)\n  -c, --creator      Print only the creator pane UUID\n  -l, --last         Print only the last focused pane UUID\n\nWithout --uuid, queries current pane (requires running inside mux)\n", .{});
-        } else if (found_ses and found_list) {
+        if (has_help) {
+            // Show help for the most specific command found (manual strings to avoid argonaut crash)
+            if (found_mux and found_focus) {
+                print(
+                    "Usage: hexe mux focus <dir>\n\nMove focus to adjacent pane in the mux. Intended for editor integration (nvim).\n\nDirs: left, right, up, down\n\nRequires running inside mux (HEXE_MUX_SOCKET)\n",
+                    .{},
+                );
+            } else
+            if (found_mux and found_send) {
+                print("Usage: hexe mux send [OPTIONS] [text]\n\nSend keystrokes to pane (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>  Target specific pane\n  -c, --creator      Send to pane that created current pane\n  -l, --last         Send to previously focused pane\n  -b, --broadcast    Broadcast to all attached panes\n  -e, --enter        Append Enter key after text\n  -C, --ctrl <char>  Send Ctrl+<char> (e.g., -C c for Ctrl+C)\n", .{});
+            } else if (found_mux and found_notify) {
+                print("Usage: hexe mux notify [OPTIONS] <message>\n\nSend notification (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>  Target specific mux or pane\n  -c, --creator      Send to pane that created current pane\n  -l, --last         Send to previously focused pane\n  -b, --broadcast    Broadcast to all muxes\n", .{});
+            } else if (found_mux and found_info) {
+                print("Usage: hexe mux info [OPTIONS]\n\nShow information about a pane\n\nOptions:\n  -u, --uuid <UUID>  Query specific pane by UUID (works from anywhere)\n  -c, --creator      Print only the creator pane UUID\n  -l, --last         Print only the last focused pane UUID\n\nWithout --uuid, queries current pane (requires running inside mux)\n", .{});
+            } else if (found_ses and found_list) {
             print("Usage: hexe ses list [OPTIONS]\n\nList all sessions and panes\n\nOptions:\n  -d, --details  Show extra details\n", .{});
         } else if (found_ses and found_status) {
             print("Usage: hexe ses status\n\nShow daemon status and socket path\n", .{});
@@ -317,6 +328,8 @@ pub fn main() !void {
                 mux_send_ctrl.*,
                 mux_send_text.*,
             );
+        } else if (mux_focus.happened) {
+            try cli_cmds.runFocusMove(allocator, mux_focus_dir.*);
         } else if (mux_info.happened) {
             try cli_cmds.runInfo(allocator, mux_info_uuid.*, mux_info_creator.*, mux_info_last.*);
         }

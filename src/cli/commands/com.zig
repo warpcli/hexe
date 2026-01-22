@@ -745,6 +745,44 @@ pub fn runSend(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, la
     }
 }
 
+/// Ask the current mux to move focus in the given direction.
+///
+/// Intended for editor integration: Neovim tries wincmd first, and if it
+/// cannot move, it calls this.
+pub fn runFocusMove(allocator: std.mem.Allocator, dir: []const u8) !void {
+    _ = allocator;
+
+    const mux_socket = std.posix.getenv("HEXE_MUX_SOCKET") orelse {
+        print("Error: not inside a hexe mux session (HEXE_MUX_SOCKET not set)\n", .{});
+        return;
+    };
+
+    const dir_norm = std.mem.trim(u8, dir, " \t\n\r");
+    if (!(std.mem.eql(u8, dir_norm, "left") or std.mem.eql(u8, dir_norm, "right") or std.mem.eql(u8, dir_norm, "up") or std.mem.eql(u8, dir_norm, "down"))) {
+        print("Error: invalid dir (use left/right/up/down)\n", .{});
+        return;
+    }
+
+    var client = ipc.Client.connect(mux_socket) catch |err| {
+        if (err == error.ConnectionRefused or err == error.FileNotFound) {
+            print("mux is not running\n", .{});
+            return;
+        }
+        return err;
+    };
+    defer client.close();
+
+    var conn = client.toConnection();
+
+    var buf: [128]u8 = undefined;
+    const msg = std.fmt.bufPrint(&buf, "{{\"type\":\"focus_move\",\"dir\":\"{s}\"}}", .{dir_norm}) catch return;
+    conn.sendLine(msg) catch return;
+
+    // Read and ignore response (best-effort).
+    var resp_buf: [256]u8 = undefined;
+    _ = conn.recvLine(&resp_buf) catch null;
+}
+
 /// Ask mux whether the current shell should be allowed to exit.
 /// Intended to be called from shell keybindings (exit/Ctrl+D) so mux can
 /// present a confirm dialog for the last split.

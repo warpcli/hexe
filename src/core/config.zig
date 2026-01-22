@@ -255,6 +255,28 @@ pub const Config = struct {
 
     pub const BindContext = struct {
         focus: FocusContext = .any,
+        program: ?ProgramFilter = null,
+    };
+
+    /// Optional per-bind filter to include/exclude the bind based on the
+    /// program running in the focused pane.
+    ///
+    /// Matching uses the "program name" derived from the pane shell metadata
+    /// (typically argv0 / basename, e.g. "nvim", "vim", "fzf").
+    pub const ProgramFilter = struct {
+        include: ?[][]u8 = null,
+        exclude: ?[][]u8 = null,
+
+        pub fn deinit(self: ProgramFilter, allocator: std.mem.Allocator) void {
+            if (self.include) |items| {
+                for (items) |s| allocator.free(s);
+                allocator.free(items);
+            }
+            if (self.exclude) |items| {
+                for (items) |s| allocator.free(s);
+                allocator.free(items);
+            }
+        }
     };
 
     pub const Bind = struct {
@@ -375,6 +397,11 @@ pub const Config = struct {
                 alloc.free(msg);
             }
             if (self.input.binds.len > 0) {
+                for (self.input.binds) |b| {
+                    if (b.context.program) |pf| {
+                        pf.deinit(alloc);
+                    }
+                }
                 alloc.free(self.input.binds);
             }
             for (self.floats) |f| {
@@ -461,7 +488,7 @@ fn parseBinds(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const Config
     const len = runtime.getArrayLen(-1);
     for (1..len + 1) |i| {
         if (runtime.pushArrayElement(-1, i)) {
-            if (parseBind(runtime)) |bind| {
+            if (parseBind(runtime, allocator)) |bind| {
                 list.append(allocator, bind) catch {};
             }
             runtime.pop();
@@ -471,7 +498,7 @@ fn parseBinds(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const Config
     return list.toOwnedSlice(allocator) catch &[_]Config.Bind{};
 }
 
-fn parseBind(runtime: *LuaRuntime) ?Config.Bind {
+fn parseBind(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?Config.Bind {
     // Parse key (required)
     const key_str = runtime.getString(-1, "key") orelse return null;
     const key: Config.BindKey = blk: {
@@ -528,6 +555,21 @@ fn parseBind(runtime: *LuaRuntime) ?Config.Bind {
         if (runtime.getString(-1, "focus")) |f| {
             context.focus = std.meta.stringToEnum(Config.FocusContext, f) orelse .any;
         }
+
+        // Optional program include/exclude filter
+        if (runtime.pushTable(-1, "program")) {
+            var pf: Config.ProgramFilter = .{};
+            pf.include = parseStringList(runtime, allocator, "include");
+            pf.exclude = parseStringList(runtime, allocator, "exclude");
+
+            if (pf.include != null or pf.exclude != null) {
+                context.program = pf;
+            } else {
+                pf.deinit(allocator);
+            }
+            runtime.pop();
+        }
+
         runtime.pop();
     }
 
@@ -540,6 +582,39 @@ fn parseBind(runtime: *LuaRuntime) ?Config.Bind {
         .hold_ms = runtime.getInt(i64, -1, "hold_ms"),
         .double_tap_ms = runtime.getInt(i64, -1, "double_tap_ms"),
     };
+}
+
+fn parseStringList(runtime: *LuaRuntime, allocator: std.mem.Allocator, key: [:0]const u8) ?[][]u8 {
+    // Accept either: key = {"a","b"} or key = "a"
+    if (runtime.pushTable(-1, key)) {
+        defer runtime.pop();
+        var out = std.ArrayList([]u8).empty;
+        const len = runtime.getArrayLen(-1);
+        for (1..len + 1) |i| {
+            if (runtime.pushArrayElement(-1, i)) {
+                if (runtime.toStringAt(-1)) |s| {
+                    const dup = allocator.dupe(u8, s) catch null;
+                    if (dup) |d| {
+                        out.append(allocator, d) catch allocator.free(d);
+                    }
+                }
+                runtime.pop();
+            }
+        }
+        return out.toOwnedSlice(allocator) catch null;
+    }
+
+    if (runtime.getString(-1, key)) |s| {
+        const one = allocator.dupe(u8, s) catch return null;
+        const slice = allocator.alloc([]u8, 1) catch {
+            allocator.free(one);
+            return null;
+        };
+        slice[0] = one;
+        return slice;
+    }
+
+    return null;
 }
 
 fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction {

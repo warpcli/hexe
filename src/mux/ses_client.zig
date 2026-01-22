@@ -338,6 +338,11 @@ pub const SesClient = struct {
         focused_from: ?[32]u8,
     };
 
+    pub const PaneProcessInfo = struct {
+        name: ?[]u8 = null,
+        pid: ?i32 = null,
+    };
+
     /// Get auxiliary pane info (created_from, focused_from) from ses
     pub fn getPaneAux(self: *SesClient, uuid: [32]u8) !PaneAuxInfo {
         const conn = &(self.conn orelse return error.NotConnected);
@@ -386,6 +391,58 @@ pub const SesClient = struct {
         }
 
         return info;
+    }
+
+    /// Best-effort foreground process info for a pane.
+    ///
+    /// Uses `pane_info` and prefers `active_process`/`active_pid` when present.
+    /// Returns owned strings that the caller must free.
+    pub fn getPaneProcess(self: *SesClient, uuid: [32]u8) ?PaneProcessInfo {
+        const conn = &(self.conn orelse return null);
+
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{{\"type\":\"pane_info\",\"uuid\":\"{s}\"}}", .{uuid}) catch return null;
+        conn.sendLine(msg) catch return null;
+
+        var resp_buf: [4096]u8 = undefined;
+        const line = conn.recvLine(&resp_buf) catch return null;
+        if (line == null) return null;
+
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line.?, .{}) catch return null;
+        defer parsed.deinit();
+
+        const root = parsed.value.object;
+        if (root.get("type")) |t| {
+            if (std.mem.eql(u8, t.string, "error")) return null;
+        }
+
+        var out: PaneProcessInfo = .{};
+
+        // Prefer active_process/active_pid if present.
+        if (root.get("active_process")) |v| {
+            if (v == .string and v.string.len > 0) {
+                out.name = self.allocator.dupe(u8, v.string) catch null;
+            }
+        }
+        if (root.get("active_pid")) |v| {
+            if (v == .integer) out.pid = @intCast(v.integer);
+        }
+
+        // Fall back to fg_process/fg_pid.
+        if (out.name == null) {
+            if (root.get("fg_process")) |v| {
+                if (v == .string and v.string.len > 0) {
+                    out.name = self.allocator.dupe(u8, v.string) catch null;
+                }
+            }
+        }
+        if (out.pid == null) {
+            if (root.get("fg_pid")) |v| {
+                if (v == .integer) out.pid = @intCast(v.integer);
+            }
+        }
+
+        return out;
     }
 
     /// Get current working directory from /proc/<pid>/cwd via ses

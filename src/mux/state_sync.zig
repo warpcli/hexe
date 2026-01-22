@@ -275,6 +275,20 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
 
     _ = self.refreshPaneCwd(p);
 
+    // Best-effort process detection.
+    // - local PTY panes: query directly
+    // - pod panes: query from ses (which can inspect /proc)
+    const fg_proc_local = p.getFgProcess();
+    const fg_pid_local: ?i32 = if (p.getFgPid()) |pid| @intCast(pid) else null;
+    if (fg_proc_local) |proc_name| {
+        self.setPaneProc(p.uuid, proc_name, fg_pid_local);
+    } else if (p.backend == .pod) {
+        if (self.ses_client.getPaneProcess(p.uuid)) |pi| {
+            defer if (pi.name) |n| self.allocator.free(n);
+            self.setPaneProc(p.uuid, pi.name, pi.pid);
+        }
+    }
+
     const pane_type: SesClient.PaneType = if (p.floating) .float else .split;
     const cursor = p.getCursorPos();
     const cursor_style = p.vt.getCursorStyle();
@@ -295,8 +309,8 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
         alt_screen,
         .{ .cols = p.width, .rows = p.height },
         p.getRealCwd(),
-        null,
-        null,
+        fg_proc_local,
+        if (p.getFgPid()) |pid| pid else null,
         layout_path,
     ) catch {};
 }

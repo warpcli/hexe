@@ -7,6 +7,8 @@ const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 
 const actions = @import("loop_actions.zig");
+const layout_mod = @import("layout.zig");
+const focus_move = @import("focus_move.zig");
 
 pub fn handleSesMessage(state: *State, buffer: []u8) void {
     const conn = &(state.ses_client.conn orelse return);
@@ -310,6 +312,29 @@ pub fn handleIpcConnection(state: *State, buffer: []u8) void {
             );
             state.needs_render = true;
         }
+    } else if (std.mem.eql(u8, msg_type, "focus_move")) {
+        const dir_str = if (root.get("dir")) |v|
+            if (v == .string) v.string else ""
+        else
+            "";
+        const dir: ?layout_mod.Layout.Direction = if (std.mem.eql(u8, dir_str, "left"))
+            .left
+        else if (std.mem.eql(u8, dir_str, "right"))
+            .right
+        else if (std.mem.eql(u8, dir_str, "up"))
+            .up
+        else if (std.mem.eql(u8, dir_str, "down"))
+            .down
+        else
+            null;
+
+        if (dir == null) {
+            conn.sendLine("{\"type\":\"error\",\"message\":\"invalid_dir\"}") catch {};
+            return;
+        }
+
+        _ = focus_move.perform(state, dir.?);
+        conn.sendLine("{\"type\":\"ok\"}") catch {};
     } else if (std.mem.eql(u8, msg_type, "float")) {
         const command_val = root.get("command") orelse {
             conn.sendLine("{\"type\":\"error\",\"message\":\"missing_command\"}") catch {};

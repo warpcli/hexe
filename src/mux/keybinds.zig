@@ -9,13 +9,14 @@ const Pane = @import("pane.zig").Pane;
 const input = @import("input.zig");
 const loop_ipc = @import("loop_ipc.zig");
 const actions = @import("loop_actions.zig");
-const focus_nav = @import("focus_nav.zig");
+const focus_move = @import("focus_move.zig");
 
 pub const BindWhen = core.Config.BindWhen;
 pub const BindKey = core.Config.BindKey;
 pub const BindKeyKind = core.Config.BindKeyKind;
 pub const BindAction = core.Config.BindAction;
 pub const FocusContext = core.Config.FocusContext;
+const ProgramFilter = core.Config.ProgramFilter;
 
 
 pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
@@ -59,6 +60,73 @@ fn currentFocusContext(state: *State) FocusContext {
     return if (state.active_floating != null) .float else .split;
 }
 
+fn extractProgramName(cmd: []const u8) ?[]const u8 {
+    const trimmed = std.mem.trimLeft(u8, cmd, " \t\n\r");
+    if (trimmed.len == 0) return null;
+    const end = std.mem.indexOfAny(u8, trimmed, " \t\n\r") orelse trimmed.len;
+    const argv0 = trimmed[0..end];
+    if (argv0.len == 0) return null;
+    const base_idx = std.mem.lastIndexOfScalar(u8, argv0, '/') orelse return argv0;
+    if (base_idx + 1 >= argv0.len) return null;
+    return argv0[base_idx + 1 ..];
+}
+
+fn currentProgramName(state: *State) ?[]const u8 {
+    // Prefer actual foreground process when available.
+    const pane: ?*Pane = if (state.active_floating) |idx| blk: {
+        if (idx < state.floats.items.len) break :blk state.floats.items[idx];
+        break :blk @as(?*Pane, null);
+    } else state.currentLayout().getFocusedPane();
+
+    if (pane) |p| {
+        if (p.getFgProcess()) |proc_name| {
+            return proc_name;
+        }
+    }
+
+    const uuid = state.getCurrentFocusedUuid() orelse return null;
+    if (state.getPaneProc(uuid)) |pi| {
+        if (pi.name) |n| return n;
+    }
+
+    // Fallback: shell integration "last command".
+    if (state.getPaneShell(uuid)) |info| {
+        const cmd = info.cmd orelse return null;
+        return extractProgramName(cmd);
+    }
+    return null;
+}
+
+fn matchesProgramFilter(state: *State, filter: ?ProgramFilter) bool {
+    if (filter == null) return true;
+    const f = filter.?;
+    const prog = currentProgramName(state);
+
+    if (f.include) |items| {
+        if (prog == null) return false;
+        var ok = false;
+        for (items) |name| {
+            if (std.mem.eql(u8, name, prog.?)) {
+                ok = true;
+                break;
+            }
+        }
+        if (!ok) return false;
+    }
+
+    if (f.exclude) |items| {
+        if (prog) |p| {
+            for (items) |name| {
+                if (std.mem.eql(u8, name, p)) {
+                    return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
 fn keyEq(a: BindKey, b: BindKey) bool {
     if (@as(BindKeyKind, a) != @as(BindKeyKind, b)) return false;
     if (@as(BindKeyKind, a) == .char) return a.char == b.char;
@@ -76,6 +144,7 @@ fn findBestBind(state: *State, mods: u8, key: BindKey, when: BindWhen, allow_onl
         if (b.mods != mods) continue;
         if (!keyEq(b.key, key)) continue;
         if (b.context.focus != .any and b.context.focus != focus_ctx) continue;
+        if (!matchesProgramFilter(state, b.context.program)) continue;
 
         if (allow_only_tabs) {
             if (b.action != .tab_next and b.action != .tab_prev) continue;
@@ -102,6 +171,7 @@ fn hasBind(state: *State, mods: u8, key: BindKey, when: BindWhen, focus_ctx: Foc
         if (b.mods != mods) continue;
         if (!keyEq(b.key, key)) continue;
         if (b.context.focus != .any and b.context.focus != focus_ctx) continue;
+        if (!matchesProgramFilter(state, b.context.program)) continue;
         return true;
     }
     return false;
@@ -706,33 +776,8 @@ fn dispatchAction(state: *State, action: BindAction) bool {
                 .right => .right,
                 else => null,
             };
-            if (dir) |d| {
-                const old_uuid = state.getCurrentFocusedUuid();
-                const cursor = blk: {
-                    if (state.active_floating) |idx| {
-                        const pos = state.floats.items[idx].getCursorPos();
-                        break :blk @as(?layout_mod.CursorPos, .{ .x = pos.x, .y = pos.y });
-                    }
-                    if (state.currentLayout().getFocusedPane()) |pane| {
-                        const pos = pane.getCursorPos();
-                        break :blk @as(?layout_mod.CursorPos, .{ .x = pos.x, .y = pos.y });
-                    }
-                    break :blk @as(?layout_mod.CursorPos, null);
-                };
-                if (focus_nav.focusDirectionAny(state, d, cursor)) |target| {
-                    if (target.kind == .float) {
-                        state.active_floating = target.float_index;
-                    } else {
-                        state.active_floating = null;
-                    }
-                    state.syncPaneFocus(target.pane, old_uuid);
-                    state.renderer.invalidate();
-                    state.force_full_render = true;
-                }
-                state.needs_render = true;
-                return true;
-            }
-            return false;
+            if (dir) |d| return focus_move.perform(state, d);
+            return true;
         },
     }
 }

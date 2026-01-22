@@ -48,6 +48,16 @@ pub const PaneShellInfo = struct {
     }
 };
 
+pub const PaneProcInfo = struct {
+    name: ?[]u8 = null,
+    pid: ?i32 = null,
+
+    pub fn deinit(self: *PaneProcInfo, allocator: std.mem.Allocator) void {
+        if (self.name) |n| allocator.free(n);
+        self.* = .{};
+    }
+};
+
 pub const State = struct {
     allocator: std.mem.Allocator,
     config: core.Config,
@@ -109,6 +119,12 @@ pub const State = struct {
 
     /// Shell-provided metadata (last command, status, duration) keyed by pane UUID.
     pane_shell: std.AutoHashMap([32]u8, PaneShellInfo),
+
+    /// Best-effort foreground process info keyed by pane UUID.
+    ///
+    /// For local PTY panes we can read this directly in mux.
+    /// For pod panes we query it from ses (which can inspect /proc).
+    pane_proc: std.AutoHashMap([32]u8, PaneProcInfo),
 
     // Keybinding timers (hold/double-tap delayed press)
     key_timers: std.ArrayList(PendingKeyTimer),
@@ -176,6 +192,8 @@ pub const State = struct {
 
             .pane_shell = std.AutoHashMap([32]u8, PaneShellInfo).init(allocator),
 
+            .pane_proc = std.AutoHashMap([32]u8, PaneProcInfo).init(allocator),
+
             .key_timers = .empty,
         };
     }
@@ -206,6 +224,15 @@ pub const State = struct {
                 entry.value_ptr.deinit(self.allocator);
             }
             self.pane_shell.deinit();
+        }
+
+        // Free proc metadata.
+        {
+            var it = self.pane_proc.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit(self.allocator);
+            }
+            self.pane_proc.deinit();
         }
 
         self.key_timers.deinit(self.allocator);
@@ -411,8 +438,28 @@ pub const State = struct {
         }
     }
 
+    pub fn setPaneProc(self: *State, uuid: [32]u8, name: ?[]const u8, pid: ?i32) void {
+        var entry = self.pane_proc.getPtr(uuid);
+        if (entry == null) {
+            self.pane_proc.put(uuid, .{}) catch return;
+            entry = self.pane_proc.getPtr(uuid);
+        }
+        if (entry) |info| {
+            if (name) |n| {
+                if (info.name) |old| self.allocator.free(old);
+                info.name = self.allocator.dupe(u8, n) catch info.name;
+            }
+            if (pid) |p| info.pid = p;
+        }
+    }
+
     pub fn getPaneShell(self: *const State, uuid: [32]u8) ?PaneShellInfo {
         if (self.pane_shell.get(uuid)) |v| return v;
+        return null;
+    }
+
+    pub fn getPaneProc(self: *const State, uuid: [32]u8) ?PaneProcInfo {
+        if (self.pane_proc.get(uuid)) |v| return v;
         return null;
     }
 };
