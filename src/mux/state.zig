@@ -125,6 +125,12 @@ pub const State = struct {
     mouse_selection: mouse_selection.MouseSelection,
     mouse_selection_last_autoscroll_ms: i64,
 
+    mouse_click_last_ms: i64,
+    mouse_click_count: u8,
+    mouse_click_last_pane_uuid: ?[32]u8,
+    mouse_click_last_x: u16,
+    mouse_click_last_y: u16,
+
     /// Shell-provided metadata (last command, status, duration) keyed by pane UUID.
     pane_shell: std.AutoHashMap([32]u8, PaneShellInfo),
 
@@ -200,6 +206,12 @@ pub const State = struct {
 
             .mouse_selection = .{},
             .mouse_selection_last_autoscroll_ms = 0,
+
+            .mouse_click_last_ms = 0,
+            .mouse_click_count = 0,
+            .mouse_click_last_pane_uuid = null,
+            .mouse_click_last_x = 0,
+            .mouse_click_last_y = 0,
 
             .pane_shell = std.AutoHashMap([32]u8, PaneShellInfo).init(allocator),
 

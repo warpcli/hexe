@@ -41,6 +41,10 @@ fn toLocalClamped(pane: *Pane, abs_x: u16, abs_y: u16) mouse_selection.Pos {
     return mouse_selection.clampLocalToPane(lx, ly, pane.width, pane.height);
 }
 
+fn absDiffU16(a: u16, b: u16) u16 {
+    return if (a >= b) a - b else b - a;
+}
+
 fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
     input_csi_u.forwardSanitizedToFocusedPane(state, bytes);
 }
@@ -410,8 +414,14 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 if (is_wheel) {
                     const wheel_dir = ev.btn & 3;
                     if (target) |t| {
-                        if (forward_to_app) {
-                            // Forward to app.
+                        const selection_owns = (state.mouse_selection.pane_uuid != null and std.mem.eql(u8, &state.mouse_selection.pane_uuid.?, &t.pane.uuid)) and (state.mouse_selection.active or state.mouse_selection.has_range);
+
+                        // In alt-screen we normally forward wheel to the app.
+                        // But if override chord is held OR a mux selection exists
+                        // for this pane, use mux scrollback so selection can follow.
+                        const use_mux_scroll = !forward_to_app or override_active or selection_owns;
+
+                        if (!use_mux_scroll) {
                             t.pane.write(raw) catch {};
                         } else {
                             if (wheel_dir == 0) {
@@ -453,14 +463,93 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                         const in_content = ev.x >= t.pane.x and ev.x < t.pane.x + t.pane.width and ev.y >= t.pane.y and ev.y < t.pane.y + t.pane.height;
                         const use_mux_selection = in_content and (override_active or !t.pane.vt.inAltScreen());
 
+                        // If we have a completed selection and this click isn't starting
+                        // a new mux selection, treat it as a "clear selection" action.
+                        if (!use_mux_selection and (state.mouse_selection.has_range or state.mouse_selection.active)) {
+                            state.mouse_selection.clear();
+                            state.needs_render = true;
+                        }
+
                         if (use_mux_selection) {
                             const local = toLocalClamped(t.pane, ev.x, ev.y);
+
+                            // Click counting for word/line selection.
+                            // We keep this intentionally simple:
+                            // - Same pane
+                            // - Within 400ms
+                            // - Within 1 cell of previous click
+                            const now_ms = std.time.milliTimestamp();
+                            const same_pane = state.mouse_click_last_pane_uuid != null and std.mem.eql(u8, &state.mouse_click_last_pane_uuid.?, &t.pane.uuid);
+                            const within_time = now_ms - state.mouse_click_last_ms <= 400;
+                            const within_dist = absDiffU16(local.x, state.mouse_click_last_x) <= 1 and absDiffU16(local.y, state.mouse_click_last_y) <= 1;
+
+                            var click_count: u8 = 1;
+                            if (same_pane and within_time and within_dist) {
+                                click_count = @min(@as(u8, 3), state.mouse_click_count + 1);
+                            }
+
+                            state.mouse_click_last_ms = now_ms;
+                            state.mouse_click_count = click_count;
+                            state.mouse_click_last_pane_uuid = t.pane.uuid;
+                            state.mouse_click_last_x = local.x;
+                            state.mouse_click_last_y = local.y;
+
+                            if (click_count == 2) {
+                                if (mouse_selection.selectWordRange(t.pane, local.x, local.y)) |range| {
+                                    state.mouse_selection.setRange(state.active_tab, t.pane.uuid, range);
+                                    const bytes = mouse_selection.extractText(state.allocator, t.pane, range) catch {
+                                        state.notifications.showFor("Copy failed", 1200);
+                                        state.needs_render = true;
+                                        i += ev.consumed;
+                                        continue;
+                                    };
+                                    defer state.allocator.free(bytes);
+                                    if (bytes.len == 0) {
+                                        state.notifications.showFor("No text selected", 1200);
+                                    } else {
+                                        clipboard.copyToClipboard(state.allocator, bytes);
+                                        state.notifications.showFor("Copied selection", 1200);
+                                    }
+                                    state.needs_render = true;
+                                    i += ev.consumed;
+                                    continue;
+                                }
+                            } else if (click_count == 3) {
+                                if (mouse_selection.selectLineRange(t.pane, local.x, local.y)) |range| {
+                                    state.mouse_selection.setRange(state.active_tab, t.pane.uuid, range);
+                                    const bytes = mouse_selection.extractText(state.allocator, t.pane, range) catch {
+                                        state.notifications.showFor("Copy failed", 1200);
+                                        state.needs_render = true;
+                                        i += ev.consumed;
+                                        continue;
+                                    };
+                                    defer state.allocator.free(bytes);
+                                    if (bytes.len == 0) {
+                                        state.notifications.showFor("No text selected", 1200);
+                                    } else {
+                                        clipboard.copyToClipboard(state.allocator, bytes);
+                                        state.notifications.showFor("Copied selection", 1200);
+                                    }
+                                    state.needs_render = true;
+                                    i += ev.consumed;
+                                    continue;
+                                }
+                            }
+
+                            // Default: start drag selection.
                             state.mouse_selection.begin(state.active_tab, t.pane.uuid, t.pane, local.x, local.y);
                             state.needs_render = true;
                         } else if (forward_to_app) {
                             t.pane.write(raw) catch {};
                         }
                     } else {
+                        // Clicked outside of any pane (borders/background).
+                        // Clear any persistent selection.
+                        if (state.mouse_selection.has_range or state.mouse_selection.active) {
+                            state.mouse_selection.clear();
+                            state.needs_render = true;
+                        }
+
                         // Nothing hit; forward to current focus.
                         if (state.active_floating) |afi| {
                             if (afi < state.floats.items.len) {

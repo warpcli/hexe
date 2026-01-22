@@ -100,6 +100,16 @@ pub const MouseSelection = struct {
         return null;
     }
 
+    pub fn setRange(self: *MouseSelection, tab_idx: usize, pane_uuid: [32]u8, range: BufRange) void {
+        self.tab = tab_idx;
+        self.pane_uuid = pane_uuid;
+        self.active = false;
+        self.dragging = false;
+        self.edge_scroll = .none;
+        self.has_range = true;
+        self.last_range = range;
+    }
+
     /// Convert selection to pane-local viewport coordinates for overlay.
     /// Returns null if the selection isn't currently visible in this viewport.
     pub fn rangeForPane(self: *const MouseSelection, tab_idx: usize, pane: *Pane) ?Range {
@@ -250,6 +260,39 @@ pub fn extractText(allocator: std.mem.Allocator, pane: *Pane, range: BufRange) !
 
     const slice = std.mem.sliceTo(text_z, 0);
     return dupeTrimBlankLines(allocator, slice);
+}
+
+/// Select the word under the given viewport-local coordinate.
+pub fn selectWordRange(pane: *Pane, local_x: u16, local_y: u16) ?BufRange {
+    const screen = pane.vt.terminal.screens.active;
+    const pages = &screen.pages;
+    const pin = pages.pin(.{ .viewport = .{ .x = @intCast(local_x), .y = local_y } }) orelse return null;
+    const sel = screen.selectWord(pin) orelse return null;
+    return bufRangeFromSelection(screen, sel);
+}
+
+/// Select the logical line under the given viewport-local coordinate.
+pub fn selectLineRange(pane: *Pane, local_x: u16, local_y: u16) ?BufRange {
+    const screen = pane.vt.terminal.screens.active;
+    const pages = &screen.pages;
+    const pin = pages.pin(.{ .viewport = .{ .x = @intCast(local_x), .y = local_y } }) orelse return null;
+    const sel = screen.selectLine(.{ .pin = pin }) orelse return null;
+    return bufRangeFromSelection(screen, sel);
+}
+
+fn bufRangeFromSelection(screen: *ghostty.Screen, sel: ghostty.Selection) ?BufRange {
+    const tl_pin = sel.topLeft(screen);
+    const br_pin = sel.bottomRight(screen);
+    const tl_pt = screen.pages.pointFromPin(.screen, tl_pin) orelse return null;
+    const br_pt = screen.pages.pointFromPin(.screen, br_pin) orelse return null;
+
+    const tl = tl_pt.screen;
+    const br = br_pt.screen;
+
+    return .{
+        .a = .{ .x = @intCast(tl.x), .y = tl.y },
+        .b = .{ .x = @intCast(br.x), .y = br.y },
+    };
 }
 
 fn getViewportTopScreenY(pane: *Pane) u32 {
