@@ -1,8 +1,27 @@
 {
-  "keys": {
-    "quit": "q",
-    "disown": "z",
-    "adopt": "a"
+  "input": {
+    "binds": [
+      { "mods": ["alt"], "key": "q", "context": {"focus": "any"}, "action": {"type": "mux.quit"} },
+      { "mods": ["alt"], "key": "d", "context": {"focus": "any"}, "action": {"type": "mux.detach"} },
+
+      { "mods": ["alt"], "key": "z", "context": {"focus": "any"}, "action": {"type": "pane.disown"} },
+      { "mods": ["alt"], "key": "a", "context": {"focus": "any"}, "action": {"type": "pane.adopt"} },
+
+      { "mods": ["alt"], "key": "h", "context": {"focus": "split"}, "action": {"type": "split.h"} },
+      { "mods": ["alt"], "key": "v", "context": {"focus": "split"}, "action": {"type": "split.v"} },
+
+      { "mods": ["alt"], "key": "t", "context": {"focus": "any"}, "action": {"type": "tab.new"} },
+      { "mods": ["alt"], "key": ".", "context": {"focus": "any"}, "action": {"type": "tab.next"} },
+      { "mods": ["alt"], "key": ",", "context": {"focus": "any"}, "action": {"type": "tab.prev"} },
+      { "mods": ["alt"], "key": "x", "context": {"focus": "any"}, "action": {"type": "tab.close"} },
+
+      { "mods": ["alt"], "key": "up", "context": {"focus": "any"}, "action": {"type": "focus.move", "dir": "up"} },
+      { "mods": ["alt"], "key": "down", "context": {"focus": "any"}, "action": {"type": "focus.move", "dir": "down"} },
+      { "mods": ["alt"], "key": "left", "context": {"focus": "any"}, "action": {"type": "focus.move", "dir": "left"} },
+      { "mods": ["alt"], "key": "right", "context": {"focus": "any"}, "action": {"type": "focus.move", "dir": "right"} },
+
+      { "mods": ["alt"], "key": "space", "context": {"focus": "any"}, "action": {"type": "float.toggle", "float": "0"} }
+    ]
   },
 
   "confirm_on_exit": true,
@@ -71,10 +90,6 @@
   ],
 
   "splits": {
-    "keys": {
-      "split_h": "h",
-      "split_v": "v"
-    },
     "color": {
       "active": 1,
       "passive": 237
@@ -84,13 +99,6 @@
   },
 
   "tabs": {
-    "keys": {
-      "new": "t",
-      "next": ".",
-      "prev": ",",
-      "close": "x",
-      "detach": "d"
-    },
     "status": {
       "enabled": true,
 

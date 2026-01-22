@@ -173,10 +173,101 @@ pub const NotificationConfig = struct {
 };
 
 pub const Config = struct {
-    // Global keybindings (Alt + key)
-    key_quit: u8 = 'q',
-    key_disown: u8 = 'z',
-    key_adopt: u8 = 'a',
+    pub const KeyMod = enum {
+        alt,
+        ctrl,
+        shift,
+        super,
+    };
+
+    pub const FocusContext = enum {
+        any,
+        split,
+        float,
+    };
+
+    pub const BindWhen = enum {
+        press,
+    };
+
+    pub const BindKeyKind = enum {
+        char,
+        up,
+        down,
+        left,
+        right,
+        space,
+    };
+
+    pub const BindKey = union(BindKeyKind) {
+        char: u8,
+        up,
+        down,
+        left,
+        right,
+        space,
+    };
+
+    pub const BindActionTag = enum {
+        mux_quit,
+        mux_detach,
+        pane_disown,
+        pane_adopt,
+        split_h,
+        split_v,
+        tab_new,
+        tab_next,
+        tab_prev,
+        tab_close,
+        float_toggle,
+        focus_move,
+    };
+
+    pub const BindAction = union(BindActionTag) {
+        mux_quit,
+        mux_detach,
+        pane_disown,
+        pane_adopt,
+        split_h,
+        split_v,
+        tab_new,
+        tab_next,
+        tab_prev,
+        tab_close,
+        float_toggle: u8, // float key (matches FloatDef.key)
+        focus_move: BindKeyKind, // up/down/left/right
+    };
+
+    pub const BindContext = struct {
+        focus: FocusContext = .any,
+    };
+
+    pub const Bind = struct {
+        when: BindWhen = .press,
+        mods: u8 = 0, // bitmask of KeyMod
+        key: BindKey,
+        context: BindContext = .{},
+        action: BindAction,
+    };
+
+    pub fn modsMaskFromStrings(mods: ?[]const []const u8) u8 {
+        var mods_mask: u8 = 0;
+        if (mods) |items| {
+            for (items) |m| {
+                if (std.mem.eql(u8, m, "alt")) mods_mask |= 1;
+                if (std.mem.eql(u8, m, "ctrl")) mods_mask |= 2;
+                if (std.mem.eql(u8, m, "shift")) mods_mask |= 4;
+                if (std.mem.eql(u8, m, "super")) mods_mask |= 8;
+            }
+        }
+        return mods_mask;
+    }
+
+    pub const InputConfig = struct {
+        binds: []const Bind = &[_]Bind{},
+    };
+
+    input: InputConfig = .{},
 
     // Confirmation popups
     confirm_on_exit: bool = false, // When Alt+q or last shell exits
@@ -226,16 +317,10 @@ pub const Config = struct {
 
         const json = parsed.value;
 
-        // Apply global keybindings
-        if (json.keys) |keys| {
-            if (keys.quit) |k| {
-                if (k.len > 0) config.key_quit = k[0];
-            }
-            if (keys.disown) |k| {
-                if (k.len > 0) config.key_disown = k[0];
-            }
-            if (keys.adopt) |k| {
-                if (k.len > 0) config.key_adopt = k[0];
+        // Parse input binds (no legacy key config)
+        if (json.input) |inp| {
+            if (inp.binds) |binds| {
+                config.input.binds = parseBinds(allocator, binds);
             }
         }
 
@@ -247,24 +332,6 @@ pub const Config = struct {
 
         // Parse panes config
         if (json.tabs) |p| {
-            // Keys
-            if (p.keys) |keys| {
-                if (keys.new) |k| if (k.len > 0) {
-                    config.tabs.key_new = k[0];
-                };
-                if (keys.next) |k| if (k.len > 0) {
-                    config.tabs.key_next = k[0];
-                };
-                if (keys.prev) |k| if (k.len > 0) {
-                    config.tabs.key_prev = k[0];
-                };
-                if (keys.close) |k| if (k.len > 0) {
-                    config.tabs.key_close = k[0];
-                };
-                if (keys.detach) |k| if (k.len > 0) {
-                    config.tabs.key_detach = k[0];
-                };
-            }
             // Status bar
             if (p.status) |s| {
                 if (s.enabled) |e| {
@@ -403,15 +470,6 @@ pub const Config = struct {
 
         // Parse splits config
         if (json.splits) |sp| {
-            // Keys
-            if (sp.keys) |keys| {
-                if (keys.split_h) |k| if (k.len > 0) {
-                    config.splits.key_split_h = k[0];
-                };
-                if (keys.split_v) |k| if (k.len > 0) {
-                    config.splits.key_split_v = k[0];
-                };
-            }
             // Color
             if (sp.color) |jc| {
                 if (jc.active) |a| config.splits.color.active = @intCast(@min(255, @max(0, a)));
@@ -483,6 +541,9 @@ pub const Config = struct {
 
     pub fn deinit(self: *Config) void {
         if (self._allocator) |alloc| {
+            if (self.input.binds.len > 0) {
+                alloc.free(self.input.binds);
+            }
             for (self.floats) |f| {
                 if (f.command) |cmd| {
                     alloc.free(cmd);
@@ -502,6 +563,73 @@ pub const Config = struct {
             if (f.key == key) return f;
         }
         return null;
+    }
+
+    fn parseBinds(allocator: std.mem.Allocator, json_binds: []const JsonBind) []const Bind {
+        var list: std.ArrayList(Bind) = .empty;
+
+        for (json_binds) |jb| {
+            const mods_mask = modsMaskFromStrings(jb.mods);
+
+            const when: BindWhen = if (jb.when) |w|
+                (std.meta.stringToEnum(BindWhen, w) orelse .press)
+            else
+                .press;
+
+            const key: BindKey = blk: {
+                if (jb.key.len == 1) break :blk .{ .char = jb.key[0] };
+                if (std.mem.eql(u8, jb.key, "space")) break :blk .space;
+                if (std.mem.eql(u8, jb.key, "up")) break :blk .up;
+                if (std.mem.eql(u8, jb.key, "down")) break :blk .down;
+                if (std.mem.eql(u8, jb.key, "left")) break :blk .left;
+                if (std.mem.eql(u8, jb.key, "right")) break :blk .right;
+                // Unknown -> skip
+                continue;
+            };
+
+            var ctx = BindContext{};
+            if (jb.context) |c| {
+                if (c.focus) |f| {
+                    ctx.focus = std.meta.stringToEnum(FocusContext, f) orelse .any;
+                }
+            }
+
+            const action: BindAction = blk: {
+                const t = jb.action.type;
+                if (std.mem.eql(u8, t, "mux.quit")) break :blk .mux_quit;
+                if (std.mem.eql(u8, t, "mux.detach")) break :blk .mux_detach;
+                if (std.mem.eql(u8, t, "pane.disown")) break :blk .pane_disown;
+                if (std.mem.eql(u8, t, "pane.adopt")) break :blk .pane_adopt;
+                if (std.mem.eql(u8, t, "split.h")) break :blk .split_h;
+                if (std.mem.eql(u8, t, "split.v")) break :blk .split_v;
+                if (std.mem.eql(u8, t, "tab.new")) break :blk .tab_new;
+                if (std.mem.eql(u8, t, "tab.next")) break :blk .tab_next;
+                if (std.mem.eql(u8, t, "tab.prev")) break :blk .tab_prev;
+                if (std.mem.eql(u8, t, "tab.close")) break :blk .tab_close;
+                if (std.mem.eql(u8, t, "float.toggle")) {
+                    const fk = jb.action.float orelse continue;
+                    if (fk.len != 1) continue;
+                    break :blk .{ .float_toggle = fk[0] };
+                }
+                if (std.mem.eql(u8, t, "focus.move")) {
+                    const dir = jb.action.dir orelse continue;
+                    const d = std.meta.stringToEnum(BindKeyKind, dir) orelse continue;
+                    if (d != .up and d != .down and d != .left and d != .right) continue;
+                    break :blk .{ .focus_move = d };
+                }
+                continue;
+            };
+
+            list.append(allocator, .{
+                .when = when,
+                .mods = mods_mask,
+                .key = key,
+                .context = ctx,
+                .action = action,
+            }) catch continue;
+        }
+
+        return list.toOwnedSlice(allocator) catch &[_]Bind{};
     }
 
     fn parseStatusModules(allocator: std.mem.Allocator, json_mods: []const JsonStatusModule) []const StatusModule {
@@ -753,10 +881,6 @@ const JsonSplitStyle = struct {
 };
 
 const JsonSplitsConfig = struct {
-    keys: ?struct {
-        split_h: ?[]const u8 = null,
-        split_v: ?[]const u8 = null,
-    } = null,
     color: ?JsonBorderColor = null,
     separator_v: ?[]const u8 = null,
     separator_h: ?[]const u8 = null,
@@ -764,13 +888,6 @@ const JsonSplitsConfig = struct {
 };
 
 const JsonTabsConfig = struct {
-    keys: ?struct {
-        new: ?[]const u8 = null,
-        next: ?[]const u8 = null,
-        prev: ?[]const u8 = null,
-        close: ?[]const u8 = null,
-        detach: ?[]const u8 = null,
-    } = null,
     status: ?struct {
         enabled: ?bool = null,
         left: ?[]const JsonStatusModule = null,
@@ -796,10 +913,8 @@ const JsonNotificationConfig = struct {
 };
 
 const JsonConfig = struct {
-    keys: ?struct {
-        quit: ?[]const u8 = null,
-        disown: ?[]const u8 = null,
-        adopt: ?[]const u8 = null,
+    input: ?struct {
+        binds: ?[]const JsonBind = null,
     } = null,
     confirm_on_exit: ?bool = null,
     confirm_on_detach: ?bool = null,
@@ -809,6 +924,22 @@ const JsonConfig = struct {
     splits: ?JsonSplitsConfig = null,
     tabs: ?JsonTabsConfig = null,
     notifications: ?JsonNotificationConfig = null,
+};
+
+const JsonBind = struct {
+    when: ?[]const u8 = null,
+    mods: ?[]const []const u8 = null,
+    key: []const u8,
+    context: ?struct {
+        focus: ?[]const u8 = null,
+    } = null,
+    action: struct {
+        type: []const u8,
+        // for float_toggle
+        float: ?[]const u8 = null,
+        // for focus_move
+        dir: ?[]const u8 = null,
+    },
 };
 
 const JsonOutput = struct {

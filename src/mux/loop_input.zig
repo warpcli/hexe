@@ -170,16 +170,10 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
         // ==========================================================================
         const current_tab = &state.tabs.items[state.active_tab];
         if (current_tab.popups.isBlocked()) {
-            // Allow tab switching (Alt+N, Alt+P) - also support fallback keys for Alt+>/<'
+            // Allow only tab switching while a tab popup is open.
             if (inp.len >= 2 and inp[0] == 0x1b and inp[1] != '[' and inp[1] != 'O') {
-                const cfg = &state.config;
-                const is_next = inp[1] == cfg.tabs.key_next or (cfg.tabs.key_next == '>' and inp[1] == '.');
-                const is_prev = inp[1] == cfg.tabs.key_prev or (cfg.tabs.key_prev == '<' and inp[1] == ',');
-                if (is_next or is_prev) {
-                    // Allow tab switch.
-                    if (handleAltKey(state, inp[1])) {
-                        return;
-                    }
+                if (dispatchKey(state, 1, .{ .char = inp[1] }, true)) {
+                    return;
                 }
             }
             // Block everything else - handle popup input.
@@ -308,7 +302,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 }
                 // Make sure it's not an actual escape sequence (like arrow keys).
                 if (next != '[' and next != 'O') {
-                    if (handleAltKey(state, next)) {
+                    if (dispatchKey(state, 1, .{ .char = next }, false)) {
                         i += 2;
                         continue;
                     }
@@ -645,7 +639,7 @@ fn handleAltArrow(state: *State, inp: []const u8) ?usize {
     if (inp.len >= 6 and inp[0] == 0x1b and inp[1] == '[' and
         inp[2] == '1' and inp[3] == ';' and inp[4] == '3')
     {
-        const dir: ?layout_mod.Layout.Direction = switch (inp[5]) {
+        const key: ?core.Config.BindKey = switch (inp[5]) {
             'A' => .up,
             'B' => .down,
             'C' => .right,
@@ -653,39 +647,8 @@ fn handleAltArrow(state: *State, inp: []const u8) ?usize {
             else => null,
         };
 
-        if (dir) |d| {
-            const old_uuid = state.getCurrentFocusedUuid();
-
-            // Get cursor position from current pane for smarter direction targeting.
-            var cursor_x: u16 = 0;
-            var cursor_y: u16 = 0;
-            var have_cursor = false;
-            if (state.active_floating) |idx| {
-                const pos = state.floats.items[idx].getCursorPos();
-                cursor_x = pos.x;
-                cursor_y = pos.y;
-                have_cursor = true;
-            } else if (state.currentLayout().getFocusedPane()) |pane| {
-                const pos = pane.getCursorPos();
-                cursor_x = pos.x;
-                cursor_y = pos.y;
-                have_cursor = true;
-            }
-
-            const cursor: ?layout_mod.CursorPos = if (have_cursor) .{ .x = cursor_x, .y = cursor_y } else null;
-            if (focusDirectionAny(state, d, cursor)) |target| {
-                // Update focus to the selected target.
-                if (target.kind == .float) {
-                    state.active_floating = target.float_index;
-                } else {
-                    state.active_floating = null;
-                }
-                state.syncPaneFocus(target.pane, old_uuid);
-                state.renderer.invalidate();
-                state.force_full_render = true;
-            }
-
-            state.needs_render = true;
+        if (key) |k| {
+            _ = dispatchKey(state, 1, k, false);
             return 6;
         }
     }
@@ -762,239 +725,245 @@ fn handleScrollKeys(state: *State, inp: []const u8) ?usize {
     return null;
 }
 
-fn handleAltKey(state: *State, key: u8) bool {
+fn dispatchKey(state: *State, mods: u8, key: core.Config.BindKey, allow_only_tabs: bool) bool {
     const cfg = &state.config;
 
-    if (key == cfg.key_quit) {
-        if (cfg.confirm_on_exit) {
-            state.pending_action = .exit;
-            state.popups.showConfirm("Exit mux?", .{}) catch {};
-            state.needs_render = true;
-        } else {
-            state.running = false;
+    const focus_ctx: core.Config.FocusContext = if (state.active_floating != null) .float else .split;
+
+    var best: ?core.Config.Bind = null;
+    var best_score: u8 = 0;
+
+    for (cfg.input.binds) |b| {
+        if (b.when != .press) continue;
+        if (b.mods != mods) continue;
+        if (@as(core.Config.BindKeyKind, b.key) != @as(core.Config.BindKeyKind, key)) continue;
+        if (@as(core.Config.BindKeyKind, b.key) == .char) {
+            if (b.key.char != key.char) continue;
         }
-        return true;
+        // context
+        if (b.context.focus != .any and b.context.focus != focus_ctx) continue;
+
+        var score: u8 = 0;
+        if (b.context.focus != .any) score += 1;
+        // Later binds override for equal score.
+        if (score > best_score or best == null) {
+            best = b;
+            best_score = score;
+        } else if (score == best_score) {
+            best = b;
+        }
     }
 
-    // Disown pane - orphans current pane in ses, spawns new shell in same place.
-    if (key == cfg.key_disown) {
-        // Get the current pane (float or tiled).
-        const current_pane: ?*Pane = if (state.active_floating) |idx|
-            state.floats.items[idx]
-        else
-            state.currentLayout().getFocusedPane();
+    if (best) |bind| {
+        if (allow_only_tabs) {
+            if (bind.action != .tab_next and bind.action != .tab_prev) return false;
+        }
+        return dispatchAction(state, bind.action);
+    }
+    return false;
+}
 
-        // Block disown for sticky floats only.
-        if (current_pane) |p| {
-            if (p.sticky) {
-                state.notifications.show("Cannot disown sticky float");
+fn dispatchAction(state: *State, action: core.Config.BindAction) bool {
+    const cfg = &state.config;
+
+    switch (action) {
+        .mux_quit => {
+            if (cfg.confirm_on_exit) {
+                state.pending_action = .exit;
+                state.popups.showConfirm("Exit mux?", .{}) catch {};
                 state.needs_render = true;
-                return true;
+            } else {
+                state.running = false;
             }
-        }
-
-        if (cfg.confirm_on_disown) {
-            state.pending_action = .disown;
-            state.popups.showConfirm("Disown pane?", .{}) catch {};
-            state.needs_render = true;
-        } else {
-            actions.performDisown(state);
-        }
-        return true;
-    }
-
-    // Adopt orphaned pane - interactive flow with picker and confirm.
-    if (key == cfg.key_adopt) {
-        actions.startAdoptFlow(state);
-        return true;
-    }
-
-    // Split keys.
-    const split_h_key = cfg.splits.key_split_h;
-    const split_v_key = cfg.splits.key_split_v;
-
-    if (key == split_h_key) {
-        const parent_uuid = state.getCurrentFocusedUuid();
-        // Refresh CWD from ses for pod panes before splitting.
-        const cwd = if (state.currentLayout().getFocusedPane()) |p| state.refreshPaneCwd(p) else null;
-        if (state.currentLayout().splitFocused(.horizontal, cwd) catch null) |new_pane| {
-            state.syncPaneAux(new_pane, parent_uuid);
-        }
-        state.needs_render = true;
-        state.syncStateToSes();
-        return true;
-    }
-
-    if (key == split_v_key) {
-        const parent_uuid = state.getCurrentFocusedUuid();
-        // Refresh CWD from ses for pod panes before splitting.
-        const cwd = if (state.currentLayout().getFocusedPane()) |p| state.refreshPaneCwd(p) else null;
-        if (state.currentLayout().splitFocused(.vertical, cwd) catch null) |new_pane| {
-            state.syncPaneAux(new_pane, parent_uuid);
-        }
-        state.needs_render = true;
-        state.syncStateToSes();
-        return true;
-    }
-
-    // Alt+t = new tab.
-    if (key == cfg.tabs.key_new) {
-        state.active_floating = null;
-        state.createTab() catch {};
-        state.needs_render = true;
-        return true;
-    }
-
-    // Alt+n = next tab (also support Alt+. as fallback for Alt+>).
-    if (key == cfg.tabs.key_next or (cfg.tabs.key_next == '>' and key == '.')) {
-        const old_uuid = state.getCurrentFocusedUuid();
-        if (state.active_floating) |idx| {
-            if (idx < state.floats.items.len) {
-                const fp = state.floats.items[idx];
-                // Always clear float focus when switching tabs.
-                state.syncPaneUnfocus(fp);
-                state.active_floating = null;
-            }
-        } else if (state.currentLayout().getFocusedPane()) |old_pane| {
-            state.syncPaneUnfocus(old_pane);
-        }
-        state.nextTab();
-
-        // Restore last focused float for this tab if the tab's last focus was a float.
-        if (state.tab_last_focus_kind.items.len > state.active_tab and state.tab_last_focus_kind.items[state.active_tab] == .float) {
-            if (state.tab_last_floating_uuid.items.len > state.active_tab) {
-                if (state.tab_last_floating_uuid.items[state.active_tab]) |uuid| {
-                    for (state.floats.items, 0..) |pane, fi| {
-                        if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
-                        if (!pane.isVisibleOnTab(state.active_tab)) continue;
-                        if (pane.parent_tab) |parent| {
-                            if (parent != state.active_tab) continue;
-                        }
-                        state.active_floating = fi;
-                        state.syncPaneFocus(pane, old_uuid);
-                        state.needs_render = true;
-                        return true;
-                    }
+            return true;
+        },
+        .pane_disown => {
+            const current_pane: ?*Pane = if (state.active_floating) |idx|
+                state.floats.items[idx]
+            else
+                state.currentLayout().getFocusedPane();
+            if (current_pane) |p| {
+                if (p.sticky) {
+                    state.notifications.show("Cannot disown sticky float");
+                    state.needs_render = true;
+                    return true;
                 }
             }
-        }
-
-        if (state.currentLayout().getFocusedPane()) |new_pane| {
-            state.syncPaneFocus(new_pane, old_uuid);
-        }
-        state.needs_render = true;
-        return true;
-    }
-
-    // Alt+p = previous tab (also support Alt+, as fallback for Alt+<).
-    if (key == cfg.tabs.key_prev or (cfg.tabs.key_prev == '<' and key == ',')) {
-        const old_uuid = state.getCurrentFocusedUuid();
-        if (state.active_floating) |idx| {
-            if (idx < state.floats.items.len) {
-                const fp = state.floats.items[idx];
-                // Always clear float focus when switching tabs.
-                state.syncPaneUnfocus(fp);
-                state.active_floating = null;
+            if (cfg.confirm_on_disown) {
+                state.pending_action = .disown;
+                state.popups.showConfirm("Disown pane?", .{}) catch {};
+                state.needs_render = true;
+            } else {
+                actions.performDisown(state);
             }
-        } else if (state.currentLayout().getFocusedPane()) |old_pane| {
-            state.syncPaneUnfocus(old_pane);
-        }
-        state.prevTab();
-
-        // Restore last focused float for this tab if the tab's last focus was a float.
-        if (state.tab_last_focus_kind.items.len > state.active_tab and state.tab_last_focus_kind.items[state.active_tab] == .float) {
-            if (state.tab_last_floating_uuid.items.len > state.active_tab) {
-                if (state.tab_last_floating_uuid.items[state.active_tab]) |uuid| {
-                    for (state.floats.items, 0..) |pane, fi| {
-                        if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
-                        if (!pane.isVisibleOnTab(state.active_tab)) continue;
-                        if (pane.parent_tab) |parent| {
-                            if (parent != state.active_tab) continue;
-                        }
-                        state.active_floating = fi;
-                        state.syncPaneFocus(pane, old_uuid);
-                        state.needs_render = true;
-                        return true;
-                    }
-                }
+            return true;
+        },
+        .pane_adopt => {
+            actions.startAdoptFlow(state);
+            return true;
+        },
+        .split_h => {
+            const parent_uuid = state.getCurrentFocusedUuid();
+            const cwd = if (state.currentLayout().getFocusedPane()) |p| state.refreshPaneCwd(p) else null;
+            if (state.currentLayout().splitFocused(.horizontal, cwd) catch null) |new_pane| {
+                state.syncPaneAux(new_pane, parent_uuid);
             }
-        }
-
-        if (state.currentLayout().getFocusedPane()) |new_pane| {
-            state.syncPaneFocus(new_pane, old_uuid);
-        }
-        state.needs_render = true;
-        return true;
-    }
-
-    // Alt+x (configurable) = close current float/tab (or quit if last tab).
-    if (key == cfg.tabs.key_close) {
-        if (cfg.confirm_on_close) {
-            state.pending_action = .close;
-            const msg = if (state.active_floating != null) "Close float?" else "Close tab?";
-            state.popups.showConfirm(msg, .{}) catch {};
             state.needs_render = true;
-        } else {
-            actions.performClose(state);
-        }
-        return true;
-    }
-
-    // Alt+d = detach whole mux - keeps all panes alive in ses for --attach.
-    if (key == cfg.tabs.key_detach) {
-        if (cfg.confirm_on_detach) {
-            state.pending_action = .detach;
-            state.popups.showConfirm("Detach session?", .{}) catch {};
+            state.syncStateToSes();
+            return true;
+        },
+        .split_v => {
+            const parent_uuid = state.getCurrentFocusedUuid();
+            const cwd = if (state.currentLayout().getFocusedPane()) |p| state.refreshPaneCwd(p) else null;
+            if (state.currentLayout().splitFocused(.vertical, cwd) catch null) |new_pane| {
+                state.syncPaneAux(new_pane, parent_uuid);
+            }
+            state.needs_render = true;
+            state.syncStateToSes();
+            return true;
+        },
+        .tab_new => {
+            state.active_floating = null;
+            state.createTab() catch {};
             state.needs_render = true;
             return true;
-        }
-        actions.performDetach(state);
-        return true;
-    }
-
-    // Alt+space - toggle floating focus (always space).
-    if (key == ' ') {
-        if (state.floats.items.len > 0) {
+        },
+        .tab_next => {
+            // Reuse existing code path by synthesizing Alt+next behavior.
+            // We still rely on state.nextTab + focus restoration.
             const old_uuid = state.getCurrentFocusedUuid();
             if (state.active_floating) |idx| {
                 if (idx < state.floats.items.len) {
-                    state.syncPaneUnfocus(state.floats.items[idx]);
+                    const fp = state.floats.items[idx];
+                    state.syncPaneUnfocus(fp);
+                    state.active_floating = null;
                 }
-                state.active_floating = null;
-                if (state.currentLayout().getFocusedPane()) |new_pane| {
-                    state.syncPaneFocus(new_pane, old_uuid);
-                }
-            } else {
-                // Find first float valid for current tab.
-                var first_valid: ?usize = null;
-                for (state.floats.items, 0..) |fp, fi| {
-                    // Skip tab-bound floats on wrong tab.
-                    if (fp.parent_tab) |parent| {
-                        if (parent != state.active_tab) continue;
+            } else if (state.currentLayout().getFocusedPane()) |old_pane| {
+                state.syncPaneUnfocus(old_pane);
+            }
+            state.nextTab();
+            if (state.tab_last_focus_kind.items.len > state.active_tab and state.tab_last_focus_kind.items[state.active_tab] == .float) {
+                if (state.tab_last_floating_uuid.items.len > state.active_tab) {
+                    if (state.tab_last_floating_uuid.items[state.active_tab]) |uuid| {
+                        for (state.floats.items, 0..) |pane, fi| {
+                            if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
+                            if (!pane.isVisibleOnTab(state.active_tab)) continue;
+                            if (pane.parent_tab) |parent| {
+                                if (parent != state.active_tab) continue;
+                            }
+                            state.active_floating = fi;
+                            state.syncPaneFocus(pane, old_uuid);
+                            state.needs_render = true;
+                            return true;
+                        }
                     }
-                    first_valid = fi;
-                    break;
-                }
-
-                if (first_valid) |valid_idx| {
-                    if (state.currentLayout().getFocusedPane()) |old_pane| {
-                        state.syncPaneUnfocus(old_pane);
-                    }
-                    state.active_floating = valid_idx;
-                    state.syncPaneFocus(state.floats.items[valid_idx], old_uuid);
                 }
             }
+            if (state.currentLayout().getFocusedPane()) |new_pane| {
+                state.syncPaneFocus(new_pane, old_uuid);
+            }
             state.needs_render = true;
-        }
-        return true;
+            return true;
+        },
+        .tab_prev => {
+            const old_uuid = state.getCurrentFocusedUuid();
+            if (state.active_floating) |idx| {
+                if (idx < state.floats.items.len) {
+                    const fp = state.floats.items[idx];
+                    state.syncPaneUnfocus(fp);
+                    state.active_floating = null;
+                }
+            } else if (state.currentLayout().getFocusedPane()) |old_pane| {
+                state.syncPaneUnfocus(old_pane);
+            }
+            state.prevTab();
+            if (state.tab_last_focus_kind.items.len > state.active_tab and state.tab_last_focus_kind.items[state.active_tab] == .float) {
+                if (state.tab_last_floating_uuid.items.len > state.active_tab) {
+                    if (state.tab_last_floating_uuid.items[state.active_tab]) |uuid| {
+                        for (state.floats.items, 0..) |pane, fi| {
+                            if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
+                            if (!pane.isVisibleOnTab(state.active_tab)) continue;
+                            if (pane.parent_tab) |parent| {
+                                if (parent != state.active_tab) continue;
+                            }
+                            state.active_floating = fi;
+                            state.syncPaneFocus(pane, old_uuid);
+                            state.needs_render = true;
+                            return true;
+                        }
+                    }
+                }
+            }
+            if (state.currentLayout().getFocusedPane()) |new_pane| {
+                state.syncPaneFocus(new_pane, old_uuid);
+            }
+            state.needs_render = true;
+            return true;
+        },
+        .tab_close => {
+            if (cfg.confirm_on_close) {
+                state.pending_action = .close;
+                const msg = if (state.active_floating != null) "Close float?" else "Close tab?";
+                state.popups.showConfirm(msg, .{}) catch {};
+                state.needs_render = true;
+            } else {
+                actions.performClose(state);
+            }
+            return true;
+        },
+        .mux_detach => {
+            if (cfg.confirm_on_detach) {
+                state.pending_action = .detach;
+                state.popups.showConfirm("Detach session?", .{}) catch {};
+                state.needs_render = true;
+                return true;
+            }
+            actions.performDetach(state);
+            return true;
+        },
+        .float_toggle => |fk| {
+            if (cfg.getFloatByKey(fk)) |float_def| {
+                actions.toggleNamedFloat(state, float_def);
+                state.needs_render = true;
+                return true;
+            }
+            return false;
+        },
+        .focus_move => |dir_kind| {
+            const dir: ?layout_mod.Layout.Direction = switch (dir_kind) {
+                .up => .up,
+                .down => .down,
+                .left => .left,
+                .right => .right,
+                else => null,
+            };
+            if (dir) |d| {
+                const old_uuid = state.getCurrentFocusedUuid();
+                const cursor = blk: {
+                    if (state.active_floating) |idx| {
+                        const pos = state.floats.items[idx].getCursorPos();
+                        break :blk @as(?layout_mod.CursorPos, .{ .x = pos.x, .y = pos.y });
+                    }
+                    if (state.currentLayout().getFocusedPane()) |pane| {
+                        const pos = pane.getCursorPos();
+                        break :blk @as(?layout_mod.CursorPos, .{ .x = pos.x, .y = pos.y });
+                    }
+                    break :blk @as(?layout_mod.CursorPos, null);
+                };
+                if (focusDirectionAny(state, d, cursor)) |target| {
+                    if (target.kind == .float) {
+                        state.active_floating = target.float_index;
+                    } else {
+                        state.active_floating = null;
+                    }
+                    state.syncPaneFocus(target.pane, old_uuid);
+                    state.renderer.invalidate();
+                    state.force_full_render = true;
+                }
+                state.needs_render = true;
+                return true;
+            }
+            return false;
+        },
     }
-
-    // Check for named float keys from config.
-    if (cfg.getFloatByKey(key)) |float_def| {
-        actions.toggleNamedFloat(state, float_def);
-        state.needs_render = true;
-        return true;
-    }
-
-    return false;
 }
