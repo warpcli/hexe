@@ -4,6 +4,42 @@ const ipc = core.ipc;
 
 const print = std.debug.print;
 
+const ansi = struct {
+    pub const RESET = "\x1b[0m";
+    pub const DIM = "\x1b[2m";
+    pub const BOLD = "\x1b[1m";
+
+    pub const SYM = "\x1b[38;5;220m"; // yellow
+    pub const MUX = "\x1b[38;5;45m"; // cyan
+    pub const TAB = "\x1b[38;5;39m"; // blue
+    pub const SPLIT = "\x1b[38;5;42m"; // green
+    pub const FLOAT = "\x1b[38;5;171m"; // magenta
+    pub const NAME = "\x1b[38;5;255m"; // bright white
+    pub const UUID = "\x1b[38;5;244m"; // gray
+};
+
+fn printTreeNode(prefix: []const u8, symbol: []const u8, type_color: []const u8, type_str: []const u8, name: []const u8, uuid8: []const u8) void {
+    // Format: [symbol][type][name][uuid]
+    print(
+        "{s}{s}{s}{s} {s}{s}{s} {s}{s}{s} [{s}{s}{s}]\n",
+        .{
+            prefix,
+            ansi.SYM,
+            symbol,
+            ansi.RESET,
+            type_color,
+            type_str,
+            ansi.RESET,
+            ansi.NAME,
+            name,
+            ansi.RESET,
+            ansi.UUID,
+            uuid8,
+            ansi.RESET,
+        },
+    );
+}
+
 pub fn runList(allocator: std.mem.Allocator, details: bool) !void {
     const socket_path = try ipc.getSesSocketPath(allocator);
     defer allocator.free(socket_path);
@@ -44,17 +80,28 @@ pub fn runList(allocator: std.mem.Allocator, details: bool) !void {
         const clients = clients_val.array;
         if (clients.items.len > 0) {
             print("Connected muxes: {d}\n", .{clients.items.len});
-            for (clients.items) |client_val| {
+            for (clients.items, 0..) |client_val, ci| {
                 const c = client_val.object;
                 const id = c.get("id").?.integer;
                 const panes = c.get("panes").?.array;
                 const name = if (c.get("session_name")) |n| n.string else "unknown";
                 const sid = if (c.get("session_id")) |s| s.string else null;
 
+                const is_last_client = (ci + 1 == clients.items.len);
+                const branch = if (is_last_client) "└" else "├";
+                const child_prefix = if (is_last_client) "   " else "│  ";
+
                 if (sid) |session_id| {
-                    print("  {s} [{s}] (mux #{d}, {d} panes)\n", .{ name, session_id[0..8], id, panes.items.len });
+                    var mux_line: [256]u8 = undefined;
+                    const prefix = std.fmt.bufPrint(&mux_line, "{s}─ ", .{branch}) catch "";
+                    // mux uuid uses session_id prefix for stability
+                    printTreeNode(prefix, " ", ansi.MUX, "mux", name, session_id[0..8]);
+                    _ = id;
                 } else {
-                    print("  {s} (mux #{d}, {d} panes)\n", .{ name, id, panes.items.len });
+                    var mux_line: [256]u8 = undefined;
+                    const prefix = std.fmt.bufPrint(&mux_line, "{s}─ ", .{branch}) catch "";
+                    printTreeNode(prefix, " ", ansi.MUX, "mux", name, "????????");
+                    _ = id;
                 }
 
                 if (c.get("mux_state")) |mux_state_val| {
@@ -69,7 +116,7 @@ pub fn runList(allocator: std.mem.Allocator, details: bool) !void {
                         }
                     }
 
-                    printMuxTree(allocator, mux_state_val.string, "    ", &pane_names);
+                    printMuxTree(allocator, mux_state_val.string, child_prefix, &pane_names);
                 }
             }
         }
@@ -452,68 +499,100 @@ pub fn printMuxTree(allocator: std.mem.Allocator, json: []const u8, indent: []co
     const root = parsed.value.object;
     const floats_arr = if (root.get("floats")) |fv| fv.array.items else &[_]std.json.Value{};
 
-    if (root.get("tabs")) |tabs_val| {
-        const tabs = tabs_val.array;
-        const active = if (root.get("active_tab")) |at| @as(usize, @intCast(at.integer)) else 0;
+    const active_tab: usize = if (root.get("active_tab")) |at| @as(usize, @intCast(at.integer)) else 0;
 
-        for (tabs.items, 0..) |tab_val, ti| {
-            const tab = tab_val.object;
-            const name = if (tab.get("name")) |n| n.string else "tab";
-            const tab_uuid = if (tab.get("uuid")) |u| u.string else "?";
-            const marker = if (ti == active) "*" else " ";
-            print("{s}{s} Tab: {s} [{s}]\n", .{ indent, marker, name, tab_uuid[0..@min(8, tab_uuid.len)] });
-
-            if (tab.get("splits")) |splits_val| {
-                for (splits_val.array.items) |split_val| {
-                    const split = split_val.object;
-                    const uuid = if (split.get("uuid")) |u| u.string else "?";
-                    const pid = if (split.get("id")) |id| @as(i64, id.integer) else 0;
-                    const focused = if (split.get("focused")) |f| f.bool else false;
-                    const fm = if (focused) ">" else " ";
-                    if (pane_name_map) |m| {
-                        if (m.get(uuid)) |n| {
-                            print("{s}  {s} Split {d} [{s}] {s}\n", .{ indent, fm, pid, uuid[0..@min(8, uuid.len)], n });
-                            continue;
-                        }
-                    }
-                    print("{s}  {s} Split {d} [{s}]\n", .{ indent, fm, pid, uuid[0..@min(8, uuid.len)] });
-                }
-            }
-
-            for (floats_arr, 0..) |float_val, fi| {
-                const float = float_val.object;
-                if (float.get("parent_tab")) |pt| {
-                    if (pt == .integer and @as(usize, @intCast(pt.integer)) == ti) {
-                        const uuid = if (float.get("uuid")) |u| u.string else "?";
-                        const visible = if (float.get("visible")) |v| v.bool else false;
-                        const vm = if (visible) "*" else " ";
-                        print("{s}  {s} Float {d} [{s}]\n", .{ indent, vm, fi, uuid[0..@min(8, uuid.len)] });
-                    }
-                }
-            }
-        }
-    }
-
-    var has_global_floats = false;
-    for (floats_arr) |float_val| {
+    // Precompute global floats (no parent_tab).
+    var global_floats: std.ArrayList(usize) = .empty;
+    defer global_floats.deinit(allocator);
+    for (floats_arr, 0..) |float_val, fi| {
         const float = float_val.object;
         if (float.get("parent_tab") == null) {
-            has_global_floats = true;
-            break;
+            global_floats.append(allocator, fi) catch {};
         }
     }
 
-    if (has_global_floats) {
-        print("{s}Floats (global):\n", .{indent});
-        for (floats_arr, 0..) |float_val, i| {
-            const float = float_val.object;
-            if (float.get("parent_tab") == null) {
-                const uuid = if (float.get("uuid")) |u| u.string else "?";
-                const visible = if (float.get("visible")) |v| v.bool else false;
-                const vm = if (visible) "*" else " ";
-                print("{s}  {s} Float {d} [{s}]\n", .{ indent, vm, i, uuid[0..@min(8, uuid.len)] });
+    const tabs_items = if (root.get("tabs")) |tv| tv.array.items else &[_]std.json.Value{};
+
+    // Top-level children under mux: tabs, then global floats.
+    const top_count: usize = tabs_items.len + global_floats.items.len;
+    var top_index: usize = 0;
+
+    // Tabs
+    for (tabs_items, 0..) |tab_val, ti| {
+        const tab = tab_val.object;
+        const tname = if (tab.get("name")) |n| n.string else "tab";
+        const tab_uuid = if (tab.get("uuid")) |u| u.string else "?";
+        const marker = if (ti == active_tab) "*" else " ";
+
+        const is_last_top = (top_index + 1 == top_count);
+        const branch = if (is_last_top) "└" else "├";
+
+        var prefix_buf: [256]u8 = undefined;
+        const prefix = std.fmt.bufPrint(&prefix_buf, "{s}{s}─ ", .{ indent, branch }) catch indent;
+        printTreeNode(prefix, marker, ansi.TAB, "tab", tname, tab_uuid[0..@min(8, tab_uuid.len)]);
+
+        // Children of tab: splits + tab-bound floats.
+        var children: std.ArrayList(struct { kind: enum { split, float }, obj: std.json.ObjectMap }) = .empty;
+        defer children.deinit(allocator);
+
+        if (tab.get("splits")) |splits_val| {
+            for (splits_val.array.items) |split_val| {
+                children.append(allocator, .{ .kind = .split, .obj = split_val.object }) catch {};
             }
         }
+
+        for (floats_arr) |float_val| {
+            const float = float_val.object;
+            if (float.get("parent_tab")) |pt| {
+                if (pt == .integer and @as(usize, @intCast(pt.integer)) == ti) {
+                    children.append(allocator, .{ .kind = .float, .obj = float }) catch {};
+                }
+            }
+        }
+
+        if (children.items.len > 0) {
+            const next_indent = if (is_last_top) "   " else "│  ";
+            var child_indent_buf: [256]u8 = undefined;
+            const child_indent = std.fmt.bufPrint(&child_indent_buf, "{s}{s}", .{ indent, next_indent }) catch indent;
+
+            for (children.items, 0..) |child, ci| {
+                const is_last_child = (ci + 1 == children.items.len);
+                const cbranch = if (is_last_child) "└" else "├";
+                var lp_buf: [256]u8 = undefined;
+                const lp = std.fmt.bufPrint(&lp_buf, "{s}{s}─ ", .{ child_indent, cbranch }) catch child_indent;
+
+                const uuid = if (child.obj.get("uuid")) |u| u.string else "?";
+                const uuid8 = uuid[0..@min(8, uuid.len)];
+                const focused = if (child.obj.get("focused")) |f| f.bool else false;
+                const sym = if (focused) ">" else " ";
+                const pname = if (pane_name_map) |m| (m.get(uuid) orelse "-") else "-";
+
+                switch (child.kind) {
+                    .split => printTreeNode(lp, sym, ansi.SPLIT, "split", pname, uuid8),
+                    .float => printTreeNode(lp, sym, ansi.FLOAT, "float", pname, uuid8),
+                }
+            }
+        }
+
+        top_index += 1;
+    }
+
+    // Global floats
+    for (global_floats.items) |fi| {
+        const float = floats_arr[fi].object;
+        const uuid = if (float.get("uuid")) |u| u.string else "?";
+        const uuid8 = uuid[0..@min(8, uuid.len)];
+        const focused = if (float.get("focused")) |f| f.bool else false;
+        const sym = if (focused) ">" else " ";
+        const pname = if (pane_name_map) |m| (m.get(uuid) orelse "-") else "-";
+
+        const is_last_top = (top_index + 1 == top_count);
+        const branch = if (is_last_top) "└" else "├";
+        var prefix_buf: [256]u8 = undefined;
+        const prefix = std.fmt.bufPrint(&prefix_buf, "{s}{s}─ ", .{ indent, branch }) catch indent;
+        printTreeNode(prefix, sym, ansi.FLOAT, "float", pname, uuid8);
+
+        top_index += 1;
     }
 }
 
