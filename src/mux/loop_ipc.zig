@@ -322,6 +322,7 @@ pub fn handleIpcConnection(state: *State, buffer: []u8) void {
         }
 
         const wait_for_exit = if (root.get("wait")) |v| v.bool else false;
+        const isolated = if (root.get("isolated")) |v| v.bool else false;
 
         var result_path: ?[]u8 = null;
         defer if (result_path) |path| state.allocator.free(path);
@@ -384,6 +385,14 @@ pub fn handleIpcConnection(state: *State, buffer: []u8) void {
             }
         }
 
+        if (isolated) {
+            const entry = state.allocator.dupe(u8, "HEXE_POD_ISOLATE=1") catch null;
+            if (entry) |env_entry| {
+                owned_extra_env.append(state.allocator, env_entry) catch {};
+                extra_env_list.append(state.allocator, env_entry) catch {};
+            }
+        }
+
         if (wait_for_exit) {
             if (root.get("result_file")) |rf_val| {
                 if (rf_val == .string and rf_val.string.len > 0) {
@@ -433,7 +442,8 @@ pub fn handleIpcConnection(state: *State, buffer: []u8) void {
             state.syncPaneUnfocus(tiled);
         }
 
-        const new_uuid = actions.createAdhocFloat(state, command_to_run, title, spawn_cwd, env_items, extra_env_items, !wait_for_exit) catch |err| {
+        const use_pod = (!wait_for_exit) or isolated;
+        const new_uuid = actions.createAdhocFloat(state, command_to_run, title, spawn_cwd, env_items, extra_env_items, use_pod) catch |err| {
             const msg = std.fmt.allocPrint(state.allocator, "{{\"type\":\"error\",\"message\":\"{s}\"}}", .{@errorName(err)}) catch return;
             defer state.allocator.free(msg);
             conn.sendLine(msg) catch {};

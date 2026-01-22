@@ -84,6 +84,8 @@ pub const FloatAttributes = struct {
     /// Kill the float process when hiding it.
     /// Ignored for per-cwd (and typically meaningless for global floats).
     destroy: bool = false,
+    /// Run the float command in an isolated pod child (filesystem sandbox + best-effort cgroup limits).
+    isolated: bool = false,
 };
 
 pub const FloatDef = struct {
@@ -429,6 +431,7 @@ pub const Config = struct {
                         if (a.sticky) |v| def_attrs.sticky = v;
                         if (a.global orelse a.special) |v| def_attrs.global = v;
                         if (a.destroy orelse a.destroy_on_hide) |v| def_attrs.destroy = v;
+                        if (a.isolated) |v| def_attrs.isolated = v;
                         if (def_attrs.destroy and a.global == null and a.special == null) {
                             def_attrs.global = false;
                         }
@@ -468,6 +471,7 @@ pub const Config = struct {
                     if (a.sticky) |v| attrs.sticky = v;
                     if (a.destroy orelse a.destroy_on_hide) |v| attrs.destroy = v;
                     if (a.global orelse a.special) |v| attrs.global = v;
+                    if (a.isolated) |v| attrs.isolated = v;
                     // If destroy is set and global not explicitly provided, default global to false.
                     if (attrs.destroy and a.global == null and a.special == null) {
                         attrs.global = false;
@@ -862,7 +866,6 @@ fn parseFloatStyle(allocator: std.mem.Allocator, js: JsonFloatStyle) ?FloatStyle
             .when = if (when_src) |w| allocator.dupe(u8, w) catch null else null,
         };
     }
-
     return result;
 }
 
@@ -877,6 +880,7 @@ const JsonFloatPane = struct {
         sticky: ?bool = null,
         global: ?bool = null,
         destroy: ?bool = null,
+        isolated: ?bool = null,
         // Legacy names (still accepted inside attributes)
         alone: ?bool = null,
         pwd: ?bool = null,
@@ -891,15 +895,12 @@ const JsonFloatPane = struct {
     padding_x: ?i64 = null,
     padding_y: ?i64 = null,
     color: ?JsonBorderColor = null,
-
     // New hierarchical fields
     size: ?JsonSize = null,
     position: ?JsonXY = null,
     padding: ?JsonXY = null,
-
     style: ?JsonFloatStyle = null,
 };
-
 const JsonSplitStyle = struct {
     vertical: ?[]const u8 = null,
     horizontal: ?[]const u8 = null,

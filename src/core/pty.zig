@@ -7,6 +7,8 @@ const c = @cImport({
     @cInclude("sys/ioctl.h");
 });
 
+const isolation = @import("isolation.zig");
+
 // External declaration for environ (modified by setenv)
 extern var environ: [*:null]?[*:0]u8;
 
@@ -44,6 +46,8 @@ pub const Pty = struct {
         var master_fd: c_int = 0;
         var slave_fd: c_int = 0;
 
+        const isolate = isolation.enabledFor(extra_env);
+
         // Get current terminal size to pass to the new PTY
         var ws: c.winsize = undefined;
         if (c.ioctl(posix.STDOUT_FILENO, c.TIOCGWINSZ, &ws) != 0) {
@@ -80,6 +84,10 @@ pub const Pty = struct {
                 posix.chdir(dir) catch {};
             }
 
+            if (isolate) {
+                isolation.applyChildIsolation(cwd);
+            }
+
             // Build environment: inherit parent env + BOX=1 + TERM override + extra
             const envp = buildEnv(extra_env) catch posix.exit(1);
 
@@ -101,6 +109,10 @@ pub const Pty = struct {
         }
 
         _ = posix.close(@intCast(slave_fd));
+
+        if (isolate) {
+            isolation.applyChildCgroup(extra_env, pid);
+        }
 
         return Pty{
             .master_fd = @intCast(master_fd),

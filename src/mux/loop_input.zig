@@ -426,6 +426,19 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 const next = inp[i + 1];
                 // Check for CSI sequences (ESC [).
                 if (next == '[' and i + 2 < inp.len) {
+                    // If this looks like a kitty CSI-u key event and parsing didn't
+                    // handle it above, swallow it so it never leaks into the shell.
+                    // This is intentionally conservative: we only swallow sequences
+                    // that start like a CSI numeric parameter and end in 'u'.
+                    if (inp[i + 2] >= '0' and inp[i + 2] <= '9') {
+                        var j: usize = i + 2;
+                        const end = @min(inp.len, i + 64);
+                        while (j < end and inp[j] != 'u') : (j += 1) {}
+                        if (j < end and inp[j] == 'u') {
+                            i = j + 1;
+                            continue;
+                        }
+                    }
                     // Handle Alt+Arrow for directional navigation: ESC [ 1 ; 3 <dir>
                     if (handleAltArrow(state, inp[i..])) |consumed| {
                         i += consumed;

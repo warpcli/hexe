@@ -175,6 +175,12 @@ pub fn parseKittyKeyEvent(inp: []const u8) ?KittyKeyEvent {
     if (!have_digit) return null;
     if (idx >= inp.len) return null;
 
+    // Optional alternate key codes: :shifted:base_layout (ignore but consume)
+    if (inp[idx] == ':') {
+        while (idx < inp.len and inp[idx] != ';' and inp[idx] != 'u') : (idx += 1) {}
+        if (idx >= inp.len) return null;
+    }
+
     var mod_val: u32 = 1;
     var event_type: u32 = 1;
     var has_event_type = false;
@@ -184,6 +190,7 @@ pub fn parseKittyKeyEvent(inp: []const u8) ?KittyKeyEvent {
     } else if (inp[idx] == ';') {
         idx += 1;
 
+        // Modifiers can be empty (defaults to 1).
         var mv: u32 = 0;
         var have_mv = false;
         while (idx < inp.len) : (idx += 1) {
@@ -214,8 +221,16 @@ pub fn parseKittyKeyEvent(inp: []const u8) ?KittyKeyEvent {
             if (have_ev) event_type = ev;
         }
 
-        if (idx >= inp.len or inp[idx] != 'u') return null;
-        idx += 1;
+        // Optional third field: text-as-codepoints. Ignore but consume.
+        if (idx < inp.len and inp[idx] == ';') {
+            idx += 1;
+            while (idx < inp.len and inp[idx] != 'u') : (idx += 1) {}
+            if (idx >= inp.len or inp[idx] != 'u') return null;
+            idx += 1;
+        } else {
+            if (idx >= inp.len or inp[idx] != 'u') return null;
+            idx += 1;
+        }
     } else {
         return null;
     }

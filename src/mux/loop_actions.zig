@@ -546,17 +546,20 @@ pub fn createNamedFloat(state: *State, float_def: *const core.FloatDef, current_
 
     const id: u16 = @intCast(100 + state.floats.items.len);
 
+    const isolate_env = [_][]const u8{"HEXE_POD_ISOLATE=1"};
+    const extra_env: ?[]const []const u8 = if (float_def.attributes.isolated) &isolate_env else null;
+
     // Try to create pane via ses if available.
     if (state.ses_client.isConnected()) {
-        if (state.ses_client.createPane(float_def.command, current_dir, null, null, null, null)) |result| {
+        if (state.ses_client.createPane(float_def.command, current_dir, null, null, null, extra_env)) |result| {
             defer state.allocator.free(result.socket_path);
             try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.socket_path, result.uuid);
         } else |_| {
             // Fall back to local spawn.
-            try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command, current_dir, null);
+            try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command, current_dir, extra_env);
         }
     } else {
-        try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command, current_dir, null);
+        try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command, current_dir, extra_env);
     }
 
     pane.floating = true;

@@ -101,6 +101,7 @@ pub fn main() !void {
     const mux_float_result_file = try mux_float.string("", "result-file", null);
     const mux_float_pass_env = try mux_float.flag("", "pass-env", null);
     const mux_float_extra_env = try mux_float.string("", "extra-env", null);
+    const mux_float_isolated = try mux_float.flag("", "isolated", null);
 
     // POP subcommands
     const shp_prompt = try shp_cmd.newCommand("prompt", "Render shell prompt");
@@ -204,7 +205,7 @@ pub fn main() !void {
         } else if (found_mux and found_attach) {
             print("Usage: hexe mux attach [OPTIONS] <name>\n\nAttach to existing session by name or UUID prefix\n\nOptions:\n  -d, --debug           Enable debug output\n  -L, --logfile <PATH>  Log debug output to PATH\n", .{});
         } else if (found_mux and found_float) {
-            print("Usage: hexe mux float [OPTIONS]\n\nSpawn a transient float pane (blocking)\n\nOptions:\n  -u, --uuid <UUID>            Target mux UUID (optional if inside mux)\n  -c, --command <COMMAND>      Command to run in the float\n      --title <TEXT>           Border title for the float\n      --cwd <PATH>             Working directory for the float\n      --result-file <PATH>     Read selection from PATH after exit\n      --pass-env               Send current environment to the pod\n      --extra-env <KEY=VAL,..>  Extra environment variables (comma-separated)\n", .{});
+            print("Usage: hexe mux float [OPTIONS]\n\nSpawn a transient float pane (blocking)\n\nOptions:\n  -u, --uuid <UUID>            Target mux UUID (optional if inside mux)\n  -c, --command <COMMAND>      Command to run in the float\n      --title <TEXT>           Border title for the float\n      --cwd <PATH>             Working directory for the float\n      --result-file <PATH>     Read selection from PATH after exit\n      --pass-env               Send current environment to the pod\n      --extra-env <KEY=VAL,..>  Extra environment variables (comma-separated)\n      --isolated               Run command with filesystem/cgroup isolation\n", .{});
         } else if (found_shp and found_prompt) {
             print("Usage: hexe shp prompt [OPTIONS]\n\nRender shell prompt\n\nOptions:\n  -s, --status <N>    Exit status of last command\n  -d, --duration <N>  Duration of last command in ms\n  -r, --right         Render right prompt\n  -S, --shell <SHELL> Shell type (bash, zsh, fish)\n  -j, --jobs <N>      Number of background jobs\n", .{});
         } else if (found_shp and found_init) {
@@ -318,6 +319,7 @@ pub fn main() !void {
                 mux_float_result_file.*,
                 mux_float_pass_env.*,
                 mux_float_extra_env.*,
+                mux_float_isolated.*,
             );
         }
     } else if (shp_cmd.happened) {
@@ -420,6 +422,7 @@ fn runMuxFloat(
     result_file: []const u8,
     pass_env: bool,
     extra_env: []const u8,
+    isolated: bool,
 ) !void {
     if (command.len == 0) {
         print("Error: --command is required\n", .{});
@@ -522,6 +525,9 @@ fn runMuxFloat(
     }
     if (extra_env_json.items.len > 0) {
         try writer.print(",\"extra_env\":{s}", .{extra_env_json.items});
+    }
+    if (isolated) {
+        try writer.writeAll(",\"isolated\":true");
     }
     try writer.writeAll("}");
 
