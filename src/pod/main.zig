@@ -3,10 +3,12 @@ const posix = std.posix;
 
 const c = @cImport({
     @cInclude("fcntl.h");
+    @cInclude("unistd.h");
 });
 
 const core = @import("core");
 const pod_protocol = core.pod_protocol;
+const pod_meta = core.pod_meta;
 
 fn setBlocking(fd: posix.fd_t) void {
     const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch return;
@@ -21,6 +23,9 @@ pub const PodArgs = struct {
     socket_path: []const u8,
     shell: ?[]const u8 = null,
     cwd: ?[]const u8 = null,
+    labels: ?[]const u8 = null,
+    write_meta: bool = true,
+    write_alias: bool = false,
     debug: bool = false,
     log_file: ?[]const u8 = null,
     /// When true, print a single JSON line on stdout once ready.
@@ -47,8 +52,25 @@ pub fn run(args: PodArgs) !void {
         redirectStderrToLog(path);
     }
 
-    var pod = try Pod.init(allocator, args.uuid, args.socket_path, sh, args.cwd);
+    // Best-effort: name this process for `ps` discovery.
+    setProcessName(args.name);
+
+    var pod = try Pod.init(allocator, args.uuid, args.socket_path, sh, args.cwd, args.name);
     defer pod.deinit();
+
+    // Best-effort: write grep-friendly .meta sidecar for discovery.
+    const created_at: i64 = std.time.timestamp();
+    if (args.write_meta) {
+        writePodMetaSidecar(allocator, args.uuid, args.name, args.cwd, args.labels, @intCast(c.getpid()), pod.pty.child_pid, created_at) catch {};
+    }
+
+    var created_alias_path: ?[]const u8 = null;
+    defer if (created_alias_path) |p| allocator.free(p);
+
+    // Optional: create alias symlink pod@<name>.sock -> pod-<uuid>.sock
+    if (args.write_alias and args.name != null and args.name.?.len > 0) {
+        created_alias_path = createAliasSymlink(allocator, args.name.?, args.socket_path) catch null;
+    }
 
     if (args.debug) {
         if (args.name) |n| {
@@ -66,7 +88,132 @@ pub fn run(args: PodArgs) !void {
         try stdout.writeAll(msg);
     }
 
-    try pod.run();
+    try pod.run(.{ .write_meta = args.write_meta, .created_at = created_at, .name = args.name, .labels = args.labels });
+
+    // Best-effort cleanup on exit.
+    if (args.write_meta) {
+        deletePodMetaSidecar(allocator, args.uuid) catch {};
+    }
+    if (created_alias_path) |p| {
+        std.fs.cwd().deleteFile(p) catch {};
+    }
+}
+
+fn setProcessName(name: ?[]const u8) void {
+    if (name == null or name.?.len == 0) return;
+
+    // Linux prctl(PR_SET_NAME) sets the comm field, max 15 bytes + NUL.
+    // Best-effort: ignore errors / non-linux.
+    const builtin = @import("builtin");
+    if (builtin.os.tag != .linux) return;
+
+    const pc = @cImport({
+        @cInclude("sys/prctl.h");
+    });
+
+    var buf: [16]u8 = .{0} ** 16;
+    // Prefix helps scanning; keep ASCII and short.
+    const prefix = "hexe-pod:";
+    var i: usize = 0;
+    while (i < prefix.len and i < buf.len - 1) : (i += 1) {
+        buf[i] = prefix[i];
+    }
+    const raw = name.?;
+    for (raw) |ch| {
+        if (i >= buf.len - 1) break;
+        const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_' or ch == '-' or ch == '.';
+        buf[i] = if (ok) ch else '_';
+        i += 1;
+    }
+    buf[i] = 0;
+    _ = pc.prctl(pc.PR_SET_NAME, @as(*const anyopaque, @ptrCast(&buf)), @as(c_ulong, 0), @as(c_ulong, 0), @as(c_ulong, 0));
+}
+
+fn writePodMetaSidecar(
+    allocator: std.mem.Allocator,
+    uuid: []const u8,
+    name: ?[]const u8,
+    cwd: ?[]const u8,
+    labels: ?[]const u8,
+    pod_pid: std.posix.pid_t,
+    child_pid: std.posix.pid_t,
+    created_at: i64,
+) !void {
+    var meta = try pod_meta.PodMeta.init(
+        allocator,
+        uuid,
+        name,
+        pod_pid,
+        child_pid,
+        cwd,
+        false,
+        labels,
+        created_at,
+    );
+    defer meta.deinit();
+
+    const path = try meta.metaPath(allocator);
+    defer allocator.free(path);
+
+    const dir = std.fs.path.dirname(path) orelse return;
+    std.fs.cwd().makePath(dir) catch {};
+
+    const line = try meta.formatMetaLine(allocator);
+    defer allocator.free(line);
+
+    var f = try std.fs.cwd().createFile(path, .{ .truncate = true, .mode = 0o644 });
+    defer f.close();
+    try f.writeAll(line);
+    try f.writeAll("\n");
+}
+
+fn createAliasSymlink(allocator: std.mem.Allocator, raw_name: []const u8, target_socket_path: []const u8) ![]const u8 {
+    // Create pod@<name>.sock -> pod-<uuid>.sock in the socket dir.
+    const base_alias = try pod_meta.PodMeta.aliasSocketPath(allocator, raw_name);
+    defer allocator.free(base_alias);
+
+    var attempt: usize = 0;
+    while (true) : (attempt += 1) {
+        const alias_path = if (attempt == 0) blk: {
+            break :blk try allocator.dupe(u8, base_alias);
+        } else blk: {
+            // Insert suffix before ".sock".
+            const dot = std.mem.lastIndexOfScalar(u8, base_alias, '.') orelse base_alias.len;
+            break :blk try std.fmt.allocPrint(allocator, "{s}-{d}{s}", .{ base_alias[0..dot], attempt + 1, base_alias[dot..] });
+        };
+        // Do not defer free on success; return it.
+
+        // Remove existing alias if it points to us; otherwise keep trying.
+        std.fs.cwd().deleteFile(alias_path) catch |err| switch (err) {
+            error.FileNotFound => {},
+            else => {},
+        };
+
+        // Try create. If collision races, just try next.
+        std.fs.cwd().symLink(target_socket_path, alias_path, .{}) catch |err| switch (err) {
+            error.PathAlreadyExists => {
+                allocator.free(alias_path);
+                continue;
+            },
+            else => {
+                allocator.free(alias_path);
+                return err;
+            },
+        };
+
+        return alias_path;
+    }
+
+    return error.AliasFailed;
+}
+
+fn deletePodMetaSidecar(allocator: std.mem.Allocator, uuid: []const u8) !void {
+    if (uuid.len != 32) return;
+    var tmp = try pod_meta.PodMeta.init(allocator, uuid, null, 0, 0, null, false, null, 0);
+    defer tmp.deinit();
+    const path = try tmp.metaPath(allocator);
+    defer allocator.free(path);
+    std.fs.cwd().deleteFile(path) catch {};
 }
 
 fn daemonize(log_file: ?[]const u8) !void {
@@ -211,11 +358,21 @@ const Pod = struct {
     input_reader: pod_protocol.Reader,
     pty_paused: bool = false,
 
-    pub fn init(allocator: std.mem.Allocator, uuid_str: []const u8, socket_path: []const u8, shell: []const u8, cwd: ?[]const u8) !Pod {
+    const RunOptions = struct {
+        write_meta: bool,
+        created_at: i64,
+        name: ?[]const u8,
+        labels: ?[]const u8,
+    };
+
+    pub fn init(allocator: std.mem.Allocator, uuid_str: []const u8, socket_path: []const u8, shell: []const u8, cwd: ?[]const u8, pod_name: ?[]const u8) !Pod {
         var uuid: [32]u8 = undefined;
         @memcpy(&uuid, uuid_str[0..32]);
 
-        const extra_env = [_][2][]const u8{.{ "HEXE_PANE_UUID", uuid_str }};
+        const extra_env = [_][2][]const u8{
+            .{ "HEXE_PANE_UUID", uuid_str },
+            .{ "HEXE_POD_NAME", pod_name orelse "" },
+        };
         var pty = try core.Pty.spawnWithEnv(shell, cwd, &extra_env);
         errdefer pty.close();
 
@@ -253,14 +410,26 @@ const Pod = struct {
         self.input_reader.deinit(self.allocator);
     }
 
-    pub fn run(self: *Pod) !void {
+    pub fn run(self: *Pod, opts: RunOptions) !void {
         var poll_fds: [3]posix.pollfd = undefined;
         var buf = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
         defer self.allocator.free(buf);
         var backlog_tmp = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
         defer self.allocator.free(backlog_tmp);
 
+        var last_meta_ms: i64 = 0;
+
         while (true) {
+            // Periodically refresh sidecar meta so PID/cwd changes are reflected.
+            if (opts.write_meta) {
+                const now_ms: i64 = std.time.milliTimestamp();
+                if (now_ms - last_meta_ms >= 1000) {
+                    // CWD: if we see OSC 7, prefer it; otherwise keep initial cwd.
+                    const live_cwd = self.lastOsc7Cwd();
+                    writePodMetaSidecar(self.allocator, self.uuid[0..], opts.name, live_cwd, opts.labels, @intCast(c.getpid()), self.pty.child_pid, opts.created_at) catch {};
+                    last_meta_ms = now_ms;
+                }
+            }
             // Exit if the child shell/process exited.
             if (self.pty.pollStatus() != null) break;
 
@@ -420,6 +589,13 @@ const Pod = struct {
             },
             else => {},
         }
+    }
+
+    fn lastOsc7Cwd(self: *Pod) ?[]const u8 {
+        // We do not currently run a VT parser inside the pod process, so
+        // we cannot extract OSC 7 cwd here. Keep the initial cwd (null).
+        _ = self;
+        return null;
     }
 };
 

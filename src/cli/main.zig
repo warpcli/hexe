@@ -63,7 +63,7 @@ pub fn main() !void {
 
     // Top-level subcommands only
     const ses_cmd = try parser.newCommand("ses", "Session daemon management");
-    const pod_cmd = try parser.newCommand("pod", "Per-pane PTY daemon (internal)");
+    const pod_cmd = try parser.newCommand("pod", "Per-pane PTY daemon");
     const mux_cmd = try parser.newCommand("mux", "Terminal multiplexer");
     const shp_cmd = try parser.newCommand("shp", "Shell prompt renderer");
     const pop_cmd = try parser.newCommand("pop", "Popup overlays");
@@ -90,11 +90,55 @@ pub fn main() !void {
     const pod_daemon_socket = try pod_daemon.string("s", "socket", null);
     const pod_daemon_shell = try pod_daemon.string("S", "shell", null);
     const pod_daemon_cwd = try pod_daemon.string("C", "cwd", null);
+    const pod_daemon_labels = try pod_daemon.string("", "labels", null);
+    const pod_daemon_write_meta = try pod_daemon.flag("", "write-meta", null);
+    const pod_daemon_no_write_meta = try pod_daemon.flag("", "no-write-meta", null);
+    const pod_daemon_write_alias = try pod_daemon.flag("", "write-alias", null);
     const pod_daemon_fg = try pod_daemon.flag("f", "foreground", null);
     const pod_daemon_dbg = try pod_daemon.flag("d", "debug", null);
     const pod_daemon_log = try pod_daemon.string("L", "logfile", null);
     const pod_daemon_instance = try pod_daemon.string("I", "instance", null);
     const pod_daemon_test_only = try pod_daemon.flag("T", "test-only", null);
+
+    const pod_list = try pod_cmd.newCommand("list", "List discoverable pods (from .meta)");
+    const pod_list_where = try pod_list.string("", "where", null);
+    const pod_list_probe = try pod_list.flag("", "probe", null);
+    const pod_list_alive = try pod_list.flag("", "alive", null);
+
+    const pod_new = try pod_cmd.newCommand("new", "Create a standalone pod (spawns pod daemon)");
+    const pod_new_name = try pod_new.string("n", "name", null);
+    const pod_new_shell = try pod_new.string("S", "shell", null);
+    const pod_new_cwd = try pod_new.string("C", "cwd", null);
+    const pod_new_labels = try pod_new.string("", "labels", null);
+    const pod_new_alias = try pod_new.flag("", "alias", null);
+    const pod_new_dbg = try pod_new.flag("d", "debug", null);
+    const pod_new_log = try pod_new.string("L", "logfile", null);
+    const pod_new_instance = try pod_new.string("I", "instance", null);
+    const pod_new_test_only = try pod_new.flag("T", "test-only", null);
+
+    const pod_send = try pod_cmd.newCommand("send", "Send input to a pod (by uuid/name/socket)");
+    const pod_send_uuid = try pod_send.string("u", "uuid", null);
+    const pod_send_name = try pod_send.string("n", "name", null);
+    const pod_send_socket = try pod_send.string("s", "socket", null);
+    const pod_send_enter = try pod_send.flag("e", "enter", null);
+    const pod_send_ctrl = try pod_send.string("C", "ctrl", null);
+    const pod_send_text = try pod_send.stringPositional(null);
+
+    const pod_attach = try pod_cmd.newCommand("attach", "Attach to a pod (raw tty)");
+    const pod_attach_uuid = try pod_attach.string("u", "uuid", null);
+    const pod_attach_name = try pod_attach.string("n", "name", null);
+    const pod_attach_socket = try pod_attach.string("s", "socket", null);
+    const pod_attach_detach = try pod_attach.string("", "detach", null);
+
+    const pod_kill = try pod_cmd.newCommand("kill", "Kill a pod by uuid/name");
+    const pod_kill_uuid = try pod_kill.string("u", "uuid", null);
+    const pod_kill_name = try pod_kill.string("n", "name", null);
+    const pod_kill_signal = try pod_kill.string("s", "signal", null);
+    const pod_kill_force = try pod_kill.flag("f", "force", null);
+
+    const pod_gc = try pod_cmd.newCommand("gc", "Garbage-collect stale pod metadata");
+    const pod_gc_dry = try pod_gc.flag("n", "dry-run", null);
+
 
     // MUX subcommands
     const mux_new = try mux_cmd.newCommand("new", "Create new multiplexer session");
@@ -209,6 +253,8 @@ pub fn main() !void {
     var found_status = false;
     var found_new = false;
     var found_attach = false;
+    var found_kill = false;
+    var found_gc = false;
     var found_float = false;
     var found_prompt = false;
     var found_init = false;
@@ -232,9 +278,13 @@ pub fn main() !void {
         if (std.mem.eql(u8, arg, "status")) found_status = true;
         if (std.mem.eql(u8, arg, "notify")) found_notify = true;
         if (std.mem.eql(u8, arg, "daemon")) found_daemon = true;
+        if (std.mem.eql(u8, arg, "list")) found_list = true;
+        if (std.mem.eql(u8, arg, "new")) found_new = true;
         if (std.mem.eql(u8, arg, "info")) found_info = true;
         if (std.mem.eql(u8, arg, "new")) found_new = true;
         if (std.mem.eql(u8, arg, "attach")) found_attach = true;
+        if (std.mem.eql(u8, arg, "kill")) found_kill = true;
+        if (std.mem.eql(u8, arg, "gc")) found_gc = true;
         if (std.mem.eql(u8, arg, "float")) found_float = true;
         if (std.mem.eql(u8, arg, "prompt")) found_prompt = true;
         if (std.mem.eql(u8, arg, "init")) found_init = true;
@@ -242,6 +292,7 @@ pub fn main() !void {
         if (std.mem.eql(u8, arg, "confirm")) found_confirm = true;
         if (std.mem.eql(u8, arg, "choose")) found_choose = true;
         if (std.mem.eql(u8, arg, "send")) found_send = true;
+        if (std.mem.eql(u8, arg, "attach")) found_attach = true;
         if (std.mem.eql(u8, arg, "focus")) found_focus = true;
         if (std.mem.eql(u8, arg, "exit-intent")) found_exit_intent = true;
         if (std.mem.eql(u8, arg, "shell-event")) found_shell_event = true;
@@ -262,8 +313,12 @@ pub fn main() !void {
                 print("Usage: hexe mux notify [OPTIONS] <message>\n\nSend notification (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>        Target specific mux or pane\n  -c, --creator            Send to pane that created current pane\n  -l, --last               Send to previously focused pane\n  -b, --broadcast          Broadcast to all muxes\n  -I, --instance <NAME>    Target a specific instance\n", .{});
             } else if (found_mux and found_info) {
                 print("Usage: hexe mux info [OPTIONS]\n\nShow information about a pane\n\nOptions:\n  -u, --uuid <UUID>        Query specific pane by UUID (works from anywhere)\n  -c, --creator            Print only the creator pane UUID\n  -l, --last               Print only the last focused pane UUID\n  -I, --instance <NAME>    Target a specific instance\n\nWithout --uuid, queries current pane (requires running inside mux)\n", .{});
+            } else if (found_pod and found_list) {
+                print("Usage: hexe pod list [OPTIONS]\n\nList discoverable pods by scanning pod-*.meta in the hexe socket dir.\n\nOptions:\n      --where <LUA>   Lua predicate (return boolean). Variable: pod\n      --probe         Probe sockets (best-effort)\n      --alive         Only show pods whose socket is connectable (implies --probe)\n", .{});
+            } else if (found_pod and found_new) {
+                print("Usage: hexe pod new [OPTIONS]\n\nCreate a standalone pod and print a JSON line once ready.\n\nOptions:\n  -n, --name <NAME>         Pod name (also used for ps/alias)\n  -S, --shell <CMD>         Shell/command to run (default: $SHELL)\n  -C, --cwd <DIR>           Working directory\n      --labels <a,b,c>      Comma-separated labels\n      --alias               Create pod@<name>.sock alias symlink\n  -d, --debug               Enable debug output\n  -L, --logfile <PATH>      Log debug output to PATH\n  -I, --instance <NAME>     Run under instance namespace\n  -T, --test-only           Mark as test-only (requires instance)\n", .{});
             } else if (found_ses and found_list) {
-            print("Usage: hexe ses list [OPTIONS]\n\nList all sessions and panes\n\nOptions:\n  -d, --details           Show extra details\n  -I, --instance <NAME>   Target a specific instance\n", .{});
+                print("Usage: hexe ses list [OPTIONS]\n\nList all sessions and panes\n\nOptions:\n  -d, --details           Show extra details\n  -I, --instance <NAME>   Target a specific instance\n", .{});
         } else if (found_ses and found_status) {
             print("Usage: hexe ses status [OPTIONS]\n\nShow daemon status and socket path\n\nOptions:\n  -I, --instance <NAME>   Target a specific instance\n", .{});
         } else if (found_shp and found_exit_intent) {
@@ -275,10 +330,18 @@ pub fn main() !void {
             );
         } else if (found_ses and found_daemon) {
             print("Usage: hexe ses daemon [OPTIONS]\n\nStart the session daemon\n\nOptions:\n  -f, --foreground        Run in foreground (don't daemonize)\n  -d, --debug             Enable debug output\n  -L, --logfile <PATH>    Log debug output to PATH\n  -I, --instance <NAME>   Run under instance namespace\n  -T, --test-only         Mark as test-only (requires instance)\n", .{});
-        } else if (found_pod and found_daemon) {
-            print("Usage: hexe pod daemon [OPTIONS]\n\nStart a per-pane pod daemon (normally launched by ses)\n\nOptions:\n  -u, --uuid <UUID>        Pane UUID (32 hex chars)\n  -n, --name <NAME>        Human-friendly pane name (for `ps`)\n  -s, --socket <PATH>      Pod unix socket path\n  -S, --shell <CMD>        Shell/command to run\n  -C, --cwd <DIR>          Working directory\n  -f, --foreground         Run in foreground (prints pod_ready JSON)\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n  -I, --instance <NAME>    Run under instance namespace\n  -T, --test-only          Mark as test-only (requires instance)\n", .{});
-        } else if (found_mux and found_new) {
-            print("Usage: hexe mux new [OPTIONS]\n\nCreate new multiplexer session\n\nOptions:\n  -n, --name <NAME>        Session name\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n  -I, --instance <NAME>    Use instance namespace\n  -T, --test-only          Create an isolated test instance\n", .{});
+            } else if (found_pod and found_daemon) {
+                print("Usage: hexe pod daemon [OPTIONS]\n\nStart a per-pane pod daemon (normally launched by ses)\n\nOptions:\n  -u, --uuid <UUID>            Pane UUID (32 hex chars)\n  -n, --name <NAME>            Human-friendly pane name (for `ps`)\n  -s, --socket <PATH>          Pod unix socket path\n  -S, --shell <CMD>            Shell/command to run\n  -C, --cwd <DIR>              Working directory\n      --labels <a,b,c>         Comma-separated labels for discovery\n      --no-write-meta           Disable writing pod-<uuid>.meta\n      --write-alias             Create pod@<name>.sock alias symlink\n  -f, --foreground             Run in foreground (prints pod_ready JSON)\n  -d, --debug                  Enable debug output\n  -L, --logfile <PATH>         Log debug output to PATH\n  -I, --instance <NAME>        Run under instance namespace\n  -T, --test-only              Mark as test-only (requires instance)\n", .{});
+            } else if (found_pod and found_send) {
+                print("Usage: hexe pod send [OPTIONS] [text]\n\nSend input to a pod without ses/mux.\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID (32 hex chars)\n  -n, --name <NAME>        Target pod by name (via pod-*.meta scan)\n  -s, --socket <PATH>      Target pod by explicit socket path\n  -e, --enter              Append Enter key\n  -C, --ctrl <char>        Send Ctrl+<char> (e.g., -C c for Ctrl+C)\n", .{});
+            } else if (found_pod and found_attach) {
+                print("Usage: hexe pod attach [OPTIONS]\n\nInteractive attach to a pod socket (raw tty).\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID (32 hex chars)\n  -n, --name <NAME>        Target pod by name (via pod-*.meta scan)\n  -s, --socket <PATH>      Target pod by explicit socket path\n      --detach <key>       Detach prefix Ctrl+<key> (default: b), then press 'd'\n", .{});
+            } else if (found_pod and found_kill) {
+                print("Usage: hexe pod kill [OPTIONS]\n\nKill a pod process (reads pid from pod-*.meta).\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID\n  -n, --name <NAME>        Target pod by name (newest created_at wins)\n  -s, --signal <SIG>       TERM|KILL|INT|HUP (default: TERM)\n  -f, --force              Follow with SIGKILL\n", .{});
+            } else if (found_pod and found_gc) {
+                print("Usage: hexe pod gc [--dry-run]\n\nDelete stale pod-*.meta and broken pod@*.sock aliases.\n\nOptions:\n  -n, --dry-run            Only print what would be deleted\n", .{});
+            } else if (found_mux and found_new) {
+                print("Usage: hexe mux new [OPTIONS]\n\nCreate new multiplexer session\n\nOptions:\n  -n, --name <NAME>        Session name\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n  -I, --instance <NAME>    Use instance namespace\n  -T, --test-only          Create an isolated test instance\n", .{});
         } else if (found_mux and found_attach) {
             print("Usage: hexe mux attach [OPTIONS] <name>\n\nAttach to existing session by name or UUID prefix\n\nOptions:\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n  -I, --instance <NAME>    Target a specific instance\n", .{});
         } else if (found_mux and found_float) {
@@ -303,7 +366,7 @@ pub fn main() !void {
         } else if (found_ses) {
             print("Usage: hexe ses <command>\n\nSession daemon management\n\nCommands:\n  daemon  Start the session daemon\n  status  Show daemon info\n  list    List sessions and panes\n", .{});
         } else if (found_pod) {
-            print("Usage: hexe pod <command>\n\nPer-pane PTY daemon (internal)\n\nCommands:\n  daemon  Start a per-pane pod daemon\n", .{});
+            print("Usage: hexe pod <command>\n\nPer-pane PTY daemon\n\nCommands:\n  daemon  Start a per-pane pod daemon\n  new     Create a standalone pod\n  list    List discoverable pods\n  send    Send input to a pod\n  attach  Attach to a pod\n  kill    Kill a pod\n  gc      Clean stale pod metadata\n", .{});
         } else if (found_mux) {
             print("Usage: hexe mux <command>\n\nTerminal multiplexer\n\nCommands:\n  new     Create new multiplexer session\n  attach  Attach to existing session\n  float   Spawn a transient float pane\n  notify  Send notification\n  send    Send keystrokes to pane\n  info    Show pane info\n", .{});
         } else if (found_shp) {
@@ -376,9 +439,65 @@ pub fn main() !void {
                 pod_daemon_socket.*,
                 pod_daemon_shell.*,
                 pod_daemon_cwd.*,
+                pod_daemon_labels.*,
+                pod_daemon_write_meta.*,
+                pod_daemon_no_write_meta.*,
+                pod_daemon_write_alias.*,
                 pod_daemon_dbg.*,
                 pod_daemon_log.*,
             );
+        } else if (pod_list.happened) {
+            // No ses dependency; uses ipc.getSocketDir() + .meta files.
+            const alive_only = pod_list_alive.*;
+            const probe = pod_list_probe.* or alive_only;
+            try cli_cmds.runPodList(allocator, pod_list_where.*, probe, alive_only);
+        } else if (pod_new.happened) {
+            if (pod_new_instance.*.len > 0) setInstanceFromCli(pod_new_instance.*);
+            if (pod_new_test_only.*) {
+                setTestOnlyEnv();
+                if (!hasInstanceEnv()) {
+                    print("Error: --test-only requires --instance or HEXE_INSTANCE\n", .{});
+                    return;
+                }
+            }
+            try cli_cmds.runPodNew(
+                allocator,
+                pod_new_name.*,
+                pod_new_shell.*,
+                pod_new_cwd.*,
+                pod_new_labels.*,
+                pod_new_alias.*,
+                pod_new_dbg.*,
+                pod_new_log.*,
+            );
+        } else if (pod_send.happened) {
+            try cli_cmds.runPodSend(
+                allocator,
+                pod_send_uuid.*,
+                pod_send_name.*,
+                pod_send_socket.*,
+                pod_send_enter.*,
+                pod_send_ctrl.*,
+                pod_send_text.*,
+            );
+        } else if (pod_attach.happened) {
+            try cli_cmds.runPodAttach(
+                allocator,
+                pod_attach_uuid.*,
+                pod_attach_name.*,
+                pod_attach_socket.*,
+                pod_attach_detach.*,
+            );
+        } else if (pod_kill.happened) {
+            try cli_cmds.runPodKill(
+                allocator,
+                pod_kill_uuid.*,
+                pod_kill_name.*,
+                pod_kill_signal.*,
+                pod_kill_force.*,
+            );
+        } else if (pod_gc.happened) {
+            try cli_cmds.runPodGc(allocator, pod_gc_dry.*);
         }
         return;
     } else if (mux_cmd.happened) {
@@ -497,11 +616,26 @@ fn runSesStatus(allocator: std.mem.Allocator) !void {
 // POD handlers
 // ============================================================================
 
-fn runPodDaemon(foreground: bool, uuid: []const u8, name: []const u8, socket_path: []const u8, shell: []const u8, cwd: []const u8, debug: bool, log_file: []const u8) !void {
+fn runPodDaemon(
+    foreground: bool,
+    uuid: []const u8,
+    name: []const u8,
+    socket_path: []const u8,
+    shell: []const u8,
+    cwd: []const u8,
+    labels: []const u8,
+    write_meta: bool,
+    no_write_meta: bool,
+    write_alias: bool,
+    debug: bool,
+    log_file: []const u8,
+) !void {
     if (uuid.len == 0 or socket_path.len == 0) {
         print("Error: --uuid and --socket required\n", .{});
         return;
     }
+
+    const effective_write_meta = if (no_write_meta) false else if (write_meta) true else true;
 
     try pod.run(.{
         .daemon = !foreground,
@@ -510,6 +644,9 @@ fn runPodDaemon(foreground: bool, uuid: []const u8, name: []const u8, socket_pat
         .socket_path = socket_path,
         .shell = if (shell.len > 0) shell else null,
         .cwd = if (cwd.len > 0) cwd else null,
+        .labels = if (labels.len > 0) labels else null,
+        .write_meta = effective_write_meta,
+        .write_alias = write_alias,
         .debug = debug,
         .log_file = if (log_file.len > 0) log_file else null,
         .emit_ready = foreground,

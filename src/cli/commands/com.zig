@@ -3,6 +3,12 @@ const core = @import("core");
 const ipc = core.ipc;
 
 pub const runMuxFloat = @import("mux_float.zig").runMuxFloat;
+pub const runPodList = @import("pod_list.zig").runPodList;
+pub const runPodSend = @import("pod_send.zig").runPodSend;
+pub const runPodNew = @import("pod_new.zig").runPodNew;
+pub const runPodAttach = @import("pod_attach.zig").runPodAttach;
+pub const runPodKill = @import("pod_kill.zig").runPodKill;
+pub const runPodGc = @import("pod_gc.zig").runPodGc;
 
 const print = std.debug.print;
 
