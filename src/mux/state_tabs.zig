@@ -297,11 +297,60 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     const root = parsed.value.object;
 
+    // Clear current UI state before restoring.
+    //
+    // If we leave the previous session's tabs/panes around and then append the
+    // restored tabs, focus and routing can point at panes that were never
+    // adopted (blank/frozen) or double-adopted.
+    // This is especially important for `hexe mux attach` because the mux starts
+    // by creating a fresh tab, then reattaches.
+    {
+        // Deinit existing tab state.
+        while (self.tabs.items.len > 0) {
+            const tab_opt = self.tabs.pop();
+            if (tab_opt) |tab_const| {
+                var tab = tab_const;
+                tab.deinit();
+            }
+        }
+
+        // Deinit any existing floats.
+        while (self.floats.items.len > 0) {
+            const p_opt = self.floats.pop();
+            if (p_opt) |p| {
+                p.deinit();
+                self.allocator.destroy(p);
+            }
+        }
+
+        self.active_tab = 0;
+        self.active_floating = null;
+        self.tab_last_floating_uuid.clearRetainingCapacity();
+        self.tab_last_focus_kind.clearRetainingCapacity();
+    }
+
     // Restore mux UUID (persistent identity).
     if (root.get("uuid")) |uuid_val| {
         const uuid_str = uuid_val.string;
         if (uuid_str.len == 32) {
             @memcpy(&self.uuid, uuid_str[0..32]);
+
+            // Recreate the IPC server at the restored UUID's socket path.
+            // The shell's HEXE_MUX_SOCKET env var points to this path, and it
+            // doesn't change on reattach (shell was spawned by the pod, not mux).
+            // Without this, shell-event messages silently fail after reattach.
+            if (self.ipc_server) |*old_srv| {
+                old_srv.deinit();
+                self.ipc_server = null;
+            }
+            if (self.socket_path) |old_path| {
+                self.allocator.free(old_path);
+                self.socket_path = null;
+            }
+            if (core.ipc.getMuxSocketPath(self.allocator, uuid_str)) |new_path| {
+                self.socket_path = new_path;
+                self.ipc_server = core.ipc.Server.init(self.allocator, new_path) catch null;
+            } else |_| {}
         }
     }
 
@@ -320,13 +369,13 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     // Re-register with ses using restored UUID and session_name.
     self.ses_client.updateSession(self.uuid, self.session_name) catch {};
 
-    // Restore active tab/floating.
-    if (root.get("active_tab")) |at| {
-        self.active_tab = @intCast(at.integer);
-    }
-    if (root.get("active_floating")) |af| {
-        self.active_floating = if (af == .null) null else @intCast(af.integer);
-    }
+    // Remember active tab/floating from the stored state.
+    // We apply these after restoring tabs/floats so indices are valid.
+    const wanted_active_tab: usize = if (root.get("active_tab")) |at| @intCast(at.integer) else 0;
+    const wanted_active_floating: ?usize = if (root.get("active_floating")) |af|
+        if (af == .null) null else @intCast(af.integer)
+    else
+        null;
 
     // Build a map of UUID -> pod socket path for pane adoption.
     var uuid_socket_map = std.AutoHashMap([32]u8, []u8).init(self.allocator);
@@ -465,6 +514,26 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 else
                     null;
 
+                // Re-apply float style and border color from config definition.
+                // These are config pointers that can't be serialized, so we look
+                // up the FloatDef by the restored float_key.
+                if (pane.float_key != 0) {
+                    if (self.config.getFloatByKey(pane.float_key)) |float_def| {
+                        const style = if (float_def.style) |*s| s else if (self.config.float_style_default) |*s| s else null;
+                        if (style) |s| {
+                            pane.float_style = s;
+                        }
+                        pane.border_color = float_def.color orelse self.config.float_color;
+                    }
+                }
+
+                // Restore pwd_dir for per_cwd floats.
+                if (pane_obj.get("pwd_dir")) |pwd_val| {
+                    if (pwd_val == .string) {
+                        pane.pwd_dir = self.allocator.dupe(u8, pwd_val.string) catch null;
+                    }
+                }
+
                 // Configure pane notifications.
                 pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
 
@@ -484,6 +553,26 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         }
     }
 
+    // Prune dead pane nodes from layout trees. Pods that died during detach
+    // (e.g., from SIGPIPE) leave orphan nodes in the tree that would corrupt
+    // the layout by allocating space for non-existent panes.
+    for (self.tabs.items) |*tab| {
+        tab.layout.pruneDeadNodes();
+    }
+
+    // Remove tabs that have no live panes (all pods died).
+    {
+        var i: usize = 0;
+        while (i < self.tabs.items.len) {
+            if (self.tabs.items[i].layout.splits.count() == 0) {
+                var dead_tab = self.tabs.orderedRemove(i);
+                dead_tab.deinit();
+            } else {
+                i += 1;
+            }
+        }
+    }
+
     // Recalculate all layouts for current terminal size.
     for (self.tabs.items) |*tab| {
         tab.layout.resize(self.layout_width, self.layout_height);
@@ -491,6 +580,17 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     // Recalculate floating pane positions.
     self.resizeFloatingPanes();
+
+    // Apply restored active indices now that all state is present.
+    if (self.tabs.items.len > 0) {
+        self.active_tab = @min(wanted_active_tab, self.tabs.items.len - 1);
+    } else {
+        self.active_tab = 0;
+    }
+    self.active_floating = if (wanted_active_floating) |idx|
+        if (idx < self.floats.items.len) idx else null
+    else
+        null;
 
     self.renderer.invalidate();
     self.force_full_render = true;

@@ -275,6 +275,90 @@ pub const Layout = struct {
         }
     }
 
+    /// Remove nodes from the tree that reference pane IDs not in `splits`.
+    /// This handles the case where some pods died during detach and their
+    /// panes couldn't be recreated on reattach. Without pruning, the tree
+    /// allocates space for non-existent panes, corrupting the layout.
+    pub fn pruneDeadNodes(self: *Layout) void {
+        if (self.root) |root| {
+            const result = self.pruneNode(root);
+            if (result.dead) {
+                // Entire tree is dead
+                self.freeNode(root);
+                self.root = null;
+            } else if (result.replacement) |replacement| {
+                // Root was a split where one side died
+                self.root = replacement;
+                self.allocator.destroy(root);
+            }
+        }
+        // Ensure focused_split_id points to a live pane
+        if (!self.splits.contains(self.focused_split_id)) {
+            var it = self.splits.keyIterator();
+            if (it.next()) |first_id| {
+                self.focused_split_id = first_id.*;
+                if (self.splits.get(first_id.*)) |pane| {
+                    pane.focused = true;
+                }
+            }
+        }
+    }
+
+    const PruneResult = struct {
+        dead: bool, // This node references only dead panes
+        replacement: ?*LayoutNode, // If non-null, replace this node with this
+    };
+
+    fn pruneNode(self: *Layout, node: *LayoutNode) PruneResult {
+        switch (node.*) {
+            .pane => |id| {
+                if (self.splits.contains(id)) {
+                    return .{ .dead = false, .replacement = null };
+                } else {
+                    return .{ .dead = true, .replacement = null };
+                }
+            },
+            .split => |split| {
+                const first_result = self.pruneNode(split.first);
+                const second_result = self.pruneNode(split.second);
+
+                if (first_result.dead and second_result.dead) {
+                    // Both children dead - this whole subtree is dead
+                    self.freeNode(split.first);
+                    self.freeNode(split.second);
+                    return .{ .dead = true, .replacement = null };
+                } else if (first_result.dead) {
+                    // First child dead - replace this split with second child
+                    self.freeNode(split.first);
+                    if (second_result.replacement) |repl| {
+                        self.allocator.destroy(split.second);
+                        return .{ .dead = false, .replacement = repl };
+                    }
+                    return .{ .dead = false, .replacement = split.second };
+                } else if (second_result.dead) {
+                    // Second child dead - replace this split with first child
+                    self.freeNode(split.second);
+                    if (first_result.replacement) |repl| {
+                        self.allocator.destroy(split.first);
+                        return .{ .dead = false, .replacement = repl };
+                    }
+                    return .{ .dead = false, .replacement = split.first };
+                } else {
+                    // Both alive - apply any child replacements in-place
+                    if (first_result.replacement) |repl| {
+                        self.allocator.destroy(split.first);
+                        node.split.first = repl;
+                    }
+                    if (second_result.replacement) |repl| {
+                        self.allocator.destroy(split.second);
+                        node.split.second = repl;
+                    }
+                    return .{ .dead = false, .replacement = null };
+                }
+            },
+        }
+    }
+
     /// Resize the entire layout area
     pub fn resize(self: *Layout, width: u16, height: u16) void {
         self.width = width;

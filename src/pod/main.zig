@@ -36,6 +36,16 @@ pub const PodArgs = struct {
 ///
 /// In normal operation pods are launched by `hexe-ses`.
 pub fn run(args: PodArgs) !void {
+    // Ignore SIGPIPE so writes to disconnected mux sockets return EPIPE
+    // instead of killing the pod process. This is critical for surviving
+    // mux detach (terminal close) while the shell is producing output.
+    const sigpipe_action = std.os.linux.Sigaction{
+        .handler = .{ .handler = std.os.linux.SIG.IGN },
+        .mask = std.os.linux.sigemptyset(),
+        .flags = 0,
+    };
+    _ = std.os.linux.sigaction(posix.SIG.PIPE, &sigpipe_action, null);
+
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
@@ -465,6 +475,12 @@ const Pod = struct {
                         // For the main mux connection we want blocking semantics.
                         setBlocking(conn.fd);
                         self.client = conn;
+
+                        // Reset the frame reader to discard any partial state left
+                        // from the previous connection. Without this, a new mux's
+                        // input frames get misinterpreted as continuations of the
+                        // old connection's partial frames, causing commands to hang.
+                        self.reader.reset();
                         // Replay backlog.
                         const n = self.backlog.copyOut(backlog_tmp);
                         var off: usize = 0;

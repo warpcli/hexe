@@ -483,24 +483,42 @@ fn daemonize(log_file: ?[]const u8) !void {
 
     // We are now the daemon process
 
-    // Redirect stdin/stdout to /dev/null, stderr to debug log
+    // Do not die when the parent terminal closes.
+    // We also close stdio fds below, but ignoring SIGHUP makes the intent explicit
+    // and protects us from other session teardown edge-cases.
+    const sighup_action = std.os.linux.Sigaction{
+        .handler = .{ .handler = std.os.linux.SIG.IGN },
+        .mask = std.os.linux.sigemptyset(),
+        .flags = 0,
+    };
+    _ = std.os.linux.sigaction(posix.SIG.HUP, &sighup_action, null);
+
+    // Redirect stdin/stdout/stderr away from the controlling terminal.
+    // If stderr isn't redirected too, some terminals will still keep the PTY
+    // alive and can deliver a HUP/teardown in surprising ways.
     const devnull = posix.open("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch return;
     posix.dup2(devnull, posix.STDIN_FILENO) catch {};
     posix.dup2(devnull, posix.STDOUT_FILENO) catch {};
-    // Keep stderr for debugging - write to a log file
-    const log_path = log_file orelse "/tmp/hexe-ses-debug.log";
-    const append = log_file != null;
-    const logfd = posix.open(log_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = append, .TRUNC = !append }, 0o644) catch {
+
+    if (log_file) |log_path| {
+        if (log_path.len > 0) {
+            const logfd = posix.open(log_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch {
+                posix.dup2(devnull, posix.STDERR_FILENO) catch {};
+                if (devnull > 2) posix.close(devnull);
+                std.posix.chdir("/") catch {};
+                return;
+            };
+            posix.dup2(logfd, posix.STDERR_FILENO) catch {};
+            if (logfd > 2) posix.close(logfd);
+        } else {
+            posix.dup2(devnull, posix.STDERR_FILENO) catch {};
+        }
+    } else {
+        // Default: no noisy logfile. If user wants logs, they pass --logfile.
         posix.dup2(devnull, posix.STDERR_FILENO) catch {};
-        if (devnull > 2) posix.close(devnull);
-        std.posix.chdir("/") catch {};
-        return;
-    };
-    posix.dup2(logfd, posix.STDERR_FILENO) catch {};
-    if (logfd > 2) posix.close(logfd);
-    if (devnull > 2) {
-        posix.close(devnull);
     }
+
+    if (devnull > 2) posix.close(devnull);
 
     // Change to root directory
     std.posix.chdir("/") catch {};

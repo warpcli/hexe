@@ -87,6 +87,15 @@ pub fn run(mux_args: MuxArgs) !void {
         // Will be handled after state init.
     }
 
+    // Ignore SIGPIPE so writes to disconnected pod sockets return EPIPE
+    // instead of killing the mux process.
+    const sigpipe_action = std.os.linux.Sigaction{
+        .handler = .{ .handler = std.os.linux.SIG.IGN },
+        .mask = std.os.linux.sigemptyset(),
+        .flags = 0,
+    };
+    _ = std.os.linux.sigaction(posix.SIG.PIPE, &sigpipe_action, null);
+
     // Redirect stderr to a log file or /dev/null to avoid display corruption.
     redirectStderr(mux_args.log_file);
     debug_enabled = mux_args.debug;
