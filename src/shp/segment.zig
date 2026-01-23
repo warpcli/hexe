@@ -94,7 +94,7 @@ pub const Context = struct {
     pub fn renderSegment(self: *Context, name: []const u8) ?[]const Segment {
         // Dynamic segments (cpu, mem, netspeed, time) should not be cached
         // since they need fresh values each render
-        const dynamic_segments = [_][]const u8{ "cpu", "mem", "memory", "netspeed", "time", "battery", "uptime", "last_command" };
+        const dynamic_segments = [_][]const u8{ "cpu", "mem", "memory", "netspeed", "time", "battery", "uptime", "last_command", "randomdo" };
         var is_dynamic = false;
         if (std.mem.eql(u8, name, "running_anim") or std.mem.startsWith(u8, name, "running_anim/")) {
             is_dynamic = true;

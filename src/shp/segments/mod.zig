@@ -11,6 +11,7 @@ pub const memory = @import("memory.zig");
 pub const battery = @import("battery.zig");
 pub const last_command = @import("last_command.zig");
 pub const running_anim = @import("running_anim.zig");
+pub const randomdo = @import("randomdo.zig");
 
 // Shell context segments (for prompt)
 pub const directory = @import("directory.zig");
@@ -47,6 +48,7 @@ pub const registry = std.StaticStringMap(SegmentFn).initComptime(.{
     .{ "last_command", last_command.render },
     .{ "cmd", last_command.render },
     .{ "running_anim", running_anim.render },
+    .{ "randomdo", randomdo.render },
 
     // Shell context (prompt)
     .{ "directory", directory.render },

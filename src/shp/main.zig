@@ -186,6 +186,7 @@ fn renderPrompt(allocator: std.mem.Allocator, args: []const []const u8) !void {
     // Get environment info
     ctx.cwd = std.posix.getenv("PWD") orelse "";
     ctx.home = std.posix.getenv("HOME");
+    ctx.now_ms = @intCast(std.time.milliTimestamp());
 
     // Get terminal width from COLUMNS env var or default
     if (posix.getenv("COLUMNS")) |cols| {
