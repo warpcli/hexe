@@ -28,5 +28,7 @@ pub const PanesConfig = config.PanesConfig;
 pub const StatusModule = config.StatusModule;
 pub const OutputDef = config.OutputDef;
 pub const WhenDef = config.WhenDef;
+pub const WhenTokens = config.WhenTokens;
+pub const SpinnerDef = config.SpinnerDef;
 pub const NotificationStyleConfig = config.NotificationStyleConfig;
 pub const NotificationConfig = config.NotificationConfig;

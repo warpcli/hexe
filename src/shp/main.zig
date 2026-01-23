@@ -312,6 +312,42 @@ fn evalLuaWhen(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bo
     return false;
 }
 
+fn evalPromptWhen(allocator: std.mem.Allocator, lua_rt: *?LuaRuntime, ctx: *segment.Context, when: core.WhenDef) bool {
+    if (when.any) |clauses| {
+        for (clauses) |c| {
+            if (evalPromptWhenClause(allocator, lua_rt, ctx, c)) return true;
+        }
+        return false;
+    }
+    return evalPromptWhenClause(allocator, lua_rt, ctx, when);
+}
+
+fn evalPromptWhenClause(allocator: std.mem.Allocator, lua_rt: *?LuaRuntime, ctx: *segment.Context, when: core.WhenDef) bool {
+    if (when.lua) |lua_code| {
+        if (lua_rt.* == null) {
+            lua_rt.* = LuaRuntime.init(allocator) catch null;
+        }
+        if (lua_rt.* == null) return false;
+        if (!evalLuaWhen(&lua_rt.*.?, ctx, lua_code)) return false;
+    }
+
+    if (when.bash) |bash_code| {
+        const res = std.process.Child.run(.{
+            .allocator = allocator,
+            .argv = &.{ "/bin/bash", "-lc", bash_code },
+        }) catch return false;
+        allocator.free(res.stdout);
+        allocator.free(res.stderr);
+        const ok = switch (res.term) {
+            .Exited => |code| code == 0,
+            else => false,
+        };
+        if (!ok) return false;
+    }
+
+    return true;
+}
+
 fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
     var config = ShpConfig{
         .left = &[_]ModuleDef{},
@@ -414,8 +450,13 @@ fn parseWhenPrompt(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?core.Whe
     if (!runtime.pushTable(-1, "when")) return null;
     defer runtime.pop();
 
-    // Strict: prompt does not allow hexe conditions.
-    if (runtime.fieldType(-1, "hexe") != .nil) {
+    // Strict: prompt does not allow hexe.* providers.
+    if (runtime.fieldType(-1, "hexe") != .nil or
+        runtime.fieldType(-1, "hexe.shp") != .nil or
+        runtime.fieldType(-1, "hexe.mux") != .nil or
+        runtime.fieldType(-1, "hexe.ses") != .nil or
+        runtime.fieldType(-1, "hexe.pod") != .nil)
+    {
         return null;
     }
 
@@ -491,25 +532,14 @@ fn renderModulesSimple(ctx: *segment.Context, modules: []const ModuleDef, stdout
     var results: [32]ModuleResult = [_]ModuleResult{.{}} ** 32;
     const mod_count = @min(modules.len, 32);
 
-    // Evaluate Lua conditions on the main thread (Lua VM is not thread-safe).
+    // Evaluate all `when` on the main thread.
+    // This avoids Lua VM thread-safety issues and keeps semantics simple.
     var lua_rt: ?LuaRuntime = null;
     defer if (lua_rt) |*rt| rt.deinit();
 
     for (modules[0..mod_count], 0..) |mod, i| {
         if (mod.when) |w| {
-            if (w.lua) |lua_code| {
-                if (lua_rt == null) {
-                    lua_rt = LuaRuntime.init(alloc) catch null;
-                }
-                if (lua_rt) |*rt| {
-                    results[i].when_lua_passed = evalLuaWhen(rt, ctx, lua_code);
-                    if (!results[i].when_lua_passed) {
-                        results[i].when_passed = false;
-                    }
-                } else {
-                    results[i].when_passed = false;
-                }
-            }
+            results[i].when_passed = evalPromptWhen(alloc, &lua_rt, ctx, w);
         }
     }
 
@@ -523,25 +553,6 @@ fn renderModulesSimple(ctx: *segment.Context, modules: []const ModuleDef, stdout
     const thread_fn = struct {
         fn run(tctx: ThreadContext) void {
             if (!tctx.result.when_passed) return;
-            // Check 'when' condition
-            if (tctx.mod.when) |w| {
-                if (w.bash) |when_cmd| {
-                    const when_result = std.process.Child.run(.{
-                        .allocator = tctx.alloc,
-                        .argv = &.{ "/bin/bash", "-lc", when_cmd },
-                    }) catch {
-                        tctx.result.when_passed = false;
-                        return;
-                    };
-                    tctx.alloc.free(when_result.stdout);
-                    tctx.alloc.free(when_result.stderr);
-                    tctx.result.when_passed = switch (when_result.term) {
-                        .Exited => |code| code == 0,
-                        else => false,
-                    };
-                    if (!tctx.result.when_passed) return;
-                }
-            }
 
             // Run command
             if (tctx.mod.command) |cmd| {

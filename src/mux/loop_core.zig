@@ -164,11 +164,11 @@ pub fn runMainLoop(state: *State) !void {
         const want_anim = blk: {
             const uuid = state.getCurrentFocusedUuid() orelse break :blk false;
 
-            // suppress while alt-screen is active
-            const alt = if (state.active_floating) |idx| blk2: {
-                if (idx < state.floats.items.len) break :blk2 state.floats.items[idx].vt.inAltScreen();
-                break :blk2 false;
-            } else if (state.currentLayout().getFocusedPane()) |pane| pane.vt.inAltScreen() else false;
+            // If a float is focused, allow fast refresh (spinners in statusbar).
+            if (state.active_floating != null) break :blk true;
+
+            // suppress while alt-screen is active (for split-focused panes)
+            const alt = if (state.currentLayout().getFocusedPane()) |pane| pane.vt.inAltScreen() else false;
             if (alt) break :blk false;
 
             // Prefer direct fg_process; fallback to cached process name.

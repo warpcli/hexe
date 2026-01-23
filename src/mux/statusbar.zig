@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("core");
 const shp = @import("shp");
+const spinners = @import("spinners/mod.zig");
 
 const LuaRuntime = core.LuaRuntime;
 
@@ -36,6 +37,22 @@ fn hexeTokenPass(ctx: *shp.Context, tok: []const u8) bool {
     if (std.mem.eql(u8, tok, "jobs_nonzero")) return ctx.jobs > 0;
     if (std.mem.eql(u8, tok, "has_last_cmd")) return ctx.last_command != null and ctx.last_command.?.len > 0;
     if (std.mem.eql(u8, tok, "last_status_nonzero")) return (ctx.exit_status orelse 0) != 0;
+    return false;
+}
+
+fn muxTokenPass(ctx: *shp.Context, tok: []const u8) bool {
+    if (std.mem.eql(u8, tok, "focus_float")) return ctx.focus_is_float;
+    if (std.mem.eql(u8, tok, "focus_split")) return ctx.focus_is_split;
+    if (std.mem.eql(u8, tok, "adhoc_float")) return ctx.focus_is_float and ctx.float_key == 0;
+    if (std.mem.eql(u8, tok, "named_float")) return ctx.focus_is_float and ctx.float_key != 0;
+    if (std.mem.eql(u8, tok, "float_destroyable")) return ctx.focus_is_float and ctx.float_destroyable;
+    if (std.mem.eql(u8, tok, "float_exclusive")) return ctx.focus_is_float and ctx.float_exclusive;
+    if (std.mem.eql(u8, tok, "float_sticky")) return ctx.focus_is_float and ctx.float_sticky;
+    if (std.mem.eql(u8, tok, "float_per_cwd")) return ctx.focus_is_float and ctx.float_per_cwd;
+    if (std.mem.eql(u8, tok, "float_global")) return ctx.focus_is_float and ctx.float_global;
+    if (std.mem.eql(u8, tok, "float_isolated")) return ctx.focus_is_float and ctx.float_isolated;
+    if (std.mem.eql(u8, tok, "tabs_gt1")) return ctx.tab_count > 1;
+    if (std.mem.eql(u8, tok, "tabs_eq1")) return ctx.tab_count == 1;
     return false;
 }
 
@@ -137,11 +154,30 @@ fn passesWhen(ctx: *shp.Context, mod: core.config.StatusModule) bool {
     if (mod.when == null) return true;
     const w = mod.when.?;
 
-    if (w.hexe) |tokens| {
-        for (tokens) |t| {
-            if (!hexeTokenPass(ctx, t)) return false;
+    if (w.any) |clauses| {
+        for (clauses) |c| {
+            if (passesWhenClause(ctx, c)) return true;
         }
+        return false;
     }
+
+    return passesWhenClause(ctx, w);
+}
+
+fn passesWhenClause(ctx: *shp.Context, w: core.WhenDef) bool {
+
+    if (w.hexe_shp) |tokens| {
+        if (!passesTokenExpr(tokens, ctx, hexeTokenPass)) return false;
+    }
+
+    if (w.hexe_mux) |tokens| {
+        if (!passesTokenExpr(tokens, ctx, muxTokenPass)) return false;
+    }
+
+    // Parse-only for now: treat unsupported providers as false if present.
+    if (w.hexe_ses != null) return false;
+    if (w.hexe_pod != null) return false;
+
     if (w.lua) |lua_code| {
         if (!evalLuaWhen(lua_code, ctx, 250)) return false;
     }
@@ -149,6 +185,29 @@ fn passesWhen(ctx: *shp.Context, mod: core.config.StatusModule) bool {
         if (!evalBashWhen(bash_code, ctx, 1000)) return false;
     }
 
+    return true;
+}
+
+fn passesTokenExpr(expr: core.WhenTokens, ctx: *shp.Context, comptime tokFn: fn (*shp.Context, []const u8) bool) bool {
+    if (expr.any) |groups| {
+        for (groups) |g| {
+            var ok = true;
+            for (g.tokens) |t| {
+                if (!tokFn(ctx, t)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) return true;
+        }
+        return false;
+    }
+    if (expr.all) |tokens| {
+        for (tokens) |t| {
+            if (!tokFn(ctx, t)) return false;
+        }
+        return true;
+    }
     return true;
 }
 
@@ -267,8 +326,20 @@ pub fn draw(
     defer ctx.deinit();
     ctx.terminal_width = width;
 
+    ctx.now_ms = @intCast(std.time.milliTimestamp());
+
     // Provide shell metadata for status modules.
+    // Also ensure we have a stable `shell_started_at_ms` while a float is focused,
+    // so spinner modules can animate even without shell hooks.
     if (state.getCurrentFocusedUuid()) |uuid| {
+        if (state.active_floating != null) {
+            const info_opt = state.getPaneShell(uuid);
+            const needs_start = if (info_opt) |info| info.started_at_ms == null else true;
+            if (needs_start) {
+                state.setPaneShellRunning(uuid, false, ctx.now_ms, null, null, null);
+            }
+        }
+
         if (state.getPaneShell(uuid)) |info| {
             if (info.cmd) |c| {
                 ctx.last_command = c;
@@ -292,16 +363,34 @@ pub fn draw(
         }
     }
 
-    // Provide pane state for animation policy.
+    // Mux focus state.
+    ctx.tab_count = @intCast(@min(tabs.items.len, @as(usize, std.math.maxInt(u16))));
+    ctx.focus_is_float = state.active_floating != null;
+    ctx.focus_is_split = state.active_floating == null;
+
+    // Provide pane state for animation policy + float attributes.
     if (state.active_floating) |idx| {
         if (idx < state.floats.items.len) {
             ctx.alt_screen = state.floats.items[idx].vt.inAltScreen();
+
+            const fp = state.floats.items[idx];
+            ctx.float_key = fp.float_key;
+            ctx.float_sticky = fp.sticky;
+            ctx.float_global = fp.parent_tab == null;
+
+            if (fp.float_key != 0) {
+                if (state.config.getFloatByKey(fp.float_key)) |fd| {
+                    ctx.float_destroyable = fd.attributes.destroy;
+                    ctx.float_exclusive = fd.attributes.exclusive;
+                    ctx.float_per_cwd = fd.attributes.per_cwd;
+                    ctx.float_isolated = fd.attributes.isolated;
+                    ctx.float_global = ctx.float_global or fd.attributes.global;
+                }
+            }
         }
     } else if (state.currentLayout().getFocusedPane()) |pane| {
         ctx.alt_screen = pane.vt.inAltScreen();
     }
-
-    ctx.now_ms = @intCast(std.time.milliTimestamp());
 
     // Find the tabs module to check tab_title setting
     var use_basename = true;
@@ -594,8 +683,19 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, mod: core.config.Statu
         const style = shp.Style.parse(out.style);
         ctx.module_default_style = style;
 
-        const output_segs: ?[]const shp.Segment = if (std.mem.eql(u8, mod.name, "session")) null else ctx.renderSegment(mod.name);
-        const output_text: []const u8 = if (std.mem.eql(u8, mod.name, "session")) ctx.session_name else "";
+        var output_segs: ?[]const shp.Segment = null;
+        var output_text: []const u8 = "";
+        if (std.mem.eql(u8, mod.name, "session")) {
+            output_text = ctx.session_name;
+        } else if (std.mem.eql(u8, mod.name, "spinner")) {
+            if (mod.spinner) |cfg_in| {
+                var cfg = cfg_in;
+                cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
+                output_segs = spinners.render(ctx, cfg);
+            }
+        } else {
+            output_segs = ctx.renderSegment(mod.name);
+        }
         x = drawFormatted(renderer, x, y, out.format, output_text, output_segs, style);
     }
 
@@ -634,8 +734,19 @@ pub fn calcModuleWidth(ctx: *shp.Context, mod: core.config.StatusModule) u16 {
         const style = shp.Style.parse(out.style);
         ctx.module_default_style = style;
 
-        const output_segs: ?[]const shp.Segment = if (std.mem.eql(u8, mod.name, "session")) null else ctx.renderSegment(mod.name);
-        const output_text: []const u8 = if (std.mem.eql(u8, mod.name, "session")) ctx.session_name else "";
+        var output_segs: ?[]const shp.Segment = null;
+        var output_text: []const u8 = "";
+        if (std.mem.eql(u8, mod.name, "session")) {
+            output_text = ctx.session_name;
+        } else if (std.mem.eql(u8, mod.name, "spinner")) {
+            if (mod.spinner) |cfg_in| {
+                var cfg = cfg_in;
+                cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
+                output_segs = spinners.render(ctx, cfg);
+            }
+        } else {
+            output_segs = ctx.renderSegment(mod.name);
+        }
         width += calcFormattedWidth(out.format, output_text, output_segs);
     }
 

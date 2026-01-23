@@ -35,6 +35,21 @@ pub const Context = struct {
     // Mux pane state (for mux status bar mode)
     alt_screen: bool = false,
 
+    // Mux focus state (for mux status bar mode)
+    focus_is_float: bool = false,
+    focus_is_split: bool = true,
+
+    // Focused float attributes (for mux status bar mode)
+    float_key: u8 = 0,
+    float_destroyable: bool = false,
+    float_exclusive: bool = false,
+    float_per_cwd: bool = false,
+    float_global: bool = false,
+    float_sticky: bool = false,
+    float_isolated: bool = false,
+
+    tab_count: u16 = 0,
+
     // Clock (ms since epoch) for animations/time-based segments
     now_ms: u64 = 0,
 

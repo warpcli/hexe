@@ -2,6 +2,8 @@ const std = @import("std");
 const core = @import("core");
 const ipc = core.ipc;
 
+pub const runMuxFloat = @import("mux_float.zig").runMuxFloat;
+
 const print = std.debug.print;
 
 const ansi = struct {

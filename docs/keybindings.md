@@ -283,7 +283,7 @@ Example:
 }
 ```
 
-`hexe` tokens available:
+`hexe.shp` tokens available:
 - `process_running`
 - `not_process_running`
 - `alt_screen`
@@ -291,6 +291,20 @@ Example:
 - `jobs_nonzero`
 - `has_last_cmd`
 - `last_status_nonzero`
+
+`hexe.mux` tokens available:
+- `focus_float`
+- `focus_split`
+- `adhoc_float`
+- `named_float`
+- `float_destroyable`
+- `float_exclusive`
+- `float_sticky`
+- `float_per_cwd`
+- `float_global`
+- `float_isolated`
+- `tabs_gt1`
+- `tabs_eq1`
 
 For statusbar `lua`, `ctx` includes:
 - `ctx.shell_running`
