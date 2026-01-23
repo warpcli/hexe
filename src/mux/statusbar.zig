@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("core");
 const shp = @import("shp");
 const spinners = @import("spinners/mod.zig");
+const randomdo_mod = @import("modules/randomdo.zig");
 
 const LuaRuntime = core.LuaRuntime;
 
@@ -17,6 +18,49 @@ const WhenCacheEntry = struct {
 threadlocal var when_bash_cache: ?std.AutoHashMap(usize, WhenCacheEntry) = null;
 threadlocal var when_lua_cache: ?std.AutoHashMap(usize, WhenCacheEntry) = null;
 threadlocal var when_lua_rt: ?LuaRuntime = null;
+
+const RandomdoState = struct {
+    active: bool,
+    idx: u16,
+};
+
+threadlocal var randomdo_state: ?std.AutoHashMap(usize, RandomdoState) = null;
+
+fn getRandomdoStateMap() *std.AutoHashMap(usize, RandomdoState) {
+    if (randomdo_state == null) {
+        randomdo_state = std.AutoHashMap(usize, RandomdoState).init(std.heap.page_allocator);
+    }
+    return &randomdo_state.?;
+}
+
+fn randomdoKey(mod: core.config.StatusModule) usize {
+    return (@intFromPtr(mod.outputs.ptr) << 1) ^ @as(usize, mod.priority) ^ mod.name.len;
+}
+
+fn randomdoTextFor(ctx: *shp.Context, mod: core.config.StatusModule, visible: bool) []const u8 {
+    const key = randomdoKey(mod);
+    const map = getRandomdoStateMap();
+
+    if (!visible) {
+        if (map.getPtr(key)) |st| st.active = false;
+        return "";
+    }
+
+    var entry = map.getPtr(key);
+    if (entry == null) {
+        map.put(key, .{ .active = false, .idx = 0 }) catch {};
+        entry = map.getPtr(key);
+    }
+    if (entry) |st| {
+        if (!st.active) {
+            const idx = randomdo_mod.chooseIndex(ctx.now_ms, ctx.cwd);
+            st.idx = @intCast(idx);
+            st.active = true;
+        }
+        return randomdo_mod.WORDS[@min(@as(usize, st.idx), randomdo_mod.WORDS.len - 1)];
+    }
+    return "";
+}
 
 fn whenKey(s: []const u8) usize {
     return (@intFromPtr(s.ptr) << 1) ^ s.len;
@@ -154,14 +198,14 @@ fn passesWhen(ctx: *shp.Context, mod: core.config.StatusModule) bool {
     if (mod.when == null) return true;
     const w = mod.when.?;
 
-    if (w.any) |clauses| {
+    const ok = if (w.any) |clauses| {
         for (clauses) |c| {
             if (passesWhenClause(ctx, c)) return true;
         }
         return false;
-    }
+    } else passesWhenClause(ctx, w);
 
-    return passesWhenClause(ctx, w);
+    return ok;
 }
 
 fn passesWhenClause(ctx: *shp.Context, w: core.WhenDef) bool {
@@ -479,6 +523,14 @@ pub fn draw(
         }
     }
 
+    // Update randomdo visibility state (off->on changes word).
+    for (0..left_count) |i| {
+        if (std.mem.eql(u8, left_modules[i].mod.name, "randomdo")) {
+            const shown = left_modules[i].visible and left_modules[i].width != 0;
+            _ = randomdoTextFor(&ctx, left_modules[i].mod.*, shown);
+        }
+    }
+
     // Collect right modules with widths
     var right_modules: [24]ModuleInfo = undefined;
     var right_count: usize = 0;
@@ -509,6 +561,13 @@ pub fn draw(
         if (right_used + right_modules[idx].width <= right_budget) {
             right_modules[idx].visible = true;
             right_used += right_modules[idx].width;
+        }
+    }
+
+    for (0..right_count) |i| {
+        if (std.mem.eql(u8, right_modules[i].mod.name, "randomdo")) {
+            const shown = right_modules[i].visible and right_modules[i].width != 0;
+            _ = randomdoTextFor(&ctx, right_modules[i].mod.*, shown);
         }
     }
 
@@ -687,6 +746,8 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, mod: core.config.Statu
         var output_text: []const u8 = "";
         if (std.mem.eql(u8, mod.name, "session")) {
             output_text = ctx.session_name;
+        } else if (std.mem.eql(u8, mod.name, "randomdo")) {
+            output_text = randomdoTextFor(ctx, mod, true);
         } else if (std.mem.eql(u8, mod.name, "spinner")) {
             if (mod.spinner) |cfg_in| {
                 var cfg = cfg_in;
@@ -738,6 +799,9 @@ pub fn calcModuleWidth(ctx: *shp.Context, mod: core.config.StatusModule) u16 {
         var output_text: []const u8 = "";
         if (std.mem.eql(u8, mod.name, "session")) {
             output_text = ctx.session_name;
+        } else if (std.mem.eql(u8, mod.name, "randomdo")) {
+            width += calcFormattedWidthMax(out.format, randomdo_mod.MAX_LEN);
+            continue;
         } else if (std.mem.eql(u8, mod.name, "spinner")) {
             if (mod.spinner) |cfg_in| {
                 var cfg = cfg_in;
@@ -750,6 +814,22 @@ pub fn calcModuleWidth(ctx: *shp.Context, mod: core.config.StatusModule) u16 {
         width += calcFormattedWidth(out.format, output_text, output_segs);
     }
 
+    return width;
+}
+
+fn calcFormattedWidthMax(format: []const u8, output_max: u16) u16 {
+    var width: u16 = 0;
+    var i: usize = 0;
+    while (i < format.len) {
+        if (i + 7 <= format.len and std.mem.eql(u8, format[i..][0..7], "$output")) {
+            width += output_max;
+            i += 7;
+        } else {
+            const len = std.unicode.utf8ByteSequenceLength(format[i]) catch 1;
+            i += len;
+            width += 1;
+        }
+    }
     return width;
 }
 
