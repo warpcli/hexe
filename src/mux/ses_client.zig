@@ -358,6 +358,10 @@ pub const SesClient = struct {
         pid: ?i32 = null,
     };
 
+    pub const PaneNameInfo = struct {
+        name: ?[]u8 = null,
+    };
+
     /// Get auxiliary pane info (created_from, focused_from) from ses
     pub fn getPaneAux(self: *SesClient, uuid: [32]u8) !PaneAuxInfo {
         const conn = &(self.conn orelse return error.NotConnected);
@@ -458,6 +462,78 @@ pub const SesClient = struct {
         }
 
         return out;
+    }
+
+    /// Best-effort pane name (mux metadata).
+    /// Returns an owned string that the caller must free.
+    pub fn getPaneName(self: *SesClient, uuid: [32]u8) ?[]u8 {
+        const conn = &(self.conn orelse return null);
+
+        var buf: [128]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "{{\"type\":\"pane_info\",\"uuid\":\"{s}\"}}", .{uuid}) catch return null;
+        conn.sendLine(msg) catch return null;
+
+        var resp_buf: [4096]u8 = undefined;
+        const line = conn.recvLine(&resp_buf) catch return null;
+        if (line == null) return null;
+
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, line.?, .{}) catch return null;
+        defer parsed.deinit();
+
+        const root = parsed.value.object;
+        if (root.get("type")) |t| {
+            if (std.mem.eql(u8, t.string, "error")) return null;
+        }
+        if (root.get("name")) |v| {
+            if (v == .string and v.string.len > 0) {
+                return self.allocator.dupe(u8, v.string) catch null;
+            }
+        }
+        return null;
+    }
+
+    pub fn updatePaneName(self: *SesClient, uuid: [32]u8, name: ?[]const u8) !void {
+        const conn = &(self.conn orelse return error.NotConnected);
+
+        var buf: [1024]u8 = undefined;
+        var stream = std.io.fixedBufferStream(&buf);
+        var w = stream.writer();
+
+        try w.print("{{\"type\":\"update_pane_name\",\"uuid\":\"{s}\",\"name\":", .{uuid});
+        if (name) |n| {
+            try w.writeByte('"');
+            try writeJsonEscaped(w, n);
+            try w.writeByte('"');
+        } else {
+            try w.writeAll("null");
+        }
+        try w.writeAll("}");
+
+        try conn.sendLine(stream.getWritten());
+
+        // Wait for OK response.
+        var resp_buf: [256]u8 = undefined;
+        const line = try conn.recvLine(&resp_buf);
+        if (line == null) return error.ConnectionClosed;
+    }
+
+    fn writeJsonEscaped(writer: anytype, value: []const u8) !void {
+        for (value) |ch| {
+            switch (ch) {
+                '"' => try writer.writeAll("\\\""),
+                '\\' => try writer.writeAll("\\\\"),
+                '\n' => try writer.writeAll("\\n"),
+                '\r' => try writer.writeAll("\\r"),
+                '\t' => try writer.writeAll("\\t"),
+                else => {
+                    if (ch < 0x20) {
+                        try writer.writeByte(' ');
+                    } else {
+                        try writer.writeByte(ch);
+                    }
+                },
+            }
+        }
     }
 
     /// Get current working directory from /proc/<pid>/cwd via ses

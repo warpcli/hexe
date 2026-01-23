@@ -30,9 +30,7 @@ pub fn save(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
             p.pod_socket_path,
             @tagName(p.state),
         });
-        if (p.name) |n| {
-            try w.print(",\"name\":\"{s}\"", .{n});
-        }
+        // Intentionally do not persist pane.name.
         if (p.sticky_pwd) |pwd| {
             try w.print(",\"sticky_pwd\":\"{s}\"", .{pwd});
         }
@@ -131,10 +129,8 @@ pub fn load(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
             const sticky_pwd: ?[]const u8 = if (obj.get("sticky_pwd")) |p| try ses_state.allocator.dupe(u8, p.string) else null;
             const sticky_key: ?u8 = if (obj.get("sticky_key")) |k| @intCast(k.integer) else null;
 
-            const name: ?[]const u8 = if (obj.get("name")) |n|
-                try ses_state.allocator.dupe(u8, n.string)
-            else
-                null;
+            // Intentionally do not load pane.name.
+            const name: ?[]const u8 = null;
 
             var session_id: ?[16]u8 = null;
             if (obj.get("session_id")) |sid_val| {

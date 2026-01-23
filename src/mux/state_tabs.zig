@@ -468,6 +468,13 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 // Configure pane notifications.
                 pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
 
+                // Restore float title from ses memory (best-effort).
+                if (self.ses_client.isConnected()) {
+                    if (self.ses_client.getPaneName(uuid_arr)) |name| {
+                        pane.float_title = name;
+                    }
+                }
+
                 self.floats.append(self.allocator, pane) catch {
                     pane.deinit();
                     self.allocator.destroy(pane);

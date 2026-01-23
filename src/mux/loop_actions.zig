@@ -475,6 +475,10 @@ pub fn createAdhocFloat(
         }
     }
 
+    if (state.ses_client.isConnected()) {
+        state.ses_client.updatePaneName(pane.uuid, pane.float_title) catch {};
+    }
+
     pane.border_x = outer_x;
     pane.border_y = outer_y;
     pane.border_w = outer_w;
@@ -572,6 +576,10 @@ pub fn createNamedFloat(state: *State, float_def: *const core.FloatDef, current_
         if (t.len > 0) {
             pane.float_title = state.allocator.dupe(u8, t) catch null;
         }
+    }
+
+    if (state.ses_client.isConnected()) {
+        state.ses_client.updatePaneName(pane.uuid, pane.float_title) catch {};
     }
     // For global floats (special or pwd), set per-tab visibility.
     // For tab-bound floats, use simple visible field.

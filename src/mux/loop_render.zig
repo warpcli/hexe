@@ -6,6 +6,7 @@ const statusbar = @import("statusbar.zig");
 const popup_render = @import("popup_render.zig");
 const borders = @import("borders.zig");
 const mouse_selection = @import("mouse_selection.zig");
+const float_title = @import("float_title.zig");
 
 pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     const renderer = &state.renderer;
@@ -53,6 +54,11 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         }
 
         borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, false, if (pane.float_title) |t| t else "", pane.border_color, pane.float_style);
+        if (state.float_rename_uuid) |uuid| {
+            if (std.mem.eql(u8, &uuid, &pane.uuid)) {
+                float_title.drawTitleEditor(renderer, pane, state.float_rename_buf.items);
+            }
+        }
 
         const render_state = pane.getRenderState() catch continue;
         renderer.drawRenderState(render_state, pane.x, pane.y, pane.width, pane.height);
@@ -81,6 +87,11 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             true;
         if (pane.isVisibleOnTab(state.active_tab) and can_render) {
             borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, true, if (pane.float_title) |t| t else "", pane.border_color, pane.float_style);
+            if (state.float_rename_uuid) |uuid| {
+                if (std.mem.eql(u8, &uuid, &pane.uuid)) {
+                    float_title.drawTitleEditor(renderer, pane, state.float_rename_buf.items);
+                }
+            }
 
             if (pane.getRenderState()) |render_state| {
                 renderer.drawRenderState(render_state, pane.x, pane.y, pane.width, pane.height);

@@ -64,6 +64,41 @@ pub const PaneProcInfo = struct {
 };
 
 pub const State = struct {
+    pub const MouseDragSplitResize = struct {
+        split: *layout_mod.LayoutNode.Split,
+        dir: layout_mod.SplitDir,
+        x: u16,
+        y: u16,
+        w: u16,
+        h: u16,
+    };
+
+    pub const MouseDragFloatMove = struct {
+        uuid: [32]u8,
+        start_x: u16,
+        start_y: u16,
+        orig_x: u16,
+        orig_y: u16,
+    };
+
+    pub const MouseDragFloatResize = struct {
+        uuid: [32]u8,
+        edge_mask: u8,
+        start_x: u16,
+        start_y: u16,
+        orig_x: u16,
+        orig_y: u16,
+        orig_w: u16,
+        orig_h: u16,
+    };
+
+    pub const MouseDrag = union(enum) {
+        none,
+        split_resize: MouseDragSplitResize,
+        float_move: MouseDragFloatMove,
+        float_resize: MouseDragFloatResize,
+    };
+
     allocator: std.mem.Allocator,
     config: core.Config,
     pop_config: pop.PopConfig,
@@ -124,6 +159,19 @@ pub const State = struct {
 
     mouse_selection: mouse_selection.MouseSelection,
     mouse_selection_last_autoscroll_ms: i64,
+
+    mouse_drag: MouseDrag,
+
+    // Float title rename (inline editing)
+    float_rename_uuid: ?[32]u8,
+    float_rename_buf: std.ArrayList(u8),
+
+    // Title click counter (for double-click rename)
+    mouse_title_last_ms: i64,
+    mouse_title_click_count: u8,
+    mouse_title_last_uuid: ?[32]u8,
+    mouse_title_last_x: u16,
+    mouse_title_last_y: u16,
 
     mouse_click_last_ms: i64,
     mouse_click_count: u8,
@@ -207,6 +255,17 @@ pub const State = struct {
             .mouse_selection = .{},
             .mouse_selection_last_autoscroll_ms = 0,
 
+            .mouse_drag = .none,
+
+            .float_rename_uuid = null,
+            .float_rename_buf = .empty,
+
+            .mouse_title_last_ms = 0,
+            .mouse_title_click_count = 0,
+            .mouse_title_last_uuid = null,
+            .mouse_title_last_x = 0,
+            .mouse_title_last_y = 0,
+
             .mouse_click_last_ms = 0,
             .mouse_click_count = 0,
             .mouse_click_last_pane_uuid = null,
@@ -219,6 +278,52 @@ pub const State = struct {
 
             .key_timers = .empty,
         };
+    }
+
+    pub fn beginFloatRename(self: *State, pane: *Pane) void {
+        const title = pane.float_title orelse return;
+        if (title.len == 0) return;
+
+        self.float_rename_uuid = pane.uuid;
+        self.float_rename_buf.clearRetainingCapacity();
+
+        const cap: usize = 64;
+        const slice = title[0..@min(title.len, cap)];
+        self.float_rename_buf.appendSlice(self.allocator, slice) catch {};
+        self.needs_render = true;
+    }
+
+    pub fn clearFloatRename(self: *State) void {
+        self.float_rename_uuid = null;
+        self.float_rename_buf.clearRetainingCapacity();
+        self.needs_render = true;
+    }
+
+    pub fn commitFloatRename(self: *State) void {
+        const uuid = self.float_rename_uuid orelse return;
+        const pane = self.findPaneByUuid(uuid) orelse {
+            self.clearFloatRename();
+            return;
+        };
+
+        const new_title = std.mem.trim(u8, self.float_rename_buf.items, " \t\r\n");
+        if (pane.float_title) |old| {
+            self.allocator.free(old);
+            pane.float_title = null;
+        }
+        if (new_title.len > 0) {
+            pane.float_title = self.allocator.dupe(u8, new_title) catch null;
+        }
+
+        // Best-effort: store title in ses memory for reattach.
+        if (self.ses_client.isConnected()) {
+            self.ses_client.updatePaneName(pane.uuid, pane.float_title) catch {};
+        }
+
+        self.clearFloatRename();
+        self.renderer.invalidate();
+        self.force_full_render = true;
+        self.syncStateToSes();
     }
 
     pub fn deinit(self: *State) void {
@@ -305,6 +410,8 @@ pub const State = struct {
             }
         }
         self.pending_float_requests.deinit();
+
+        self.float_rename_buf.deinit(self.allocator);
         if (self.ipc_server) |*srv| {
             srv.deinit();
         }

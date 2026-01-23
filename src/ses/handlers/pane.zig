@@ -526,6 +526,53 @@ pub fn handleUpdatePaneShell(
     try conn.sendLine("{\"type\":\"ok\"}");
 }
 
+/// Handle update_pane_name request
+///
+/// This updates the in-memory pane name in ses. This is intended for mux UI
+/// metadata (e.g. float title rename). It is not treated as durable state.
+pub fn handleUpdatePaneName(
+    ses_state: *state.SesState,
+    conn: *ipc.Connection,
+    root: std.json.ObjectMap,
+    sendError: *const fn (*ipc.Connection, []const u8) anyerror!void,
+) !void {
+    const uuid_val = root.get("uuid") orelse return sendError(conn, "missing_uuid");
+    const uuid_str = switch (uuid_val) {
+        .string => |s| s,
+        else => return sendError(conn, "invalid_uuid"),
+    };
+    if (uuid_str.len != 32) return sendError(conn, "invalid_uuid");
+
+    var uuid: [32]u8 = undefined;
+    @memcpy(&uuid, uuid_str[0..32]);
+
+    const pane = ses_state.panes.getPtr(uuid) orelse {
+        return sendError(conn, "pane_not_found");
+    };
+
+    if (pane.name) |old| {
+        pane.allocator.free(old);
+        pane.name = null;
+    }
+
+    if (root.get("name")) |v| {
+        switch (v) {
+            .string => |s| {
+                if (s.len > 0) {
+                    pane.name = pane.allocator.dupe(u8, s) catch null;
+                }
+            },
+            .null => {},
+            else => {},
+        }
+    }
+
+    // Mark dirty so other aux changes continue to be saved; name itself is not
+    // persisted (persist layer ignores it).
+    ses_state.markDirty();
+    try conn.sendLine("{\"type\":\"ok\"}");
+}
+
 fn writeJsonEscaped(writer: anytype, value: []const u8) !void {
     for (value) |ch| {
         switch (ch) {

@@ -266,6 +266,8 @@ pub const Server = struct {
             try session_handlers.handleListSessions(self.allocator, self.ses_state, conn, sendErrorFn);
         } else if (std.mem.eql(u8, type_str, "update_pane_aux")) {
             try pane_handlers.handleUpdatePaneAux(self.ses_state, conn, root, sendErrorFn);
+        } else if (std.mem.eql(u8, type_str, "update_pane_name")) {
+            try pane_handlers.handleUpdatePaneName(self.ses_state, conn, root, sendErrorFn);
         } else if (std.mem.eql(u8, type_str, "update_pane_shell")) {
             try pane_handlers.handleUpdatePaneShell(self.ses_state, conn, root, sendErrorFn);
         } else if (std.mem.eql(u8, type_str, "pop_response")) {
