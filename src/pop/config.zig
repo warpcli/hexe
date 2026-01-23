@@ -80,6 +80,9 @@ pub const PopConfig = struct {
         };
         defer runtime.deinit();
 
+        // Let a single config.lua avoid building other sections.
+        runtime.setHexeSection("pop");
+
         runtime.loadConfig(path) catch |err| {
             switch (err) {
                 error.FileNotFound => {

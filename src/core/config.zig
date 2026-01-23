@@ -470,6 +470,9 @@ pub const Config = struct {
         };
         defer runtime.deinit();
 
+        // Let a single config.lua avoid building other sections.
+        runtime.setHexeSection("mux");
+
         runtime.loadConfig(path) catch |err| {
             switch (err) {
                 error.FileNotFound => {

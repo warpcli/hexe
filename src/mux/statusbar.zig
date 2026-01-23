@@ -118,7 +118,7 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
 
     const res = std.process.Child.run(.{
         .allocator = std.heap.page_allocator,
-        .argv = &.{ "/bin/bash", "-lc", code },
+        .argv = &.{ "/bin/bash", "-c", code },
         .env_map = &env_map,
     }) catch {
         map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
@@ -223,10 +223,10 @@ fn passesWhenClause(ctx: *shp.Context, w: core.WhenDef) bool {
     if (w.hexe_pod != null) return false;
 
     if (w.lua) |lua_code| {
-        if (!evalLuaWhen(lua_code, ctx, 250)) return false;
+        if (!evalLuaWhen(lua_code, ctx, 500)) return false;
     }
     if (w.bash) |bash_code| {
-        if (!evalBashWhen(bash_code, ctx, 1000)) return false;
+        if (!evalBashWhen(bash_code, ctx, 2000)) return false;
     }
 
     return true;
@@ -322,8 +322,36 @@ pub fn styleColorToRender(col: shp.Color) render.Color {
     };
 }
 
+const ModuleCmdCache = struct {
+    output: [256]u8,
+    output_len: usize,
+    last_eval_ms: i64,
+};
+
+threadlocal var module_cmd_cache: ?std.AutoHashMap(usize, ModuleCmdCache) = null;
+
+fn getModuleCmdCache() *std.AutoHashMap(usize, ModuleCmdCache) {
+    if (module_cmd_cache == null) {
+        module_cmd_cache = std.AutoHashMap(usize, ModuleCmdCache).init(std.heap.page_allocator);
+    }
+    return &module_cmd_cache.?;
+}
+
 pub fn runStatusModule(module: *const core.StatusModule, buf: []u8) ![]const u8 {
     if (module.command) |cmd| {
+        const now = std.time.milliTimestamp();
+        const cache_key = (@intFromPtr(cmd.ptr) << 1) ^ cmd.len;
+        const cache = getModuleCmdCache();
+        const ttl_ms: i64 = 1000;
+
+        if (cache.get(cache_key)) |entry| {
+            if (now - entry.last_eval_ms < ttl_ms) {
+                const copy_len = @min(entry.output_len, buf.len);
+                @memcpy(buf[0..copy_len], entry.output[0..copy_len]);
+                return buf[0..copy_len];
+            }
+        }
+
         const result = std.process.Child.run(.{
             .allocator = std.heap.page_allocator,
             .argv = &.{ "/bin/sh", "-c", cmd },
@@ -337,6 +365,17 @@ pub fn runStatusModule(module: *const core.StatusModule, buf: []u8) ![]const u8 
         }
         const copy_len = @min(len, buf.len);
         @memcpy(buf[0..copy_len], result.stdout[0..copy_len]);
+
+        // Cache the result
+        const store_len = @min(len, @as(usize, 256));
+        var entry = ModuleCmdCache{
+            .output = undefined,
+            .output_len = store_len,
+            .last_eval_ms = now,
+        };
+        @memcpy(entry.output[0..store_len], result.stdout[0..store_len]);
+        cache.put(cache_key, entry) catch {};
+
         return buf[0..copy_len];
     }
 

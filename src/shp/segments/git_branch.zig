@@ -7,16 +7,55 @@ const Style = @import("../style.zig").Style;
 var branch_buf: [128]u8 = undefined;
 var branch_len: usize = 0;
 
+// Cache for branch name (keyed by cwd hash, 2s TTL)
+const BranchCache = struct {
+    cwd_hash: u64,
+    name_len: u8,
+    name_buf: [128]u8,
+    timestamp_ms: i64,
+};
+
+var branch_cache: ?BranchCache = null;
+
+fn hashCwd(cwd: []const u8) u64 {
+    var h: u64 = 5381;
+    for (cwd) |c| {
+        h = ((h << 5) +% h) +% c;
+    }
+    return h;
+}
+
 /// Git branch segment - displays current git branch
 /// Format:  main
 pub fn render(ctx: *Context) ?[]const Segment {
     const cwd = if (ctx.cwd.len > 0) ctx.cwd else std.posix.getenv("PWD") orelse return null;
+
+    const now = std.time.milliTimestamp();
+    const cwd_hash = hashCwd(cwd);
+
+    // Check cache (2s TTL)
+    if (branch_cache) |cached| {
+        if (cached.cwd_hash == cwd_hash and (now - cached.timestamp_ms) < 2000 and cached.name_len > 0) {
+            const text = ctx.allocText(cached.name_buf[0..cached.name_len]) catch return null;
+            return ctx.addSegment(text, Style.parse("bold fg:magenta")) catch return null;
+        }
+    }
 
     // Check if we're in a git repo by looking for .git directory
     if (!isGitRepo(cwd)) return null;
 
     // Get branch name into static buffer
     const branch = getBranchName(cwd) orelse return null;
+
+    // Cache the result
+    var cache_entry = BranchCache{
+        .cwd_hash = cwd_hash,
+        .name_len = @intCast(@min(branch.len, 128)),
+        .name_buf = undefined,
+        .timestamp_ms = now,
+    };
+    @memcpy(cache_entry.name_buf[0..cache_entry.name_len], branch[0..cache_entry.name_len]);
+    branch_cache = cache_entry;
 
     // Return just the branch name - config controls the icon (e.g., "  $output")
     const text = ctx.allocText(branch) catch return null;

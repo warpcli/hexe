@@ -366,6 +366,8 @@ fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
     };
     defer runtime.deinit();
 
+    runtime.setHexeSection("shp");
+
     runtime.loadConfig(path) catch |err| {
         switch (err) {
             error.FileNotFound => {

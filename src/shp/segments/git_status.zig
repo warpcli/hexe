@@ -18,6 +18,23 @@ const ICON_STAGED = "+";
 const ICON_RENAMED = "»";
 const ICON_DELETED = "✘";
 
+// Cache for git status results (keyed by cwd hash, 2s TTL)
+const GitStatusCache = struct {
+    cwd_hash: u64,
+    status: GitStatus,
+    timestamp_ms: i64,
+};
+
+var git_status_cache: ?GitStatusCache = null;
+
+fn hashCwd(cwd: []const u8) u64 {
+    var h: u64 = 5381;
+    for (cwd) |c| {
+        h = ((h << 5) +% h) +% c;
+    }
+    return h;
+}
+
 /// Git status segment - displays git status indicators using starship icons
 /// Format: ⇡1 ⇣2 +3 !4 ?5 (ahead, behind, staged, modified, untracked)
 pub fn render(ctx: *Context) ?[]const Segment {
@@ -26,9 +43,22 @@ pub fn render(ctx: *Context) ?[]const Segment {
     // Check if we're in a git repo
     if (!isGitRepo(cwd)) return null;
 
-    // Run git status --porcelain=v2 --branch
+    const now = std.time.milliTimestamp();
+    const cwd_hash = hashCwd(cwd);
+
+    // Check cache (2s TTL)
     var status = GitStatus{};
-    runGitStatus(cwd, &status);
+    if (git_status_cache) |cached| {
+        if (cached.cwd_hash == cwd_hash and (now - cached.timestamp_ms) < 2000) {
+            status = cached.status;
+        } else {
+            runGitStatus(cwd, &status);
+            git_status_cache = .{ .cwd_hash = cwd_hash, .status = status, .timestamp_ms = now };
+        }
+    } else {
+        runGitStatus(cwd, &status);
+        git_status_cache = .{ .cwd_hash = cwd_hash, .status = status, .timestamp_ms = now };
+    }
 
     if (status.isEmpty()) return null;
 
@@ -173,7 +203,7 @@ fn runGitStatus(cwd: []const u8, status: *GitStatus) void {
     // Run git status --porcelain=v2 --branch
     const result = std.process.Child.run(.{
         .allocator = alloc,
-        .argv = &.{ "git", "-C", cwd, "status", "--porcelain=v2", "--branch" },
+        .argv = &.{ "git", "--no-optional-locks", "-C", cwd, "status", "--porcelain=v2", "--branch" },
     }) catch return;
     defer alloc.free(result.stdout);
     defer alloc.free(result.stderr);

@@ -98,6 +98,11 @@ pub const Pane = struct {
     float_style: ?*const core.FloatStyle = null,
     float_title: ?[]u8 = null,
 
+    // Cached foreground process name (avoids repeated /proc reads)
+    fg_proc_cache_len: u8 = 0,
+    fg_proc_cache_ms: i64 = 0,
+    fg_proc_cache_buf: [64]u8 = undefined,
+
     // Tracks whether we saw a clear-screen sequence in the last output.
     did_clear: bool = false,
     // Keep last bytes so we can detect escape sequences across boundaries.
@@ -724,7 +729,14 @@ pub const Pane = struct {
     }
 
     fn containsClearSeq(tail: []const u8, data: []const u8) bool {
-        return std.mem.indexOfScalar(u8, data, 0x0c) != null or
+        // Fast path: if no ESC (0x1b) or FF (0x0c) in data, and no pending
+        // ESC in tail, no clear sequence is possible.
+        const has_esc = std.mem.indexOfScalar(u8, data, 0x1b) != null;
+        const has_ff = std.mem.indexOfScalar(u8, data, 0x0c) != null;
+        const tail_has_esc = tail.len > 0 and tail[tail.len - 1] == 0x1b;
+        if (!has_esc and !has_ff and !tail_has_esc) return false;
+
+        return has_ff or
             containsSeq(tail, data, "\x1b[2J") or
             containsSeq(tail, data, "\x1b[3J") or
             containsSeq(tail, data, "\x1b[J") or
@@ -901,8 +913,13 @@ pub const Pane = struct {
     }
 
     /// Get foreground process name by reading /proc/<pid>/comm.
-    /// Only available for local PTY panes.
+    /// Only available for local PTY panes. Results are cached for 500ms.
     pub fn getFgProcess(self: *Pane) ?[]const u8 {
+        const now = std.time.milliTimestamp();
+        if (self.fg_proc_cache_len > 0 and (now - self.fg_proc_cache_ms) < 500) {
+            return self.fg_proc_cache_buf[0..self.fg_proc_cache_len];
+        }
+
         const pid = self.getFgPid() orelse return null;
         var path_buf: [64]u8 = undefined;
         const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/comm", .{pid}) catch return null;
@@ -911,7 +928,14 @@ pub const Pane = struct {
         const len = file.read(&proc_buf) catch return null;
         if (len == 0) return null;
         const end = if (len > 0 and proc_buf[len - 1] == '\n') len - 1 else len;
-        return proc_buf[0..end];
+
+        // Cache the result
+        const cache_len = @min(end, self.fg_proc_cache_buf.len);
+        @memcpy(self.fg_proc_cache_buf[0..cache_len], proc_buf[0..cache_len]);
+        self.fg_proc_cache_len = @intCast(cache_len);
+        self.fg_proc_cache_ms = now;
+
+        return self.fg_proc_cache_buf[0..cache_len];
     }
 
     /// Scroll up by given number of lines

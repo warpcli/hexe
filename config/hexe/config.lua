@@ -1,15 +1,8 @@
-local hx = require("hexe")
 
-return {
-  mux = {
-    mouse = {
-      -- When held during a mouse drag, force mux-side selection even for
-      -- alt-screen apps (btop, vim, etc).
-      selection_override_mods = { hx.mod.ctrl, hx.mod.alt },
-    },
-
+local function mux_config()
+  return {
     input = {
-      timing = { hold_ms = 400, double_tap_ms = 250 },
+      timing = { hold_ms = 600 },
       binds = {
         { mods = { hx.mod.alt }, key = "q", context = { focus = "any" }, action = { type = hx.action.mux_quit } },
         { mods = { hx.mod.alt, hx.mod.shift }, key = "d", context = { focus = "any" }, action = { type = hx.action.mux_detach } },
@@ -25,17 +18,21 @@ return {
         { mods = { hx.mod.alt }, key = ",", context = { focus = "any" }, action = { type = hx.action.tab_prev } },
         { mods = { hx.mod.alt }, key = "x", context = { focus = "any" }, action = { type = hx.action.tab_close } },
 
-        { mods = { hx.mod.alt }, key = "up", context = { focus = "any" }, action = { type = hx.action.focus_move, dir = "up" } },
-        { mods = { hx.mod.alt }, key = "down", context = { focus = "any" }, action = { type = hx.action.focus_move, dir = "down" } },
-        { mods = { hx.mod.alt }, key = "left", context = { focus = "any" }, action = { type = hx.action.focus_move, dir = "left" } },
-        { mods = { hx.mod.alt }, key = "right", context = { focus = "any" }, action = { type = hx.action.focus_move, dir = "right" } },
+        { mods = { hx.mod.alt }, key = "up", context = { focus = "any", program = { exclude = { "nvim", "vim" } } }, action = { type = hx.action.focus_move, dir = "up" } },
+        { mods = { hx.mod.alt }, key = "down", context = { focus = "any", program = { exclude = { "nvim", "vim" } } }, action = { type = hx.action.focus_move, dir = "down" } },
+        { mods = { hx.mod.alt }, key = "left", context = { focus = "any", program = { exclude = { "nvim", "vim" } } }, action = { type = hx.action.focus_move, dir = "left" } },
+        { mods = { hx.mod.alt }, key = "right", context = { focus = "any", program = { exclude = { "nvim", "vim" } } }, action = { type = hx.action.focus_move, dir = "right" } },
 
         { mods = { hx.mod.alt, hx.mod.shift }, key = "k", context = { focus = "float" }, action = { type = hx.action.float_nudge, dir = "up" } },
         { mods = { hx.mod.alt, hx.mod.shift }, key = "j", context = { focus = "float" }, action = { type = hx.action.float_nudge, dir = "down" } },
         { mods = { hx.mod.alt, hx.mod.shift }, key = "h", context = { focus = "float" }, action = { type = hx.action.float_nudge, dir = "left" } },
         { mods = { hx.mod.alt, hx.mod.shift }, key = "l", context = { focus = "float" }, action = { type = hx.action.float_nudge, dir = "right" } },
 
-        { mods = { hx.mod.alt }, key = "space", context = { focus = "any" }, action = { type = hx.action.float_toggle, float = "0" } },
+        { mods = { hx.mod.alt }, key = "1", context = { focus = "any" }, action = { type = hx.action.float_toggle, float = "1" } },
+        { mods = { hx.mod.alt }, key = "2", context = { focus = "any" }, action = { type = hx.action.float_toggle, float = "2" } },
+        { mods = { hx.mod.alt }, key = "3", context = { focus = "any" }, action = { type = hx.action.float_toggle, float = "3" } },
+        { mods = { hx.mod.alt }, key = "4", context = { focus = "any" }, action = { type = hx.action.float_toggle, float = "4" } },
+        { mods = { hx.mod.alt }, key = "0", context = { focus = "any" }, action = { type = hx.action.float_toggle, float = "p" } },
       },
     },
 
@@ -46,46 +43,86 @@ return {
 
     floats = {
       {
-        padding = { x = 2, y = 1 },
+        size = { width = 80, height = 70 },
+        title = "float",
+        attributes = {
+          exclusive = true,
+          per_cwd = true,
+          sticky = true,
+          global = true,
+          destroy = false,
+        },
+        color = { active = 1, passive = 237 },
         style = {
-          border = {
-            color = { active = 1, passive = 237 },
+          title = {
+            name = "title",
+            position = "bottomright",
+            outputs = {
+              { style = "bg:0 fg:1", format = "" },
+              { style = "bg:1 fg:0", format = " $output " },
+              { style = "bg:0 fg:1", format = "" },
+            },
           },
         },
       },
       {
         key = "1",
-        attributes = { per_cwd = true, sticky = true },
+        title = "opencode",
+        attributes = { per_cwd = true },
+        command = "/env/bin/opencode",
       },
       {
         key = "2",
+        title = "opencode",
+        command = "/env/bin/opencode",
       },
       {
-        key = "3",
-        position = { x = 100, y = 0 },
-        size = { width = 40, height = 50 },
-        padding = { x = 0, y = 0 },
+        key = "p",
+        title = "scratchpad",
+        position = { x = 100, y = 50 },
+        size = { width = 40, height = 80 },
+        padding = { x = 2, y = 1 },
         attributes = { global = false },
-      },
-      {
-        key = "4",
-        attributes = { destroy = true },
-      },
-      {
-        key = "f",
-        command = "btop",
-        title = "btop",
-        attributes = { exclusive = true },
         style = {
+          shadow = { color = 236 },
+          border = {
+            chars = {
+              top_left = "╔",
+              top_right = "╗",
+              bottom_left = "╚",
+              bottom_right = "╝",
+              horizontal = "═",
+              vertical = "║",
+              left_t = "╠",
+              right_t = "╣",
+              top_t = "╦",
+              bottom_t = "╩",
+              cross = "╬",
+            },
+          },
           title = {
-            position = "topright",
+            name = "title",
+            position = "topcenter",
             outputs = {
-              { style = "bg:0 fg:1", format = "[" },
-              { style = "bg:237 fg:250", format = " $output " },
-              { style = "bg:0 fg:1", format = "]" },
+              { style = "bg:0 fg:1", format = "" },
+              { style = "bg:1 fg:0", format = " $output " },
+              { style = "bg:0 fg:1", format = "" },
             },
           },
         },
+      },
+      {
+        key = "3",
+        title = "opencode",
+        command = "/env/bin/opencode",
+      },
+      {
+        key = "4",
+        title = "claude",
+        command = "/env/bin/bun x --package @anthropic-ai/claude-code claude",
+      },
+      {
+        key = "0",
       },
     },
 
@@ -119,10 +156,47 @@ return {
             },
           },
           {
-            name = "uptime",
-            priority = 100,
+            name = "spinner",
+            priority = 20,
+            when = {
+              ["or"] = {
+                {
+                  ["and"] = {
+                    { ["hexe.shp"] = { "process_running" } },
+                    { ["hexe.shp"] = { "not_alt_screen" } },
+                  },
+                },
+                { ["hexe.mux"] = { "adhoc_float" } },
+              },
+            },
+            spinner = {
+              kind = "knight_rider",
+              width = 10,
+              step = 40,
+              hold = 20,
+              colors = { 243, 242, 241, 240, 239, 238, 237, 236 },
+              bg = 0,
+            },
             outputs = {
-              { style = "fg:7", format = " $output" },
+              { format = " $output " },
+            },
+          },
+          {
+            name = "randomdo",
+            priority = 200000,
+            when = {
+              ["or"] = {
+                {
+                  ["and"] = {
+                    { ["hexe.shp"] = { "process_running" } },
+                    { ["hexe.shp"] = { "not_alt_screen" } },
+                  },
+                },
+                { ["hexe.mux"] = { "adhoc_float" } },
+              },
+            },
+            outputs = {
+              { style = "bg:0 fg:1", format = "$output " },
             },
           },
         },
@@ -180,9 +254,11 @@ return {
         },
       },
     },
-  },
+  }
+end
 
-  pop = {
+local function pop_config()
+  return {
     carrier = {
       notification = {
         fg = 232,
@@ -235,16 +311,18 @@ return {
         visible_count = 10,
       },
     },
-  },
+  }
+end
 
-  shp = {
+local function shp_config()
+  return {
     prompt = {
       left = {
         {
           name = "ssh",
           priority = 60,
           command = "echo //",
-          when = "[[ -n $SSH_CONNECTION ]]",
+          when = { bash = "[[ -n $SSH_CONNECTION ]]" },
           outputs = {
             { style = "bg:237 italic fg:15", format = " $output" },
           },
@@ -260,7 +338,7 @@ return {
           name = "distro",
           priority = 10,
           command = "/env/dot/.func/shell/distrologo",
-          when = "true",
+          when = { bash = "true" },
           outputs = {
             { style = "bg:1 fg:0", format = " $output" },
           },
@@ -276,7 +354,7 @@ return {
           name = "direnv",
           priority = 25,
           command = "echo ▓",
-          when = "[[ -n $DIRENV_DIR ]]",
+          when = { bash = "[[ -n $DIRENV_DIR ]]" },
           outputs = {
             { style = "bg:1 fg:0", format = "$output" },
           },
@@ -292,7 +370,7 @@ return {
           name = "tab",
           priority = 30,
           command = "echo $TAB | tr -d '/'",
-          when = "[[ -n $TAB ]]",
+          when = { bash = "[[ -n $TAB && $TAB != '.reset-prompt' && $TAB != 'reset-prompt' ]]" },
           outputs = {
             { style = "fg:7", format = "|" },
             { style = "bg:6 italic fg:0", format = " t: $output " },
@@ -302,7 +380,7 @@ return {
           name = "tab2",
           priority = 35,
           command = "echo $(( $(tab -l 2> /dev/null | wc -l) - 1 ))",
-          when = "[[ ! -n $TAB ]] && [[ $(( $(tab -l 2> /dev/null | wc -l) - 1 )) -gt 0 ]]",
+          when = { bash = "[[ ! -n $TAB ]] && [[ $(( $(tab -l 2> /dev/null | wc -l) - 1 )) -gt 0 ]]" },
           outputs = {
             { style = "fg:7", format = "|" },
             { style = "bg:237 italic fg:15", format = " $output " },
@@ -319,7 +397,7 @@ return {
           name = "container",
           priority = 50,
           command = "/env/dot/.func/shell/incontainer",
-          when = "[[ $(systemd-detect-virt) != 'none' ]]",
+          when = { bash = "[[ $(systemd-detect-virt) != 'none' ]]" },
           outputs = {
             { style = "bg:0 fg:0", format = " " },
             { style = "bg:5 fg:0", format = "$output" },
@@ -339,7 +417,7 @@ return {
           name = "container2",
           priority = 55,
           command = "/env/dot/.func/shell/incontainer2",
-          when = "[[ $(systemd-detect-virt) != 'none' ]]",
+          when = { bash = "[[ $(systemd-detect-virt) != 'none' ]]" },
           outputs = {
             { style = "fg:7", format = "|" },
             { style = "bg:5 fg:0", format = " $output " },
@@ -377,5 +455,20 @@ return {
         },
       },
     },
-  },
-}
+  }
+end
+
+return setmetatable({}, {
+  __index = function(_, key)
+    if key == "mux" then
+      return mux_config()
+    end
+    if key == "pop" then
+      return pop_config()
+    end
+    if key == "shp" then
+      return shp_config()
+    end
+    return nil
+  end,
+})

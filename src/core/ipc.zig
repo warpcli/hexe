@@ -139,25 +139,55 @@ pub const Connection = struct {
         try self.send("\n");
     }
 
-    /// Receive a line (up to newline, newline not included in result)
+    /// Receive a line (up to newline, newline not included in result).
+    /// Uses MSG_PEEK to find the newline position, then consumes exactly
+    /// that many bytes, avoiding per-byte syscalls.
     pub fn recvLine(self: *Connection, buf: []u8) !?[]const u8 {
         var i: usize = 0;
         while (i < buf.len) {
-            const n = posix.read(self.fd, buf[i .. i + 1]) catch |err| {
-                if (err == error.WouldBlock) {
-                    if (i == 0) return null;
-                    continue;
-                }
-                return err;
-            };
+            // Peek at available data to find newline without consuming
+            const remaining = buf.len - i;
+            const peek_len = @min(remaining, @as(usize, 4096));
+            var peek_buf: [4096]u8 = undefined;
+            const peek_slice = peek_buf[0..peek_len];
+            const peeked = c.recv(self.fd, @ptrCast(peek_slice.ptr), peek_len, c.MSG_PEEK);
+            if (peeked < 0) {
+                // Check for EAGAIN/EWOULDBLOCK
+                if (i == 0) return null;
+                // If we already have partial data, fall back to byte-by-byte
+                const n = posix.read(self.fd, buf[i .. i + 1]) catch |err| {
+                    if (err == error.WouldBlock) return null;
+                    return err;
+                };
+                if (n == 0) return buf[0..i];
+                if (buf[i] == '\n') return buf[0..i];
+                i += 1;
+                continue;
+            }
+            const n: usize = @intCast(peeked);
             if (n == 0) {
                 if (i == 0) return null;
                 return buf[0..i];
             }
-            if (buf[i] == '\n') {
-                return buf[0..i];
+
+            // Scan peeked data for newline
+            if (std.mem.indexOfScalar(u8, peek_slice[0..n], '\n')) |nl_offset| {
+                // Found newline - consume up to and including it
+                const consume = nl_offset + 1;
+                const read_n = posix.read(self.fd, buf[i..][0..consume]) catch |err| {
+                    if (err == error.WouldBlock) continue;
+                    return err;
+                };
+                _ = read_n;
+                return buf[0 .. i + nl_offset];
             }
-            i += 1;
+
+            // No newline found - consume all peeked data and continue
+            const read_n = posix.read(self.fd, buf[i..][0..n]) catch |err| {
+                if (err == error.WouldBlock) continue;
+                return err;
+            };
+            i += read_n;
         }
         return buf[0..i];
     }
