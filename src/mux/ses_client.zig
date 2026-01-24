@@ -303,7 +303,7 @@ pub const SesClient = struct {
 
         const hdr = wire.readControlHeader(fd) catch return null;
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-        if (resp_type != .ok or hdr.payload_len < @sizeOf(wire.PaneCwd)) {
+        if (resp_type != .get_pane_cwd or hdr.payload_len < @sizeOf(wire.PaneCwd)) {
             self.skipPayload(fd, hdr.payload_len);
             return null;
         }
@@ -416,14 +416,26 @@ pub const SesClient = struct {
         const resp = wire.readStruct(wire.PaneInfoResp, fd) catch return null;
         var out: PaneProcessInfo = .{};
 
-        // Read trailing name + fg_process + cwd.
+        // Calculate total trailing bytes to consume.
+        const trail_total: usize = @as(usize, resp.name_len) + @as(usize, resp.fg_len) +
+            @as(usize, resp.cwd_len) + @as(usize, resp.tty_len) +
+            @as(usize, resp.socket_path_len) + @as(usize, resp.session_name_len) +
+            @as(usize, resp.layout_path_len) + @as(usize, resp.last_cmd_len) +
+            @as(usize, resp.base_process_len) + @as(usize, resp.sticky_pwd_len);
+
+        // Read trailing name (skip).
         if (resp.name_len > 0) {
             var skip: [256]u8 = undefined;
-            wire.readExact(fd, skip[0..@min(@as(usize, resp.name_len), skip.len)]) catch return null;
+            wire.readExact(fd, skip[0..@min(@as(usize, resp.name_len), skip.len)]) catch {
+                return null;
+            };
         }
+        // Read fg_process (keep).
         if (resp.fg_len > 0) {
             const buf = self.allocator.alloc(u8, resp.fg_len) catch {
-                self.skipPayload(fd, @as(u32, resp.fg_len) + @as(u32, resp.cwd_len));
+                // Skip all remaining trailing bytes.
+                const remaining = trail_total - @as(usize, resp.name_len);
+                self.skipPayload(fd, @intCast(remaining));
                 return null;
             };
             wire.readExact(fd, buf) catch {
@@ -432,9 +444,10 @@ pub const SesClient = struct {
             };
             out.name = buf;
         }
-        if (resp.cwd_len > 0) {
-            var skip: [4096]u8 = undefined;
-            wire.readExact(fd, skip[0..@min(@as(usize, resp.cwd_len), skip.len)]) catch {};
+        // Skip all remaining trailing bytes (cwd + tty + socket + session_name + layout + last_cmd + base_process + sticky_pwd).
+        const remaining = trail_total - @as(usize, resp.name_len) - @as(usize, resp.fg_len);
+        if (remaining > 0) {
+            self.skipPayload(fd, @intCast(remaining));
         }
         if (resp.fg_pid != 0) out.pid = resp.fg_pid;
         return out;
@@ -455,9 +468,16 @@ pub const SesClient = struct {
         const resp = wire.readStruct(wire.PaneInfoResp, fd) catch return null;
         var result: ?[]u8 = null;
 
+        // Calculate total trailing bytes.
+        const trail_total: usize = @as(usize, resp.name_len) + @as(usize, resp.fg_len) +
+            @as(usize, resp.cwd_len) + @as(usize, resp.tty_len) +
+            @as(usize, resp.socket_path_len) + @as(usize, resp.session_name_len) +
+            @as(usize, resp.layout_path_len) + @as(usize, resp.last_cmd_len) +
+            @as(usize, resp.base_process_len) + @as(usize, resp.sticky_pwd_len);
+
         if (resp.name_len > 0) {
             const buf = self.allocator.alloc(u8, resp.name_len) catch {
-                self.skipPayload(fd, @as(u32, resp.name_len) + @as(u32, resp.fg_len) + @as(u32, resp.cwd_len));
+                self.skipPayload(fd, @intCast(trail_total));
                 return null;
             };
             wire.readExact(fd, buf) catch {
@@ -466,14 +486,10 @@ pub const SesClient = struct {
             };
             result = buf;
         }
-        // Skip remaining trailing data.
-        if (resp.fg_len > 0) {
-            var skip: [256]u8 = undefined;
-            wire.readExact(fd, skip[0..@min(@as(usize, resp.fg_len), skip.len)]) catch {};
-        }
-        if (resp.cwd_len > 0) {
-            var skip: [4096]u8 = undefined;
-            wire.readExact(fd, skip[0..@min(@as(usize, resp.cwd_len), skip.len)]) catch {};
+        // Skip all remaining trailing bytes.
+        const remaining = trail_total - @as(usize, resp.name_len);
+        if (remaining > 0) {
+            self.skipPayload(fd, @intCast(remaining));
         }
         return result;
     }

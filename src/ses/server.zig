@@ -515,6 +515,15 @@ pub const Server = struct {
             .get_pane_cwd => {
                 self.handleBinaryGetPaneCwd(fd, hdr.payload_len, &buf);
             },
+            .pane_info => {
+                if (hdr.payload_len < @sizeOf(wire.PaneUuid)) {
+                    self.skipBinaryPayload(fd, hdr.payload_len, &buf);
+                    wire.writeControl(fd, .@"error", &.{}) catch {};
+                    return false;
+                }
+                const pu = wire.readStruct(wire.PaneUuid, fd) catch return false;
+                self.handleBinaryPaneInfo(fd, pu.uuid);
+            },
             .list_orphaned => {
                 self.handleBinaryListOrphaned(fd, &buf);
             },
@@ -564,8 +573,9 @@ pub const Server = struct {
                 self.handleBinaryExited(fd, hdr.payload_len, &buf);
             },
             else => {
-                // Unknown — skip payload.
+                // Unknown — skip payload and send error so the MUX doesn't hang.
                 self.skipBinaryPayload(fd, hdr.payload_len, &buf);
+                wire.writeControl(fd, .@"error", &.{}) catch {};
             },
         }
         return true;
@@ -1537,6 +1547,7 @@ pub const Server = struct {
                     return;
                 };
                 self.handleBinaryPaneInfo(fd, pu.uuid);
+                posix.close(fd);
             },
             .status => {
                 // Payload is 1 byte: full_mode flag (0 or 1).
@@ -1616,13 +1627,13 @@ pub const Server = struct {
         }
     }
 
-    /// Handle binary pane_info query from CLI — respond with PaneInfoResp.
+    /// Handle binary pane_info query — respond with PaneInfoResp.
+    /// Does NOT close the fd — caller is responsible for closing if needed.
     fn handleBinaryPaneInfo(self: *Server, fd: posix.fd_t, uuid: [32]u8) void {
         ses.debugLog("pane_info: uuid={s} fd={d}", .{ uuid[0..8], fd });
         const pane = self.ses_state.panes.get(uuid) orelse {
             ses.debugLog("pane_info: not found", .{});
             wire.writeControl(fd, .pane_not_found, &.{}) catch {};
-            posix.close(fd);
             return;
         };
 
@@ -1772,7 +1783,6 @@ pub const Server = struct {
         }
 
         wire.writeControlWithTrail(fd, .pane_info, std.mem.asBytes(&resp), trail_buf[0..trail_len]) catch {};
-        posix.close(fd);
     }
 
     /// Handle binary status query from CLI — respond with StatusResp + entries.
