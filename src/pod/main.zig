@@ -236,8 +236,7 @@ pub fn run(args: PodArgs) !void {
     if (args.uuid.len != 32) return error.InvalidUuid;
 
     const sh = args.shell orelse (posix.getenv("SHELL") orelse "/bin/sh");
-    const default_log: []const u8 = "/tmp/hexe-pod-debug.log";
-    const log_path = if (args.log_file) |path| if (path.len > 0) path else null else if (args.debug) default_log else null;
+    const log_path: ?[]const u8 = if (args.log_file) |path| (if (path.len > 0) path else null) else if (args.debug) "/tmp/hexe" else null;
 
     if (args.daemon) {
         try daemonize(log_path);

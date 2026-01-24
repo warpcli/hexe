@@ -48,9 +48,10 @@ pub fn run(args: SesArgs) !void {
         return;
     }
 
-    // Enable debug mode and optional logging
+    // Enable debug mode and optional logging.
+    // When --debug is set without --logfile, default to /tmp/hexe.
     debug_enabled = args.debug;
-    log_file_path = if (args.log_file) |path| if (path.len > 0) path else null else null;
+    log_file_path = if (args.log_file) |path| (if (path.len > 0) path else null) else if (args.debug) "/tmp/hexe" else null;
 
     // Avoid multiple daemons: if ses socket is connectable, exit.
     {

@@ -97,7 +97,9 @@ pub fn run(mux_args: MuxArgs) !void {
     _ = std.os.linux.sigaction(posix.SIG.PIPE, &sigpipe_action, null);
 
     // Redirect stderr to a log file or /dev/null to avoid display corruption.
-    redirectStderr(mux_args.log_file);
+    // When --debug is set without --logfile, default to /tmp/hexe.
+    const effective_log: ?[]const u8 = if (mux_args.log_file) |p| (if (p.len > 0) p else null) else if (mux_args.debug) "/tmp/hexe" else null;
+    redirectStderr(effective_log);
     debug_enabled = mux_args.debug;
     debugLog("started", .{});
 
