@@ -282,6 +282,11 @@ pub fn runMainLoop(state: *State) !void {
                 }
                 if (poll_fds[idx].revents & posix.POLL.HUP != 0) {
                     dead_splits.append(allocator, pane.*.id) catch {};
+                } else if (poll_fds[idx].revents & posix.POLL.ERR != 0) {
+                    // ERR without HUP — verify process actually exited.
+                    if (!pane.*.isAlive()) {
+                        dead_splits.append(allocator, pane.*.id) catch {};
+                    }
                 }
                 idx += 1;
             }
@@ -311,6 +316,11 @@ pub fn runMainLoop(state: *State) !void {
                 }
                 if (poll_fds[idx].revents & posix.POLL.HUP != 0) {
                     dead_floating.append(allocator, fi) catch {};
+                } else if (poll_fds[idx].revents & posix.POLL.ERR != 0) {
+                    // ERR without HUP — verify process actually exited.
+                    if (!pane.isAlive()) {
+                        dead_floating.append(allocator, fi) catch {};
+                    }
                 }
                 idx += 1;
             }
@@ -391,14 +401,28 @@ pub fn runMainLoop(state: *State) !void {
             const was_active = if (state.active_floating) |af| af == fi else false;
 
             const pane = state.floats.orderedRemove(fi);
+
+            // Capture exit status (not yet set if detected via HUP/ERR).
+            _ = pane.isAlive();
+
             float_completion.handleBlockingFloatCompletion(state, pane);
+
+            // Kill in ses (dead panes don't need to be orphaned).
+            if (state.ses_client.isConnected()) {
+                state.ses_client.killPane(pane.uuid) catch {};
+            }
+
             pane.deinit();
             state.allocator.destroy(pane);
             state.needs_render = true;
+            state.syncStateToSes();
 
-            // Clear focus if this was the active float.
+            // Clear focus if this was the active float, sync focus to tiled pane.
             if (was_active) {
                 state.active_floating = null;
+                if (state.currentLayout().getFocusedPane()) |tiled| {
+                    state.syncPaneFocus(tiled, null);
+                }
             }
         }
         // Ensure active_floating is still valid.

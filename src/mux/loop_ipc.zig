@@ -579,7 +579,19 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
     const command = state.allocator.dupe(u8, cmd) catch return;
     defer state.allocator.free(command);
 
-    const new_uuid = actions.createAdhocFloat(state, command, title, spawn_cwd, env_items, extra_items, use_pod) catch return;
+    const new_uuid = actions.createAdhocFloat(state, command, title, spawn_cwd, env_items, extra_items, use_pod) catch {
+        // Spawn failed — if wait_for_exit, send error result so CLI doesn't hang.
+        if (wait_for_exit) {
+            const ctl_fd = state.ses_client.getCtlFd() orelse return;
+            const result = wire.FloatResult{
+                .uuid = .{0} ** 32,
+                .exit_code = 127, // command not found
+                .output_len = 0,
+            };
+            wire.writeControl(ctl_fd, .float_result, std.mem.asBytes(&result)) catch {};
+        }
+        return;
+    };
 
     if (state.floats.items.len > 0) {
         state.syncPaneFocus(state.floats.items[state.floats.items.len - 1], old_uuid);

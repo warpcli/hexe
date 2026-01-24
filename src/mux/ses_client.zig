@@ -277,9 +277,6 @@ pub const SesClient = struct {
         const fd = self.ctl_fd orelse return error.NotConnected;
         var msg: wire.PaneUuid = .{ .uuid = uuid };
         try wire.writeControl(fd, .orphan_pane, std.mem.asBytes(&msg));
-
-        const hdr = try self.readSyncResponse(fd);
-        self.skipPayload(fd, hdr.payload_len);
     }
 
     /// Set sticky info on a pane.
@@ -291,9 +288,6 @@ pub const SesClient = struct {
             .pwd_len = @intCast(pwd.len),
         };
         try wire.writeControlWithTrail(fd, .set_sticky, std.mem.asBytes(&msg), pwd);
-
-        const hdr = try self.readSyncResponse(fd);
-        self.skipPayload(fd, hdr.payload_len);
     }
 
     /// Kill a pane.
@@ -301,9 +295,6 @@ pub const SesClient = struct {
         const fd = self.ctl_fd orelse return error.NotConnected;
         var msg: wire.PaneUuid = .{ .uuid = uuid };
         try wire.writeControl(fd, .kill_pane, std.mem.asBytes(&msg));
-
-        const hdr = try self.readSyncResponse(fd);
-        self.skipPayload(fd, hdr.payload_len);
     }
 
     /// Request pane CWD from ses (fire-and-forget; response handled in handleSesMessage).
