@@ -260,6 +260,7 @@ pub fn runMainLoop(state: *State) !void {
 
         pane_it = state.currentLayout().splitIterator();
         while (pane_it.next()) |pane| {
+            if (!pane.*.hasPollableFd()) continue;
             if (idx < fd_count) {
                 if (poll_fds[idx].revents & posix.POLL.IN != 0) {
                     if (pane.*.poll(&buffer)) |had_data| {
@@ -291,6 +292,7 @@ pub fn runMainLoop(state: *State) !void {
         defer dead_floating.deinit(allocator);
 
         for (state.floats.items, 0..) |pane, fi| {
+            if (!pane.hasPollableFd()) continue;
             if (idx < fd_count) {
                 if (poll_fds[idx].revents & posix.POLL.IN != 0) {
                     if (pane.poll(&buffer)) |had_data| {
