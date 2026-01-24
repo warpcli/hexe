@@ -13,48 +13,66 @@ const layout_mod = @import("layout.zig");
 const focus_move = @import("focus_move.zig");
 
 /// Handle binary control messages from the SES control channel.
+/// Reads all available messages (CTL fd is non-blocking).
 pub fn handleSesMessage(state: *State, buffer: []u8) void {
     const fd = state.ses_client.getCtlFd() orelse return;
 
-    const hdr = wire.readControlHeader(fd) catch return;
-    const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-    mux.debugLog("ses msg: type=0x{x:0>4} len={d}", .{ hdr.msg_type, hdr.payload_len });
+    // Process all available messages (fire-and-forget responses may accumulate).
+    var msgs: usize = 0;
+    while (msgs < 32) : (msgs += 1) {
+        const hdr = wire.tryReadControlHeader(fd) catch break;
+        const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+        mux.debugLog("ses msg: type=0x{x:0>4} len={d}", .{ hdr.msg_type, hdr.payload_len });
 
-    switch (msg_type) {
-        .notify => {
-            handleNotify(state, fd, hdr.payload_len, buffer);
-        },
-        .targeted_notify => {
-            handleTargetedNotify(state, fd, hdr.payload_len, buffer);
-        },
-        .pop_confirm => {
-            handlePopConfirm(state, fd, hdr.payload_len, buffer);
-        },
-        .pop_choose => {
-            handlePopChoose(state, fd, hdr.payload_len, buffer);
-        },
-        .shell_event => {
-            handleShellEvent(state, fd, hdr.payload_len, buffer);
-        },
-        .send_keys => {
-            handleSendKeys(state, fd, buffer);
-        },
-        .focus_move => {
-            handleFocusMove(state, fd, hdr.payload_len, buffer);
-        },
-        .exit_intent => {
-            handleExitIntent(state, fd, hdr.payload_len, buffer);
-        },
-        .float_request => {
-            handleFloatRequest(state, fd, hdr.payload_len, buffer);
-        },
-        .pane_exited => {
-            handlePaneExited(state, fd, hdr.payload_len, buffer);
-        },
-        else => {
-            // Unknown message — skip payload.
-            skipPayload(fd, hdr.payload_len, buffer);
-        },
+        switch (msg_type) {
+            .notify => {
+                handleNotify(state, fd, hdr.payload_len, buffer);
+            },
+            .targeted_notify => {
+                handleTargetedNotify(state, fd, hdr.payload_len, buffer);
+            },
+            .pop_confirm => {
+                handlePopConfirm(state, fd, hdr.payload_len, buffer);
+            },
+            .pop_choose => {
+                handlePopChoose(state, fd, hdr.payload_len, buffer);
+            },
+            .shell_event => {
+                handleShellEvent(state, fd, hdr.payload_len, buffer);
+            },
+            .send_keys => {
+                handleSendKeys(state, fd, buffer);
+            },
+            .focus_move => {
+                handleFocusMove(state, fd, hdr.payload_len, buffer);
+            },
+            .exit_intent => {
+                handleExitIntent(state, fd, hdr.payload_len, buffer);
+            },
+            .float_request => {
+                handleFloatRequest(state, fd, hdr.payload_len, buffer);
+            },
+            .pane_exited => {
+                handlePaneExited(state, fd, hdr.payload_len, buffer);
+            },
+            // Async responses from fire-and-forget requests:
+            .ok, .pong => {
+                skipPayload(fd, hdr.payload_len, buffer);
+            },
+            .get_pane_cwd => {
+                handleCwdResponse(state, fd, hdr.payload_len, buffer);
+            },
+            .pane_info => {
+                handlePaneInfoResponse(state, fd, hdr.payload_len, buffer);
+            },
+            .pane_not_found, .@"error" => {
+                skipPayload(fd, hdr.payload_len, buffer);
+            },
+            else => {
+                // Unknown message — skip payload.
+                skipPayload(fd, hdr.payload_len, buffer);
+            },
+        }
     }
 }
 
@@ -610,6 +628,81 @@ fn handlePaneExited(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
         }
     }
     state.needs_render = true;
+}
+
+/// Handle async get_pane_cwd response.
+fn handleCwdResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+    if (payload_len < @sizeOf(wire.PaneCwd)) {
+        skipPayload(fd, payload_len, buffer);
+        return;
+    }
+    const resp = wire.readStruct(wire.PaneCwd, fd) catch return;
+    const uuid = state.ses_client.pending_cwd_uuid orelse {
+        // No pending request — skip trailing data.
+        if (resp.cwd_len > 0) skipPayload(fd, resp.cwd_len, buffer);
+        return;
+    };
+    state.ses_client.pending_cwd_uuid = null;
+
+    if (resp.cwd_len == 0) return;
+    if (resp.cwd_len > buffer.len) {
+        skipPayload(fd, resp.cwd_len, buffer);
+        return;
+    }
+    wire.readExact(fd, buffer[0..resp.cwd_len]) catch return;
+
+    // Find the pane and update its CWD.
+    if (state.findPaneByUuid(uuid)) |pane| {
+        const cwd = state.allocator.dupe(u8, buffer[0..resp.cwd_len]) catch return;
+        pane.setSesCwd(cwd);
+    }
+}
+
+/// Handle async pane_info response (updates fg_process cache).
+fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+    if (payload_len < @sizeOf(wire.PaneInfoResp)) {
+        skipPayload(fd, payload_len, buffer);
+        return;
+    }
+    const resp = wire.readStruct(wire.PaneInfoResp, fd) catch return;
+
+    // Calculate total trailing bytes.
+    const trail_total: usize = @as(usize, resp.name_len) + @as(usize, resp.fg_len) +
+        @as(usize, resp.cwd_len) + @as(usize, resp.tty_len) +
+        @as(usize, resp.socket_path_len) + @as(usize, resp.session_name_len) +
+        @as(usize, resp.layout_path_len) + @as(usize, resp.last_cmd_len) +
+        @as(usize, resp.base_process_len) + @as(usize, resp.sticky_pwd_len);
+
+    // Skip name.
+    if (resp.name_len > 0) {
+        if (resp.name_len <= buffer.len) {
+            wire.readExact(fd, buffer[0..resp.name_len]) catch return;
+        } else {
+            skipPayload(fd, resp.name_len, buffer);
+        }
+    }
+
+    // Read fg_process.
+    var fg_name: ?[]u8 = null;
+    if (resp.fg_len > 0 and resp.fg_len <= buffer.len) {
+        wire.readExact(fd, buffer[0..resp.fg_len]) catch return;
+        fg_name = state.allocator.dupe(u8, buffer[0..resp.fg_len]) catch null;
+    } else if (resp.fg_len > 0) {
+        skipPayload(fd, resp.fg_len, buffer);
+    }
+
+    // Skip remaining trailing bytes.
+    const remaining = trail_total -| @as(usize, resp.name_len) -| @as(usize, resp.fg_len);
+    if (remaining > 0) {
+        skipPayload(fd, @intCast(remaining), buffer);
+    }
+
+    // Update process cache.
+    const fg_pid: ?i32 = if (resp.fg_pid != 0) resp.fg_pid else null;
+    if (fg_name != null or fg_pid != null) {
+        state.setPaneProc(resp.uuid, fg_name, fg_pid);
+    }
+    if (fg_name) |n| state.allocator.free(n);
 }
 
 fn skipPayload(fd: posix.fd_t, len: u32, buffer: []u8) void {

@@ -585,6 +585,26 @@ pub fn readControlHeader(fd: posix.fd_t) !ControlHeader {
     return std.mem.bytesToValue(ControlHeader, &buf);
 }
 
+/// Non-blocking variant: returns WouldBlock if no data available on first byte,
+/// but spin-waits on remaining bytes (header in-flight).
+pub fn tryReadControlHeader(fd: posix.fd_t) !ControlHeader {
+    var buf: [@sizeOf(ControlHeader)]u8 = undefined;
+    // First byte: propagate WouldBlock (no data available).
+    const first = posix.read(fd, buf[0..1]) catch |err| return err;
+    if (first == 0) return error.ConnectionClosed;
+    // Remaining bytes: spin-wait (header in-flight).
+    var off: usize = 1;
+    while (off < buf.len) {
+        const n = posix.read(fd, buf[off..]) catch |err| switch (err) {
+            error.WouldBlock => continue,
+            else => return err,
+        };
+        if (n == 0) return error.ConnectionClosed;
+        off += n;
+    }
+    return std.mem.bytesToValue(ControlHeader, &buf);
+}
+
 /// Read exactly `T` from the fd (fixed-size struct).
 pub fn readStruct(comptime T: type, fd: posix.fd_t) !T {
     var buf: [@sizeOf(T)]u8 = undefined;

@@ -21,6 +21,9 @@ pub const SesClient = struct {
     session_name: []const u8, // Pokemon name
     keepalive: bool,
 
+    // Pending async request tracking
+    pending_cwd_uuid: ?[32]u8 = null,
+
     pub fn init(allocator: std.mem.Allocator, session_id: [32]u8, session_name: []const u8, keepalive: bool, debug: bool, log_file: ?[]const u8) SesClient {
         return .{
             .allocator = allocator,
@@ -78,6 +81,18 @@ pub const SesClient = struct {
     fn connectCtl(self: *SesClient, socket_path: []const u8) bool {
         const ctl_client = core.ipc.Client.connect(socket_path) catch return false;
         const ctl_fd = ctl_client.fd;
+
+        // Set non-blocking — periodic sync calls must not block the main loop.
+        const O_NONBLOCK: usize = 0o4000;
+        const flags = posix.fcntl(ctl_fd, posix.F.GETFL, 0) catch {
+            posix.close(ctl_fd);
+            return false;
+        };
+        _ = posix.fcntl(ctl_fd, posix.F.SETFL, flags | O_NONBLOCK) catch {
+            posix.close(ctl_fd);
+            return false;
+        };
+
         const ctl_handshake = [_]u8{wire.SES_HANDSHAKE_MUX_CTL};
         wire.writeAll(ctl_fd, &ctl_handshake) catch {
             posix.close(ctl_fd);
@@ -132,7 +147,7 @@ pub const SesClient = struct {
         try wire.writeControlWithTrail(fd, .register, std.mem.asBytes(&reg), self.session_name);
 
         // Wait for registered response.
-        const hdr = try wire.readControlHeader(fd);
+        const hdr = try self.readSyncResponse(fd);
         const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (msg_type == .@"error") {
             self.skipPayload(fd, hdr.payload_len);
@@ -163,17 +178,13 @@ pub const SesClient = struct {
         wire.writeControl(fd, .disconnect, std.mem.asBytes(&msg)) catch {};
     }
 
-    /// Sync current mux state to ses (for crash recovery).
+    /// Sync current mux state to ses (fire-and-forget).
     pub fn syncState(self: *SesClient, mux_state_json: []const u8) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
         var msg: wire.SyncState = .{
             .state_len = @intCast(mux_state_json.len),
         };
         try wire.writeControlWithTrail(fd, .sync_state, std.mem.asBytes(&msg), mux_state_json);
-
-        // Wait for ok response.
-        const hdr = try wire.readControlHeader(fd);
-        self.skipPayload(fd, hdr.payload_len);
     }
 
     /// Create a new pane via ses.
@@ -204,7 +215,7 @@ pub const SesClient = struct {
         try wire.writeControlMsg(fd, .create_pane, std.mem.asBytes(&msg), trails);
 
         // Read response.
-        const hdr = try wire.readControlHeader(fd);
+        const hdr = try self.readSyncResponse(fd);
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type == .@"error") {
             self.skipPayload(fd, hdr.payload_len);
@@ -240,7 +251,7 @@ pub const SesClient = struct {
         };
         try wire.writeControlWithTrail(fd, .find_sticky, std.mem.asBytes(&msg), pwd);
 
-        const hdr = try wire.readControlHeader(fd);
+        const hdr = try self.readSyncResponse(fd);
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type == .pane_not_found) {
             self.skipPayload(fd, hdr.payload_len);
@@ -267,7 +278,7 @@ pub const SesClient = struct {
         var msg: wire.PaneUuid = .{ .uuid = uuid };
         try wire.writeControl(fd, .orphan_pane, std.mem.asBytes(&msg));
 
-        const hdr = try wire.readControlHeader(fd);
+        const hdr = try self.readSyncResponse(fd);
         self.skipPayload(fd, hdr.payload_len);
     }
 
@@ -281,7 +292,7 @@ pub const SesClient = struct {
         };
         try wire.writeControlWithTrail(fd, .set_sticky, std.mem.asBytes(&msg), pwd);
 
-        const hdr = try wire.readControlHeader(fd);
+        const hdr = try self.readSyncResponse(fd);
         self.skipPayload(fd, hdr.payload_len);
     }
 
@@ -291,30 +302,16 @@ pub const SesClient = struct {
         var msg: wire.PaneUuid = .{ .uuid = uuid };
         try wire.writeControl(fd, .kill_pane, std.mem.asBytes(&msg));
 
-        const hdr = try wire.readControlHeader(fd);
+        const hdr = try self.readSyncResponse(fd);
         self.skipPayload(fd, hdr.payload_len);
     }
 
-    /// Get pane CWD from ses (uses /proc on ses side).
-    pub fn getPaneCwd(self: *SesClient, uuid: [32]u8) ?[]u8 {
-        const fd = self.ctl_fd orelse return null;
+    /// Request pane CWD from ses (fire-and-forget; response handled in handleSesMessage).
+    pub fn requestPaneCwd(self: *SesClient, uuid: [32]u8) void {
+        const fd = self.ctl_fd orelse return;
+        self.pending_cwd_uuid = uuid;
         var msg: wire.GetPaneCwd = .{ .uuid = uuid };
-        wire.writeControl(fd, .get_pane_cwd, std.mem.asBytes(&msg)) catch return null;
-
-        const hdr = wire.readControlHeader(fd) catch return null;
-        const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-        if (resp_type != .get_pane_cwd or hdr.payload_len < @sizeOf(wire.PaneCwd)) {
-            self.skipPayload(fd, hdr.payload_len);
-            return null;
-        }
-        const resp = wire.readStruct(wire.PaneCwd, fd) catch return null;
-        if (resp.cwd_len == 0) return null;
-        const buf = self.allocator.alloc(u8, resp.cwd_len) catch return null;
-        wire.readExact(fd, buf) catch {
-            self.allocator.free(buf);
-            return null;
-        };
-        return buf;
+        wire.writeControl(fd, .get_pane_cwd, std.mem.asBytes(&msg)) catch return;
     }
 
     /// Ping ses to check if it's alive.
@@ -322,13 +319,13 @@ pub const SesClient = struct {
         const fd = self.ctl_fd orelse return false;
         try wire.writeControl(fd, .ping, &.{});
 
-        const hdr = wire.readControlHeader(fd) catch return false;
+        const hdr = self.readSyncResponse(fd) catch return false;
         self.skipPayload(fd, hdr.payload_len);
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         return resp_type == .pong;
     }
 
-    /// Update pane name in ses.
+    /// Update pane name in ses (fire-and-forget).
     pub fn updatePaneName(self: *SesClient, uuid: [32]u8, name: ?[]const u8) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
         const name_bytes = name orelse "";
@@ -337,12 +334,9 @@ pub const SesClient = struct {
             .name_len = @intCast(name_bytes.len),
         };
         try wire.writeControlWithTrail(fd, .update_pane_name, std.mem.asBytes(&msg), name_bytes);
-
-        const hdr = try wire.readControlHeader(fd);
-        self.skipPayload(fd, hdr.payload_len);
     }
 
-    /// Update shell-provided pane metadata.
+    /// Update shell-provided pane metadata (fire-and-forget).
     pub fn updatePaneShell(self: *SesClient, uuid: [32]u8, cmd: ?[]const u8, cwd: ?[]const u8, status: ?i32, duration_ms: ?u64, jobs: ?u16) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
         const cmd_bytes = cmd orelse "";
@@ -360,9 +354,6 @@ pub const SesClient = struct {
         };
         const trails: []const []const u8 = &.{ cmd_bytes, cwd_bytes };
         try wire.writeControlMsg(fd, .update_pane_shell, std.mem.asBytes(&msg), trails);
-
-        const hdr = try wire.readControlHeader(fd);
-        self.skipPayload(fd, hdr.payload_len);
     }
 
     /// Pane type enum for auxiliary info.
@@ -400,66 +391,31 @@ pub const SesClient = struct {
         return .{ .created_from = null, .focused_from = null };
     }
 
-    /// Best-effort foreground process info for a pane.
-    /// Uses pane_info query.
-    pub fn getPaneProcess(self: *SesClient, uuid: [32]u8) ?PaneProcessInfo {
-        const fd = self.ctl_fd orelse return null;
+    /// Request foreground process info for a pane (fire-and-forget; response handled in handleSesMessage).
+    pub fn requestPaneProcess(self: *SesClient, uuid: [32]u8) void {
+        const fd = self.ctl_fd orelse return;
         var msg: wire.PaneUuid = .{ .uuid = uuid };
-        wire.writeControl(fd, .pane_info, std.mem.asBytes(&msg)) catch return null;
-
-        const hdr = wire.readControlHeader(fd) catch return null;
-        const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-        if (resp_type != .pane_info or hdr.payload_len < @sizeOf(wire.PaneInfoResp)) {
-            self.skipPayload(fd, hdr.payload_len);
-            return null;
-        }
-        const resp = wire.readStruct(wire.PaneInfoResp, fd) catch return null;
-        var out: PaneProcessInfo = .{};
-
-        // Calculate total trailing bytes to consume.
-        const trail_total: usize = @as(usize, resp.name_len) + @as(usize, resp.fg_len) +
-            @as(usize, resp.cwd_len) + @as(usize, resp.tty_len) +
-            @as(usize, resp.socket_path_len) + @as(usize, resp.session_name_len) +
-            @as(usize, resp.layout_path_len) + @as(usize, resp.last_cmd_len) +
-            @as(usize, resp.base_process_len) + @as(usize, resp.sticky_pwd_len);
-
-        // Read trailing name (skip).
-        if (resp.name_len > 0) {
-            var skip: [256]u8 = undefined;
-            wire.readExact(fd, skip[0..@min(@as(usize, resp.name_len), skip.len)]) catch {
-                return null;
-            };
-        }
-        // Read fg_process (keep).
-        if (resp.fg_len > 0) {
-            const buf = self.allocator.alloc(u8, resp.fg_len) catch {
-                // Skip all remaining trailing bytes.
-                const remaining = trail_total - @as(usize, resp.name_len);
-                self.skipPayload(fd, @intCast(remaining));
-                return null;
-            };
-            wire.readExact(fd, buf) catch {
-                self.allocator.free(buf);
-                return null;
-            };
-            out.name = buf;
-        }
-        // Skip all remaining trailing bytes (cwd + tty + socket + session_name + layout + last_cmd + base_process + sticky_pwd).
-        const remaining = trail_total - @as(usize, resp.name_len) - @as(usize, resp.fg_len);
-        if (remaining > 0) {
-            self.skipPayload(fd, @intCast(remaining));
-        }
-        if (resp.fg_pid != 0) out.pid = resp.fg_pid;
-        return out;
+        wire.writeControl(fd, .pane_info, std.mem.asBytes(&msg)) catch return;
     }
 
-    /// Best-effort pane name.
+    /// Best-effort pane name (sync call, skips pending .ok/.get_pane_cwd responses).
     pub fn getPaneName(self: *SesClient, uuid: [32]u8) ?[]u8 {
         const fd = self.ctl_fd orelse return null;
         var msg: wire.PaneUuid = .{ .uuid = uuid };
         wire.writeControl(fd, .pane_info, std.mem.asBytes(&msg)) catch return null;
 
-        const hdr = wire.readControlHeader(fd) catch return null;
+        // Read response, skipping fire-and-forget acks (but NOT .pane_info).
+        const hdr = blk: {
+            while (true) {
+                const h = wire.readControlHeader(fd) catch return null;
+                const mt: wire.MsgType = @enumFromInt(h.msg_type);
+                if (mt == .ok or mt == .get_pane_cwd) {
+                    self.skipPayload(fd, h.payload_len);
+                    continue;
+                }
+                break :blk h;
+            }
+        };
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type != .pane_info or hdr.payload_len < @sizeOf(wire.PaneInfoResp)) {
             self.skipPayload(fd, hdr.payload_len);
@@ -500,7 +456,7 @@ pub const SesClient = struct {
         var msg: wire.PaneUuid = .{ .uuid = uuid };
         try wire.writeControl(fd, .adopt_pane, std.mem.asBytes(&msg));
 
-        const hdr = try wire.readControlHeader(fd);
+        const hdr = try self.readSyncResponse(fd);
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type == .@"error") {
             self.skipPayload(fd, hdr.payload_len);
@@ -524,7 +480,7 @@ pub const SesClient = struct {
         const fd = self.ctl_fd orelse return error.NotConnected;
         try wire.writeControl(fd, .list_orphaned, &.{});
 
-        const hdr = try wire.readControlHeader(fd);
+        const hdr = try self.readSyncResponse(fd);
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type != .orphaned_panes) {
             self.skipPayload(fd, hdr.payload_len);
@@ -554,7 +510,7 @@ pub const SesClient = struct {
         };
         try wire.writeControlWithTrail(fd, .detach, std.mem.asBytes(&msg), mux_state_json);
 
-        const hdr = try wire.readControlHeader(fd);
+        const hdr = try self.readSyncResponse(fd);
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type == .@"error") {
             self.skipPayload(fd, hdr.payload_len);
@@ -578,7 +534,7 @@ pub const SesClient = struct {
         };
         try wire.writeControlWithTrail(fd, .reattach, std.mem.asBytes(&msg), session_id);
 
-        const hdr = try wire.readControlHeader(fd);
+        const hdr = try self.readSyncResponse(fd);
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type == .@"error") {
             self.skipPayload(fd, hdr.payload_len);
@@ -614,7 +570,7 @@ pub const SesClient = struct {
         const fd = self.ctl_fd orelse return error.NotConnected;
         try wire.writeControl(fd, .list_sessions, &.{});
 
-        const hdr = try wire.readControlHeader(fd);
+        const hdr = try self.readSyncResponse(fd);
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type != .sessions_list) {
             self.skipPayload(fd, hdr.payload_len);
@@ -707,6 +663,36 @@ pub const SesClient = struct {
     }
 
     // ── Helpers ──────────────────────────────────────────────────────────────
+
+    /// Read a response from the CTL fd, skipping any fire-and-forget response
+    /// types that may have arrived before our expected response.
+    fn readSyncResponse(self: *SesClient, fd: posix.fd_t) !wire.ControlHeader {
+        while (true) {
+            const hdr = try wire.readControlHeader(fd);
+            const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+            switch (msg_type) {
+                // Fire-and-forget acks from syncState/updatePaneName/updatePaneShell.
+                .ok => {
+                    self.skipPayload(fd, hdr.payload_len);
+                    continue;
+                },
+                // Async get_pane_cwd response.
+                .get_pane_cwd => {
+                    self.skipPayload(fd, hdr.payload_len);
+                    continue;
+                },
+                // Async pane_info response (large payload = response, not request).
+                .pane_info => {
+                    if (hdr.payload_len >= @sizeOf(wire.PaneInfoResp)) {
+                        self.skipPayload(fd, hdr.payload_len);
+                        continue;
+                    }
+                    return hdr;
+                },
+                else => return hdr,
+            }
+        }
+    }
 
     fn skipPayload(self: *SesClient, fd: posix.fd_t, len: u32) void {
         _ = self;
