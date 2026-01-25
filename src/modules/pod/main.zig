@@ -4,7 +4,37 @@ const posix = std.posix;
 const c = @cImport({
     @cInclude("fcntl.h");
     @cInclude("unistd.h");
+    @cInclude("sys/socket.h");
 });
+
+const linux = std.os.linux;
+
+/// Unix credentials structure for SO_PEERCRED
+const ucred = extern struct {
+    pid: i32,
+    uid: u32,
+    gid: u32,
+};
+
+/// SO_PEERCRED option value (from Linux headers)
+const SO_PEERCRED: u32 = 17;
+
+/// Verify connecting peer has same UID as current process (security check)
+fn verifyPeerCredentials(fd: posix.fd_t) bool {
+    var cred: ucred = undefined;
+    var len: linux.socklen_t = @sizeOf(ucred);
+    const rc = linux.getsockopt(fd, linux.SOL.SOCKET, SO_PEERCRED, @ptrCast(&cred), &len);
+    if (rc != 0) {
+        debugLog("SO_PEERCRED failed", .{});
+        return false;
+    }
+    const my_uid = linux.getuid();
+    if (cred.uid != my_uid) {
+        debugLog("peer uid {d} != our uid {d}, rejecting", .{ cred.uid, my_uid });
+        return false;
+    }
+    return true;
+}
 
 const core = @import("core");
 const pod_protocol = core.pod_protocol;
@@ -665,6 +695,13 @@ const Pod = struct {
             // Accept new connection.
             if (poll_fds[0].revents & posix.POLL.IN != 0) {
                 if (self.server.tryAccept() catch null) |conn| {
+                    // Security: verify peer has same UID
+                    if (!verifyPeerCredentials(conn.fd)) {
+                        var tmp = conn;
+                        tmp.close();
+                        continue;
+                    }
+
                     // Peek first byte to distinguish connection type.
                     var peek_byte: [1]u8 = undefined;
                     const peeked = posix.read(conn.fd, &peek_byte) catch 0;
@@ -888,7 +925,7 @@ const Pod = struct {
                 } else if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.resize)) {
                     if (payload_len >= 4) {
                         const cols = std.mem.readInt(u16, buf[off..][0..2], .big);
-                        const rows = std.mem.readInt(u16, buf[off + 2 ..][0..4][0..2], .big);
+                        const rows = std.mem.readInt(u16, buf[off + 2 ..][0..2], .big);
                         self.pty.setSize(cols, rows) catch {};
                     }
                 }

@@ -6,6 +6,9 @@ const wire = core.wire;
 const state = @import("state.zig");
 const ses = @import("main.zig");
 
+/// Maximum number of concurrent client connections (MUX instances).
+const MAX_CLIENTS: usize = 64;
+
 /// Server that handles mux connections
 /// Note: Uses page_allocator internally to avoid GPA issues after fork/daemonization
 pub const Server = struct {
@@ -189,6 +192,14 @@ pub const Server = struct {
 
     /// Dispatch a newly accepted connection based on its first (handshake) byte.
     fn dispatchNewConnection(self: *Server, conn: ipc.Connection, alloc: std.mem.Allocator, poll_fds: *std.ArrayList(posix.pollfd)) void {
+        // Reject if at max capacity to prevent resource exhaustion.
+        if (self.ses_state.clients.items.len >= MAX_CLIENTS) {
+            ses.debugLog("max clients reached ({d}), rejecting connection", .{MAX_CLIENTS});
+            var tmp = conn;
+            tmp.close();
+            return;
+        }
+
         // The accepted fd is blocking. The client sends the handshake byte immediately
         // after connecting, so it should be available. Read it directly.
         var peek: [1]u8 = undefined;
@@ -1477,7 +1488,10 @@ pub const Server = struct {
                     posix.close(fd);
                     return;
                 };
-                const sk: *const wire.SendKeys = @ptrCast(@alignCast(buf[0..@sizeOf(wire.SendKeys)]));
+                const sk = wire.bytesToStruct(wire.SendKeys, buf[0..hdr.payload_len]) orelse {
+                    posix.close(fd);
+                    return;
+                };
                 const zero_uuid: [32]u8 = .{0} ** 32;
                 const mux_fd = if (std.mem.eql(u8, &sk.uuid, &zero_uuid))
                     self.findAnyMuxCtl()
@@ -1501,7 +1515,10 @@ pub const Server = struct {
                     posix.close(fd);
                     return;
                 };
-                const tn: *const wire.TargetedNotify = @ptrCast(@alignCast(buf[0..@sizeOf(wire.TargetedNotify)]));
+                const tn = wire.bytesToStruct(wire.TargetedNotify, buf[0..hdr.payload_len]) orelse {
+                    posix.close(fd);
+                    return;
+                };
                 const mux_fd = self.findMuxCtlForUuid(tn.uuid) orelse self.findAnyMuxCtl();
                 if (mux_fd) |mfd| {
                     wire.writeControl(mfd, .targeted_notify, buf[0..hdr.payload_len]) catch {};
@@ -1540,7 +1557,10 @@ pub const Server = struct {
                     posix.close(fd);
                     return;
                 };
-                const pc: *const wire.PopConfirm = @ptrCast(@alignCast(buf[0..@sizeOf(wire.PopConfirm)]));
+                const pc = wire.bytesToStruct(wire.PopConfirm, buf[0..hdr.payload_len]) orelse {
+                    posix.close(fd);
+                    return;
+                };
                 const zero_uuid: [32]u8 = .{0} ** 32;
                 const mux_fd = if (std.mem.eql(u8, &pc.uuid, &zero_uuid))
                     self.findAnyMuxCtl()
@@ -1568,12 +1588,15 @@ pub const Server = struct {
                     posix.close(fd);
                     return;
                 };
-                const pc: *const wire.PopChoose = @ptrCast(@alignCast(buf[0..@sizeOf(wire.PopChoose)]));
+                const pch = wire.bytesToStruct(wire.PopChoose, buf[0..hdr.payload_len]) orelse {
+                    posix.close(fd);
+                    return;
+                };
                 const zero_uuid: [32]u8 = .{0} ** 32;
-                const mux_fd = if (std.mem.eql(u8, &pc.uuid, &zero_uuid))
+                const mux_fd = if (std.mem.eql(u8, &pch.uuid, &zero_uuid))
                     self.findAnyMuxCtl()
                 else
-                    self.findMuxCtlForUuid(pc.uuid) orelse self.findAnyMuxCtl();
+                    self.findMuxCtlForUuid(pch.uuid) orelse self.findAnyMuxCtl();
                 if (mux_fd) |mfd| {
                     wire.writeControl(mfd, .pop_choose, buf[0..hdr.payload_len]) catch {};
                     self.pending_pop_requests.put(mfd, fd) catch {

@@ -531,10 +531,10 @@ fn daemonize(log_file: ?[]const u8) !void {
     std.posix.chdir("/") catch {};
 }
 
-var global_server: ?*server.Server = null;
+var global_server: std.atomic.Value(?*server.Server) = std.atomic.Value(?*server.Server).init(null);
 
 fn setupSignalHandlers(srv: *server.Server) void {
-    global_server = srv;
+    global_server.store(srv, .release);
 
     // Ignore SIGPIPE - we handle closed connections gracefully
     const sigpipe_action = std.os.linux.Sigaction{
@@ -557,7 +557,7 @@ fn setupSignalHandlers(srv: *server.Server) void {
 
 fn signalHandler(sig: c_int) callconv(.c) void {
     _ = sig;
-    if (global_server) |srv| {
+    if (global_server.load(.acquire)) |srv| {
         srv.stop();
     }
 }

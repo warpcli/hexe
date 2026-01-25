@@ -691,3 +691,10 @@ pub fn readExact(fd: posix.fd_t, buf: []u8) !void {
         off += n;
     }
 }
+
+/// Safely parse a struct from a byte buffer. Returns null if buffer is too small.
+/// This avoids unsafe @ptrCast/@alignCast on potentially misaligned buffers.
+pub fn bytesToStruct(comptime T: type, buf: []const u8) ?T {
+    if (buf.len < @sizeOf(T)) return null;
+    return std.mem.bytesToValue(T, buf[0..@sizeOf(T)]);
+}
