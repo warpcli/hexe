@@ -1,7 +1,7 @@
 const std = @import("std");
 const core = @import("core");
 const shp = @import("shp");
-const spinners = @import("spinners/mod.zig");
+const animations = core.segments.animations;
 const randomdo_mod = core.segments.randomdo;
 
 const LuaRuntime = core.LuaRuntime;
@@ -723,7 +723,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
             if (mod.spinner) |cfg_in| {
                 var cfg = cfg_in;
                 cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
-                output_segs = spinners.render(ctx, cfg);
+                output_segs = animations.renderSegments(ctx, cfg);
             }
         } else {
             output_segs = ctx.renderSegment(mod.name);
@@ -777,7 +777,7 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
             if (mod.spinner) |cfg_in| {
                 var cfg = cfg_in;
                 cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
-                output_segs = spinners.render(ctx, cfg);
+                output_segs = animations.renderSegments(ctx, cfg);
             }
         } else {
             output_segs = ctx.renderSegment(mod.name);

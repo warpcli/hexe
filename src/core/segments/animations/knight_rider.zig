@@ -201,3 +201,88 @@ pub fn renderAnsiWithOptions(now_ms: u64, started_at_ms: u64, width_in: u8, step
     _ = appendBytes(&OUT_ANSI_BUF, &out_len, "\x1b[0m");
     return OUT_ANSI_BUF[0..out_len];
 }
+
+// ─── Segment-based render (for statusbar) ──────────────────────────────────
+
+const segment = @import("../context.zig");
+const Context = segment.Context;
+const Segment = segment.Segment;
+const Style = @import("../../style.zig").Style;
+const SpinnerDef = @import("../../config.zig").SpinnerDef;
+
+fn getTrailIndexWithLen(char_index: u8, state: ScannerState, trail_len: u8) i8 {
+    const active = state.active_position;
+    const directional_distance: i16 = if (state.is_moving_forward)
+        @as(i16, active) - @as(i16, char_index)
+    else
+        @as(i16, char_index) - @as(i16, active);
+
+    if (state.is_holding) {
+        const adjusted = directional_distance + state.hold_progress;
+        if (adjusted >= 0 and adjusted < trail_len) return @intCast(adjusted);
+        return -1;
+    }
+
+    if (directional_distance == 0) return 0;
+    if (directional_distance > 0 and directional_distance < trail_len) return @intCast(directional_distance);
+    return -1;
+}
+
+/// Render knight_rider animation as styled segments for statusbar.
+pub fn renderSegments(ctx: *Context, cfg: SpinnerDef) ?[]const Segment {
+    const width = clampWidth(cfg.width);
+    const step_ms: u64 = if (cfg.step_ms == 0) 75 else cfg.step_ms;
+    const hold: u8 = if (cfg.hold_frames == 0) 9 else cfg.hold_frames;
+    const trail_len: u8 = if (cfg.trail_len == 0) 6 else cfg.trail_len;
+
+    if (cfg.colors.len < 2) return null;
+
+    const elapsed_ms: u64 = if (ctx.now_ms > cfg.started_at_ms) ctx.now_ms - cfg.started_at_ms else 0;
+    const frame: u32 = @intCast((elapsed_ms / step_ms) % cycleFrames(width, hold));
+    const st = getScannerState(frame, width, hold);
+
+    const placeholder_color: u8 = cfg.placeholder_color orelse cfg.colors[cfg.colors.len / 2];
+
+    ctx.segment_buffer.clearRetainingCapacity();
+
+    var last_style: ?Style = null;
+    var run_start: usize = ctx.text_buffer.items.len;
+
+    var i: u8 = 0;
+    while (i < width) : (i += 1) {
+        const ti = getTrailIndexWithLen(i, st, trail_len);
+        const active = ti >= 0;
+        const glyph: u21 = if (active) HEAD else TRAIL;
+
+        var s = Style{};
+        if (active) {
+            const dist: usize = @intCast(@min(@as(i16, @intCast(cfg.colors.len - 1)), ti));
+            s.fg = .{ .palette = cfg.colors[dist] };
+        } else {
+            s.fg = .{ .palette = placeholder_color };
+        }
+        if (cfg.bg_color) |bg| {
+            s.bg = .{ .palette = bg };
+        }
+
+        const same = if (last_style) |ls| std.meta.eql(ls, s) else false;
+        if (!same and ctx.text_buffer.items.len > run_start and last_style != null) {
+            const txt = ctx.text_buffer.items[run_start..ctx.text_buffer.items.len];
+            ctx.segment_buffer.append(ctx.allocator, .{ .text = txt, .style = last_style.? }) catch return null;
+            run_start = ctx.text_buffer.items.len;
+        }
+        last_style = s;
+
+        var tmp: [4]u8 = undefined;
+        const n = std.unicode.utf8Encode(glyph, &tmp) catch 0;
+        if (n == 0) continue;
+        ctx.text_buffer.appendSlice(ctx.allocator, tmp[0..n]) catch return null;
+    }
+
+    if (last_style != null and ctx.text_buffer.items.len > run_start) {
+        const txt = ctx.text_buffer.items[run_start..ctx.text_buffer.items.len];
+        ctx.segment_buffer.append(ctx.allocator, .{ .text = txt, .style = last_style.? }) catch return null;
+    }
+
+    return ctx.segment_buffer.items;
+}

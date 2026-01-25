@@ -3,6 +3,11 @@ const std = @import("std");
 pub const knight_rider = @import("knight_rider.zig");
 pub const palette_ramp = @import("palette_ramp.zig");
 
+const segment = @import("../context.zig");
+const Context = segment.Context;
+const Segment = segment.Segment;
+const SpinnerDef = @import("../../config.zig").SpinnerDef;
+
 /// Render an animation frame as UTF-8 text.
 ///
 /// The output is intended to be embedded in a single statusline segment.
@@ -55,6 +60,14 @@ pub fn renderAnsiWithOptions(name: []const u8, now_ms: u64, started_at_ms: u64, 
 pub fn trailIndicesWithOptions(name: []const u8, now_ms: u64, started_at_ms: u64, width: u8, step_ms: u64, hold_frames: u8) ?[]const i8 {
     if (std.mem.eql(u8, name, "knight_rider")) {
         return knight_rider.trailIndicesWithOptions(now_ms, started_at_ms, width, step_ms, hold_frames);
+    }
+    return null;
+}
+
+/// Render an animation as styled segments (for statusbar).
+pub fn renderSegments(ctx: *Context, cfg: SpinnerDef) ?[]const Segment {
+    if (std.mem.eql(u8, cfg.kind, "knight_rider")) {
+        return knight_rider.renderSegments(ctx, cfg);
     }
     return null;
 }
