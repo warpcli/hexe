@@ -220,7 +220,7 @@ fn renderPrompt(allocator: std.mem.Allocator, args: []const []const u8) !void {
     }
 
     // Fallback to defaults if no config
-    try renderDefaultPrompt(&ctx, is_right, stdout, is_zsh);
+    try renderDefaultPrompt(&ctx, is_right, stdout);
 }
 
 fn deinitShpConfig(config: *ShpConfig, allocator: std.mem.Allocator) void {
@@ -248,8 +248,7 @@ fn deinitModules(mods: []const ModuleDef, allocator: std.mem.Allocator) void {
     }
 }
 
-fn renderDefaultPrompt(ctx: *segment.Context, is_right: bool, stdout: std.fs.File, is_zsh: bool) !void {
-    _ = is_zsh;
+fn renderDefaultPrompt(ctx: *segment.Context, is_right: bool, stdout: std.fs.File) !void {
     const segment_names: []const []const u8 = if (is_right)
         &.{"time"}
     else
@@ -431,11 +430,11 @@ fn parseModule(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?ModuleDef {
         .priority = runtime.getInt(i64, -1, "priority") orelse 50,
         .outputs = parseOutputs(runtime, allocator),
         .command = runtime.getStringAlloc(-1, "command"),
-        .when = parseWhenPrompt(runtime, allocator),
+        .when = parseWhenPrompt(runtime),
     };
 }
 
-fn parseWhenPrompt(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?core.WhenDef {
+fn parseWhenPrompt(runtime: *LuaRuntime) ?core.WhenDef {
     const ty = runtime.fieldType(-1, "when");
     if (ty == .nil) return null;
     if (ty != .table) return null;
@@ -456,8 +455,6 @@ fn parseWhenPrompt(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?core.Whe
     var when: core.WhenDef = .{};
     when.bash = runtime.getStringAlloc(-1, "bash");
     when.lua = runtime.getStringAlloc(-1, "lua");
-    // hexe is not supported for prompt.
-    _ = allocator;
     return when;
 }
 

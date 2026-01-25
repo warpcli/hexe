@@ -1,8 +1,9 @@
 const std = @import("std");
 const posix = std.posix;
 const ipc = @import("ipc.zig");
+const wire = @import("wire.zig");
 
-pub const MAX_FRAME_LEN: usize = 4 * 1024 * 1024;
+pub const MAX_FRAME_LEN: usize = wire.MAX_PAYLOAD_LEN;
 
 pub const FrameType = enum(u8) {
     output = 1,

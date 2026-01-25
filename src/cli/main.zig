@@ -155,7 +155,6 @@ pub fn main() !void {
     const mux_attach_instance = try mux_attach.string("I", "instance", null);
 
     const mux_float = try mux_cmd.newCommand("float", "Spawn a transient float pane");
-    const mux_float_uuid = try mux_float.string("u", "uuid", null);
     const mux_float_command = try mux_float.string("c", "command", null);
     const mux_float_title = try mux_float.string("", "title", null);
     const mux_float_cwd = try mux_float.string("", "cwd", null);
@@ -517,7 +516,6 @@ pub fn main() !void {
             if (mux_float_instance.*.len > 0) setInstanceFromCli(mux_float_instance.*);
             try cli_cmds.runMuxFloat(
                 allocator,
-                mux_float_uuid.*,
                 mux_float_command.*,
                 mux_float_title.*,
                 mux_float_cwd.*,
@@ -563,7 +561,6 @@ pub fn main() !void {
             try cli_cmds.runExitIntent(allocator);
         } else if (shp_shell_event.happened) {
             try cli_cmds.runShellEvent(
-                allocator,
                 shp_shell_event_cmd.*,
                 shp_shell_event_status.*,
                 shp_shell_event_duration.*,

@@ -609,7 +609,7 @@ const Pod = struct {
         var server = try core.ipc.Server.init(allocator, socket_path);
         errdefer server.deinit();
 
-        var backlog = try RingBuffer.init(allocator, 4 * 1024 * 1024);
+        var backlog = try RingBuffer.init(allocator, core.wire.MAX_PAYLOAD_LEN);
         errdefer backlog.deinit(allocator);
 
         var reader = try pod_protocol.Reader.init(allocator, pod_protocol.MAX_FRAME_LEN);

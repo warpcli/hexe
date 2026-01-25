@@ -341,7 +341,7 @@ pub const Server = struct {
         const payload_len = std.mem.readInt(u32, hdr[1..5], .big);
 
         // Safety cap.
-        if (payload_len > 4 * 1024 * 1024) return false;
+        if (payload_len > wire.MAX_PAYLOAD_LEN) return false;
 
         // Look up pane_id.
         const pane_id = self.ses_state.pod_vt_to_pane_id.get(pod_vt_fd) orelse return false;
@@ -380,7 +380,7 @@ pub const Server = struct {
         ses.debugLog("vt mux->pod: pane_id={d} type={d} len={d}", .{ mux_hdr.pane_id, mux_hdr.frame_type, mux_hdr.len });
 
         // Safety cap.
-        if (mux_hdr.len > 4 * 1024 * 1024) return false;
+        if (mux_hdr.len > wire.MAX_PAYLOAD_LEN) return false;
 
         // Look up pod_vt_fd from pane_id.
         const pod_vt_fd = self.ses_state.pane_id_to_pod_vt.get(mux_hdr.pane_id) orelse {
@@ -664,7 +664,7 @@ pub const Server = struct {
             return;
         }
         const ss = wire.readStruct(wire.SyncState, fd) catch return;
-        if (ss.state_len > 4 * 1024 * 1024) {
+        if (ss.state_len > wire.MAX_PAYLOAD_LEN) {
             self.skipBinaryPayload(fd, payload_len - @sizeOf(wire.SyncState), buf);
             return;
         }
@@ -958,7 +958,7 @@ pub const Server = struct {
             return;
         }
         const det = wire.readStruct(wire.Detach, fd) catch return;
-        if (det.state_len > 4 * 1024 * 1024) {
+        if (det.state_len > wire.MAX_PAYLOAD_LEN) {
             self.skipBinaryPayload(fd, det.state_len, buf);
             self.sendBinaryError(fd, "state_too_large");
             return;

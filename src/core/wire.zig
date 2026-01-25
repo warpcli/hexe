@@ -2,6 +2,14 @@ const std = @import("std");
 const posix = std.posix;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Protocol limits
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Maximum payload size for control messages and VT frames (4MB).
+/// Prevents denial-of-service via oversized allocations.
+pub const MAX_PAYLOAD_LEN: usize = 4 * 1024 * 1024;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Handshake bytes — first byte sent on a new connection to identify channel type.
 // ─────────────────────────────────────────────────────────────────────────────
 

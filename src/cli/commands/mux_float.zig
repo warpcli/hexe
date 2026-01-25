@@ -7,7 +7,6 @@ const print = std.debug.print;
 
 pub fn runMuxFloat(
     allocator: std.mem.Allocator,
-    mux_uuid: []const u8,
     command: []const u8,
     title: []const u8,
     cwd: []const u8,
@@ -16,8 +15,6 @@ pub fn runMuxFloat(
     extra_env: []const u8,
     isolated: bool,
 ) !void {
-    _ = mux_uuid;
-
     if (command.len == 0) {
         print("Error: --command is required\n", .{});
         return;

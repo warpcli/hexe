@@ -763,7 +763,6 @@ pub fn runExitIntent(allocator: std.mem.Allocator) !void {
 }
 
 pub fn runShellEvent(
-    allocator: std.mem.Allocator,
     cmd: []const u8,
     status: i64,
     duration_ms: i64,
@@ -773,8 +772,6 @@ pub fn runShellEvent(
     running: bool,
     started_at_ms: i64,
 ) !void {
-    _ = allocator;
-
     const pod_socket = std.posix.getenv("HEXE_POD_SOCKET") orelse return;
 
     const wire = core.wire;
