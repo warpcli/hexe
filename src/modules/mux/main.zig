@@ -15,6 +15,18 @@ const loop_core = @import("loop_core.zig");
 
 var debug_enabled: bool = false;
 
+/// Global state pointer for signal handlers.
+var global_state: std.atomic.Value(?*State) = std.atomic.Value(?*State).init(null);
+
+/// SIGHUP handler: set detach mode and stop the main loop.
+/// This is called when the terminal closes unexpectedly.
+fn sighupHandler(_: c_int) callconv(.c) void {
+    if (global_state.load(.acquire)) |state| {
+        state.detach_mode = true;
+        state.running = false;
+    }
+}
+
 pub fn debugLog(comptime fmt: []const u8, args: anytype) void {
     if (!debug_enabled) return;
     std.debug.print("[mux] " ++ fmt ++ "\n", args);
@@ -56,9 +68,18 @@ pub fn run(mux_args: MuxArgs) !void {
         const sess_count = ses.listSessions(&sessions) catch 0;
         if (sess_count > 0) {
             std.debug.print("Detached sessions:\n", .{});
+            const instance = std.posix.getenv("HEXE_INSTANCE");
             for (sessions[0..sess_count]) |s| {
                 const name = s.session_name[0..s.session_name_len];
-                std.debug.print("  {s} [{s}] {d} tabs - attach with: hexe mux attach {s}\n", .{ name, s.session_id[0..8], s.pane_count, name });
+                if (instance) |inst| {
+                    if (inst.len > 0) {
+                        std.debug.print("  {s} [{s}] {d} tabs - attach with: hexe mux attach --instance {s} {s}\n", .{ name, s.session_id[0..8], s.pane_count, inst, name });
+                    } else {
+                        std.debug.print("  {s} [{s}] {d} tabs - attach with: hexe mux attach {s}\n", .{ name, s.session_id[0..8], s.pane_count, name });
+                    }
+                } else {
+                    std.debug.print("  {s} [{s}] {d} tabs - attach with: hexe mux attach {s}\n", .{ name, s.session_id[0..8], s.pane_count, name });
+                }
             }
         }
 
@@ -96,9 +117,25 @@ pub fn run(mux_args: MuxArgs) !void {
     };
     _ = std.os.linux.sigaction(posix.SIG.PIPE, &sigpipe_action, null);
 
+    // Handle SIGHUP: terminal closed unexpectedly - preserve session for reattach.
+    const sighup_action = std.os.linux.Sigaction{
+        .handler = .{ .handler = sighupHandler },
+        .mask = std.os.linux.sigemptyset(),
+        .flags = 0,
+    };
+    _ = std.os.linux.sigaction(posix.SIG.HUP, &sighup_action, null);
+
     // Redirect stderr to a log file or /dev/null to avoid display corruption.
-    // When --debug is set without --logfile, default to /tmp/hexe.
-    const effective_log: ?[]const u8 = if (mux_args.log_file) |p| (if (p.len > 0) p else null) else if (mux_args.debug) "/tmp/hexe" else null;
+    // When --debug is set without --logfile, default to instance-specific log.
+    var default_log_path: ?[]const u8 = null;
+    defer if (default_log_path) |p| allocator.free(p);
+
+    const effective_log: ?[]const u8 = if (mux_args.log_file) |p|
+        (if (p.len > 0) p else null)
+    else if (mux_args.debug) blk: {
+        default_log_path = core.ipc.getLogPath(allocator) catch null;
+        break :blk default_log_path;
+    } else null;
     redirectStderr(effective_log);
     debug_enabled = mux_args.debug;
     debugLog("started", .{});
@@ -109,6 +146,10 @@ pub fn run(mux_args: MuxArgs) !void {
     // Initialize state.
     var state = try State.init(allocator, size.cols, size.rows, mux_args.debug, mux_args.log_file);
     defer state.deinit();
+
+    // Register state for signal handlers.
+    global_state.store(&state, .release);
+    defer global_state.store(null, .release);
 
     // Show notification for config status.
     switch (state.config.status) {

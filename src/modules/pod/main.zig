@@ -273,7 +273,13 @@ pub fn run(args: PodArgs) !void {
     if (args.uuid.len != 32) return error.InvalidUuid;
 
     const sh = args.shell orelse (posix.getenv("SHELL") orelse "/bin/sh");
-    const log_path: ?[]const u8 = if (args.log_file) |path| (if (path.len > 0) path else null) else if (args.debug) "/tmp/hexe" else null;
+    // Use page_allocator for log path since it must survive daemonization
+    const log_path: ?[]const u8 = if (args.log_file) |path|
+        (if (path.len > 0) path else null)
+    else if (args.debug)
+        (core.ipc.getLogPath(std.heap.page_allocator) catch null)
+    else
+        null;
 
     if (args.daemon) {
         try daemonize(log_path);

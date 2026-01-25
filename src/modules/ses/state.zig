@@ -33,6 +33,9 @@ pub const Pane = struct {
     pod_vt_fd: ?posix.fd_t = null,
     pod_ctl_fd: ?posix.fd_t = null,
 
+    // Flag for deferred backlog replay on reattach
+    needs_backlog_replay: bool = false,
+
     // For sticky pwd floats
     sticky_pwd: ?[]const u8,
     sticky_key: ?u8,
@@ -340,6 +343,7 @@ pub const SesState = struct {
         // Store in pane.
         if (self.panes.getPtr(uuid)) |pane| {
             if (pane.pod_vt_fd) |old_fd| {
+                ses.debugLog("connectPodVt: closing old fd={d}", .{old_fd});
                 _ = self.pod_vt_to_pane_id.remove(old_fd);
                 posix.close(old_fd);
             }
@@ -405,17 +409,27 @@ pub const SesState = struct {
     /// keepalive=true: auto-detach session (preserve for reattach)
     /// keepalive=false: kill all panes
     pub fn removeClient(self: *SesState, client_id: usize) void {
+        ses.debugLog("removeClient: client_id={d}", .{client_id});
+
         // Find and remove client
         var client_index: ?usize = null;
         for (self.clients.items, 0..) |*client, i| {
             if (client.id == client_id) {
+                ses.debugLog("removeClient: found client keepalive={} has_session_id={} pane_count={d}", .{
+                    client.keepalive,
+                    client.session_id != null,
+                    client.pane_uuids.items.len,
+                });
+
                 if (client.keepalive) {
                     // Auto-detach: preserve session with last known state
                     if (client.session_id) |session_id| {
                         const mux_state = client.last_mux_state orelse "{}";
+                        ses.debugLog("removeClient: detaching session state_len={d}", .{mux_state.len});
                         // Use detachSessionDirect to avoid removing client twice
                         self.detachSessionDirect(client, session_id, mux_state);
                     } else {
+                        ses.debugLog("removeClient: no session_id, killing panes", .{});
                         // No session_id yet, just kill panes
                         for (client.pane_uuids.items) |uuid| {
                             self.killPane(uuid) catch |e| {
@@ -424,6 +438,7 @@ pub const SesState = struct {
                         }
                     }
                 } else {
+                    ses.debugLog("removeClient: keepalive=false, killing panes", .{});
                     // No keepalive: kill all panes
                     for (client.pane_uuids.items) |uuid| {
                         self.killPane(uuid) catch |e| {
@@ -439,6 +454,8 @@ pub const SesState = struct {
 
         if (client_index) |idx| {
             _ = self.clients.orderedRemove(idx);
+        } else {
+            ses.debugLog("removeClient: client_id={d} not found", .{client_id});
         }
     }
 
@@ -496,6 +513,9 @@ pub const SesState = struct {
 
     /// Internal: detach session without removing client (used by removeClient)
     fn detachSessionDirect(self: *SesState, client: *Client, session_id: [16]u8, mux_state_json: []const u8) void {
+        const hex_id: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
+        ses.debugLog("detachSessionDirect: session={s} name={s}", .{ hex_id[0..8], client.session_name orelse "null" });
+
         var pane_uuids_list: std.ArrayList([32]u8) = .empty;
 
         // Mark all panes as detached and collect UUIDs
@@ -507,24 +527,29 @@ pub const SesState = struct {
                 pane_uuids_list.append(self.allocator, uuid) catch continue;
             }
         }
+        ses.debugLog("detachSessionDirect: marked {d} panes as detached", .{pane_uuids_list.items.len});
 
         // If session already exists (re-detach), remove old state first
         if (self.detached_sessions.fetchRemove(session_id)) |old| {
             var old_state = old.value;
             old_state.deinit();
+            ses.debugLog("detachSessionDirect: replaced existing detached session", .{});
         }
 
         // Store the full mux state
         const owned_name = self.allocator.dupe(u8, client.session_name orelse "unknown") catch {
+            ses.debugLog("detachSessionDirect: failed to dupe session_name", .{});
             pane_uuids_list.deinit(self.allocator);
             return;
         };
         const owned_json = self.allocator.dupe(u8, mux_state_json) catch {
+            ses.debugLog("detachSessionDirect: failed to dupe mux_state_json", .{});
             self.allocator.free(owned_name);
             pane_uuids_list.deinit(self.allocator);
             return;
         };
         const owned_uuids = pane_uuids_list.toOwnedSlice(self.allocator) catch {
+            ses.debugLog("detachSessionDirect: failed to toOwnedSlice", .{});
             self.allocator.free(owned_name);
             self.allocator.free(owned_json);
             return;
@@ -540,10 +565,13 @@ pub const SesState = struct {
         };
 
         self.detached_sessions.put(session_id, detached_state) catch {
+            ses.debugLog("detachSessionDirect: failed to put detached_state", .{});
             self.allocator.free(owned_name);
             self.allocator.free(owned_json);
             self.allocator.free(owned_uuids);
+            return;
         };
+        ses.debugLog("detachSessionDirect: success, detached_sessions.count={d}", .{self.detached_sessions.count()});
         self.dirty = true;
     }
 
@@ -941,13 +969,26 @@ pub const SesState = struct {
         return null;
     }
 
-    /// Attach an orphaned pane to a client
+    /// Attach an orphaned/detached pane to a client.
+    /// Marks pane for deferred backlog replay (processed by server loop).
     pub fn attachPane(self: *SesState, uuid: [32]u8, client_id: usize) !*Pane {
         const pane = self.panes.getPtr(uuid) orelse return error.PaneNotFound;
+
+        ses.debugLog("attachPane: uuid={s} state={s} client_id={d}", .{
+            uuid[0..8],
+            @tagName(pane.state),
+            client_id,
+        });
 
         if (pane.state == .attached) {
             return error.PaneAlreadyAttached;
         }
+
+        // Mark for deferred backlog replay. The VT reconnection happens
+        // in the server loop after all adopt messages are processed,
+        // avoiding deadlock from socket buffer filling during sync calls.
+        pane.needs_backlog_replay = true;
+        ses.debugLog("attachPane: marked for deferred backlog replay", .{});
 
         pane.state = .attached;
         pane.attached_to = client_id;
@@ -958,7 +999,26 @@ pub const SesState = struct {
         const client = self.getClient(client_id) orelse return error.ClientNotFound;
         try client.appendUuid(uuid);
 
+        ses.debugLog("attachPane: success, pane_id={d}", .{pane.pane_id});
         return pane;
+    }
+
+    /// Process panes that need backlog replay (called from server loop).
+    /// Reconnects VT channel to each marked pane, triggering POD backlog replay.
+    pub fn processBacklogReplays(self: *SesState) void {
+        var iter = self.panes.iterator();
+        while (iter.next()) |entry| {
+            const pane = entry.value_ptr;
+            if (pane.needs_backlog_replay) {
+                ses.debugLog("processBacklogReplays: uuid={s} pane_id={d}", .{
+                    entry.key_ptr[0..8],
+                    pane.pane_id,
+                });
+                // Reconnect VT channel to trigger backlog replay
+                self.connectPodVt(entry.key_ptr.*, pane.pod_socket_path, pane.pane_id);
+                pane.needs_backlog_replay = false;
+            }
+        }
     }
 
     /// Manually orphan a pane (user requested suspend)

@@ -49,9 +49,14 @@ pub fn run(args: SesArgs) !void {
     }
 
     // Enable debug mode and optional logging.
-    // When --debug is set without --logfile, default to /tmp/hexe.
+    // When --debug is set without --logfile, default to instance-specific log.
     debug_enabled = args.debug;
-    log_file_path = if (args.log_file) |path| (if (path.len > 0) path else null) else if (args.debug) "/tmp/hexe" else null;
+    log_file_path = if (args.log_file) |path|
+        (if (path.len > 0) path else null)
+    else if (args.debug)
+        (ipc.getLogPath(page_alloc) catch null)
+    else
+        null;
 
     // Avoid multiple daemons: if ses socket is connectable, exit.
     {
@@ -88,10 +93,10 @@ pub fn run(args: SesArgs) !void {
     var ses_state = state.SesState.init(allocator);
     defer ses_state.deinit();
 
-    // Load persisted registry/layout (best-effort)
-    // Uses page_allocator for file path, but JSON parsing still uses passed allocator
-    // Disabled for now due to GPA issues after fork
-    // persist.load(allocator, &ses_state) catch {};
+    // Load persisted registry/layout (best-effort).
+    // Uses page_allocator for temporary allocations to avoid GPA issues after fork.
+    // Verifies pods are still alive before restoring them.
+    persist.load(allocator, &ses_state) catch {};
 
     // Initialize server (uses page_allocator internally)
     var srv = server.Server.init(allocator, &ses_state) catch |err| {
@@ -345,7 +350,17 @@ fn listStatus(allocator: std.mem.Allocator, full_mode: bool) !void {
         const mux_state = if (de.mux_state_len > 0) payload[off .. off + de.mux_state_len] else "";
         off += de.mux_state_len;
 
-        print("  {s} [{s}] {d} panes - reattach: hexe mux attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
+        // Include --instance flag if not in default instance
+        const instance = posix.getenv("HEXE_INSTANCE");
+        if (instance) |inst| {
+            if (inst.len > 0) {
+                print("  {s} [{s}] {d} panes - reattach: hexe mux attach --instance {s} {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, inst, name_str });
+            } else {
+                print("  {s} [{s}] {d} panes - reattach: hexe mux attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
+            }
+        } else {
+            print("  {s} [{s}] {d} panes - reattach: hexe mux attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
+        }
 
         if (mux_state.len > 0) {
             printMuxStateTree(allocator, mux_state, "    ");

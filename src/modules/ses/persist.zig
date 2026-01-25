@@ -90,20 +90,23 @@ pub fn save(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
     try std.fs.renameAbsolute(tmp_path, path);
 }
 
-pub fn load(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
-    // Use page_allocator for path to avoid potential GPA issues after fork
-    const path = try ipc.getSesStatePath(std.heap.page_allocator);
-    defer std.heap.page_allocator.free(path);
+pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
+    // Use page_allocator for ALL temporary allocations to avoid GPA issues after fork.
+    // Only ses_state.allocator is used for final owned data that persists.
+    const tmp_alloc = std.heap.page_allocator;
+
+    const path = try ipc.getSesStatePath(tmp_alloc);
+    defer tmp_alloc.free(path);
 
     const file = std.fs.openFileAbsolute(path, .{}) catch {
         return;
     };
     defer file.close();
 
-    const data = try file.readToEndAlloc(allocator, 8 * 1024 * 1024);
-    defer allocator.free(data);
+    const data = try file.readToEndAlloc(tmp_alloc, 8 * 1024 * 1024);
+    defer tmp_alloc.free(data);
 
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, data, .{}) catch return;
+    const parsed = std.json.parseFromSlice(std.json.Value, tmp_alloc, data, .{}) catch return;
     defer parsed.deinit();
 
     const root = parsed.value.object;
@@ -120,6 +123,15 @@ pub fn load(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
 
             const pod_pid: std.posix.pid_t = @intCast((obj.get("pod_pid") orelse continue).integer);
             const child_pid: std.posix.pid_t = @intCast((obj.get("child_pid") orelse continue).integer);
+
+            // Verify pod process is still running before restoring.
+            // kill(pid, 0) checks process existence without sending a signal.
+            if (std.posix.kill(pod_pid, 0)) |_| {
+                // Process exists, continue
+            } else |_| {
+                // Process doesn't exist, skip this pane
+                continue;
+            }
 
             const state_str = (obj.get("state") orelse continue).string;
             const pane_state: state.PaneState = if (std.mem.eql(u8, state_str, "attached")) .attached else if (std.mem.eql(u8, state_str, "detached")) .detached else if (std.mem.eql(u8, state_str, "sticky")) .sticky else .orphaned;

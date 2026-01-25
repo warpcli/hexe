@@ -397,9 +397,24 @@ pub fn runMainLoop(state: *State) !void {
 
         // Handle stdin.
         if (poll_fds[0].revents & posix.POLL.IN != 0) {
-            const n = posix.read(posix.STDIN_FILENO, &buffer) catch break;
-            if (n == 0) break;
+            const n = posix.read(posix.STDIN_FILENO, &buffer) catch {
+                // Terminal closed unexpectedly — preserve panes for reattach.
+                state.detach_mode = true;
+                break;
+            };
+            if (n == 0) {
+                // EOF on stdin — terminal closed. Preserve panes for reattach.
+                state.detach_mode = true;
+                break;
+            }
             loop_input.handleInput(state, buffer[0..n]);
+        }
+
+        // Check for POLL.HUP/ERR on stdin (terminal closed).
+        if (poll_fds[0].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
+            // Terminal closed unexpectedly — preserve panes for reattach.
+            state.detach_mode = true;
+            break;
         }
 
         // Remove dead floats (in reverse order to preserve indices).

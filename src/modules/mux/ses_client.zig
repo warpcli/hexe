@@ -740,6 +740,22 @@ pub const SesClient = struct {
         // by the IPC loop. We just check that the write succeeded.
         return true;
     }
+
+    /// Request SES to trigger backlog replay for adopted panes.
+    /// Called after reattachSession completes and MUX is ready to receive data.
+    pub fn requestBacklogReplay(self: *SesClient) !void {
+        const fd = self.ctl_fd orelse return error.NotConnected;
+        mux.debugLog("requestBacklogReplay: sending replay_backlogs", .{});
+        try wire.writeControl(fd, .replay_backlogs, &.{});
+
+        // Wait for ok response (blocking, but brief)
+        const hdr = try self.readSyncResponse(fd);
+        const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+        if (msg_type != .ok) {
+            self.skipPayload(fd, hdr.payload_len);
+        }
+        mux.debugLog("requestBacklogReplay: done", .{});
+    }
 };
 
 pub const OrphanedPaneInfo = struct {

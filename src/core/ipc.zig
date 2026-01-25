@@ -415,6 +415,23 @@ pub fn getSesStatePath(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/hexe/ses_state.json", .{state_home});
 }
 
+/// Get the debug log file path.
+/// Returns /tmp/hexe/<instance>/log where instance defaults to "default".
+pub fn getLogPath(allocator: std.mem.Allocator) ![]const u8 {
+    const instance_raw = posix.getenv("HEXE_INSTANCE");
+    const instance = if (instance_raw) |inst| (if (inst.len > 0) inst else "default") else "default";
+
+    var sanitized_buf: [32]u8 = undefined;
+    const sanitized = sanitizeInstanceName(sanitized_buf[0..], instance);
+    const final_instance = if (sanitized.len > 0) sanitized else "default";
+
+    const dir = try std.fmt.allocPrint(allocator, "/tmp/hexe/{s}", .{final_instance});
+    defer allocator.free(dir);
+    std.fs.cwd().makePath(dir) catch {};
+
+    return std.fmt.allocPrint(allocator, "/tmp/hexe/{s}/log", .{final_instance});
+}
+
 // ============================================================================
 // Pop IPC types - for CLI popup commands
 // ============================================================================

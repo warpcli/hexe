@@ -90,6 +90,7 @@ pub const MsgType = enum(u16) {
     float_created = 0x012D,
     float_result = 0x012E,
     pane_exited = 0x012F,
+    replay_backlogs = 0x0130, // MUX tells SES it's ready for backlog replay
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,

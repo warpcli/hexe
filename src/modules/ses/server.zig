@@ -535,6 +535,15 @@ pub const Server = struct {
             .adopt_pane => {
                 self.handleBinaryAdoptPane(fd, hdr.payload_len, &buf);
             },
+            .replay_backlogs => {
+                // MUX signals it's ready for backlog replay after reattach.
+                // Send ok FIRST so MUX can return to its event loop and start
+                // reading VT data. Otherwise MUX blocks waiting for ok while
+                // we fill its VT buffer, causing deadlock.
+                ses.debugLog("replay_backlogs: sending ok, then processing", .{});
+                wire.writeControl(fd, .ok, &.{}) catch {};
+                self.ses_state.processBacklogReplays();
+            },
             .kill_pane => {
                 self.handleBinaryKillPane(fd, hdr.payload_len, &buf);
             },

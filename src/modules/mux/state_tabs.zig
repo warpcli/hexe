@@ -594,6 +594,11 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     self.renderer.invalidate();
     self.force_full_render = true;
+
+    // Signal SES that we're ready for backlog replay.
+    // This triggers deferred VT reconnection to PODs, which replays their buffers.
+    self.ses_client.requestBacklogReplay() catch {};
+
     return self.tabs.items.len > 0;
 }
 

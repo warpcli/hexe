@@ -168,7 +168,17 @@ pub fn runList(allocator: std.mem.Allocator, details: bool) !void {
         const mux_state = if (de.mux_state_len > 0) payload[off .. off + de.mux_state_len] else "";
         off += de.mux_state_len;
 
-        print("  {s} [{s}] {d} panes - reattach: hexe mux attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
+        // Include --instance flag if not in default instance
+        const instance = std.posix.getenv("HEXE_INSTANCE");
+        if (instance) |instance_name| {
+            if (instance_name.len > 0) {
+                print("  {s} [{s}] {d} panes - reattach: hexe mux attach --instance {s} {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, instance_name, name_str });
+            } else {
+                print("  {s} [{s}] {d} panes - reattach: hexe mux attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
+            }
+        } else {
+            print("  {s} [{s}] {d} panes - reattach: hexe mux attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
+        }
 
         if (mux_state.len > 0) {
             printMuxTree(allocator, mux_state, "    ", null);
