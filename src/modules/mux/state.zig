@@ -142,6 +142,10 @@ pub const State = struct {
     session_name: []const u8,
     session_name_owned: ?[]const u8,
 
+    /// Monotonically increasing version counter for state sync.
+    /// SES uses this to reject stale/out-of-order updates.
+    state_version: u32 = 0,
+
     osc_reply_target_uuid: ?[32]u8,
     osc_reply_buf: std.ArrayList(u8),
     osc_reply_in_progress: bool,

@@ -192,7 +192,8 @@ pub const Server = struct {
         }
     }
 
-    /// Dispatch a newly accepted connection based on its first (handshake) byte.
+    /// Dispatch a newly accepted connection based on its handshake bytes.
+    /// Handshake format: [channel_type, protocol_version]
     fn dispatchNewConnection(self: *Server, conn: ipc.Connection, alloc: std.mem.Allocator, poll_fds: *std.ArrayList(posix.pollfd)) void {
         // Reject if at max capacity to prevent resource exhaustion.
         if (self.ses_state.clients.items.len >= MAX_CLIENTS) {
@@ -202,21 +203,32 @@ pub const Server = struct {
             return;
         }
 
-        // The accepted fd is blocking. The client sends the handshake byte immediately
-        // after connecting, so it should be available. Read it directly.
-        var peek: [1]u8 = undefined;
-        const n = posix.read(conn.fd, &peek) catch {
-            var tmp = conn;
-            tmp.close();
-            return;
-        };
-        if (n == 0) {
+        // Read versioned handshake: [channel_type, version]
+        var handshake: [2]u8 = undefined;
+        var off: usize = 0;
+        while (off < 2) {
+            const n = posix.read(conn.fd, handshake[off..]) catch {
+                var tmp = conn;
+                tmp.close();
+                return;
+            };
+            if (n == 0) {
+                var tmp = conn;
+                tmp.close();
+                return;
+            }
+            off += n;
+        }
+
+        // Validate protocol version.
+        if (handshake[1] != wire.PROTOCOL_VERSION) {
+            ses.debugLog("reject: unsupported protocol version {d} (expected {d})", .{ handshake[1], wire.PROTOCOL_VERSION });
             var tmp = conn;
             tmp.close();
             return;
         }
 
-        switch (peek[0]) {
+        switch (handshake[0]) {
             wire.SES_HANDSHAKE_MUX_CTL => {
                 // MUX binary control channel.
                 ses.debugLog("accept: MUX ctl channel fd={d}", .{conn.fd});
@@ -679,6 +691,13 @@ pub const Server = struct {
 
         const client_id = self.findClientForCtlFd(fd) orelse return;
         if (self.ses_state.getClient(client_id)) |client| {
+            // Reject stale/out-of-order updates based on version.
+            if (ss.version <= client.last_sync_version) {
+                ses.debugLog("sync_state: reject stale version {d} <= {d}", .{ ss.version, client.last_sync_version });
+                wire.writeControl(fd, .ok, &.{}) catch {};
+                return;
+            }
+            client.last_sync_version = ss.version;
             client.updateMuxState(state_buf) catch {};
         }
         wire.writeControl(fd, .ok, &.{}) catch {};

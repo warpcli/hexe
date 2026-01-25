@@ -692,25 +692,46 @@ const Pod = struct {
                         continue;
                     }
 
-                    // Peek first byte to distinguish connection type.
-                    var peek_byte: [1]u8 = undefined;
-                    const peeked = posix.read(conn.fd, &peek_byte) catch 0;
+                    // Read versioned handshake: [channel_type, version]
+                    var handshake: [2]u8 = undefined;
+                    var hoff: usize = 0;
+                    while (hoff < 2) {
+                        const n = posix.read(conn.fd, handshake[hoff..]) catch {
+                            var tmp_conn = conn;
+                            tmp_conn.close();
+                            continue;
+                        };
+                        if (n == 0) {
+                            var tmp_conn = conn;
+                            tmp_conn.close();
+                            continue;
+                        }
+                        hoff += n;
+                    }
 
-                    if (peeked > 0 and peek_byte[0] == wire.POD_HANDSHAKE_SES_VT) {
+                    // Validate protocol version.
+                    if (handshake[1] != wire.PROTOCOL_VERSION) {
+                        debugLog("reject: unsupported protocol version {d} fd={d}", .{ handshake[1], conn.fd });
+                        var tmp_conn = conn;
+                        tmp_conn.close();
+                        continue;
+                    }
+
+                    if (handshake[0] == wire.POD_HANDSHAKE_SES_VT) {
                         // SES VT channel (③) — treat as main client.
                         debugLog("accept: SES VT client fd={d}", .{conn.fd});
                         self.acceptVtClient(conn, backlog_tmp);
-                    } else if (peeked > 0 and peek_byte[0] == wire.POD_HANDSHAKE_SHP_CTL) {
+                    } else if (handshake[0] == wire.POD_HANDSHAKE_SHP_CTL) {
                         // SHP binary control (⑤) — read binary control messages.
                         debugLog("accept: SHP ctl fd={d}", .{conn.fd});
                         self.handleBinaryShpConnection(conn);
-                    } else if (peeked > 0 and peek_byte[0] == wire.POD_HANDSHAKE_AUX_INPUT) {
+                    } else if (handshake[0] == wire.POD_HANDSHAKE_AUX_INPUT) {
                         // Auxiliary input (e.g., hexe pod send) — inject frames without replacing client.
                         debugLog("accept: aux input fd={d}", .{conn.fd});
                         self.handleAuxInput(conn);
                     } else {
                         // Unknown handshake — reject.
-                        debugLog("accept: unknown handshake 0x{x:0>2} fd={d}", .{ if (peeked > 0) peek_byte[0] else @as(u8, 0), conn.fd });
+                        debugLog("accept: unknown handshake 0x{x:0>2} fd={d}", .{ handshake[0], conn.fd });
                         var tmp_conn = conn;
                         tmp_conn.close();
                     }
@@ -822,6 +843,15 @@ const Pod = struct {
 
         setBlocking(conn.fd);
         self.client = conn;
+
+        // Send acknowledgment so client knows we're ready.
+        wire.writeControl(conn.fd, .ok, &.{}) catch {
+            debugLog("acceptVtClient: failed to send ack, closing fd={d}", .{conn.fd});
+            var tmp = conn;
+            tmp.close();
+            self.client = null;
+            return;
+        };
         self.reader.reset();
 
         // Replay backlog.

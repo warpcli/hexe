@@ -29,9 +29,8 @@ pub fn runPodAttach(
     };
     defer client.close();
 
-    // Send handshake byte to identify as VT client.
-    const handshake = [_]u8{wire.POD_HANDSHAKE_SES_VT};
-    wire.writeAll(client.fd, &handshake) catch return;
+    // Send versioned handshake to identify as VT client.
+    wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_SES_VT) catch return;
 
     var conn = client.toConnection();
 

@@ -433,8 +433,7 @@ pub fn connectSesCliChannel(allocator: std.mem.Allocator) ?std.posix.fd_t {
         return null;
     };
     const fd = client.fd;
-    const handshake: [1]u8 = .{wire.SES_HANDSHAKE_CLI};
-    wire.writeAll(fd, &handshake) catch {
+    wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch {
         client.close();
         return null;
     };
@@ -660,7 +659,6 @@ pub fn runSend(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, la
 /// cannot move, it calls this.
 pub fn runFocusMove(allocator: std.mem.Allocator, dir: []const u8) !void {
     const wire = core.wire;
-    const posix = std.posix;
 
     const dir_norm = std.mem.trim(u8, dir, " \t\n\r");
     const dir_byte: u8 = if (std.mem.eql(u8, dir_norm, "left"))
@@ -695,8 +693,8 @@ pub fn runFocusMove(allocator: std.mem.Allocator, dir: []const u8) !void {
     const pane_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse return;
     if (pane_uuid.len != 32) return;
 
-    // Send CLI handshake byte.
-    _ = posix.write(fd, &.{wire.SES_HANDSHAKE_CLI}) catch return;
+    // Send versioned CLI handshake.
+    wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch return;
 
     // Send focus_move message.
     var fm: wire.FocusMove = undefined;
@@ -712,7 +710,6 @@ pub fn runFocusMove(allocator: std.mem.Allocator, dir: []const u8) !void {
 /// Exit codes: 0=allow, 1=deny
 pub fn runExitIntent(allocator: std.mem.Allocator) !void {
     const wire = core.wire;
-    const posix = std.posix;
 
     const pane_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
         std.process.exit(0);
@@ -733,8 +730,8 @@ pub fn runExitIntent(allocator: std.mem.Allocator) !void {
     defer client.close();
     const fd = client.fd;
 
-    // Send CLI handshake byte.
-    _ = posix.write(fd, &.{wire.SES_HANDSHAKE_CLI}) catch {
+    // Send versioned CLI handshake.
+    wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch {
         std.process.exit(0);
     };
 
@@ -775,14 +772,13 @@ pub fn runShellEvent(
     const pod_socket = std.posix.getenv("HEXE_POD_SOCKET") orelse return;
 
     const wire = core.wire;
-    const posix = std.posix;
 
     var client = ipc.Client.connect(pod_socket) catch return;
     defer client.close();
     const fd = client.fd;
 
-    // Send SHP handshake byte.
-    _ = posix.write(fd, &.{wire.POD_HANDSHAKE_SHP_CTL}) catch return;
+    // Send versioned SHP handshake.
+    wire.sendHandshake(fd, wire.POD_HANDSHAKE_SHP_CTL) catch return;
 
     // Build ShpShellEvent struct.
     const phase_byte: u8 = if (std.mem.eql(u8, phase, "start")) 1 else 0;

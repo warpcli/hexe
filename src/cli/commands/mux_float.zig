@@ -66,8 +66,8 @@ pub fn runMuxFloat(
     defer client.close();
     const fd = client.fd;
 
-    // Send CLI handshake byte.
-    _ = posix.write(fd, &.{wire.SES_HANDSHAKE_CLI}) catch return;
+    // Send versioned CLI handshake.
+    wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch return;
 
     // Determine result path for wait_for_exit.
     var owned_result_path: ?[]u8 = null;

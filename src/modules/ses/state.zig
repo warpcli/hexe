@@ -205,6 +205,9 @@ pub const Client = struct {
     mux_ctl_fd: ?posix.fd_t = null,
     mux_vt_fd: ?posix.fd_t = null,
 
+    /// Last accepted state sync version. Used to reject stale/out-of-order updates.
+    last_sync_version: u32 = 0,
+
     pub fn init(allocator: std.mem.Allocator, id: usize, fd: posix.fd_t) Client {
         return .{
             .id = id,
@@ -316,12 +319,23 @@ pub const SesState = struct {
         };
         const fd = client.fd;
 
-        // Send handshake byte.
-        const handshake = [_]u8{wire.POD_HANDSHAKE_SES_VT};
-        wire.writeAll(fd, &handshake) catch {
+        // Send versioned handshake.
+        wire.sendHandshake(fd, wire.POD_HANDSHAKE_SES_VT) catch {
             posix.close(fd);
             return;
         };
+
+        // Wait for acknowledgment from POD to avoid race during init.
+        const ack_hdr = wire.readControlHeader(fd) catch {
+            posix.close(fd);
+            return;
+        };
+        const ack_type: wire.MsgType = @enumFromInt(ack_hdr.msg_type);
+        if (ack_type != .ok) {
+            ses.debugLog("connectPodVt: unexpected ack {x}, closing", .{ack_hdr.msg_type});
+            posix.close(fd);
+            return;
+        }
 
         // Store in pane.
         if (self.panes.getPtr(uuid)) |pane| {

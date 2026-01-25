@@ -9,8 +9,13 @@ const posix = std.posix;
 /// Prevents denial-of-service via oversized allocations.
 pub const MAX_PAYLOAD_LEN: usize = 4 * 1024 * 1024;
 
+/// Protocol version. Increment when making breaking changes.
+/// Sent as second byte after handshake byte.
+pub const PROTOCOL_VERSION: u8 = 1;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Handshake bytes — first byte sent on a new connection to identify channel type.
+// Second byte is always PROTOCOL_VERSION.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Sent by MUX to SES to open the control channel (①).
@@ -191,6 +196,7 @@ pub const Disconnect = extern struct {
 /// Followed by: mux_state bytes (state_len).
 pub const SyncState = extern struct {
     state_len: u32 align(1),
+    version: u32 align(1), // Monotonically increasing version; SES rejects stale updates.
 };
 
 /// Notify: message for the owning MUX.
@@ -705,4 +711,29 @@ pub fn readExact(fd: posix.fd_t, buf: []u8) !void {
 pub fn bytesToStruct(comptime T: type, buf: []const u8) ?T {
     if (buf.len < @sizeOf(T)) return null;
     return std.mem.bytesToValue(T, buf[0..@sizeOf(T)]);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Versioned Handshake Helpers
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Send a versioned handshake: [channel_type, PROTOCOL_VERSION].
+pub fn sendHandshake(fd: posix.fd_t, channel_type: u8) !void {
+    const handshake = [_]u8{ channel_type, PROTOCOL_VERSION };
+    try writeAll(fd, &handshake);
+}
+
+/// Read a versioned handshake. Returns the channel type and version.
+/// Returns error.UnsupportedVersion if version doesn't match.
+pub fn readHandshake(fd: posix.fd_t) !struct { channel: u8, version: u8 } {
+    var buf: [2]u8 = undefined;
+    try readExact(fd, &buf);
+    return .{ .channel = buf[0], .version = buf[1] };
+}
+
+/// Read handshake and validate version matches PROTOCOL_VERSION.
+pub fn readAndValidateHandshake(fd: posix.fd_t) !u8 {
+    const hs = try readHandshake(fd);
+    if (hs.version != PROTOCOL_VERSION) return error.UnsupportedVersion;
+    return hs.channel;
 }

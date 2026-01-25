@@ -93,8 +93,7 @@ pub const SesClient = struct {
             return false;
         };
 
-        const ctl_handshake = [_]u8{wire.SES_HANDSHAKE_MUX_CTL};
-        wire.writeAll(ctl_fd, &ctl_handshake) catch {
+        wire.sendHandshake(ctl_fd, wire.SES_HANDSHAKE_MUX_CTL) catch {
             posix.close(ctl_fd);
             return false;
         };
@@ -119,8 +118,7 @@ pub const SesClient = struct {
             return false;
         };
 
-        const vt_handshake = [_]u8{wire.SES_HANDSHAKE_MUX_VT};
-        wire.writeAll(vt_fd, &vt_handshake) catch {
+        wire.sendHandshake(vt_fd, wire.SES_HANDSHAKE_MUX_VT) catch {
             posix.close(vt_fd);
             return false;
         };
@@ -179,10 +177,11 @@ pub const SesClient = struct {
     }
 
     /// Sync current mux state to ses (fire-and-forget).
-    pub fn syncState(self: *SesClient, mux_state_json: []const u8) !void {
+    pub fn syncState(self: *SesClient, mux_state_json: []const u8, version: u32) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
         var msg: wire.SyncState = .{
             .state_len = @intCast(mux_state_json.len),
+            .version = version,
         };
         try wire.writeControlWithTrail(fd, .sync_state, std.mem.asBytes(&msg), mux_state_json);
     }

@@ -46,7 +46,10 @@ pub fn syncStateToSes(self: anytype) void {
     const mux_state_json = self.serializeState() catch return;
     defer self.allocator.free(mux_state_json);
 
-    self.ses_client.syncState(mux_state_json) catch |e| {
+    // Increment version before syncing.
+    self.state_version +%= 1;
+
+    self.ses_client.syncState(mux_state_json, self.state_version) catch |e| {
         core.logging.logError("mux", "syncState failed", e);
     };
 }

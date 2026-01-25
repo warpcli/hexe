@@ -61,9 +61,8 @@ pub fn runPodSend(
     };
     defer client.close();
 
-    // Send handshake byte for auxiliary input.
-    const handshake = [_]u8{wire.POD_HANDSHAKE_AUX_INPUT};
-    wire.writeAll(client.fd, &handshake) catch return;
+    // Send versioned handshake for auxiliary input.
+    wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_INPUT) catch return;
 
     var conn = client.toConnection();
     try pod_protocol.writeFrame(&conn, .input, data_buf[0..data_len]);
