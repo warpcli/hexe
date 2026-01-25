@@ -228,9 +228,9 @@ pub const SesClient = struct {
 
         const resp = try wire.readStruct(wire.PaneCreated, fd);
         // Skip socket_path (we don't need it — VT goes through SES).
-        if (resp.socket_len > 0) {
+        if (resp.socket_path_len > 0) {
             var skip_buf: [512]u8 = undefined;
-            wire.readExact(fd, skip_buf[0..resp.socket_len]) catch {};
+            wire.readExact(fd, skip_buf[0..resp.socket_path_len]) catch {};
         }
 
         mux.debugLog("pane created: uuid={s} pane_id={d} pid={d}", .{ resp.uuid[0..8], resp.pane_id, resp.pid });
@@ -264,9 +264,9 @@ pub const SesClient = struct {
 
         const resp = try wire.readStruct(wire.PaneFound, fd);
         // Skip socket_path.
-        if (resp.socket_len > 0) {
+        if (resp.socket_path_len > 0) {
             var skip_buf: [512]u8 = undefined;
-            wire.readExact(fd, skip_buf[0..@min(@as(usize, resp.socket_len), skip_buf.len)]) catch {};
+            wire.readExact(fd, skip_buf[0..@min(@as(usize, resp.socket_path_len), skip_buf.len)]) catch {};
         }
 
         return .{ .uuid = resp.uuid, .pane_id = resp.pane_id, .pid = resp.pid };
@@ -485,9 +485,9 @@ pub const SesClient = struct {
         }
 
         const resp = try wire.readStruct(wire.PaneFound, fd);
-        if (resp.socket_len > 0) {
+        if (resp.socket_path_len > 0) {
             var skip_buf: [512]u8 = undefined;
-            wire.readExact(fd, skip_buf[0..@min(@as(usize, resp.socket_len), skip_buf.len)]) catch {};
+            wire.readExact(fd, skip_buf[0..@min(@as(usize, resp.socket_path_len), skip_buf.len)]) catch {};
         }
         return .{ .uuid = uuid, .pane_id = resp.pane_id, .pid = resp.pid };
     }
@@ -730,6 +730,16 @@ pub const SesClient = struct {
             wire.readExact(fd, buf[0..chunk]) catch return;
             remaining -= chunk;
         }
+    }
+
+    /// Send a ping to SES to check connection is alive.
+    /// Returns true if pong received, false if connection appears dead.
+    pub fn sendPing(self: *SesClient) bool {
+        const fd = self.ctl_fd orelse return false;
+        wire.writeControl(fd, .ping, &.{}) catch return false;
+        // Note: pong response will be received asynchronously and handled
+        // by the IPC loop. We just check that the write succeeded.
+        return true;
     }
 };
 

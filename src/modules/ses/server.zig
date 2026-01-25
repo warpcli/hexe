@@ -745,7 +745,7 @@ pub const Server = struct {
             .uuid = pane.uuid,
             .pid = pane.child_pid,
             .pane_id = pane.pane_id,
-            .socket_len = @intCast(pane.pod_socket_path.len),
+            .socket_path_len = @intCast(pane.pod_socket_path.len),
         };
         wire.writeControlWithTrail(fd, .pane_created, std.mem.asBytes(&resp), pane.pod_socket_path) catch {};
     }
@@ -781,7 +781,7 @@ pub const Server = struct {
                 .uuid = pane.uuid,
                 .pid = pane.child_pid,
                 .pane_id = pane.pane_id,
-                .socket_len = @intCast(pane.pod_socket_path.len),
+                .socket_path_len = @intCast(pane.pod_socket_path.len),
             };
             wire.writeControlWithTrail(fd, .pane_found, std.mem.asBytes(&resp), pane.pod_socket_path) catch {};
         } else {
@@ -823,7 +823,7 @@ pub const Server = struct {
             .uuid = pane.uuid,
             .pid = pane.child_pid,
             .pane_id = pane.pane_id,
-            .socket_len = @intCast(pane.pod_socket_path.len),
+            .socket_path_len = @intCast(pane.pod_socket_path.len),
         };
         wire.writeControlWithTrail(fd, .pane_found, std.mem.asBytes(&resp), pane.pod_socket_path) catch {};
     }

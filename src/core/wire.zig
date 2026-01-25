@@ -148,12 +148,12 @@ pub const CreatePane = extern struct {
 };
 
 /// PaneCreated (response to CreatePane).
-/// Followed by: socket_path bytes (socket_len).
+/// Followed by: socket_path bytes (socket_path_len).
 pub const PaneCreated = extern struct {
     uuid: [32]u8 align(1),
     pid: i32 align(1),
     pane_id: u16 align(1),
-    socket_len: u16 align(1),
+    socket_path_len: u16 align(1),
 };
 
 /// DestroyPane / KillPane / OrphanPane. No trailing data.
@@ -231,12 +231,12 @@ pub const FindSticky = extern struct {
 };
 
 /// PaneFound (response to FindSticky/AdoptPane).
-/// Followed by: socket_path bytes (socket_len).
+/// Followed by: socket_path bytes (socket_path_len).
 pub const PaneFound = extern struct {
     uuid: [32]u8 align(1),
     pid: i32 align(1),
     pane_id: u16 align(1),
-    socket_len: u16 align(1),
+    socket_path_len: u16 align(1),
 };
 
 /// OrphanedPanes response.

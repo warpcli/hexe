@@ -40,11 +40,13 @@ pub fn runMainLoop(state: *State) !void {
     var last_render: i64 = std.time.milliTimestamp();
     var last_status_update: i64 = last_render;
     var last_pane_sync: i64 = last_render;
+    var last_heartbeat: i64 = last_render;
     // Update status bar periodically.
     // This is also used to drive lightweight animations.
     const status_update_interval_base: i64 = 250;
     const status_update_interval_anim: i64 = 75;
     const pane_sync_interval: i64 = 1000; // Sync pane info (CWD, process) every 1s
+    const heartbeat_interval: i64 = 30000; // Send ping to SES every 30s
 
     // Main loop.
     while (state.running) {
@@ -251,6 +253,12 @@ pub fn runMainLoop(state: *State) !void {
         if (now2 - last_pane_sync >= pane_sync_interval) {
             last_pane_sync = now2;
             state.syncFocusedPaneInfo();
+        }
+
+        // Periodic heartbeat to SES to detect dead connections.
+        if (now2 - last_heartbeat >= heartbeat_interval) {
+            last_heartbeat = now2;
+            _ = state.ses_client.sendPing();
         }
 
         // Handle PTY output.
