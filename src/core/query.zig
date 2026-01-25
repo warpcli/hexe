@@ -84,60 +84,36 @@ pub fn evalToken(q: *const PaneQuery, tok: []const u8) bool {
     return false;
 }
 
-/// Evaluate a WhenTokens expression (AND/OR groups of tokens).
-pub fn evalTokens(q: *const PaneQuery, expr: config.WhenTokens) bool {
-    if (expr.any) |groups| {
-        for (groups) |g| {
-            var ok = true;
-            for (g.tokens) |t| {
-                if (!evalToken(q, t)) {
-                    ok = false;
-                    break;
-                }
-            }
-            if (ok) return true;
-        }
-        return false;
-    }
-    if (expr.all) |tokens| {
+/// Evaluate a full WhenDef condition against a PaneQuery.
+/// Only evaluates token conditions; bash/lua conditions are not handled here
+/// (caller should check those separately with caching).
+///
+/// Logic:
+/// - If `all` is set: all tokens must match (AND)
+/// - If `any` is set: at least one nested WhenDef must match (OR)
+/// - If both are set: both conditions must pass
+/// - If neither is set (only bash/lua): returns true (caller handles scripts)
+pub fn evalWhen(q: *const PaneQuery, w: config.WhenDef) bool {
+    // Check 'all' tokens (AND): all must match
+    if (w.all) |tokens| {
         for (tokens) |t| {
             if (!evalToken(q, t)) return false;
         }
-        return true;
     }
-    return true;
-}
 
-/// Evaluate a single WhenDef clause (token-based only; bash/lua handled by caller).
-/// Returns false if any token provider fails. Returns true if no token providers set.
-pub fn evalWhenClause(q: *const PaneQuery, w: config.WhenDef) bool {
-    // All token namespaces resolve against the same PaneQuery
-    if (w.hexe_shp) |tokens| {
-        if (!evalTokens(q, tokens)) return false;
-    }
-    if (w.hexe_mux) |tokens| {
-        if (!evalTokens(q, tokens)) return false;
-    }
-    if (w.hexe_ses) |tokens| {
-        if (!evalTokens(q, tokens)) return false;
-    }
-    if (w.hexe_pod) |tokens| {
-        if (!evalTokens(q, tokens)) return false;
-    }
-    return true;
-}
-
-/// Evaluate a full WhenDef (handles DNF "any" clauses).
-/// Only evaluates token conditions; bash/lua conditions are not handled here
-/// (caller should check those separately with caching).
-pub fn evalWhen(q: *const PaneQuery, w: config.WhenDef) bool {
+    // Check 'any' nested conditions (OR): at least one must match
     if (w.any) |clauses| {
+        var any_match = false;
         for (clauses) |c| {
-            if (evalWhenClause(q, c)) return true;
+            if (evalWhen(q, c)) {
+                any_match = true;
+                break;
+            }
         }
-        return false;
+        if (!any_match) return false;
     }
-    return evalWhenClause(q, w);
+
+    return true;
 }
 
 fn eql(a: []const u8, b: []const u8) bool {

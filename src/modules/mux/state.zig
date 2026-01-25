@@ -26,7 +26,8 @@ const Pane = @import("pane.zig").Pane;
 
 const BindKey = core.Config.BindKey;
 const BindAction = core.Config.BindAction;
-const FocusContext = core.Config.FocusContext;
+/// Simple focus context for timer storage (float vs split).
+pub const FocusContext = enum { split, float };
 
 const state_tabs = @import("state_tabs.zig");
 const state_serialize = @import("state_serialize.zig");

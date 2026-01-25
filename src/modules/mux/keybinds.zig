@@ -15,8 +15,8 @@ pub const BindWhen = core.Config.BindWhen;
 pub const BindKey = core.Config.BindKey;
 pub const BindKeyKind = core.Config.BindKeyKind;
 pub const BindAction = core.Config.BindAction;
-pub const FocusContext = core.Config.FocusContext;
-const ProgramFilter = core.Config.ProgramFilter;
+const PaneQuery = core.PaneQuery;
+const FocusContext = @import("state.zig").FocusContext;
 
 
 pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
@@ -56,75 +56,81 @@ pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
     }
 }
 
+/// Legacy focus context for backward compatibility with timer storage.
 fn currentFocusContext(state: *State) FocusContext {
     return if (state.active_floating != null) .float else .split;
 }
 
-fn extractProgramName(cmd: []const u8) ?[]const u8 {
-    const trimmed = std.mem.trimLeft(u8, cmd, " \t\n\r");
-    if (trimmed.len == 0) return null;
-    const end = std.mem.indexOfAny(u8, trimmed, " \t\n\r") orelse trimmed.len;
-    const argv0 = trimmed[0..end];
-    if (argv0.len == 0) return null;
-    const base_idx = std.mem.lastIndexOfScalar(u8, argv0, '/') orelse return argv0;
-    if (base_idx + 1 >= argv0.len) return null;
-    return argv0[base_idx + 1 ..];
-}
-
-fn currentProgramName(state: *State) ?[]const u8 {
-    // Prefer actual foreground process when available.
+/// Build a PaneQuery from the current mux state for condition evaluation.
+fn buildPaneQuery(state: *State) PaneQuery {
+    const is_float = state.active_floating != null;
     const pane: ?*Pane = if (state.active_floating) |idx| blk: {
         if (idx < state.floats.items.len) break :blk state.floats.items[idx];
         break :blk @as(?*Pane, null);
     } else state.currentLayout().getFocusedPane();
 
-    if (pane) |p| {
-        if (p.getFgProcess()) |proc_name| {
-            return proc_name;
+    // Get foreground process name.
+    const fg_proc: ?[]const u8 = blk: {
+        if (pane) |p| {
+            if (p.getFgProcess()) |proc_name| break :blk proc_name;
         }
-    }
-
-    const uuid = state.getCurrentFocusedUuid() orelse return null;
-    if (state.getPaneProc(uuid)) |pi| {
-        if (pi.name) |n| return n;
-    }
-
-    // Fallback: shell integration "last command".
-    if (state.getPaneShell(uuid)) |info| {
-        const cmd = info.cmd orelse return null;
-        return extractProgramName(cmd);
-    }
-    return null;
-}
-
-fn matchesProgramFilter(state: *State, filter: ?ProgramFilter) bool {
-    if (filter == null) return true;
-    const f = filter.?;
-    const prog = currentProgramName(state);
-
-    if (f.include) |items| {
-        if (prog == null) return false;
-        var ok = false;
-        for (items) |name| {
-            if (std.mem.eql(u8, name, prog.?)) {
-                ok = true;
-                break;
+        if (state.getCurrentFocusedUuid()) |uuid| {
+            if (state.getPaneProc(uuid)) |pi| {
+                if (pi.name) |n| break :blk n;
             }
         }
-        if (!ok) return false;
-    }
+        break :blk null;
+    };
 
-    if (f.exclude) |items| {
-        if (prog) |p| {
-            for (items) |name| {
-                if (std.mem.eql(u8, name, p)) {
-                    return false;
+    // Get float attributes if this is a float.
+    var float_key: u8 = 0;
+    var float_sticky = false;
+    var float_exclusive = false;
+    var float_per_cwd = false;
+    var float_global = false;
+    var float_isolated = false;
+    var float_destroyable = false;
+
+    if (pane) |p| {
+        if (is_float) {
+            float_key = p.float_key;
+            float_sticky = p.sticky;
+            // Look up float def for other attributes.
+            if (float_key != 0) {
+                if (state.config.getFloatByKey(float_key)) |fd| {
+                    float_exclusive = fd.attributes.exclusive;
+                    float_per_cwd = fd.attributes.per_cwd;
+                    float_global = fd.attributes.global or fd.attributes.per_cwd;
+                    float_isolated = fd.attributes.isolated;
+                    float_destroyable = fd.attributes.destroy;
                 }
             }
         }
     }
 
-    return true;
+    return .{
+        .is_float = is_float,
+        .is_split = !is_float,
+        .float_key = float_key,
+        .float_sticky = float_sticky,
+        .float_exclusive = float_exclusive,
+        .float_per_cwd = float_per_cwd,
+        .float_global = float_global,
+        .float_isolated = float_isolated,
+        .float_destroyable = float_destroyable,
+        .tab_count = @intCast(state.tabs.items.len),
+        .active_tab = @intCast(state.active_tab),
+        .fg_process = fg_proc,
+        .now_ms = @intCast(std.time.milliTimestamp()),
+    };
+}
+
+/// Evaluate a bind's when condition against the current state.
+fn matchesWhen(when: ?core.config.WhenDef, query: *const PaneQuery) bool {
+    if (when) |w| {
+        return core.query.evalWhen(query, w);
+    }
+    return true; // No condition = always matches.
 }
 
 fn keyEq(a: BindKey, b: BindKey) bool {
@@ -133,25 +139,24 @@ fn keyEq(a: BindKey, b: BindKey) bool {
     return true;
 }
 
-fn findBestBind(state: *State, mods: u8, key: BindKey, when: BindWhen, allow_only_tabs: bool, focus_ctx: FocusContext) ?core.Config.Bind {
+fn findBestBind(state: *State, mods: u8, key: BindKey, on: BindWhen, allow_only_tabs: bool, query: *const PaneQuery) ?core.Config.Bind {
     const cfg = &state.config;
 
     var best: ?core.Config.Bind = null;
     var best_score: u8 = 0;
 
     for (cfg.input.binds) |b| {
-        if (b.when != when) continue;
+        if (b.on != on) continue;
         if (b.mods != mods) continue;
         if (!keyEq(b.key, key)) continue;
-        if (b.context.focus != .any and b.context.focus != focus_ctx) continue;
-        if (!matchesProgramFilter(state, b.context.program)) continue;
+        if (!matchesWhen(b.when, query)) continue;
 
         if (allow_only_tabs) {
             if (b.action != .tab_next and b.action != .tab_prev) continue;
         }
 
         var score: u8 = 0;
-        if (b.context.focus != .any) score += 1;
+        if (b.when != null) score += 2; // Conditional binds are more specific.
         if (b.hold_ms != null) score += 1;
         if (b.double_tap_ms != null) score += 1;
 
@@ -164,14 +169,12 @@ fn findBestBind(state: *State, mods: u8, key: BindKey, when: BindWhen, allow_onl
     return best;
 }
 
-fn hasBind(state: *State, mods: u8, key: BindKey, when: BindWhen, focus_ctx: FocusContext) bool {
-    const cfg = &state.config;
-    for (cfg.input.binds) |b| {
-        if (b.when != when) continue;
+fn hasBind(_: *State, mods: u8, key: BindKey, on: BindWhen, query: *const PaneQuery, binds: []const core.Config.Bind) bool {
+    for (binds) |b| {
+        if (b.on != on) continue;
         if (b.mods != mods) continue;
         if (!keyEq(b.key, key)) continue;
-        if (b.context.focus != .any and b.context.focus != focus_ctx) continue;
-        if (!matchesProgramFilter(state, b.context.program)) continue;
+        if (!matchesWhen(b.when, query)) continue;
         return true;
     }
     return false;
@@ -294,6 +297,7 @@ pub fn processKeyTimers(state: *State, now_ms: i64) void {
 pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, allow_only_tabs: bool, defer_to_release: bool) bool {
     const cfg = &state.config;
     const focus_ctx = currentFocusContext(state);
+    const query = buildPaneQuery(state);
     const now_ms = std.time.milliTimestamp();
 
     const mods_eff: u8 = blk: {
@@ -352,7 +356,7 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
             // Short hold => tap.
             if (tap_action) |a| {
                 _ = dispatchAction(state, a);
-            } else if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, focus_ctx)) |b| {
+            } else if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |b| {
                 _ = dispatchAction(state, b.action);
             } else if (defer_to_release) {
                 forwardKeyAsLegacy(state, mods_eff, key);
@@ -387,7 +391,7 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
             // Repeat never activated => tap.
             if (tap_action) |a| {
                 _ = dispatchAction(state, a);
-            } else if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, focus_ctx)) |b| {
+            } else if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |b| {
                 _ = dispatchAction(state, b.action);
             } else if (defer_to_release) {
                 forwardKeyAsLegacy(state, mods_eff, key);
@@ -395,7 +399,7 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
             return true;
         }
 
-        if (findBestBind(state, mods_eff, key, .release, allow_only_tabs, focus_ctx)) |b| {
+        if (findBestBind(state, mods_eff, key, .release, allow_only_tabs, &query)) |b| {
             return dispatchAction(state, b.action);
         }
         // Always consume release events (they are mux-only).
@@ -425,7 +429,7 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
         cancelTimer(state, .hold, mods_eff, key);
         cancelTimer(state, .hold_fired, mods_eff, key);
 
-        if (findBestBind(state, mods_eff, key, .repeat, allow_only_tabs, focus_ctx)) |b| {
+        if (findBestBind(state, mods_eff, key, .repeat, allow_only_tabs, &query)) |b| {
             return dispatchAction(state, b.action);
         }
         return true;
@@ -434,7 +438,7 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
     // Hold scheduling (press only)
     var hold_scheduled = false;
     if (when == .press and defer_to_release) {
-        if (findBestBind(state, mods_eff, key, .hold, false, focus_ctx)) |hb| {
+        if (findBestBind(state, mods_eff, key, .hold, false, &query)) |hb| {
             const hold_ms = hb.hold_ms orelse cfg.input.hold_ms;
             cancelTimer(state, .hold, mods_eff, key);
             // Clear any previous fired marker for the same chord.
@@ -468,9 +472,9 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
             }
         }
 
-        const press_bind = findBestBind(state, mods_eff, key, .press, allow_only_tabs, focus_ctx);
-        const have_repeat = hasBind(state, mods_eff, key, .repeat, focus_ctx);
-        const have_hold = hasBind(state, mods_eff, key, .hold, focus_ctx);
+        const press_bind = findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query);
+        const have_repeat = hasBind(state, mods_eff, key, .repeat, &query, cfg.input.binds);
+        const have_hold = hasBind(state, mods_eff, key, .hold, &query, cfg.input.binds);
 
         if (press_bind != null or have_repeat or have_hold) {
             // Second press within repeat_ms => treat as repeat.
@@ -514,8 +518,8 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
     }
 
     // Double tap handling (press only)
-    if (when == .press and hasBind(state, mods_eff, key, .double_tap, focus_ctx)) {
-        const dt_bind = findBestBind(state, mods_eff, key, .double_tap, allow_only_tabs, focus_ctx);
+    if (when == .press and hasBind(state, mods_eff, key, .double_tap, &query, cfg.input.binds)) {
+        const dt_bind = findBestBind(state, mods_eff, key, .double_tap, allow_only_tabs, &query);
         const dt_ms = if (dt_bind) |b| (b.double_tap_ms orelse cfg.input.double_tap_ms) else cfg.input.double_tap_ms;
 
         // Second tap?
@@ -539,7 +543,7 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
         scheduleTimer(state, .double_tap_wait, now_ms + dt_ms, mods_eff, key, .mux_quit, focus_ctx); // action ignored
 
         // If there's a press bind, delay it so it doesn't fire when user intends double.
-        if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, focus_ctx)) |pb| {
+        if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |pb| {
             const delay = pb.double_tap_ms orelse cfg.input.double_tap_ms;
             cancelTimer(state, .delayed_press, mods_eff, key);
             scheduleTimer(state, .delayed_press, now_ms + delay, mods_eff, key, pb.action, focus_ctx);
@@ -549,7 +553,7 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
 
     // Normal press
     if (when == .press) {
-        if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, focus_ctx)) |b| {
+        if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |b| {
             return dispatchAction(state, b.action);
         }
 

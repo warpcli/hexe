@@ -302,11 +302,11 @@ pub fn drawFloatingBorder(
                 const output = if (name.len > 0)
                     name
                 else
-                    statusbar.runStatusModule(module, &output_buf) catch "";
+                    statusbar.runSegment(module, &output_buf) catch "";
                 if (output.len == 0) return;
 
                 // Render styled output
-                const segments = statusbar.renderModuleOutput(module, output);
+                const segments = statusbar.renderSegmentOutput(module, output);
 
                 // Calculate position based on style position
                 const total_len = segments.total_len;

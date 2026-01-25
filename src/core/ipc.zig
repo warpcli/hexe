@@ -372,12 +372,22 @@ pub fn getSesSocketPath(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/ses.sock", .{dir});
 }
 
-/// Check if ses is running by trying to connect
+/// Check if ses is running by trying to connect.
+/// If socket file exists but connection fails, removes the stale socket.
 pub fn isSesRunning(allocator: std.mem.Allocator) bool {
     const path = getSesSocketPath(allocator) catch return false;
     defer allocator.free(path);
 
-    var client = Client.connect(path) catch return false;
+    // First check if socket file exists
+    std.fs.cwd().access(path, .{}) catch return false;
+
+    // Try to connect
+    var client = Client.connect(path) catch {
+        // Socket file exists but can't connect = stale socket
+        // Remove it so the new SES can bind
+        std.fs.cwd().deleteFile(path) catch {};
+        return false;
+    };
     client.close();
     return true;
 }

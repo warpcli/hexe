@@ -33,11 +33,11 @@ fn getRandomdoStateMap() *std.AutoHashMap(usize, RandomdoState) {
     return &randomdo_state.?;
 }
 
-fn randomdoKey(mod: core.config.StatusModule) usize {
+fn randomdoKey(mod: core.config.Segment) usize {
     return (@intFromPtr(mod.outputs.ptr) << 1) ^ @as(usize, mod.priority) ^ mod.name.len;
 }
 
-fn randomdoTextFor(ctx: *shp.Context, mod: core.config.StatusModule, visible: bool) []const u8 {
+fn randomdoTextFor(ctx: *shp.Context, mod: core.config.Segment, visible: bool) []const u8 {
     const key = randomdoKey(mod);
     const map = getRandomdoStateMap();
 
@@ -195,22 +195,30 @@ fn evalLuaWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     return ok;
 }
 
-fn passesWhen(ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.StatusModule) bool {
+fn passesWhen(ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment) bool {
     if (mod.when == null) return true;
-    const w = mod.when.?;
-
-    if (w.any) |clauses| {
-        for (clauses) |c| {
-            if (passesWhenClause(ctx, query, c)) return true;
-        }
-        return false;
-    }
-    return passesWhenClause(ctx, query, w);
+    return passesWhenClause(ctx, query, mod.when.?);
 }
 
 fn passesWhenClause(ctx: *shp.Context, query: *const core.PaneQuery, w: core.WhenDef) bool {
-    // Token-based conditions — delegated to core.query
-    if (!core.query.evalWhenClause(query, w)) return false;
+    // Token-based 'all' conditions
+    if (w.all) |tokens| {
+        for (tokens) |t| {
+            if (!core.query.evalToken(query, t)) return false;
+        }
+    }
+
+    // Nested 'any' conditions (OR): at least one must match
+    if (w.any) |clauses| {
+        var any_match = false;
+        for (clauses) |c| {
+            if (passesWhenClause(ctx, query, c)) {
+                any_match = true;
+                break;
+            }
+        }
+        if (!any_match) return false;
+    }
 
     // Lua/bash conditions — evaluated with caching
     if (w.lua) |lua_code| {
@@ -240,7 +248,7 @@ pub const RenderedSegments = struct {
     total_len: usize,
 };
 
-pub fn renderModuleOutput(module: *const core.StatusModule, output: []const u8) RenderedSegments {
+pub fn renderSegmentOutput(module: *const core.Segment, output: []const u8) RenderedSegments {
     var result = RenderedSegments{
         .items = undefined,
         .buffers = undefined,
@@ -290,7 +298,7 @@ pub fn styleColorToRender(col: shp.Color) render.Color {
     };
 }
 
-pub fn runStatusModule(module: *const core.StatusModule, buf: []u8) ![]const u8 {
+pub fn runSegment(module: *const core.Segment, buf: []u8) ![]const u8 {
     if (module.command) |cmd| {
         const result = std.process.Child.run(.{
             .allocator = std.heap.page_allocator,
@@ -461,7 +469,7 @@ pub fn draw(
     const right_budget = width -| (center_start +| center_width);
 
     // Collect left modules with widths
-    const ModuleInfo = struct { mod: *const core.StatusModule, width: u16, visible: bool };
+    const ModuleInfo = struct { mod: *const core.Segment, width: u16, visible: bool };
     var left_modules: [24]ModuleInfo = undefined;
     var left_count: usize = 0;
     for (cfg.left) |*mod| {
@@ -622,7 +630,7 @@ pub fn hitTestTab(
 
     // Find the tabs module and its tab_title setting.
     var use_basename = true;
-    var tabs_mod: ?*const core.StatusModule = null;
+    var tabs_mod: ?*const core.Segment = null;
     for (cfg.center) |mod| {
         if (std.mem.eql(u8, mod.name, "tabs")) {
             use_basename = std.mem.eql(u8, mod.tab_title, "basename");
@@ -704,7 +712,7 @@ fn measureTabsWidth(tab_names: []const []const u8, separator: []const u8, left_a
     return w;
 }
 
-pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.StatusModule, start_x: u16, y: u16) u16 {
+pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment, start_x: u16, y: u16) u16 {
     var x = start_x;
 
     if (!passesWhen(ctx, query, mod)) return x;
@@ -758,7 +766,7 @@ pub fn drawFormatted(renderer: *Renderer, start_x: u16, y: u16, format: []const 
     return x;
 }
 
-pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.StatusModule) u16 {
+pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment) u16 {
     if (!passesWhen(ctx, query, mod)) return 0;
     var width: u16 = 0;
 

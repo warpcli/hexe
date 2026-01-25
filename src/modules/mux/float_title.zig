@@ -27,7 +27,7 @@ pub fn getTitleRect(pane: *const Pane) ?TitleRect {
     const outer_h = pane.border_h;
     if (outer_w < 3 or outer_h < 3) return null;
 
-    const segments = statusbar.renderModuleOutput(&module, title);
+    const segments = statusbar.renderSegmentOutput(&module, title);
     const total_len: u16 = @intCast(@min(@as(usize, outer_w -| 2), segments.total_len));
     if (total_len == 0) return null;
 

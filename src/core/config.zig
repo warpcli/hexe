@@ -38,67 +38,46 @@ pub const SpinnerDef = struct {
     }
 };
 
-/// Provider-specific "when" condition for prompt/status modules.
+/// Unified condition for keybindings, segments, and prompts.
 ///
-/// No backwards compatibility: `when` must be a table in Lua configs.
+/// Syntax:
+///   when = "token"                              -- single token
+///   when = { all = { "a", "b" } }               -- AND
+///   when = { any = { "a", "b" } }               -- OR
+///   when = { any = { { all = { "a", "b" } }, "c" } }  -- OR of ANDs
+///   when = { bash = "..." }                     -- bash script
+///   when = { lua = "..." }                      -- lua script
 pub const WhenDef = struct {
+    /// AND of tokens (flat list, no namespaces needed)
+    all: ?[][]const u8 = null,
+    /// OR of conditions
+    any: ?[]const WhenDef = null,
+    /// Bash script condition
     bash: ?[]const u8 = null,
+    /// Lua script condition
     lua: ?[]const u8 = null,
-    // Only valid for mux statusbar modules.
-    hexe_shp: ?WhenTokens = null,
-    hexe_mux: ?WhenTokens = null,
-    hexe_ses: ?WhenTokens = null,
-    hexe_pod: ?WhenTokens = null,
-
-    /// OR across clauses (DNF). If set, the top-level provider fields are ignored.
-    any: ?[]WhenDef = null,
 
     pub fn deinit(self: *WhenDef, allocator: std.mem.Allocator) void {
-        if (self.bash) |s| allocator.free(s);
-        if (self.lua) |s| allocator.free(s);
-        if (self.hexe_shp) |*t| t.deinit(allocator);
-        if (self.hexe_mux) |*t| t.deinit(allocator);
-        if (self.hexe_ses) |*t| t.deinit(allocator);
-        if (self.hexe_pod) |*t| t.deinit(allocator);
-        if (self.any) |items| {
-            for (items) |*w| w.deinit(allocator);
-            allocator.free(items);
-        }
-        self.* = .{};
-    }
-};
-
-pub const WhenTokens = struct {
-    /// AND of tokens.
-    all: ?[][]u8 = null,
-    /// OR of groups; each group is AND.
-    any: ?[]TokenGroup = null,
-
-    pub const TokenGroup = struct {
-        tokens: [][]u8,
-
-        pub fn deinit(self: *TokenGroup, allocator: std.mem.Allocator) void {
-            for (self.tokens) |s| allocator.free(s);
-            allocator.free(self.tokens);
-            self.* = undefined;
-        }
-    };
-
-    pub fn deinit(self: *WhenTokens, allocator: std.mem.Allocator) void {
         if (self.all) |items| {
-            for (items) |s| allocator.free(s);
+            for (items) |s| allocator.free(@constCast(s));
             allocator.free(items);
         }
-        if (self.any) |groups| {
-            for (groups) |*g| g.deinit(allocator);
-            allocator.free(groups);
+        if (self.any) |items| {
+            for (items) |*w| {
+                var mw = @constCast(w);
+                mw.deinit(allocator);
+            }
+            allocator.free(items);
         }
+        if (self.bash) |s| allocator.free(@constCast(s));
+        if (self.lua) |s| allocator.free(@constCast(s));
         self.* = .{};
     }
 };
 
-/// Status bar module definition
-pub const StatusModule = struct {
+/// Segment definition for statusbar and prompt.
+/// Both statusbar modules and shell prompt segments use this unified type.
+pub const Segment = struct {
     name: []const u8,
     // Priority for width-based hiding (lower = higher priority, stays longer)
     priority: u8 = 50,
@@ -108,26 +87,26 @@ pub const StatusModule = struct {
     command: ?[]const u8 = null,
     when: ?WhenDef = null,
 
-    // Optional spinner module configuration
+    // Optional spinner configuration
     spinner: ?SpinnerDef = null,
-    // For tabs module
+    // For tabs segment
     active_style: []const u8 = "bg:1 fg:0",
     inactive_style: []const u8 = "bg:237 fg:250",
     separator: []const u8 = " | ",
     separator_style: []const u8 = "fg:7",
-    // For tabs module: what to show as tab title ("name" or "basename")
+    // For tabs segment: what to show as tab title ("name" or "basename")
     tab_title: []const u8 = "basename",
-    // For tabs module: arrow decorations (empty string = no arrows)
+    // For tabs segment: arrow decorations (empty string = no arrows)
     left_arrow: []const u8 = "",
     right_arrow: []const u8 = "",
 };
 
 /// Status bar config
-pub const StatusConfig = struct {
+pub const StatusBarConfig = struct {
     enabled: bool = true,
-    left: []const StatusModule = &[_]StatusModule{},
-    center: []const StatusModule = &[_]StatusModule{},
-    right: []const StatusModule = &[_]StatusModule{},
+    left: []const Segment = &[_]Segment{},
+    center: []const Segment = &[_]Segment{},
+    right: []const Segment = &[_]Segment{},
 };
 
 pub const FloatStylePosition = enum {
@@ -159,7 +138,7 @@ pub const FloatStyle = struct {
     shadow_color: ?u8 = null,
     // Optional module in border
     position: ?FloatStylePosition = null,
-    module: ?StatusModule = null,
+    module: ?Segment = null,
 };
 
 pub const FloatAttributes = struct {
@@ -240,7 +219,7 @@ pub const TabsConfig = struct {
     key_close: u8 = 'x',
     key_detach: u8 = 'd',
     // Status bar
-    status: StatusConfig = .{},
+    status: StatusBarConfig = .{},
 };
 
 /// Single notification style configuration
@@ -278,11 +257,6 @@ pub const Config = struct {
         super,
     };
 
-    pub const FocusContext = enum {
-        any,
-        split,
-        float,
-    };
 
     pub const BindWhen = enum {
         press,
@@ -344,38 +318,13 @@ pub const Config = struct {
         focus_move: BindKeyKind, // up/down/left/right
     };
 
-    pub const BindContext = struct {
-        focus: FocusContext = .any,
-        program: ?ProgramFilter = null,
-    };
-
-    /// Optional per-bind filter to include/exclude the bind based on the
-    /// program running in the focused pane.
-    ///
-    /// Matching uses the "program name" derived from the pane shell metadata
-    /// (typically argv0 / basename, e.g. "nvim", "vim", "fzf").
-    pub const ProgramFilter = struct {
-        include: ?[][]u8 = null,
-        exclude: ?[][]u8 = null,
-
-        pub fn deinit(self: ProgramFilter, allocator: std.mem.Allocator) void {
-            if (self.include) |items| {
-                for (items) |s| allocator.free(s);
-                allocator.free(items);
-            }
-            if (self.exclude) |items| {
-                for (items) |s| allocator.free(s);
-                allocator.free(items);
-            }
-        }
-    };
-
     pub const Bind = struct {
-        when: BindWhen = .press,
+        on: BindWhen = .press,
         mods: u8 = 0, // bitmask of KeyMod
         key: BindKey,
-        context: BindContext = .{},
         action: BindAction,
+        /// Condition for when this bind is active.
+        when: ?WhenDef = null,
 
         // Timing (used by hold/double_tap)
         hold_ms: ?i64 = null,
@@ -514,8 +463,9 @@ pub const Config = struct {
             }
             if (self.input.binds.len > 0) {
                 for (self.input.binds) |b| {
-                    if (b.context.program) |pf| {
-                        pf.deinit(alloc);
+                    if (b.when) |w| {
+                        var mw = w;
+                        mw.deinit(alloc);
                     }
                 }
                 alloc.free(self.input.binds);
@@ -690,42 +640,21 @@ fn parseBind(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?Config.Bind {
         mods = m;
     }
 
-    // Parse when
-    const when: Config.BindWhen = if (runtime.getString(-1, "when")) |w|
-        std.meta.stringToEnum(Config.BindWhen, w) orelse .press
+    // Parse on (press/release/repeat/hold/double_tap)
+    const on: Config.BindWhen = if (runtime.getString(-1, "on")) |o|
+        std.meta.stringToEnum(Config.BindWhen, o) orelse .press
     else
         .press;
 
-    // Parse context
-    var context = Config.BindContext{};
-    if (runtime.pushTable(-1, "context")) {
-        if (runtime.getString(-1, "focus")) |f| {
-            context.focus = std.meta.stringToEnum(Config.FocusContext, f) orelse .any;
-        }
-
-        // Optional program include/exclude filter
-        if (runtime.pushTable(-1, "program")) {
-            var pf: Config.ProgramFilter = .{};
-            pf.include = parseStringList(runtime, allocator, "include");
-            pf.exclude = parseStringList(runtime, allocator, "exclude");
-
-            if (pf.include != null or pf.exclude != null) {
-                context.program = pf;
-            } else {
-                pf.deinit(allocator);
-            }
-            runtime.pop();
-        }
-
-        runtime.pop();
-    }
+    // Parse when (condition)
+    const when = parseWhenTable(runtime, allocator, true);
 
     return Config.Bind{
-        .when = when,
+        .on = on,
         .mods = mods,
         .key = key,
-        .context = context,
         .action = action,
+        .when = when,
         .hold_ms = runtime.getInt(i64, -1, "hold_ms"),
         .double_tap_ms = runtime.getInt(i64, -1, "double_tap_ms"),
     };
@@ -1039,7 +968,7 @@ fn parseFloatStyle(runtime: *LuaRuntime, allocator: std.mem.Allocator) FloatStyl
         }
         // For float titles we allow omitting `name` and default to "title".
         // The module outputs define styling for the title text.
-        result.module = parseStatusModuleWithDefaultName(runtime, allocator, "title");
+        result.module = parseSegmentWithDefaultName(runtime, allocator, "title");
         runtime.pop();
     }
 
@@ -1051,10 +980,10 @@ fn parseFloatStyle(runtime: *LuaRuntime, allocator: std.mem.Allocator) FloatStyl
     return result;
 }
 
-fn parseStatusModuleWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocator, default_name: []const u8) ?StatusModule {
+fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocator, default_name: []const u8) ?Segment {
     const name = runtime.getStringAlloc(-1, "name") orelse allocator.dupe(u8, default_name) catch return null;
 
-    return StatusModule{
+    return Segment{
         .name = name,
         .priority = lua_runtime.parseConstrainedInt(runtime, u8, -1, "priority", 1, 255, 50),
         .outputs = parseOutputs(runtime, allocator),
@@ -1100,41 +1029,41 @@ fn parseTabs(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocator
         if (runtime.getBool(-1, "enabled")) |v| config.tabs.status.enabled = v;
 
         if (runtime.pushTable(-1, "left")) {
-            config.tabs.status.left = parseStatusModules(runtime, allocator);
+            config.tabs.status.left = parseSegments(runtime, allocator);
             runtime.pop();
         }
         if (runtime.pushTable(-1, "center")) {
-            config.tabs.status.center = parseStatusModules(runtime, allocator);
+            config.tabs.status.center = parseSegments(runtime, allocator);
             runtime.pop();
         }
         if (runtime.pushTable(-1, "right")) {
-            config.tabs.status.right = parseStatusModules(runtime, allocator);
+            config.tabs.status.right = parseSegments(runtime, allocator);
             runtime.pop();
         }
         runtime.pop();
     }
 }
 
-fn parseStatusModules(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const StatusModule {
-    var list = std.ArrayList(StatusModule).empty;
+fn parseSegments(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const Segment {
+    var list = std.ArrayList(Segment).empty;
 
     const len = runtime.getArrayLen(-1);
     for (1..len + 1) |i| {
         if (runtime.pushArrayElement(-1, i)) {
-            if (parseStatusModule(runtime, allocator)) |mod| {
+            if (parseSegment(runtime, allocator)) |mod| {
                 list.append(allocator, mod) catch {};
             }
             runtime.pop();
         }
     }
 
-    return list.toOwnedSlice(allocator) catch &[_]StatusModule{};
+    return list.toOwnedSlice(allocator) catch &[_]Segment{};
 }
 
-fn parseStatusModule(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?StatusModule {
+fn parseSegment(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?Segment {
     const name = runtime.getStringAlloc(-1, "name") orelse return null;
 
-    return StatusModule{
+    return Segment{
         .name = name,
         .priority = lua_runtime.parseConstrainedInt(runtime, u8, -1, "priority", 1, 255, 50),
         .outputs = parseOutputs(runtime, allocator),
@@ -1193,287 +1122,78 @@ fn parseSpinner(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?SpinnerDef 
     return s;
 }
 
+/// Parse a 'when' condition using the unified Option C syntax.
+///
+/// Supported forms:
+/// - when = "token"                                   -- single token (implicit all)
+/// - when = { all = { "a", "b" } }                    -- AND of tokens
+/// - when = { any = { "a", "b" } }                    -- OR of tokens (each as single-token all)
+/// - when = { any = { { all = {"a","b"} }, "c" } }    -- OR of conditions
+/// - when = { bash = "..." }                          -- bash script
+/// - when = { lua = "..." }                           -- lua function
 fn parseWhenTable(runtime: *LuaRuntime, allocator: std.mem.Allocator, allow_hexe: bool) ?WhenDef {
+    _ = allow_hexe; // No longer used; tokens are namespace-agnostic
     const ty = runtime.fieldType(-1, "when");
     if (ty == .nil) return null;
 
+    // String shorthand: when = "token" → { all = { "token" } }
+    if (ty == .string) {
+        if (runtime.getStringAlloc(-1, "when")) |s| {
+            const arr = allocator.alloc([]const u8, 1) catch {
+                allocator.free(s);
+                return null;
+            };
+            arr[0] = s;
+            return .{ .all = arr };
+        }
+        return null;
+    }
+
     if (ty != .table) {
-        // No backwards compatibility: must be a table.
-        setParseError(allocator, "config: 'when' must be a table");
+        setParseError(allocator, "config: 'when' must be a string or table");
         return null;
     }
 
     if (!runtime.pushTable(-1, "when")) return null;
     defer runtime.pop();
 
-    // New syntax: boolean tree using explicit keywords.
-    // - when = { ["or"] = { <expr>, <expr> } }
-    // - when = { ["and"] = { <expr>, <expr> } }
-    // - leaf expr: provider table { ["hexe.shp"] = {..}, bash=..., lua=... }
-    //
-    // We compile the expression into DNF (OR across clauses) stored in WhenDef.any.
-    const clauses = parseWhenExprToDnf(runtime, allocator, allow_hexe) orelse return null;
-
-    if (clauses.len == 1) {
-        const one = clauses[0];
-        allocator.free(clauses);
-        return one;
-    }
-    var out: WhenDef = .{};
-    out.any = clauses;
-    return out;
+    return parseWhenExpr(runtime, allocator);
 }
 
-fn parseWhenExprToDnf(runtime: *LuaRuntime, allocator: std.mem.Allocator, allow_hexe: bool) ?[]WhenDef {
-    // runtime stack top is the "when" table
-    // OR node
-    if (runtime.pushTable(-1, "or")) {
-        defer runtime.pop();
-        if (runtime.typeOf(-1) != .table) {
-            setParseError(allocator, "config: when.or must be an array table");
-            return null;
-        }
-        var out = std.ArrayList(WhenDef).empty;
-        const len = runtime.getArrayLen(-1);
-        for (1..len + 1) |i| {
-            if (!runtime.pushArrayElement(-1, i)) continue;
-            if (runtime.typeOf(-1) != .table) {
-                runtime.pop();
-                continue;
-            }
-            const child = parseWhenExprToDnf(runtime, allocator, allow_hexe);
-            runtime.pop();
-            if (child) |slice| {
-                defer allocator.free(slice);
-                for (slice) |c| {
-                    out.append(allocator, c) catch {
-                        var tmp = c;
-                        tmp.deinit(allocator);
-                    };
-                }
-            }
-        }
-        if (out.items.len == 0) return null;
-        return out.toOwnedSlice(allocator) catch null;
-    }
-
-    // AND node
-    if (runtime.pushTable(-1, "and")) {
-        defer runtime.pop();
-        if (runtime.typeOf(-1) != .table) {
-            setParseError(allocator, "config: when.and must be an array table");
-            return null;
-        }
-        var acc = std.ArrayList(WhenDef).empty;
-        // Identity for AND is a single empty clause.
-        acc.append(allocator, .{}) catch return null;
-
-        const len = runtime.getArrayLen(-1);
-        for (1..len + 1) |i| {
-            if (!runtime.pushArrayElement(-1, i)) continue;
-            if (runtime.typeOf(-1) != .table) {
-                runtime.pop();
-                continue;
-            }
-            const child = parseWhenExprToDnf(runtime, allocator, allow_hexe);
-            runtime.pop();
-            if (child == null) continue;
-
-            var next = std.ArrayList(WhenDef).empty;
-            for (acc.items) |a| {
-                for (child.?) |b| {
-                    if (mergeWhenClauses(allocator, a, b)) |m| {
-                        next.append(allocator, m) catch {
-                            var tmp = m;
-                            tmp.deinit(allocator);
-                        };
-                    }
-                }
-            }
-
-            // free old acc clauses
-            for (acc.items) |*c| c.deinit(allocator);
-            acc.deinit(allocator);
-            // free child slice (clauses are copied by merge)
-            allocator.free(child.?);
-
-            if (next.items.len == 0) return null;
-            acc = next;
-        }
-
-        if (acc.items.len == 0) return null;
-        return acc.toOwnedSlice(allocator) catch null;
-    }
-
-    // leaf
-    var leaf = parseWhenLeaf(runtime, allocator, allow_hexe) orelse return null;
-    const slice = allocator.alloc(WhenDef, 1) catch {
-        leaf.deinit(allocator);
-        return null;
-    };
-    slice[0] = leaf;
-    return slice;
-}
-
-fn parseWhenLeaf(runtime: *LuaRuntime, allocator: std.mem.Allocator, allow_hexe: bool) ?WhenDef {
+/// Parse a when expression (the table is already on the stack).
+fn parseWhenExpr(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?WhenDef {
     var when: WhenDef = .{};
+
+    // Check for bash/lua script conditions
     when.bash = runtime.getStringAlloc(-1, "bash");
     when.lua = runtime.getStringAlloc(-1, "lua");
 
-    if (allow_hexe) {
-        // Strict: no legacy alias.
-        if (runtime.fieldType(-1, "hexe") != .nil) {
-            setParseError(allocator, "config: 'when.hexe' is not supported; use ['hexe.shp'] etc");
-        }
+    // Check for 'all' key: array of tokens (AND)
+    if (runtime.pushTable(-1, "all")) {
+        defer runtime.pop();
+        when.all = parseTokenArray(runtime, allocator);
+    }
 
-        when.hexe_shp = parseWhenTokenList(runtime, allocator, "hexe.shp");
-        when.hexe_mux = parseWhenTokenList(runtime, allocator, "hexe.mux");
-        when.hexe_ses = parseWhenTokenList(runtime, allocator, "hexe.ses");
-        when.hexe_pod = parseWhenTokenList(runtime, allocator, "hexe.pod");
+    // Check for 'any' key: array of expressions (OR)
+    if (runtime.pushTable(-1, "any")) {
+        defer runtime.pop();
+        when.any = parseAnyArray(runtime, allocator);
+    }
+
+    // If nothing was set, return null
+    if (when.all == null and when.any == null and when.bash == null and when.lua == null) {
+        return null;
     }
 
     return when;
 }
 
-fn mergeWhenClauses(allocator: std.mem.Allocator, a: WhenDef, b: WhenDef) ?WhenDef {
-    var out: WhenDef = .{};
-
-    // bash: allow AND by concatenation
-    if (a.bash != null and b.bash != null) {
-        const joined = std.fmt.allocPrint(allocator, "({s}) && ({s})", .{ a.bash.?, b.bash.? }) catch {
-            return null;
-        };
-        out.bash = joined;
-    } else {
-        out.bash = if (a.bash) |s| allocator.dupe(u8, s) catch null else if (b.bash) |s| allocator.dupe(u8, s) catch null else null;
-    }
-
-    // lua: strict (do not combine multiple lua chunks)
-    if (a.lua != null and b.lua != null) {
-        setParseError(allocator, "config: multiple when.lua clauses in an AND block are not supported");
-        if (out.bash) |s| allocator.free(s);
-        return null;
-    }
-    out.lua = if (a.lua) |s| allocator.dupe(u8, s) catch null else if (b.lua) |s| allocator.dupe(u8, s) catch null else null;
-
-    out.hexe_shp = mergeWhenTokens(allocator, a.hexe_shp, b.hexe_shp);
-    out.hexe_mux = mergeWhenTokens(allocator, a.hexe_mux, b.hexe_mux);
-    out.hexe_ses = mergeWhenTokens(allocator, a.hexe_ses, b.hexe_ses);
-    out.hexe_pod = mergeWhenTokens(allocator, a.hexe_pod, b.hexe_pod);
-
-    return out;
-}
-
-fn mergeWhenTokens(allocator: std.mem.Allocator, a: ?WhenTokens, b: ?WhenTokens) ?WhenTokens {
-    if (a == null) {
-        if (b == null) return null;
-        return dupWhenTokens(allocator, b.?);
-    }
-    if (b == null) {
-        return dupWhenTokens(allocator, a.?);
-    }
-
-    // OR groups inside provider tokens are not supported when using top-level and/or.
-    if (a.?.any != null or b.?.any != null) {
-        setParseError(allocator, "config: provider-level OR groups are not supported; use when['and']/when['or']");
-        return null;
-    }
-    const aa = a.?.all orelse return dupWhenTokens(allocator, b.?);
-    const bb = b.?.all orelse return dupWhenTokens(allocator, a.?);
-
-    var list = std.ArrayList([]u8).empty;
-    for (aa) |s| {
-        const d = allocator.dupe(u8, s) catch continue;
-        list.append(allocator, d) catch allocator.free(d);
-    }
-    for (bb) |s| {
-        const d = allocator.dupe(u8, s) catch continue;
-        list.append(allocator, d) catch allocator.free(d);
-    }
-    if (list.items.len == 0) return null;
-    var out: WhenTokens = .{};
-    out.all = list.toOwnedSlice(allocator) catch null;
-    if (out.all == null) return null;
-    return out;
-}
-
-fn dupWhenTokens(allocator: std.mem.Allocator, src: WhenTokens) ?WhenTokens {
-    if (src.any != null) return null;
-    if (src.all == null) return null;
-    var list = std.ArrayList([]u8).empty;
-    for (src.all.?) |s| {
-        const d = allocator.dupe(u8, s) catch continue;
-        list.append(allocator, d) catch allocator.free(d);
-    }
-    var out: WhenTokens = .{};
-    out.all = list.toOwnedSlice(allocator) catch null;
-    if (out.all == null) return null;
-    return out;
-}
-
-fn parseWhenTokenList(runtime: *LuaRuntime, allocator: std.mem.Allocator, key: [:0]const u8) ?WhenTokens {
-    const ty = runtime.fieldType(-1, key);
-    if (ty == .nil) return null;
-    if (ty != .table) {
-        setParseError(allocator, "config: when.<provider> must be an array table");
-        return null;
-    }
-    if (!runtime.pushTable(-1, key)) return null;
-    defer runtime.pop();
-
+/// Parse an array of string tokens for 'all' clause.
+fn parseTokenArray(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?[][]const u8 {
     const len = runtime.getArrayLen(-1);
     if (len == 0) return null;
 
-    // OR form: { {"a","b"}, {"c"} }
-    // AND form: {"a","b"}
-    var first_is_table = false;
-    if (runtime.pushArrayElement(-1, 1)) {
-        first_is_table = runtime.typeOf(-1) == .table;
-        runtime.pop();
-    }
-
-    var out: WhenTokens = .{};
-
-    if (first_is_table) {
-        var groups = std.ArrayList(WhenTokens.TokenGroup).empty;
-        for (1..len + 1) |gi| {
-            if (!runtime.pushArrayElement(-1, gi)) continue;
-            if (runtime.typeOf(-1) != .table) {
-                runtime.pop();
-                continue;
-            }
-            var toks = std.ArrayList([]u8).empty;
-            const glen = runtime.getArrayLen(-1);
-            for (1..glen + 1) |ti| {
-                if (runtime.pushArrayElement(-1, ti)) {
-                    if (runtime.toStringAt(-1)) |s| {
-                        const dup = allocator.dupe(u8, s) catch null;
-                        if (dup) |d| {
-                            toks.append(allocator, d) catch allocator.free(d);
-                        }
-                    }
-                    runtime.pop();
-                }
-            }
-            runtime.pop();
-            if (toks.items.len > 0) {
-                const owned = toks.toOwnedSlice(allocator) catch null;
-                if (owned) |slice| {
-                    groups.append(allocator, .{ .tokens = slice }) catch {
-                        for (slice) |s| allocator.free(s);
-                        allocator.free(slice);
-                    };
-                }
-            }
-        }
-        if (groups.items.len == 0) return null;
-        out.any = groups.toOwnedSlice(allocator) catch null;
-        if (out.any == null) return null;
-        return out;
-    }
-
-    // AND list
-    var list = std.ArrayList([]u8).empty;
+    var list = std.ArrayList([]const u8).empty;
     for (1..len + 1) |i| {
         if (runtime.pushArrayElement(-1, i)) {
             if (runtime.toStringAt(-1)) |s| {
@@ -1485,10 +1205,52 @@ fn parseWhenTokenList(runtime: *LuaRuntime, allocator: std.mem.Allocator, key: [
             runtime.pop();
         }
     }
+
     if (list.items.len == 0) return null;
-    out.all = list.toOwnedSlice(allocator) catch null;
-    if (out.all == null) return null;
-    return out;
+    return list.toOwnedSlice(allocator) catch null;
+}
+
+/// Parse an array of expressions for 'any' clause.
+/// Each element can be:
+/// - A string: treated as single-token condition
+/// - A table: parsed recursively as WhenDef
+fn parseAnyArray(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?[]const WhenDef {
+    const len = runtime.getArrayLen(-1);
+    if (len == 0) return null;
+
+    var list = std.ArrayList(WhenDef).empty;
+    for (1..len + 1) |i| {
+        if (!runtime.pushArrayElement(-1, i)) continue;
+        defer runtime.pop();
+
+        const elem_ty = runtime.typeOf(-1);
+        if (elem_ty == .string) {
+            // String element: wrap in single-token all
+            if (runtime.toStringAt(-1)) |s| {
+                const dup = allocator.dupe(u8, s) catch continue;
+                const arr = allocator.alloc([]const u8, 1) catch {
+                    allocator.free(dup);
+                    continue;
+                };
+                arr[0] = dup;
+                list.append(allocator, .{ .all = arr }) catch {
+                    allocator.free(dup);
+                    allocator.free(arr);
+                };
+            }
+        } else if (elem_ty == .table) {
+            // Table element: parse recursively
+            if (parseWhenExpr(runtime, allocator)) |w| {
+                list.append(allocator, w) catch {
+                    var mw = w;
+                    @constCast(&mw).deinit(allocator);
+                };
+            }
+        }
+    }
+
+    if (list.items.len == 0) return null;
+    return list.toOwnedSlice(allocator) catch null;
 }
 
 fn parseOutputs(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const OutputDef {
