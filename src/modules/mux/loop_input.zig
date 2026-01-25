@@ -348,9 +348,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
             }
             // Mouse events (SGR): click-to-focus and status-bar tab switching.
             if (input.parseMouseEvent(inp[i..])) |ev| {
-                const raw = inp[i .. i + ev.consumed];
-
-                _ = loop_mouse.handle(state, ev, raw);
+                _ = loop_mouse.handle(state, ev);
                 i += ev.consumed;
                 continue;
             }

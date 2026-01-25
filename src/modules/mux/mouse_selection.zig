@@ -33,6 +33,8 @@ pub const EdgeScroll = enum { none, up, down };
 ///
 /// Internally we store Y positions in terminal "screen" coordinates so the
 /// selection stays attached to the same buffer lines when the viewport scrolls.
+/// In alternate screen mode, we store local coordinates directly since there's
+/// no scrollback.
 pub const MouseSelection = struct {
     tab: ?usize = null,
     pane_uuid: ?[32]u8 = null,
@@ -49,29 +51,46 @@ pub const MouseSelection = struct {
     has_range: bool = false,
     last_range: BufRange = .{ .a = .{}, .b = .{} },
 
+    /// True if selection was started in alternate screen mode.
+    /// In alt screen, we store local coords directly (no viewport offset).
+    alt_screen_mode: bool = false,
+
     pub fn clear(self: *MouseSelection) void {
         self.* = .{};
     }
 
     pub fn begin(self: *MouseSelection, tab_idx: usize, pane_uuid: [32]u8, pane: *Pane, local_x: u16, local_y: u16) void {
-        const viewport_top = getViewportTopScreenY(pane);
+        const is_alt = pane.vt.inAltScreen();
         self.tab = tab_idx;
         self.pane_uuid = pane_uuid;
         self.active = true;
         self.dragging = false;
+        self.alt_screen_mode = is_alt;
         self.last_local = .{ .x = local_x, .y = local_y };
         self.edge_scroll = edgeFromLocalY(local_y, pane.height);
-        self.anchor = .{ .x = local_x, .y = viewport_top + local_y };
+        // In alt screen mode, store local coords directly (no viewport offset needed).
+        // In normal mode, add viewport offset so selection tracks buffer lines during scroll.
+        if (is_alt) {
+            self.anchor = .{ .x = local_x, .y = local_y };
+        } else {
+            const viewport_top = getViewportTopScreenY(pane);
+            self.anchor = .{ .x = local_x, .y = viewport_top + local_y };
+        }
         self.cursor = self.anchor;
         self.has_range = false;
     }
 
     pub fn update(self: *MouseSelection, pane: *Pane, local_x: u16, local_y: u16) void {
         if (!self.active) return;
-        const viewport_top = getViewportTopScreenY(pane);
-        const next: BufPos = .{ .x = local_x, .y = viewport_top + local_y };
         self.last_local = .{ .x = local_x, .y = local_y };
         self.edge_scroll = edgeFromLocalY(local_y, pane.height);
+        // Use same coordinate mode as when selection started
+        const next: BufPos = if (self.alt_screen_mode)
+            .{ .x = local_x, .y = local_y }
+        else blk: {
+            const viewport_top = getViewportTopScreenY(pane);
+            break :blk .{ .x = local_x, .y = viewport_top + local_y };
+        };
         if (self.cursor.x != next.x or self.cursor.y != next.y) {
             self.dragging = true;
         }
@@ -100,12 +119,13 @@ pub const MouseSelection = struct {
         return null;
     }
 
-    pub fn setRange(self: *MouseSelection, tab_idx: usize, pane_uuid: [32]u8, range: BufRange) void {
+    pub fn setRange(self: *MouseSelection, tab_idx: usize, pane_uuid: [32]u8, pane: *Pane, range: BufRange) void {
         self.tab = tab_idx;
         self.pane_uuid = pane_uuid;
         self.active = false;
         self.dragging = false;
         self.edge_scroll = .none;
+        self.alt_screen_mode = pane.vt.inAltScreen();
         self.has_range = true;
         self.last_range = range;
     }
@@ -114,10 +134,19 @@ pub const MouseSelection = struct {
     /// Returns null if the selection isn't currently visible in this viewport.
     pub fn rangeForPane(self: *const MouseSelection, tab_idx: usize, pane: *Pane) ?Range {
         const br = self.bufRangeForPane(tab_idx, pane) orelse return null;
+        const norm = normalizeBufRange(br);
 
+        // In alt screen mode, coordinates are already local - just clamp to pane bounds.
+        if (self.alt_screen_mode) {
+            return .{
+                .a = clampToPane(@intCast(@min(norm.start.x, 65535)), @intCast(@min(norm.start.y, 65535)), pane.width, pane.height),
+                .b = clampToPane(@intCast(@min(norm.end.x, 65535)), @intCast(@min(norm.end.y, 65535)), pane.width, pane.height),
+            };
+        }
+
+        // Normal mode: convert from buffer coordinates to viewport-local.
         const viewport_top = getViewportTopScreenY(pane);
         const viewport_bottom: u32 = viewport_top + @as(u32, @intCast(@max(pane.height, 1) - 1));
-        const norm = normalizeBufRange(br);
 
         // Not visible at all.
         if (norm.end.y < viewport_top or norm.start.y > viewport_bottom) return null;
@@ -296,6 +325,10 @@ fn bufRangeFromSelection(screen: *ghostty.Screen, sel: ghostty.Selection) ?BufRa
 }
 
 fn getViewportTopScreenY(pane: *Pane) u32 {
+    // Alternate screen has no scrollback - viewport is always at top
+    if (pane.vt.inAltScreen()) {
+        return 0;
+    }
     const screen = pane.vt.terminal.screens.active;
     const pin = screen.pages.getTopLeft(.viewport);
     const pt = screen.pages.pointFromPin(.screen, pin) orelse return 0;

@@ -42,6 +42,20 @@ fn toLocalClamped(pane: *Pane, abs_x: u16, abs_y: u16) mouse_selection.Pos {
     return mouse_selection.clampLocalToPane(lx, ly, pane.width, pane.height);
 }
 
+/// Forward a mouse event to a pane with translated coordinates.
+/// The app expects pane-local coordinates, not absolute screen coordinates.
+fn forwardMouseToPane(pane: *Pane, ev: input.MouseEvent) void {
+    // Convert absolute coords to pane-local (1-based for SGR)
+    const local_x: u16 = if (ev.x >= pane.x) ev.x - pane.x + 1 else 1;
+    const local_y: u16 = if (ev.y >= pane.y) ev.y - pane.y + 1 else 1;
+
+    // Build SGR mouse sequence: ESC [ < btn ; x ; y M/m
+    var buf: [32]u8 = undefined;
+    const terminator: u8 = if (ev.is_release) 'm' else 'M';
+    const len = std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{ ev.btn, local_x, local_y, terminator }) catch return;
+    pane.write(len) catch {};
+}
+
 fn focusTarget(state: *State, target: FocusTarget) void {
     const old_uuid = state.getCurrentFocusedUuid();
     if (target.kind == .float) {
@@ -322,7 +336,7 @@ fn updateFloatResize(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const 
     state.needs_render = true;
 }
 
-pub fn handle(state: *State, ev: input.MouseEvent, raw: []const u8) bool {
+pub fn handle(state: *State, ev: input.MouseEvent) bool {
     const mouse_mods = mouseModsMask(ev.btn);
     const sel_override = state.config.mouse.selection_override_mods;
     const override_active = sel_override != 0 and (mouse_mods & sel_override) == sel_override;
@@ -463,7 +477,7 @@ pub fn handle(state: *State, ev: input.MouseEvent, raw: []const u8) bool {
             const selection_owns = (state.mouse_selection.pane_uuid != null and std.mem.eql(u8, &state.mouse_selection.pane_uuid.?, &t.pane.uuid)) and (state.mouse_selection.active or state.mouse_selection.has_range);
             const use_mux_scroll = !forward_to_app or override_active or selection_owns;
             if (!use_mux_scroll) {
-                t.pane.write(raw) catch {};
+                forwardMouseToPane(t.pane, ev);
             } else {
                 if (wheel_dir == 0) {
                     t.pane.scrollUp(3);
@@ -479,10 +493,10 @@ pub fn handle(state: *State, ev: input.MouseEvent, raw: []const u8) bool {
         } else {
             if (state.active_floating) |afi| {
                 if (afi < state.floats.items.len) {
-                    state.floats.items[afi].write(raw) catch {};
+                    forwardMouseToPane(state.floats.items[afi], ev);
                 }
             } else if (state.currentLayout().getFocusedPane()) |p| {
-                p.write(raw) catch {};
+                forwardMouseToPane(p, ev);
             }
         }
         return true;
@@ -576,7 +590,7 @@ pub fn handle(state: *State, ev: input.MouseEvent, raw: []const u8) bool {
 
                 if (click_count == 2) {
                     if (mouse_selection.selectWordRange(t.pane, local.x, local.y)) |range| {
-                        state.mouse_selection.setRange(state.active_tab, t.pane.uuid, range);
+                        state.mouse_selection.setRange(state.active_tab, t.pane.uuid, t.pane, range);
                         const bytes = mouse_selection.extractText(state.allocator, t.pane, range) catch {
                             state.notifications.showFor("Copy failed", 1200);
                             state.needs_render = true;
@@ -594,7 +608,7 @@ pub fn handle(state: *State, ev: input.MouseEvent, raw: []const u8) bool {
                     }
                 } else if (click_count == 3) {
                     if (mouse_selection.selectLineRange(t.pane, local.x, local.y)) |range| {
-                        state.mouse_selection.setRange(state.active_tab, t.pane.uuid, range);
+                        state.mouse_selection.setRange(state.active_tab, t.pane.uuid, t.pane, range);
                         const bytes = mouse_selection.extractText(state.allocator, t.pane, range) catch {
                             state.notifications.showFor("Copy failed", 1200);
                             state.needs_render = true;
@@ -615,7 +629,7 @@ pub fn handle(state: *State, ev: input.MouseEvent, raw: []const u8) bool {
                 state.mouse_selection.begin(state.active_tab, t.pane.uuid, t.pane, local.x, local.y);
                 state.needs_render = true;
             } else if (forward_to_app) {
-                t.pane.write(raw) catch {};
+                forwardMouseToPane(t.pane, ev);
             }
         } else {
             if (state.mouse_selection.has_range or state.mouse_selection.active) {
@@ -625,12 +639,12 @@ pub fn handle(state: *State, ev: input.MouseEvent, raw: []const u8) bool {
             if (state.active_floating) |afi| {
                 if (afi < state.floats.items.len) {
                     if (state.floats.items[afi].vt.inAltScreen()) {
-                        state.floats.items[afi].write(raw) catch {};
+                        forwardMouseToPane(state.floats.items[afi], ev);
                     }
                 }
             } else if (state.currentLayout().getFocusedPane()) |p| {
                 if (p.vt.inAltScreen()) {
-                    p.write(raw) catch {};
+                    forwardMouseToPane(p, ev);
                 }
             }
         }
@@ -641,19 +655,19 @@ pub fn handle(state: *State, ev: input.MouseEvent, raw: []const u8) bool {
     // Other mouse events (including release): forward only when target is in alt-screen.
     if (target) |t| {
         if (forward_to_app) {
-            t.pane.write(raw) catch {};
+            forwardMouseToPane(t.pane, ev);
             return true;
         }
     } else if (state.active_floating) |afi| {
         if (afi < state.floats.items.len) {
             if (state.floats.items[afi].vt.inAltScreen()) {
-                state.floats.items[afi].write(raw) catch {};
+                forwardMouseToPane(state.floats.items[afi], ev);
                 return true;
             }
         }
     } else if (state.currentLayout().getFocusedPane()) |p| {
         if (p.vt.inAltScreen()) {
-            p.write(raw) catch {};
+            forwardMouseToPane(p, ev);
             return true;
         }
     }
