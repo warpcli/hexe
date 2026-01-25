@@ -268,6 +268,17 @@ pub const UpdatePaneName = extern struct {
     name_len: u16 align(1),
 };
 
+/// UpdatePaneAux: MUX syncs auxiliary pane info to SES.
+/// Used for focus tracking (created_from, focused_from).
+pub const UpdatePaneAux = extern struct {
+    uuid: [32]u8 align(1),
+    created_from: [32]u8 align(1),
+    focused_from: [32]u8 align(1),
+    has_created_from: u8 align(1),
+    has_focused_from: u8 align(1),
+    is_focused: u8 align(1),
+};
+
 /// UpdatePaneShell: MUX syncs shell metadata to SES.
 /// Followed by: cmd bytes (cmd_len), then cwd bytes (cwd_len).
 pub const UpdatePaneShell = extern struct {

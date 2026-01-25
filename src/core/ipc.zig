@@ -63,8 +63,15 @@ pub const Server = struct {
 
     /// Non-blocking accept, returns null if no connection pending
     pub fn tryAccept(self: *Server) !?Connection {
-        // Use accept with SOCK_NONBLOCK flag directly
-        const client_fd = posix.accept(self.fd, null, null, posix.SOCK.NONBLOCK) catch |err| {
+        // Set server socket to non-blocking temporarily for the accept check.
+        const O_NONBLOCK: usize = 0o4000;
+        const flags = posix.fcntl(self.fd, posix.F.GETFL, 0) catch return null;
+        _ = posix.fcntl(self.fd, posix.F.SETFL, flags | O_NONBLOCK) catch return null;
+        defer _ = posix.fcntl(self.fd, posix.F.SETFL, flags) catch {};
+
+        // Accept WITHOUT SOCK_NONBLOCK so the client fd is blocking.
+        // This allows wire.readExact to work correctly without busy-spinning.
+        const client_fd = posix.accept(self.fd, null, null, 0) catch |err| {
             if (err == error.WouldBlock) return null;
             return err;
         };

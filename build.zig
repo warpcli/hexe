@@ -39,7 +39,7 @@ pub fn build(b: *std.Build) void {
 
     // Create shp module (shell prompt/status bar segments)
     const shp_module = b.createModule(.{
-        .root_source_file = b.path("src/shp/mod.zig"),
+        .root_source_file = b.path("src/modules/shp/mod.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -47,7 +47,7 @@ pub fn build(b: *std.Build) void {
 
     // Create pop module (popup/overlay system)
     const pop_module = b.createModule(.{
-        .root_source_file = b.path("src/pop/mod.zig"),
+        .root_source_file = b.path("src/modules/pop/mod.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -55,7 +55,7 @@ pub fn build(b: *std.Build) void {
 
     // Create mux module for unified CLI
     const mux_module = b.createModule(.{
-        .root_source_file = b.path("src/mux/main.zig"),
+        .root_source_file = b.path("src/modules/mux/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -69,7 +69,7 @@ pub fn build(b: *std.Build) void {
 
     // Create ses module for unified CLI
     const ses_module = b.createModule(.{
-        .root_source_file = b.path("src/ses/main.zig"),
+        .root_source_file = b.path("src/modules/ses/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -78,7 +78,7 @@ pub fn build(b: *std.Build) void {
 
     // Create pod module (per-pane PTY + scrollback; launched via `hexe pod daemon`)
     const pod_module = b.createModule(.{
-        .root_source_file = b.path("src/pod/mod.zig"),
+        .root_source_file = b.path("src/modules/pod/mod.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
