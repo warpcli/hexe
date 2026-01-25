@@ -19,6 +19,9 @@ pub const PodMeta = struct {
     /// Working directory passed at spawn time (optional).
     cwd: ?[]const u8 = null,
 
+    /// Detected shell type (e.g., "bash", "zsh", "fish").
+    shell: ?[]const u8 = null,
+
     /// Current isolation state (future-proof; today pods are not isolated).
     isolated: bool = false,
 
@@ -37,6 +40,7 @@ pub const PodMeta = struct {
         pid: std.posix.pid_t,
         child_pid: std.posix.pid_t,
         cwd: ?[]const u8,
+        shell: ?[]const u8,
         isolated: bool,
         labels_csv: ?[]const u8,
         created_at: i64,
@@ -52,6 +56,9 @@ pub const PodMeta = struct {
         const owned_cwd: ?[]const u8 = if (cwd) |d| if (d.len > 0) try allocator.dupe(u8, d) else null else null;
         errdefer if (owned_cwd) |d| allocator.free(d);
 
+        const owned_shell: ?[]const u8 = if (shell) |s| if (s.len > 0) try allocator.dupe(u8, s) else null else null;
+        errdefer if (owned_shell) |s| allocator.free(s);
+
         const labels = try parseLabelsCsv(allocator, labels_csv);
         errdefer freeLabels(allocator, labels);
 
@@ -61,6 +68,7 @@ pub const PodMeta = struct {
             .pid = pid,
             .child_pid = child_pid,
             .cwd = owned_cwd,
+            .shell = owned_shell,
             .isolated = isolated,
             .labels = labels,
             .created_at = created_at,
@@ -71,6 +79,7 @@ pub const PodMeta = struct {
     pub fn deinit(self: *PodMeta) void {
         if (self.name) |n| self.allocator.free(n);
         if (self.cwd) |d| self.allocator.free(d);
+        if (self.shell) |s| self.allocator.free(s);
         freeLabels(self.allocator, self.labels);
         self.* = undefined;
     }
@@ -116,6 +125,10 @@ pub const PodMeta = struct {
             try w.print(" cwd={s}", .{d});
         } else {
             try w.writeAll(" cwd=");
+        }
+
+        if (self.shell) |s| {
+            try w.print(" shell={s}", .{s});
         }
 
         try w.print(" isolated={d}", .{if (self.isolated) @as(u8, 1) else 0});

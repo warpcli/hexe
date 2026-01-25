@@ -170,11 +170,22 @@ pub fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
             }
 
             // Last-resort: swallow CSI-u shaped sequences (ESC [ <digits...> u).
+            // CSI-u format: ESC [ <digits> [:<digits>] [;<digits>[:<digits>]] u
+            // Only swallow if ALL bytes between ESC[ and 'u' are valid CSI-u chars.
             if (i + 2 < bytes.len and bytes[i + 2] >= '0' and bytes[i + 2] <= '9') {
                 var j: usize = i + 2;
                 const end = @min(bytes.len, i + 128);
-                while (j < end and bytes[j] != 'u') : (j += 1) {}
-                if (j < end and bytes[j] == 'u') {
+                var valid_csi_u = true;
+                while (j < end) : (j += 1) {
+                    const ch = bytes[j];
+                    if (ch == 'u') break; // Found terminator
+                    // Valid CSI-u intermediate chars: digits, semicolon, colon
+                    if ((ch >= '0' and ch <= '9') or ch == ';' or ch == ':') continue;
+                    // Any other char means this is NOT a CSI-u sequence
+                    valid_csi_u = false;
+                    break;
+                }
+                if (valid_csi_u and j < end and bytes[j] == 'u') {
                     i = j + 1;
                     continue;
                 }

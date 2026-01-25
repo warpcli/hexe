@@ -373,6 +373,9 @@ fn writePodMetaSidecar(
     child_pid: std.posix.pid_t,
     created_at: i64,
 ) !void {
+    // Detect shell type from /proc/<child_pid>/comm
+    const shell = detectShell(child_pid);
+
     var meta = try pod_meta.PodMeta.init(
         allocator,
         uuid,
@@ -380,6 +383,7 @@ fn writePodMetaSidecar(
         pod_pid,
         child_pid,
         cwd,
+        shell,
         false,
         labels,
         created_at,
@@ -399,6 +403,39 @@ fn writePodMetaSidecar(
     defer f.close();
     try f.writeAll(line);
     try f.writeAll("\n");
+}
+
+fn detectShell(child_pid: posix.pid_t) ?[]const u8 {
+    if (child_pid <= 0) return null;
+
+    var comm_path_buf: [64]u8 = undefined;
+    const comm_path = std.fmt.bufPrint(&comm_path_buf, "/proc/{d}/comm", .{child_pid}) catch return null;
+    const comm_file = std.fs.openFileAbsolute(comm_path, .{}) catch return null;
+    defer comm_file.close();
+
+    var comm_buf: [64]u8 = undefined;
+    const comm_len = comm_file.read(&comm_buf) catch return null;
+    if (comm_len == 0) return null;
+
+    const comm = std.mem.trim(u8, comm_buf[0..comm_len], " \t\n\r");
+    if (comm.len == 0) return null;
+
+    // Return known shell types
+    if (std.mem.eql(u8, comm, "bash")) return "bash";
+    if (std.mem.eql(u8, comm, "zsh")) return "zsh";
+    if (std.mem.eql(u8, comm, "fish")) return "fish";
+    if (std.mem.eql(u8, comm, "sh")) return "sh";
+    if (std.mem.eql(u8, comm, "dash")) return "dash";
+    if (std.mem.eql(u8, comm, "ksh")) return "ksh";
+    if (std.mem.eql(u8, comm, "tcsh")) return "tcsh";
+    if (std.mem.eql(u8, comm, "csh")) return "csh";
+    if (std.mem.eql(u8, comm, "nu")) return "nushell";
+    if (std.mem.eql(u8, comm, "pwsh")) return "powershell";
+    if (std.mem.eql(u8, comm, "elvish")) return "elvish";
+    if (std.mem.eql(u8, comm, "xonsh")) return "xonsh";
+    if (std.mem.eql(u8, comm, "oil")) return "oil";
+
+    return null;
 }
 
 fn createAliasSymlink(allocator: std.mem.Allocator, raw_name: []const u8, target_socket_path: []const u8) ![]const u8 {
@@ -443,7 +480,7 @@ fn createAliasSymlink(allocator: std.mem.Allocator, raw_name: []const u8, target
 
 fn deletePodMetaSidecar(allocator: std.mem.Allocator, uuid: []const u8) !void {
     if (uuid.len != 32) return;
-    var tmp = try pod_meta.PodMeta.init(allocator, uuid, null, 0, 0, null, false, null, 0);
+    var tmp = try pod_meta.PodMeta.init(allocator, uuid, null, 0, 0, null, null, false, null, 0);
     defer tmp.deinit();
     const path = try tmp.metaPath(allocator);
     defer allocator.free(path);
@@ -581,6 +618,86 @@ const RingBuffer = struct {
     }
 };
 
+/// Simple OSC 7 scanner for extracting CWD from terminal output.
+/// OSC 7 format: ESC ] 7 ; file://hostname/path BEL (or ESC \)
+const Osc7Scanner = struct {
+    state: State = .normal,
+    buf: [4096]u8 = undefined,
+    len: usize = 0,
+
+    const State = enum {
+        normal,
+        esc, // saw ESC
+        osc, // saw ESC ]
+        osc7, // saw ESC ] 7
+        osc7_content, // saw ESC ] 7 ; collecting content
+        osc7_esc, // saw ESC while in content (looking for \)
+    };
+
+    pub fn feed(self: *Osc7Scanner, data: []const u8, out_cwd: *?[]const u8) void {
+        for (data) |byte| {
+            switch (self.state) {
+                .normal => {
+                    if (byte == 0x1b) self.state = .esc;
+                },
+                .esc => {
+                    if (byte == ']') {
+                        self.state = .osc;
+                    } else {
+                        self.state = .normal;
+                    }
+                },
+                .osc => {
+                    if (byte == '7') {
+                        self.state = .osc7;
+                    } else {
+                        self.state = .normal;
+                    }
+                },
+                .osc7 => {
+                    if (byte == ';') {
+                        self.state = .osc7_content;
+                        self.len = 0;
+                    } else {
+                        self.state = .normal;
+                    }
+                },
+                .osc7_content => {
+                    if (byte == 0x07) {
+                        // BEL terminator - extract path
+                        self.extractPath(out_cwd);
+                        self.state = .normal;
+                    } else if (byte == 0x1b) {
+                        self.state = .osc7_esc;
+                    } else if (self.len < self.buf.len) {
+                        self.buf[self.len] = byte;
+                        self.len += 1;
+                    }
+                },
+                .osc7_esc => {
+                    if (byte == '\\') {
+                        // ESC \ terminator - extract path
+                        self.extractPath(out_cwd);
+                    }
+                    self.state = .normal;
+                },
+            }
+        }
+    }
+
+    fn extractPath(self: *Osc7Scanner, out_cwd: *?[]const u8) void {
+        const content = self.buf[0..self.len];
+        // Format: file://hostname/path or file:///path
+        if (std.mem.startsWith(u8, content, "file://")) {
+            const after_scheme = content[7..];
+            // Find the path part after hostname
+            if (std.mem.indexOfScalar(u8, after_scheme, '/')) |slash_idx| {
+                out_cwd.* = after_scheme[slash_idx..];
+            }
+        }
+    }
+};
+
 const Pod = struct {
     allocator: std.mem.Allocator,
     uuid: [32]u8,
@@ -592,6 +709,10 @@ const Pod = struct {
     pty_paused: bool = false,
 
     uplink: PodUplink,
+
+    // OSC 7 CWD tracking
+    osc7_scanner: Osc7Scanner = .{},
+    osc7_cwd: ?[]u8 = null,
 
     const RunOptions = struct {
         write_meta: bool,
@@ -641,6 +762,7 @@ const Pod = struct {
         self.backlog.deinit(self.allocator);
         self.reader.deinit(self.allocator);
         self.uplink.deinit();
+        if (self.osc7_cwd) |cwd| self.allocator.free(cwd);
     }
 
     pub fn run(self: *Pod, opts: RunOptions) !void {
@@ -768,6 +890,7 @@ const Pod = struct {
                         break;
                     }
                     const data = read_buf[0..n];
+                    self.scanOsc7(data);
                     if (containsClearSeq(data)) {
                         self.backlog.clear();
                     }
@@ -789,6 +912,7 @@ const Pod = struct {
                     break;
                 }
                 const data = buf[0..n];
+                self.scanOsc7(data);
                 if (containsClearSeq(data)) {
                     self.backlog.clear();
                 }
@@ -963,10 +1087,17 @@ const Pod = struct {
     }
 
     fn lastOsc7Cwd(self: *Pod) ?[]const u8 {
-        // We do not currently run a VT parser inside the pod process, so
-        // we cannot extract OSC 7 cwd here. Keep the initial cwd (null).
-        _ = self;
-        return null;
+        return self.osc7_cwd;
+    }
+
+    fn scanOsc7(self: *Pod, data: []const u8) void {
+        var new_cwd: ?[]const u8 = null;
+        self.osc7_scanner.feed(data, &new_cwd);
+        if (new_cwd) |path| {
+            // Store a copy of the path
+            if (self.osc7_cwd) |old| self.allocator.free(old);
+            self.osc7_cwd = self.allocator.dupe(u8, path) catch null;
+        }
     }
 };
 

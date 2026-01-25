@@ -48,19 +48,21 @@ fn printTreeNode(prefix: []const u8, symbol: []const u8, type_color: []const u8,
     );
 }
 
-pub fn runList(allocator: std.mem.Allocator, details: bool) !void {
+pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !void {
     const wire = core.wire;
     const posix = std.posix;
 
-    const inst = posix.getenv("HEXE_INSTANCE");
-    if (inst) |name| {
-        if (name.len > 0) {
-            print("Instance: {s}\n", .{name});
+    if (!json_output) {
+        const inst = posix.getenv("HEXE_INSTANCE");
+        if (inst) |name| {
+            if (name.len > 0) {
+                print("Instance: {s}\n", .{name});
+            } else {
+                print("Instance: default\n", .{});
+            }
         } else {
             print("Instance: default\n", .{});
         }
-    } else {
-        print("Instance: default\n", .{});
     }
 
     const fd = connectSesCliChannel(allocator) orelse return;
@@ -92,6 +94,12 @@ pub fn runList(allocator: std.mem.Allocator, details: bool) !void {
     if (off + @sizeOf(wire.StatusResp) > payload.len) return;
     const status_hdr = std.mem.bytesToValue(wire.StatusResp, payload[off..][0..@sizeOf(wire.StatusResp)]);
     off += @sizeOf(wire.StatusResp);
+
+    // JSON output mode - output raw structure
+    if (json_output) {
+        outputListJson(allocator, payload, off, status_hdr);
+        return;
+    }
 
     // Connected clients
     if (status_hdr.client_count > 0) {
@@ -805,5 +813,168 @@ pub fn runShellEvent(
 
     // Send as binary control message with trailing cmd + cwd.
     wire.writeControlMsg(fd, .shp_shell_event, std.mem.asBytes(&evt), &.{ cmd, cwd }) catch return;
+}
+
+fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: usize, status_hdr: core.wire.StatusResp) void {
+    const wire = core.wire;
+    const stdout = std.fs.File.stdout();
+    var off = start_off;
+    var buf: [256]u8 = undefined;
+
+    stdout.writeAll("{") catch return;
+
+    // Instance
+    const inst = std.posix.getenv("HEXE_INSTANCE");
+    stdout.writeAll("\"instance\":\"") catch return;
+    if (inst) |name| {
+        if (name.len > 0) writeJsonStr(stdout, name) else stdout.writeAll("default") catch return;
+    } else stdout.writeAll("default") catch return;
+    stdout.writeAll("\",") catch return;
+
+    // Connected muxes
+    stdout.writeAll("\"connected\":[") catch return;
+    var ci: u16 = 0;
+    while (ci < status_hdr.client_count) : (ci += 1) {
+        if (ci > 0) stdout.writeAll(",") catch return;
+        if (off + @sizeOf(wire.StatusClient) > payload.len) break;
+        const sc = std.mem.bytesToValue(wire.StatusClient, payload[off..][0..@sizeOf(wire.StatusClient)]);
+        off += @sizeOf(wire.StatusClient);
+
+        if (off + sc.name_len > payload.len) break;
+        const name_str = if (sc.name_len > 0) payload[off .. off + sc.name_len] else "";
+        off += sc.name_len;
+
+        if (off + sc.mux_state_len > payload.len) break;
+        const mux_state = if (sc.mux_state_len > 0) payload[off .. off + sc.mux_state_len] else "{}";
+        off += sc.mux_state_len;
+
+        stdout.writeAll("{\"name\":\"") catch return;
+        writeJsonStr(stdout, name_str);
+        stdout.writeAll("\",\"session_id\":\"") catch return;
+        if (sc.has_session_id != 0) stdout.writeAll(sc.session_id[0..]) catch return;
+        stdout.writeAll("\",\"pane_count\":") catch return;
+        const pane_str = std.fmt.bufPrint(&buf, "{d}", .{sc.pane_count}) catch continue;
+        stdout.writeAll(pane_str) catch return;
+        stdout.writeAll(",\"state\":") catch return;
+        stdout.writeAll(mux_state) catch return;
+
+        // Skip pane entries
+        var pi: u16 = 0;
+        while (pi < sc.pane_count) : (pi += 1) {
+            if (off + @sizeOf(wire.StatusPaneEntry) > payload.len) break;
+            const pe = std.mem.bytesToValue(wire.StatusPaneEntry, payload[off..][0..@sizeOf(wire.StatusPaneEntry)]);
+            off += @sizeOf(wire.StatusPaneEntry);
+            off += pe.name_len;
+            off += pe.sticky_pwd_len;
+        }
+        stdout.writeAll("}") catch return;
+    }
+    stdout.writeAll("],") catch return;
+
+    // Detached sessions
+    stdout.writeAll("\"detached\":[") catch return;
+    var di: u16 = 0;
+    while (di < status_hdr.detached_count) : (di += 1) {
+        if (di > 0) stdout.writeAll(",") catch return;
+        if (off + @sizeOf(wire.DetachedSessionEntry) > payload.len) break;
+        const de = std.mem.bytesToValue(wire.DetachedSessionEntry, payload[off..][0..@sizeOf(wire.DetachedSessionEntry)]);
+        off += @sizeOf(wire.DetachedSessionEntry);
+
+        if (off + de.name_len > payload.len) break;
+        const name_str = if (de.name_len > 0) payload[off .. off + de.name_len] else "";
+        off += de.name_len;
+
+        if (off + de.mux_state_len > payload.len) break;
+        const mux_state = if (de.mux_state_len > 0) payload[off .. off + de.mux_state_len] else "{}";
+        off += de.mux_state_len;
+
+        stdout.writeAll("{\"name\":\"") catch return;
+        writeJsonStr(stdout, name_str);
+        stdout.writeAll("\",\"session_id\":\"") catch return;
+        stdout.writeAll(de.session_id[0..]) catch return;
+        stdout.writeAll("\",\"pane_count\":") catch return;
+        const pane_str = std.fmt.bufPrint(&buf, "{d}", .{de.pane_count}) catch continue;
+        stdout.writeAll(pane_str) catch return;
+        stdout.writeAll(",\"state\":") catch return;
+        stdout.writeAll(mux_state) catch return;
+        stdout.writeAll("}") catch return;
+    }
+    stdout.writeAll("],") catch return;
+
+    // Orphaned panes
+    stdout.writeAll("\"orphaned\":[") catch return;
+    var oi: u16 = 0;
+    while (oi < status_hdr.orphaned_count) : (oi += 1) {
+        if (oi > 0) stdout.writeAll(",") catch return;
+        if (off + @sizeOf(wire.StatusPaneEntry) > payload.len) break;
+        const pe = std.mem.bytesToValue(wire.StatusPaneEntry, payload[off..][0..@sizeOf(wire.StatusPaneEntry)]);
+        off += @sizeOf(wire.StatusPaneEntry);
+
+        if (off + pe.name_len > payload.len) break;
+        const pname = if (pe.name_len > 0) payload[off .. off + pe.name_len] else "";
+        off += pe.name_len;
+        off += pe.sticky_pwd_len;
+
+        stdout.writeAll("{\"uuid\":\"") catch return;
+        stdout.writeAll(pe.uuid[0..]) catch return;
+        stdout.writeAll("\",\"name\":\"") catch return;
+        writeJsonStr(stdout, pname);
+        stdout.writeAll("\",\"pid\":") catch return;
+        const pid_str = std.fmt.bufPrint(&buf, "{d}", .{pe.pid}) catch continue;
+        stdout.writeAll(pid_str) catch return;
+        stdout.writeAll("}") catch return;
+    }
+    stdout.writeAll("],") catch return;
+
+    // Sticky panes
+    stdout.writeAll("\"sticky\":[") catch return;
+    var si: u16 = 0;
+    while (si < status_hdr.sticky_count) : (si += 1) {
+        if (si > 0) stdout.writeAll(",") catch return;
+        if (off + @sizeOf(wire.StickyPaneEntry) > payload.len) break;
+        const se = std.mem.bytesToValue(wire.StickyPaneEntry, payload[off..][0..@sizeOf(wire.StickyPaneEntry)]);
+        off += @sizeOf(wire.StickyPaneEntry);
+
+        off += se.name_len;
+        if (off + se.pwd_len > payload.len) break;
+        const pwd = if (se.pwd_len > 0) payload[off .. off + se.pwd_len] else "";
+        off += se.pwd_len;
+
+        stdout.writeAll("{\"uuid\":\"") catch return;
+        stdout.writeAll(se.uuid[0..]) catch return;
+        stdout.writeAll("\",\"pid\":") catch return;
+        const pid_str = std.fmt.bufPrint(&buf, "{d}", .{se.pid}) catch continue;
+        stdout.writeAll(pid_str) catch return;
+        stdout.writeAll(",\"pwd\":\"") catch return;
+        writeJsonStr(stdout, pwd);
+        stdout.writeAll("\"") catch return;
+        if (se.key != 0) {
+            stdout.writeAll(",\"key\":\"") catch return;
+            const key_buf = [1]u8{se.key};
+            stdout.writeAll(&key_buf) catch return;
+            stdout.writeAll("\"") catch return;
+        }
+        stdout.writeAll("}") catch return;
+    }
+    stdout.writeAll("]") catch return;
+
+    stdout.writeAll("}\n") catch return;
+    _ = allocator;
+}
+
+fn writeJsonStr(stdout: std.fs.File, s: []const u8) void {
+    for (s) |c| {
+        switch (c) {
+            '"' => stdout.writeAll("\\\"") catch return,
+            '\\' => stdout.writeAll("\\\\") catch return,
+            '\n' => stdout.writeAll("\\n") catch return,
+            '\r' => stdout.writeAll("\\r") catch return,
+            '\t' => stdout.writeAll("\\t") catch return,
+            else => {
+                const buf = [1]u8{c};
+                stdout.writeAll(&buf) catch return;
+            },
+        }
+    }
 }
 

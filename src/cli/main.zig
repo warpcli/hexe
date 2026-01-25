@@ -82,6 +82,7 @@ pub fn main() !void {
     const ses_list = try ses_cmd.newCommand("list", "List all sessions and panes");
     const ses_list_details = try ses_list.flag("d", "details", null);
     const ses_list_instance = try ses_list.string("I", "instance", null);
+    const ses_list_json = try ses_list.flag("j", "json", null);
 
     // POD subcommands (mostly for ses-internal use)
     const pod_daemon = try pod_cmd.newCommand("daemon", "Start a per-pane pod daemon");
@@ -104,6 +105,7 @@ pub fn main() !void {
     const pod_list_where = try pod_list.string("", "where", null);
     const pod_list_probe = try pod_list.flag("", "probe", null);
     const pod_list_alive = try pod_list.flag("", "alive", null);
+    const pod_list_json = try pod_list.flag("j", "json", null);
 
     const pod_new = try pod_cmd.newCommand("new", "Create a standalone pod (spawns pod daemon)");
     const pod_new_name = try pod_new.string("n", "name", null);
@@ -313,11 +315,11 @@ pub fn main() !void {
             } else if (found_mux and found_info) {
                 print("Usage: hexe mux info [OPTIONS]\n\nShow information about a pane\n\nOptions:\n  -u, --uuid <UUID>        Query specific pane by UUID (works from anywhere)\n  -c, --creator            Print only the creator pane UUID\n  -l, --last               Print only the last focused pane UUID\n  -I, --instance <NAME>    Target a specific instance\n\nWithout --uuid, queries current pane (requires running inside mux)\n", .{});
             } else if (found_pod and found_list) {
-                print("Usage: hexe pod list [OPTIONS]\n\nList discoverable pods by scanning pod-*.meta in the hexe socket dir.\n\nOptions:\n      --where <LUA>   Lua predicate (return boolean). Variable: pod\n      --probe         Probe sockets (best-effort)\n      --alive         Only show pods whose socket is connectable (implies --probe)\n", .{});
+                print("Usage: hexe pod list [OPTIONS]\n\nList discoverable pods by scanning pod-*.meta in the hexe socket dir.\n\nOptions:\n      --where <LUA>   Lua predicate (return boolean). Variable: pod\n      --probe         Probe sockets (best-effort)\n      --alive         Only show pods whose socket is connectable (implies --probe)\n  -j, --json          Output as JSON array\n", .{});
             } else if (found_pod and found_new) {
                 print("Usage: hexe pod new [OPTIONS]\n\nCreate a standalone pod and print a JSON line once ready.\n\nOptions:\n  -n, --name <NAME>         Pod name (also used for ps/alias)\n  -S, --shell <CMD>         Shell/command to run (default: $SHELL)\n  -C, --cwd <DIR>           Working directory\n      --labels <a,b,c>      Comma-separated labels\n      --alias               Create pod@<name>.sock alias symlink\n  -d, --debug               Enable debug output\n  -L, --logfile <PATH>      Log debug output to PATH\n  -I, --instance <NAME>     Run under instance namespace\n  -T, --test-only           Mark as test-only (requires instance)\n", .{});
             } else if (found_ses and found_list) {
-                print("Usage: hexe ses list [OPTIONS]\n\nList all sessions and panes\n\nOptions:\n  -d, --details           Show extra details\n  -I, --instance <NAME>   Target a specific instance\n", .{});
+                print("Usage: hexe ses list [OPTIONS]\n\nList all sessions and panes\n\nOptions:\n  -d, --details           Show extra details\n  -j, --json              Output as JSON\n  -I, --instance <NAME>   Target a specific instance\n", .{});
         } else if (found_ses and found_status) {
             print("Usage: hexe ses status [OPTIONS]\n\nShow daemon status and socket path\n\nOptions:\n  -I, --instance <NAME>   Target a specific instance\n", .{});
         } else if (found_shp and found_exit_intent) {
@@ -336,7 +338,7 @@ pub fn main() !void {
             } else if (found_pod and found_attach) {
                 print("Usage: hexe pod attach [OPTIONS]\n\nInteractive attach to a pod socket (raw tty).\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID (32 hex chars)\n  -n, --name <NAME>        Target pod by name (via pod-*.meta scan)\n  -s, --socket <PATH>      Target pod by explicit socket path\n      --detach <key>       Detach prefix Ctrl+<key> (default: b), then press 'd'\n", .{});
             } else if (found_pod and found_kill) {
-                print("Usage: hexe pod kill [OPTIONS]\n\nKill a pod process (reads pid from pod-*.meta).\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID\n  -n, --name <NAME>        Target pod by name (newest created_at wins)\n  -s, --signal <SIG>       TERM|KILL|INT|HUP (default: TERM)\n  -f, --force              Follow with SIGKILL\n", .{});
+                print("Usage: hexe pod kill [OPTIONS]\n\nKill a pod process (reads pid from pod-*.meta).\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID\n  -n, --name <NAME>        Target pod by name (newest created_at wins)\n  -s, --signal <SIG>       Signal name or number (default: TERM)\n                           Names: TERM, KILL, INT, HUP, QUIT, STOP, CONT, TSTP, USR1, USR2\n  -f, --force              Follow with SIGKILL\n", .{});
             } else if (found_pod and found_gc) {
                 print("Usage: hexe pod gc [--dry-run]\n\nDelete stale pod-*.meta and broken pod@*.sock aliases.\n\nOptions:\n  -n, --dry-run            Only print what would be deleted\n", .{});
             } else if (found_mux and found_new) {
@@ -419,7 +421,7 @@ pub fn main() !void {
             try runSesStatus(allocator);
         } else if (ses_list.happened) {
             if (ses_list_instance.*.len > 0) setInstanceFromCli(ses_list_instance.*);
-            try cli_cmds.runList(allocator, ses_list_details.*);
+            try cli_cmds.runList(allocator, ses_list_details.*, ses_list_json.*);
         }
     } else if (pod_cmd.happened) {
         if (pod_daemon.happened) {
@@ -449,7 +451,7 @@ pub fn main() !void {
             // No ses dependency; uses ipc.getSocketDir() + .meta files.
             const alive_only = pod_list_alive.*;
             const probe = pod_list_probe.* or alive_only;
-            try cli_cmds.runPodList(allocator, pod_list_where.*, probe, alive_only);
+            try cli_cmds.runPodList(allocator, pod_list_where.*, probe, alive_only, pod_list_json.*);
         } else if (pod_new.happened) {
             if (pod_new_instance.*.len > 0) setInstanceFromCli(pod_new_instance.*);
             if (pod_new_test_only.*) {

@@ -360,13 +360,22 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 if (next == '[' and i + 2 < inp.len) {
                     // If this looks like a kitty CSI-u key event and parsing didn't
                     // handle it above, swallow it so it never leaks into the shell.
-                    // This is intentionally conservative: we only swallow sequences
-                    // that start like a CSI numeric parameter and end in 'u'.
+                    // CSI-u format: ESC [ <digits> [:<digits>] [;<digits>[:<digits>]] u
+                    // Only swallow if ALL bytes between ESC[ and 'u' are valid CSI-u chars.
                     if (inp[i + 2] >= '0' and inp[i + 2] <= '9') {
                         var j: usize = i + 2;
                         const end = @min(inp.len, i + 64);
-                        while (j < end and inp[j] != 'u') : (j += 1) {}
-                        if (j < end and inp[j] == 'u') {
+                        var valid_csi_u = true;
+                        while (j < end) : (j += 1) {
+                            const ch = inp[j];
+                            if (ch == 'u') break; // Found terminator
+                            // Valid CSI-u intermediate chars: digits, semicolon, colon
+                            if ((ch >= '0' and ch <= '9') or ch == ';' or ch == ':') continue;
+                            // Any other char means this is NOT a CSI-u sequence
+                            valid_csi_u = false;
+                            break;
+                        }
+                        if (valid_csi_u and j < end and inp[j] == 'u') {
                             i = j + 1;
                             continue;
                         }

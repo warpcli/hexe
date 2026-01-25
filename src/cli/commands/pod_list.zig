@@ -11,13 +11,14 @@ pub const PodRecord = struct {
     pid: i64,
     child_pid: i64,
     cwd: []const u8,
+    shell: []const u8,
     isolated: bool,
     labels: []const []const u8,
     created_at: i64,
     alive: ?bool = null,
 };
 
-pub fn runPodList(allocator: std.mem.Allocator, where_lua: []const u8, probe: bool, alive_only: bool) !void {
+pub fn runPodList(allocator: std.mem.Allocator, where_lua: []const u8, probe: bool, alive_only: bool, json_output: bool) !void {
     const dir = try ipc.getSocketDir(allocator);
     defer allocator.free(dir);
 
@@ -26,6 +27,7 @@ pub fn runPodList(allocator: std.mem.Allocator, where_lua: []const u8, probe: bo
         for (records.items) |r| {
             allocator.free(r.name);
             allocator.free(r.cwd);
+            allocator.free(r.shell);
             for (r.labels) |lab| allocator.free(lab);
             allocator.free(r.labels);
         }
@@ -42,12 +44,23 @@ pub fn runPodList(allocator: std.mem.Allocator, where_lua: []const u8, probe: bo
         try filterWithLua(allocator, where_lua, &records);
     }
 
+    if (json_output) {
+        outputJson(records.items);
+        return;
+    }
+
     // Output: one line per pod, stable + grep-friendly.
     for (records.items) |r| {
         print(
-            "{s} uuid={s} name={s} pid={d} child_pid={d} cwd={s} isolated={d}",
-            .{ pod_meta.POD_META_PREFIX, r.uuid[0..], r.name, r.pid, r.child_pid, r.cwd, if (r.isolated) @as(u8, 1) else 0 },
+            "{s} uuid={s} name={s} pid={d} child_pid={d} cwd={s}",
+            .{ pod_meta.POD_META_PREFIX, r.uuid[0..], r.name, r.pid, r.child_pid, r.cwd },
         );
+
+        if (r.shell.len > 0) {
+            print(" shell={s}", .{r.shell});
+        }
+
+        print(" isolated={d}", .{if (r.isolated) @as(u8, 1) else 0});
 
         if (r.alive) |a| {
             print(" alive={d}", .{if (a) @as(u8, 1) else 0});
@@ -59,6 +72,67 @@ pub fn runPodList(allocator: std.mem.Allocator, where_lua: []const u8, probe: bo
             print("{s}", .{lab});
         }
         print(" created_at={d}\n", .{r.created_at});
+    }
+}
+
+fn outputJson(records: []const PodRecord) void {
+    const stdout = std.fs.File.stdout();
+    stdout.writeAll("[") catch return;
+    for (records, 0..) |r, i| {
+        if (i > 0) stdout.writeAll(",") catch return;
+        stdout.writeAll("\n  {") catch return;
+        var buf: [256]u8 = undefined;
+        const uuid_str = std.fmt.bufPrint(&buf, "\"uuid\":\"{s}\",", .{r.uuid[0..]}) catch continue;
+        stdout.writeAll(uuid_str) catch return;
+        // Escape JSON strings
+        stdout.writeAll("\"name\":\"") catch return;
+        writeJsonEscaped(stdout, r.name);
+        stdout.writeAll("\",") catch return;
+        const pid_str = std.fmt.bufPrint(&buf, "\"pid\":{d},", .{r.pid}) catch continue;
+        stdout.writeAll(pid_str) catch return;
+        const child_pid_str = std.fmt.bufPrint(&buf, "\"child_pid\":{d},", .{r.child_pid}) catch continue;
+        stdout.writeAll(child_pid_str) catch return;
+        stdout.writeAll("\"cwd\":\"") catch return;
+        writeJsonEscaped(stdout, r.cwd);
+        stdout.writeAll("\",") catch return;
+        if (r.shell.len > 0) {
+            stdout.writeAll("\"shell\":\"") catch return;
+            writeJsonEscaped(stdout, r.shell);
+            stdout.writeAll("\",") catch return;
+        }
+        const iso_str = std.fmt.bufPrint(&buf, "\"isolated\":{},", .{r.isolated}) catch continue;
+        stdout.writeAll(iso_str) catch return;
+        if (r.alive) |a| {
+            const alive_str = std.fmt.bufPrint(&buf, "\"alive\":{},", .{a}) catch continue;
+            stdout.writeAll(alive_str) catch return;
+        }
+        stdout.writeAll("\"labels\":[") catch return;
+        for (r.labels, 0..) |lab, li| {
+            if (li > 0) stdout.writeAll(",") catch return;
+            stdout.writeAll("\"") catch return;
+            writeJsonEscaped(stdout, lab);
+            stdout.writeAll("\"") catch return;
+        }
+        stdout.writeAll("],") catch return;
+        const created_str = std.fmt.bufPrint(&buf, "\"created_at\":{d}}}", .{r.created_at}) catch continue;
+        stdout.writeAll(created_str) catch return;
+    }
+    stdout.writeAll("\n]\n") catch return;
+}
+
+fn writeJsonEscaped(stdout: std.fs.File, s: []const u8) void {
+    for (s) |c| {
+        switch (c) {
+            '"' => stdout.writeAll("\\\"") catch return,
+            '\\' => stdout.writeAll("\\\\") catch return,
+            '\n' => stdout.writeAll("\\n") catch return,
+            '\r' => stdout.writeAll("\\r") catch return,
+            '\t' => stdout.writeAll("\\t") catch return,
+            else => {
+                const buf = [1]u8{c};
+                stdout.writeAll(&buf) catch return;
+            },
+        }
     }
 }
 
@@ -118,6 +192,7 @@ fn scanMetaFiles(allocator: std.mem.Allocator, socket_dir: []const u8, out: *std
 fn freeRecord(allocator: std.mem.Allocator, rec: PodRecord) void {
     allocator.free(rec.name);
     allocator.free(rec.cwd);
+    allocator.free(rec.shell);
     for (rec.labels) |lab| allocator.free(lab);
     allocator.free(rec.labels);
 }
@@ -129,6 +204,7 @@ fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !PodRecord {
     var pid: i64 = 0;
     var child_pid: i64 = 0;
     var cwd: []const u8 = "";
+    var shell: []const u8 = "";
     var isolated: bool = false;
     var created_at: i64 = 0;
     var labels_list: std.ArrayList([]const u8) = .empty;
@@ -155,6 +231,8 @@ fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !PodRecord {
             child_pid = std.fmt.parseInt(i64, val, 10) catch 0;
         } else if (std.mem.eql(u8, key, "cwd")) {
             cwd = val;
+        } else if (std.mem.eql(u8, key, "shell")) {
+            shell = val;
         } else if (std.mem.eql(u8, key, "isolated")) {
             isolated = std.mem.eql(u8, val, "1");
         } else if (std.mem.eql(u8, key, "created_at")) {
@@ -173,6 +251,8 @@ fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !PodRecord {
     errdefer allocator.free(owned_name);
     const owned_cwd = try allocator.dupe(u8, if (cwd.len > 0) cwd else "-");
     errdefer allocator.free(owned_cwd);
+    const owned_shell = try allocator.dupe(u8, shell);
+    errdefer allocator.free(owned_shell);
     const labels = try labels_list.toOwnedSlice(allocator);
 
     return .{
@@ -181,6 +261,7 @@ fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !PodRecord {
         .pid = pid,
         .child_pid = child_pid,
         .cwd = owned_cwd,
+        .shell = owned_shell,
         .isolated = isolated,
         .labels = labels,
         .created_at = created_at,
@@ -242,7 +323,7 @@ fn evalPredicate(rt: *core.LuaRuntime, rec: PodRecord) !bool {
 }
 
 fn pushPodTable(rt: *core.LuaRuntime, rec: PodRecord) void {
-    rt.lua.createTable(0, 8);
+    rt.lua.createTable(0, 9);
 
     _ = rt.lua.pushString("uuid");
     _ = rt.lua.pushString(rec.uuid[0..]);
@@ -262,6 +343,10 @@ fn pushPodTable(rt: *core.LuaRuntime, rec: PodRecord) void {
 
     _ = rt.lua.pushString("cwd");
     _ = rt.lua.pushString(rec.cwd);
+    rt.lua.setTable(-3);
+
+    _ = rt.lua.pushString("shell");
+    _ = rt.lua.pushString(rec.shell);
     rt.lua.setTable(-3);
 
     _ = rt.lua.pushString("isolated");
