@@ -325,18 +325,11 @@ pub fn generateTabName() []const u8 {
     return constellation_names[index];
 }
 
+const strings = @import("strings.zig");
+
 fn sanitizeInstanceName(out: []u8, raw: []const u8) []const u8 {
-    // Keep instance names filesystem- and socket-friendly.
     // NOTE: Unix domain socket paths have tight limits; keep this short.
-    const max_len: usize = @min(out.len, 24);
-    var n: usize = 0;
-    for (raw) |ch| {
-        if (n >= max_len) break;
-        const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_' or ch == '-' or ch == '.';
-        out[n] = if (ok) ch else '_';
-        n += 1;
-    }
-    return out[0..n];
+    return strings.sanitize(out, raw, 24);
 }
 
 /// Get the socket directory path

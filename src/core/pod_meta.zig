@@ -168,21 +168,8 @@ fn parseLabelsCsv(allocator: std.mem.Allocator, labels_csv: ?[]const u8) ![]cons
     return list.toOwnedSlice(allocator);
 }
 
+const strings = @import("strings.zig");
+
 pub fn sanitizeNameForAlias(out: []u8, raw: []const u8) []const u8 {
-    // Similar to instance name sanitization but allow a bit longer.
-    const max_len: usize = @min(out.len, 48);
-    var n: usize = 0;
-    for (raw) |ch| {
-        if (n >= max_len) break;
-        const ok = (ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_' or ch == '-' or ch == '.';
-        out[n] = if (ok) ch else '_';
-        n += 1;
-    }
-    if (n == 0) {
-        out[0] = 'p';
-        out[1] = 'o';
-        out[2] = 'd';
-        return out[0..3];
-    }
-    return out[0..n];
+    return strings.sanitizeWithFallback(out, raw, 48, "pod");
 }

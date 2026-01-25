@@ -980,8 +980,13 @@ fn parseFloatStyle(runtime: *LuaRuntime, allocator: std.mem.Allocator) FloatStyl
     return result;
 }
 
-fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocator, default_name: []const u8) ?Segment {
-    const name = runtime.getStringAlloc(-1, "name") orelse allocator.dupe(u8, default_name) catch return null;
+fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocator, default_name: ?[]const u8) ?Segment {
+    const name = runtime.getStringAlloc(-1, "name") orelse blk: {
+        if (default_name) |dn| {
+            break :blk allocator.dupe(u8, dn) catch return null;
+        }
+        return null;
+    };
 
     return Segment{
         .name = name,
@@ -1061,23 +1066,7 @@ fn parseSegments(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const Seg
 }
 
 fn parseSegment(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?Segment {
-    const name = runtime.getStringAlloc(-1, "name") orelse return null;
-
-    return Segment{
-        .name = name,
-        .priority = lua_runtime.parseConstrainedInt(runtime, u8, -1, "priority", 1, 255, 50),
-        .outputs = parseOutputs(runtime, allocator),
-        .command = runtime.getStringAlloc(-1, "command"),
-        .when = parseWhenTable(runtime, allocator, true),
-        .spinner = parseSpinner(runtime, allocator),
-        .active_style = runtime.getStringAlloc(-1, "active_style") orelse "bg:1 fg:0",
-        .inactive_style = runtime.getStringAlloc(-1, "inactive_style") orelse "bg:237 fg:250",
-        .separator = runtime.getStringAlloc(-1, "separator") orelse " | ",
-        .separator_style = runtime.getStringAlloc(-1, "separator_style") orelse "fg:7",
-        .tab_title = runtime.getStringAlloc(-1, "tab_title") orelse "basename",
-        .left_arrow = runtime.getStringAlloc(-1, "left_arrow") orelse "",
-        .right_arrow = runtime.getStringAlloc(-1, "right_arrow") orelse "",
-    };
+    return parseSegmentWithDefaultName(runtime, allocator, null);
 }
 
 fn parseSpinner(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?SpinnerDef {
