@@ -2,6 +2,7 @@ const std = @import("std");
 
 const layout_mod = @import("layout.zig");
 const directions = @import("directions.zig");
+const float_util = @import("float_util.zig");
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
@@ -14,13 +15,7 @@ pub const FocusTarget = struct {
     float_index: ?usize,
 };
 
-fn isFloatRenderableOnTab(pane: *Pane, tab_idx: usize) bool {
-    if (!pane.isVisibleOnTab(tab_idx)) return false;
-    if (pane.parent_tab) |parent| {
-        return parent == tab_idx;
-    }
-    return true;
-}
+const isFloatRenderableOnTab = float_util.isFloatRenderableOnTab;
 
 pub fn focusDirectionAny(state: *State, dir: layout_mod.Layout.Direction, cursor: ?layout_mod.CursorPos) ?FocusTarget {
     // Universal focus navigation across splits and floats.

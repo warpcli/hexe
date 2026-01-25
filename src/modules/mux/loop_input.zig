@@ -386,9 +386,20 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 }
                 // Make sure it's not an actual escape sequence (like arrow keys).
                 if (next != '[' and next != 'O') {
-                    if (keybinds.handleKeyEvent(state, 1, .{ .char = next }, .press, false, false)) {
-                        i += 2;
-                        continue;
+                    // Check for Ctrl+Alt: ESC followed by control character (0x01-0x1a)
+                    if (next >= 0x01 and next <= 0x1a) {
+                        // Ctrl+Alt+letter: translate control char back to letter
+                        const letter = next + 'a' - 1;
+                        if (keybinds.handleKeyEvent(state, 3, .{ .char = letter }, .press, false, false)) {
+                            i += 2;
+                            continue;
+                        }
+                    } else {
+                        // Plain Alt+key
+                        if (keybinds.handleKeyEvent(state, 1, .{ .char = next }, .press, false, false)) {
+                            i += 2;
+                            continue;
+                        }
                     }
                 }
             }

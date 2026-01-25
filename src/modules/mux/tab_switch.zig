@@ -2,14 +2,9 @@ const std = @import("std");
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
+const float_util = @import("float_util.zig");
 
-fn isFloatRenderableOnTab(pane: *Pane, tab_idx: usize) bool {
-    if (!pane.isVisibleOnTab(tab_idx)) return false;
-    if (pane.parent_tab) |parent| {
-        return parent == tab_idx;
-    }
-    return true;
-}
+const isFloatRenderableOnTab = float_util.isFloatRenderableOnTab;
 
 fn restoreTabFocus(state: *State, old_uuid: ?[32]u8) void {
     // Restore float only if last focus kind was float.

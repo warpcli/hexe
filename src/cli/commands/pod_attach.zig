@@ -4,6 +4,7 @@ const ipc = core.ipc;
 const wire = core.wire;
 const pod_protocol = core.pod_protocol;
 const tty = @import("tty.zig");
+const shared = @import("shared.zig");
 
 
 const print = std.debug.print;
@@ -232,16 +233,4 @@ fn resolveTargetSocket(allocator: std.mem.Allocator, uuid: []const u8, name: []c
     return error.MissingTarget;
 }
 
-fn parseField(line: []const u8, key: []const u8) ?[]const u8 {
-    var pat_buf: [64]u8 = undefined;
-    if (key.len + 2 > pat_buf.len) return null;
-    pat_buf[0] = ' ';
-    @memcpy(pat_buf[1 .. 1 + key.len], key);
-    pat_buf[1 + key.len] = '=';
-    const pat = pat_buf[0 .. 2 + key.len];
-    const start = std.mem.indexOf(u8, line, pat) orelse return null;
-    const val_start = start + pat.len;
-    const rest = line[val_start..];
-    const end_rel = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
-    return rest[0..end_rel];
-}
+const parseField = shared.parseField;

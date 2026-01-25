@@ -143,18 +143,11 @@ const PodUplink = struct {
         var handshake: [17]u8 = undefined;
         handshake[0] = wire.SES_HANDSHAKE_POD_CTL;
         // Convert 32-char hex UUID to 16 binary bytes.
-        var i: usize = 0;
-        while (i < 16) : (i += 1) {
-            const hi: u8 = hexVal(self.uuid[i * 2]) orelse {
-                posix.close(fd);
-                return false;
-            };
-            const lo: u8 = hexVal(self.uuid[i * 2 + 1]) orelse {
-                posix.close(fd);
-                return false;
-            };
-            handshake[1 + i] = (hi << 4) | lo;
-        }
+        const uuid_bin = core.uuid.hexToBin(self.uuid) orelse {
+            posix.close(fd);
+            return false;
+        };
+        @memcpy(handshake[1..17], &uuid_bin);
         wire.writeAll(fd, &handshake) catch {
             posix.close(fd);
             return false;
@@ -169,13 +162,6 @@ const PodUplink = struct {
         debugLog("uplink disconnected", .{});
         if (self.fd) |fd| posix.close(fd);
         self.fd = null;
-    }
-
-    fn hexVal(ch: u8) ?u8 {
-        if (ch >= '0' and ch <= '9') return ch - '0';
-        if (ch >= 'a' and ch <= 'f') return ch - 'a' + 10;
-        if (ch >= 'A' and ch <= 'F') return ch - 'A' + 10;
-        return null;
     }
 };
 

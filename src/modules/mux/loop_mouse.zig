@@ -6,6 +6,7 @@ const input = @import("input.zig");
 const layout_mod = @import("layout.zig");
 const focus_nav = @import("focus_nav.zig");
 const float_title = @import("float_title.zig");
+const float_util = @import("float_util.zig");
 const mouse_selection = @import("mouse_selection.zig");
 const clipboard = @import("clipboard.zig");
 const statusbar = @import("statusbar.zig");
@@ -55,13 +56,7 @@ fn focusTarget(state: *State, target: FocusTarget) void {
     state.needs_render = true;
 }
 
-fn isFloatRenderableOnTab(pane: *Pane, tab_idx: usize) bool {
-    if (!pane.isVisibleOnTab(tab_idx)) return false;
-    if (pane.parent_tab) |parent| {
-        return parent == tab_idx;
-    }
-    return true;
-}
+const isFloatRenderableOnTab = float_util.isFloatRenderableOnTab;
 
 fn findFocusableAt(state: *State, x: u16, y: u16) ?FocusTarget {
     // Floats are topmost - check active first, then others in reverse.

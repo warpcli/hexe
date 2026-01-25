@@ -224,18 +224,11 @@ pub const Connection = struct {
 /// SCM_RIGHTS constant for passing file descriptors
 const SCM_RIGHTS: c_int = 1;
 
+const uuid_util = @import("uuid.zig");
+
 /// Generate a random UUID (16 bytes as hex string = 32 chars)
 pub fn generateUuid() [32]u8 {
-    var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
-
-    var hex: [32]u8 = undefined;
-    const hex_chars = "0123456789abcdef";
-    for (uuid, 0..) |byte, i| {
-        hex[i * 2] = hex_chars[byte >> 4];
-        hex[i * 2 + 1] = hex_chars[byte & 0x0f];
-    }
-    return hex;
+    return uuid_util.generateHex();
 }
 
 /// Pokemon names for session naming (Gen 1)

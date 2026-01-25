@@ -239,18 +239,12 @@ pub const Server = struct {
                     return;
                 };
                 // Convert 32-char hex to 16-byte session_id for lookup.
-                var session_id: [16]u8 = undefined;
-                var valid = true;
-                for (0..16) |idx| {
-                    const hi = hexVal(sid[idx * 2]);
-                    const lo = hexVal(sid[idx * 2 + 1]);
-                    if (hi == null or lo == null) { valid = false; break; }
-                    session_id[idx] = (hi.? << 4) | lo.?;
-                }
-                if (!valid) {
-                    // Try matching raw hex bytes against session_id.
-                    // Fall through to find client by matching sid directly.
-                }
+                const session_id = core.uuid.hexToBin(sid) orelse {
+                    // Invalid hex — close connection.
+                    var tmp = conn;
+                    tmp.close();
+                    return;
+                };
                 // Find client with matching session_id.
                 var found = false;
                 for (self.ses_state.clients.items) |*client| {
@@ -293,12 +287,7 @@ pub const Server = struct {
                     return;
                 };
                 // Convert 16 binary bytes → 32-char hex UUID key.
-                var uuid_hex: [32]u8 = undefined;
-                const hex_chars = "0123456789abcdef";
-                for (uuid_bin, 0..) |byte, i| {
-                    uuid_hex[i * 2] = hex_chars[byte >> 4];
-                    uuid_hex[i * 2 + 1] = hex_chars[byte & 0x0F];
-                }
+                const uuid_hex = core.uuid.binToHex(uuid_bin);
                 // Store fd in the pane's pod_ctl_fd.
                 if (self.ses_state.panes.getPtr(uuid_hex)) |pane| {
                     if (pane.pod_ctl_fd) |old_fd| {
@@ -641,18 +630,10 @@ pub const Server = struct {
         }
 
         // Convert 32-byte hex session_id to 16-byte binary.
-        var session_id: [16]u8 = undefined;
-        var valid = true;
-        for (0..16) |i| {
-            const hi = hexVal(reg.session_id[i * 2]);
-            const lo = hexVal(reg.session_id[i * 2 + 1]);
-            if (hi == null or lo == null) { valid = false; break; }
-            session_id[i] = (hi.? << 4) | lo.?;
-        }
-        if (!valid) {
+        const session_id = core.uuid.hexToBin(reg.session_id) orelse {
             self.sendBinaryError(fd, "register: invalid session_id hex");
             return;
-        }
+        };
 
         // Find or create client.
         const client_id = self.findClientForCtlFd(fd) orelse blk: {
@@ -991,18 +972,10 @@ pub const Server = struct {
         wire.readExact(fd, state_data) catch return;
 
         // Convert session_id hex to binary.
-        var session_id: [16]u8 = undefined;
-        var valid = true;
-        for (0..16) |i| {
-            const hi = hexVal(det.session_id[i * 2]);
-            const lo = hexVal(det.session_id[i * 2 + 1]);
-            if (hi == null or lo == null) { valid = false; break; }
-            session_id[i] = (hi.? << 4) | lo.?;
-        }
-        if (!valid) {
+        const session_id = core.uuid.hexToBin(det.session_id) orelse {
             self.sendBinaryError(fd, "invalid_session_id");
             return;
-        }
+        };
 
         const client_id = self.findClientForCtlFd(fd) orelse {
             self.sendBinaryError(fd, "no_client");
@@ -1343,13 +1316,6 @@ pub const Server = struct {
             pane.last_status = ex.status;
             self.ses_state.markDirty();
         }
-    }
-
-    fn hexVal(c: u8) ?u8 {
-        if (c >= '0' and c <= '9') return c - '0';
-        if (c >= 'a' and c <= 'f') return c - 'a' + 10;
-        if (c >= 'A' and c <= 'F') return c - 'A' + 10;
-        return null;
     }
 
     /// Handle a CLI tool request (handshake byte 0x04).
