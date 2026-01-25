@@ -12,6 +12,7 @@ pub const pod_protocol = @import("pod_protocol.zig");
 pub const pod_meta = @import("pod_meta.zig");
 pub const lua_runtime = @import("lua_runtime.zig");
 pub const uuid = @import("uuid.zig");
+pub const logging = @import("logging.zig");
 
 pub const LuaRuntime = lua_runtime.LuaRuntime;
 pub const ConfigStatus = lua_runtime.ConfigStatus;

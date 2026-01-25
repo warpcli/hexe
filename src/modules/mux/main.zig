@@ -142,7 +142,9 @@ pub fn run(mux_args: MuxArgs) !void {
     _ = c.setenv("HEXE_MUX_SOCKET", "1", 1);
 
     // Connect to ses daemon FIRST (start it if needed).
-    state.ses_client.connect() catch {};
+    state.ses_client.connect() catch |e| {
+        debugLog("ses connect failed: {s}", .{@errorName(e)});
+    };
     debugLog("ses connected (started={})", .{state.ses_client.just_started_daemon});
 
     // Show notification if we just started the daemon.

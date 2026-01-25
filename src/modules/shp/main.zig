@@ -266,16 +266,6 @@ fn renderDefaultPrompt(ctx: *segment.Context, is_right: bool, stdout: std.fs.Fil
     }
 }
 
-fn writeSegment(stdout: std.fs.File, seg: segment.Segment, is_zsh: bool) !void {
-    try writeStyleDirect(stdout, seg.style, is_zsh);
-    try stdout.writeAll(seg.text);
-    if (!seg.style.isEmpty()) {
-        if (is_zsh) try stdout.writeAll("%{");
-        try stdout.writeAll("\x1b[0m");
-        if (is_zsh) try stdout.writeAll("%}");
-    }
-}
-
 fn evalLuaWhen(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bool {
     // Provide ctx as a global table.
     runtime.lua.createTable(0, 6);
@@ -720,36 +710,6 @@ fn calcFormatWidth(format: []const u8, output: []const u8) u16 {
     return width;
 }
 
-fn runCommand(allocator: std.mem.Allocator, cmd: []const u8) ?[]const u8 {
-    _ = allocator;
-    // Use page_allocator - prompt is short-lived, OS will reclaim
-    const alloc = std.heap.page_allocator;
-    const result = std.process.Child.run(.{
-        .allocator = alloc,
-        .argv = &.{ "/bin/bash", "-c", cmd },
-    }) catch return null;
-    alloc.free(result.stderr);
-
-    // Check if command exited successfully
-    const exit_code = switch (result.term) {
-        .Exited => |code| code,
-        else => 1,
-    };
-    if (exit_code != 0) {
-        alloc.free(result.stdout);
-        return null;
-    }
-
-    // Trim trailing newline
-    const output = std.mem.trimRight(u8, result.stdout, "\n\r");
-    if (output.len == 0) {
-        alloc.free(result.stdout);
-        return null;
-    }
-
-    return output;
-}
-
 fn writeStyleDirect(stdout: std.fs.File, style: Style, is_zsh: bool) !void {
     if (style.isEmpty()) return;
 
@@ -874,16 +834,3 @@ fn writeFormat(stdout: std.fs.File, format: []const u8, output: []const u8) !voi
     }
 }
 
-fn checkCondition(cmd: []const u8) bool {
-    // Use bash for [[ ]] support
-    const result = std.process.Child.run(.{
-        .allocator = std.heap.page_allocator,
-        .argv = &.{ "/bin/bash", "-c", cmd },
-    }) catch return false;
-    defer std.heap.page_allocator.free(result.stdout);
-    defer std.heap.page_allocator.free(result.stderr);
-    return switch (result.term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
-}
