@@ -139,6 +139,10 @@ pub const Server = struct {
                                 }
                             }
                             if (client_id) |cid| self.ses_state.removeClient(cid);
+                            // Clean up any pending pop request for this mux fd.
+                            if (self.pending_pop_requests.fetchRemove(pfd.fd)) |kv| {
+                                posix.close(kv.value); // Close orphaned CLI fd
+                            }
                         }
                         posix.close(pfd.fd);
                         _ = poll_fds.orderedRemove(i);

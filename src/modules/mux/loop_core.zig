@@ -48,6 +48,12 @@ pub fn runMainLoop(state: *State) !void {
     const pane_sync_interval: i64 = 1000; // Sync pane info (CWD, process) every 1s
     const heartbeat_interval: i64 = 30000; // Send ping to SES every 30s
 
+    // Reusable lists for dead pane tracking (avoid per-iteration allocations).
+    var dead_splits: std.ArrayList(u16) = .empty;
+    defer dead_splits.deinit(allocator);
+    var dead_floating: std.ArrayList(usize) = .empty;
+    defer dead_floating.deinit(allocator);
+
     // Main loop.
     while (state.running) {
         // Clear skip flag from previous iteration.
@@ -265,8 +271,7 @@ pub fn runMainLoop(state: *State) !void {
         // NOTE: we do this before handling stdin/actions that can mutate the
         // layout, so pollfd indices remain consistent with the pane iteration.
         var idx: usize = 1;
-        var dead_splits: std.ArrayList(u16) = .empty;
-        defer dead_splits.deinit(allocator);
+        dead_splits.clearRetainingCapacity();
 
         pane_it = state.currentLayout().splitIterator();
         while (pane_it.next()) |pane| {
@@ -303,8 +308,7 @@ pub fn runMainLoop(state: *State) !void {
         }
 
         // Handle floating pane output.
-        var dead_floating: std.ArrayList(usize) = .empty;
-        defer dead_floating.deinit(allocator);
+        dead_floating.clearRetainingCapacity();
 
         for (state.floats.items, 0..) |pane, fi| {
             if (!pane.hasPollableFd()) continue;
