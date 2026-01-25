@@ -404,13 +404,17 @@ pub const SesState = struct {
                     } else {
                         // No session_id yet, just kill panes
                         for (client.pane_uuids.items) |uuid| {
-                            self.killPane(uuid) catch {};
+                            self.killPane(uuid) catch |e| {
+                                core.logging.logError("ses", "killPane failed in removeClient", e);
+                            };
                         }
                     }
                 } else {
                     // No keepalive: kill all panes
                     for (client.pane_uuids.items) |uuid| {
-                        self.killPane(uuid) catch {};
+                        self.killPane(uuid) catch |e| {
+                            core.logging.logError("ses", "killPane failed in removeClient", e);
+                        };
                     }
                 }
                 client.deinit();
@@ -459,7 +463,9 @@ pub const SesState = struct {
                             }
                         }
                     }
-                    self.killPane(uuid) catch {};
+                    self.killPane(uuid) catch |e| {
+                        core.logging.logError("ses", "killPane failed in shutdownClient", e);
+                    };
                 }
 
                 client.deinit();
@@ -1034,7 +1040,9 @@ pub const SesState = struct {
         }
 
         for (to_remove.items) |uuid| {
-            self.killPane(uuid) catch {};
+            self.killPane(uuid) catch |e| {
+                core.logging.logError("ses", "killPane failed in cleanupTimedOut", e);
+            };
         }
     }
 

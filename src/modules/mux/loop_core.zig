@@ -91,7 +91,9 @@ pub fn runMainLoop(state: *State) !void {
 
                     // Kill in ses (dead panes don't need to be orphaned).
                     if (state.ses_client.isConnected()) {
-                        state.ses_client.killPane(pane.uuid) catch {};
+                        state.ses_client.killPane(pane.uuid) catch |e| {
+                            core.logging.logError("mux", "killPane failed for float", e);
+                        };
                     }
 
                     pane.deinit();
@@ -409,7 +411,9 @@ pub fn runMainLoop(state: *State) !void {
 
             // Kill in ses (dead panes don't need to be orphaned).
             if (state.ses_client.isConnected()) {
-                state.ses_client.killPane(pane.uuid) catch {};
+                state.ses_client.killPane(pane.uuid) catch |e| {
+                    core.logging.logError("mux", "killPane failed for float", e);
+                };
             }
 
             pane.deinit();

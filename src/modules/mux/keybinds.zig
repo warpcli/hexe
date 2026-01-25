@@ -645,7 +645,9 @@ fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .tab_new => {
             state.active_floating = null;
-            state.createTab() catch {};
+            state.createTab() catch |e| {
+                core.logging.logError("mux", "createTab failed", e);
+            };
             state.needs_render = true;
             return true;
         },

@@ -290,7 +290,9 @@ pub fn run(args: PodArgs) !void {
     // Best-effort: write grep-friendly .meta sidecar for discovery.
     const created_at: i64 = std.time.timestamp();
     if (args.write_meta) {
-        writePodMetaSidecar(allocator, args.uuid, args.name, args.cwd, args.labels, @intCast(c.getpid()), pod.pty.child_pid, created_at) catch {};
+        writePodMetaSidecar(allocator, args.uuid, args.name, args.cwd, args.labels, @intCast(c.getpid()), pod.pty.child_pid, created_at) catch |e| {
+            core.logging.logError("pod", "writePodMetaSidecar failed", e);
+        };
     }
 
     var created_alias_path: ?[]const u8 = null;
@@ -316,7 +318,9 @@ pub fn run(args: PodArgs) !void {
 
     // Best-effort cleanup on exit.
     if (args.write_meta) {
-        deletePodMetaSidecar(allocator, args.uuid) catch {};
+        deletePodMetaSidecar(allocator, args.uuid) catch |e| {
+            core.logging.logError("pod", "deletePodMetaSidecar failed", e);
+        };
     }
     if (created_alias_path) |p| {
         std.fs.cwd().deleteFile(p) catch {};

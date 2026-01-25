@@ -74,7 +74,9 @@ pub const Server = struct {
             // Periodic persistence (best-effort)
             const now_ms = std.time.milliTimestamp();
             if (self.ses_state.dirty and now_ms - last_save >= 1000) {
-                @import("persist.zig").save(self.allocator, self.ses_state) catch {};
+                @import("persist.zig").save(self.allocator, self.ses_state) catch |e| {
+                    core.logging.logError("ses", "persist.save failed", e);
+                };
                 self.ses_state.dirty = false;
                 last_save = now_ms;
             }

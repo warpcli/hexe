@@ -102,7 +102,9 @@ pub fn closeCurrentTab(self: anytype) bool {
         if (fp.parent_tab) |parent| {
             if (parent == closing_tab) {
                 // Kill this tab-bound float.
-                self.ses_client.killPane(fp.uuid) catch {};
+                self.ses_client.killPane(fp.uuid) catch |e| {
+                    core.logging.logError("mux", "killPane failed in closeTab", e);
+                };
                 fp.deinit();
                 self.allocator.destroy(fp);
                 _ = self.floats.orderedRemove(i);
@@ -369,7 +371,9 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     }
 
     // Re-register with ses using restored UUID and session_name.
-    self.ses_client.updateSession(self.uuid, self.session_name) catch {};
+    self.ses_client.updateSession(self.uuid, self.session_name) catch |e| {
+        core.logging.logError("mux", "updateSession failed in restoreLayout", e);
+    };
 
     // Remember active tab/floating from the stored state.
     // We apply these after restoring tabs/floats so indices are valid.
