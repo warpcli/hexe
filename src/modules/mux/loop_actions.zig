@@ -646,3 +646,128 @@ pub fn createNamedFloat(state: *State, float_def: *const core.FloatDef, current_
     state.syncPaneAux(pane, parent_uuid);
     state.syncStateToSes();
 }
+
+const pop = @import("pop");
+
+/// Enter pane select mode - displays numbered labels on all panes.
+/// If swap is true, selecting a pane will swap it with the focused pane.
+/// If swap is false, selecting a pane will just focus it.
+pub fn enterPaneSelectMode(state: *State, swap: bool) void {
+    state.overlays.enterPaneSelectMode(swap);
+
+    // Generate labels for all visible panes
+    var label_idx: usize = 0;
+
+    // Add split panes from current layout
+    const layout = state.currentLayout();
+    var pane_iter = layout.splits.valueIterator();
+    while (pane_iter.next()) |pane_ptr| {
+        const pane = pane_ptr.*;
+        if (pop.overlay.labelForIndex(label_idx)) |label| {
+            state.overlays.addPaneLabel(
+                pane.uuid,
+                label,
+                pane.x,
+                pane.y,
+                pane.width,
+                pane.height,
+            );
+            label_idx += 1;
+        } else break;
+    }
+
+    // Add visible floats
+    for (state.floats.items) |pane| {
+        if (!pane.isVisibleOnTab(state.active_tab)) continue;
+        if (pane.parent_tab) |parent| {
+            if (parent != state.active_tab) continue;
+        }
+
+        if (pop.overlay.labelForIndex(label_idx)) |label| {
+            state.overlays.addPaneLabel(
+                pane.uuid,
+                label,
+                pane.x,
+                pane.y,
+                pane.width,
+                pane.height,
+            );
+            label_idx += 1;
+        } else break;
+    }
+
+    state.needs_render = true;
+}
+
+/// Focus a pane by UUID. Works for both split panes and floats.
+pub fn focusPaneByUuid(state: *State, uuid: [32]u8) void {
+    // Check floats first
+    for (state.floats.items, 0..) |pane, i| {
+        if (std.mem.eql(u8, &pane.uuid, &uuid)) {
+            if (!pane.isVisibleOnTab(state.active_tab)) continue;
+            if (pane.parent_tab) |parent| {
+                if (parent != state.active_tab) continue;
+            }
+
+            // Unfocus current
+            state.unfocusAllPanes();
+
+            // Focus this float
+            state.active_floating = i;
+            pane.focused = true;
+            state.syncPaneFocus(pane, null);
+            state.needs_render = true;
+            return;
+        }
+    }
+
+    // Check split panes in current layout
+    const layout = state.currentLayout();
+    var it = layout.splits.iterator();
+    while (it.next()) |entry| {
+        const pane = entry.value_ptr.*;
+        if (std.mem.eql(u8, &pane.uuid, &uuid)) {
+            // Unfocus current
+            state.unfocusAllPanes();
+
+            // Focus this split pane
+            state.active_floating = null;
+            layout.focused_split_id = entry.key_ptr.*;
+            pane.focused = true;
+            state.syncPaneFocus(pane, null);
+            state.needs_render = true;
+            return;
+        }
+    }
+}
+
+/// Handle input when pane select mode is active.
+/// Returns true if input was consumed.
+pub fn handlePaneSelectInput(state: *State, byte: u8) bool {
+    if (!state.overlays.isPaneSelectActive()) return false;
+
+    // ESC cancels
+    if (byte == 0x1b) {
+        state.overlays.exitPaneSelectMode();
+        state.needs_render = true;
+        return true;
+    }
+
+    // Check for valid label (1-9, a-z)
+    const label = if (byte >= 'A' and byte <= 'Z') byte + 32 else byte; // lowercase
+
+    if (state.overlays.findPaneByLabel(label)) |uuid| {
+        if (state.overlays.isPaneSelectSwapMode()) {
+            // TODO: Swap panes - for now just focus
+            focusPaneByUuid(state, uuid);
+        } else {
+            focusPaneByUuid(state, uuid);
+        }
+        state.overlays.exitPaneSelectMode();
+        state.needs_render = true;
+        return true;
+    }
+
+    // Invalid label - ignore but consume
+    return true;
+}

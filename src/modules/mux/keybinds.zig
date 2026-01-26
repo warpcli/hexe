@@ -18,7 +18,6 @@ pub const BindAction = core.Config.BindAction;
 const PaneQuery = core.PaneQuery;
 const FocusContext = @import("state.zig").FocusContext;
 
-
 pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
     if (state.active_floating) |idx| {
         const fpane = state.floats.items[idx];
@@ -553,6 +552,24 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
 
     // Normal press
     if (when == .press) {
+        // Hardcoded test: Ctrl+Alt+O toggles pane select mode (overlay test)
+        // mods: alt=1, ctrl=2 => 3
+        if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == 'o') {
+            if (state.overlays.isPaneSelectActive()) {
+                state.overlays.exitPaneSelectMode();
+            } else {
+                actions.enterPaneSelectMode(state, false);
+            }
+            return true;
+        }
+
+        // Hardcoded test: Ctrl+Alt+K toggles keycast mode (overlay test)
+        if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == 'k') {
+            state.overlays.toggleKeycast();
+            state.needs_render = true;
+            return true;
+        }
+
         if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |b| {
             return dispatchAction(state, b.action);
         }
@@ -603,6 +620,15 @@ fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .pane_adopt => {
             actions.startAdoptFlow(state);
+            return true;
+        },
+        .pane_select_mode => {
+            actions.enterPaneSelectMode(state, false);
+            return true;
+        },
+        .keycast_toggle => {
+            state.overlays.toggleKeycast();
+            state.needs_render = true;
             return true;
         },
         .split_h => {

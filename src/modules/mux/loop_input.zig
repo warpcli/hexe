@@ -22,6 +22,170 @@ const tab_switch = @import("tab_switch.zig");
 
 // Mouse helpers moved to loop_mouse.zig.
 
+/// Format raw input bytes for keycast display.
+/// Returns the number of bytes consumed and the formatted text.
+fn formatKeycastInput(inp: []const u8, buf: *[32]u8) struct { consumed: usize, text: []const u8 } {
+    if (inp.len == 0) return .{ .consumed = 0, .text = "" };
+
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+
+    const b = inp[0];
+
+    // ESC sequences
+    if (b == 0x1b) {
+        if (inp.len == 1) {
+            writer.writeAll("Esc") catch {};
+            return .{ .consumed = 1, .text = buf[0..stream.pos] };
+        }
+
+        const next = inp[1];
+
+        // CSI sequence: ESC [
+        if (next == '[' and inp.len >= 3) {
+            // Arrow keys: ESC [ A/B/C/D
+            if (inp[2] == 'A') {
+                writer.writeAll("Up") catch {};
+                return .{ .consumed = 3, .text = buf[0..stream.pos] };
+            }
+            if (inp[2] == 'B') {
+                writer.writeAll("Down") catch {};
+                return .{ .consumed = 3, .text = buf[0..stream.pos] };
+            }
+            if (inp[2] == 'C') {
+                writer.writeAll("Right") catch {};
+                return .{ .consumed = 3, .text = buf[0..stream.pos] };
+            }
+            if (inp[2] == 'D') {
+                writer.writeAll("Left") catch {};
+                return .{ .consumed = 3, .text = buf[0..stream.pos] };
+            }
+            if (inp[2] == 'H') {
+                writer.writeAll("Home") catch {};
+                return .{ .consumed = 3, .text = buf[0..stream.pos] };
+            }
+            if (inp[2] == 'F') {
+                writer.writeAll("End") catch {};
+                return .{ .consumed = 3, .text = buf[0..stream.pos] };
+            }
+            // Modified arrows: ESC [ 1 ; <mod> <dir>
+            if (inp.len >= 6 and inp[2] == '1' and inp[3] == ';') {
+                const mod = inp[4];
+                const dir = inp[5];
+                // mod: 2=Shift, 3=Alt, 4=Shift+Alt, 5=Ctrl, 6=Ctrl+Shift, 7=Ctrl+Alt, 8=Ctrl+Alt+Shift
+                if (mod == '3') writer.writeAll("A-") catch {};
+                if (mod == '5') writer.writeAll("C-") catch {};
+                if (mod == '7') writer.writeAll("C-A-") catch {};
+                const dir_name: []const u8 = switch (dir) {
+                    'A' => "Up",
+                    'B' => "Down",
+                    'C' => "Right",
+                    'D' => "Left",
+                    else => "?",
+                };
+                writer.writeAll(dir_name) catch {};
+                return .{ .consumed = 6, .text = buf[0..stream.pos] };
+            }
+            // Skip mouse sequences (ESC [ <)
+            if (inp[2] == '<') {
+                // Find end of mouse sequence
+                var j: usize = 3;
+                while (j < inp.len and j < 20) : (j += 1) {
+                    if (inp[j] == 'M' or inp[j] == 'm') {
+                        return .{ .consumed = j + 1, .text = "" }; // Don't show mouse events
+                    }
+                }
+                return .{ .consumed = inp.len, .text = "" };
+            }
+            // Other CSI - skip
+            return .{ .consumed = 3, .text = "" };
+        }
+
+        // SS3 sequence: ESC O (arrow keys on some terminals)
+        if (next == 'O' and inp.len >= 3) {
+            const dir_name: []const u8 = switch (inp[2]) {
+                'A' => "Up",
+                'B' => "Down",
+                'C' => "Right",
+                'D' => "Left",
+                'H' => "Home",
+                'F' => "End",
+                else => "",
+            };
+            if (dir_name.len > 0) {
+                writer.writeAll(dir_name) catch {};
+                return .{ .consumed = 3, .text = buf[0..stream.pos] };
+            }
+        }
+
+        // Alt+key: ESC <char>
+        if (next >= 0x20 and next < 0x7f) {
+            writer.writeAll("A-") catch {};
+            writer.writeByte(next) catch {};
+            return .{ .consumed = 2, .text = buf[0..stream.pos] };
+        }
+
+        // Ctrl+Alt+key: ESC <ctrl-char>
+        if (next >= 0x01 and next <= 0x1a) {
+            writer.writeAll("C-A-") catch {};
+            writer.writeByte(next + 'a' - 1) catch {};
+            return .{ .consumed = 2, .text = buf[0..stream.pos] };
+        }
+
+        writer.writeAll("Esc") catch {};
+        return .{ .consumed = 1, .text = buf[0..stream.pos] };
+    }
+
+    // Control characters
+    if (b < 0x20) {
+        if (b == 0x0d) {
+            writer.writeAll("Enter") catch {};
+        } else if (b == 0x09) {
+            writer.writeAll("Tab") catch {};
+        } else if (b == 0x08) {
+            writer.writeAll("Bksp") catch {};
+        } else {
+            writer.writeAll("C-") catch {};
+            writer.writeByte(b + 'a' - 1) catch {};
+        }
+        return .{ .consumed = 1, .text = buf[0..stream.pos] };
+    }
+
+    // Backspace/Delete
+    if (b == 0x7f) {
+        writer.writeAll("Bksp") catch {};
+        return .{ .consumed = 1, .text = buf[0..stream.pos] };
+    }
+
+    // Printable ASCII
+    if (b >= 0x20 and b < 0x7f) {
+        writer.writeByte(b) catch {};
+        return .{ .consumed = 1, .text = buf[0..stream.pos] };
+    }
+
+    // UTF-8 multi-byte - just show first byte as hex for now
+    std.fmt.format(writer, "0x{x:0>2}", .{b}) catch {};
+    return .{ .consumed = 1, .text = buf[0..stream.pos] };
+}
+
+/// Record input for keycast if enabled
+fn recordKeycastInput(state: *State, inp: []const u8) void {
+    if (!state.overlays.isKeycastEnabled()) return;
+    if (inp.len == 0) return;
+
+    var i: usize = 0;
+    while (i < inp.len) {
+        var buf: [32]u8 = undefined;
+        const result = formatKeycastInput(inp[i..], &buf);
+        if (result.text.len > 0) {
+            state.overlays.recordKeypress(result.text);
+            state.needs_render = true;
+        }
+        if (result.consumed == 0) break;
+        i += result.consumed;
+    }
+}
+
 fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
     input_csi_u.forwardSanitizedToFocusedPane(state, bytes);
 }
@@ -124,6 +288,9 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     // Don't process (or forward) partial escape sequences.
     const stable = stashIncompleteEscapeTail(state, slice);
     if (stable.len == 0) return;
+
+    // Record all input for keycast display (before any processing)
+    recordKeycastInput(state, stable);
 
     {
         const inp = stable;
@@ -279,6 +446,19 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 loop_ipc.sendPopResponse(state);
             }
             state.needs_render = true;
+            return;
+        }
+
+        // ==========================================================================
+        // LEVEL 2.5: Pane select mode - captures all input
+        // ==========================================================================
+        if (state.overlays.isPaneSelectActive()) {
+            // Handle each byte - looking for ESC or label characters
+            for (inp) |byte| {
+                if (actions.handlePaneSelectInput(state, byte)) {
+                    // Input was consumed
+                }
+            }
             return;
         }
 

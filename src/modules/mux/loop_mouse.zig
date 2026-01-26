@@ -218,6 +218,8 @@ fn beginFloatMove(state: *State, pane: *Pane, start_x: u16, start_y: u16) void {
 
 fn beginFloatResize(state: *State, pane: *Pane, edge_mask: u8, start_x: u16, start_y: u16) void {
     state.mouse_drag = .{ .float_resize = .{ .uuid = pane.uuid, .edge_mask = edge_mask, .start_x = start_x, .start_y = start_y, .orig_x = pane.border_x, .orig_y = pane.border_y, .orig_w = pane.border_w, .orig_h = pane.border_h } };
+    // Show resize info overlay
+    state.overlays.showResizeInfo(pane.uuid, pane.width, pane.height, pane.border_x, pane.border_y);
 }
 
 fn updateFloatMove(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const State.MouseDragFloatMove) void {
@@ -334,6 +336,9 @@ fn updateFloatResize(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const 
     state.renderer.invalidate();
     state.force_full_render = true;
     state.needs_render = true;
+
+    // Update resize info overlay with new dimensions
+    state.overlays.showResizeInfo(pane.uuid, pane.width, pane.height, pane.border_x, pane.border_y);
 }
 
 pub fn handle(state: *State, ev: input.MouseEvent) bool {
@@ -401,6 +406,8 @@ pub fn handle(state: *State, ev: input.MouseEvent) bool {
             if (is_wheel) return true;
             if (ev.is_release) {
                 state.mouse_drag = .none;
+                state.overlays.hideResizeInfo();
+                state.needs_render = true;
                 state.syncStateToSes();
                 return true;
             }

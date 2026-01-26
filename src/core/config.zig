@@ -289,6 +289,8 @@ pub const Config = struct {
         mux_detach,
         pane_disown,
         pane_adopt,
+        pane_select_mode,
+        keycast_toggle,
         split_h,
         split_v,
         split_resize,
@@ -306,6 +308,8 @@ pub const Config = struct {
         mux_detach,
         pane_disown,
         pane_adopt,
+        pane_select_mode, // enter pane select mode (focus or swap)
+        keycast_toggle, // toggle keycast overlay
         split_h,
         split_v,
         split_resize: BindKeyKind, // up/down/left/right (resize divider)
@@ -698,6 +702,8 @@ fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction
     if (std.mem.eql(u8, action_type, "mux.detach")) return .mux_detach;
     if (std.mem.eql(u8, action_type, "pane.disown")) return .pane_disown;
     if (std.mem.eql(u8, action_type, "pane.adopt")) return .pane_adopt;
+    if (std.mem.eql(u8, action_type, "pane.select_mode")) return .pane_select_mode;
+    if (std.mem.eql(u8, action_type, "overlay.keycast_toggle")) return .keycast_toggle;
     if (std.mem.eql(u8, action_type, "split.h")) return .split_h;
     if (std.mem.eql(u8, action_type, "split.v")) return .split_v;
     if (std.mem.eql(u8, action_type, "tab.new")) return .tab_new;
@@ -737,6 +743,8 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     if (std.mem.eql(u8, action, "mux.detach")) return .mux_detach;
     if (std.mem.eql(u8, action, "pane.disown")) return .pane_disown;
     if (std.mem.eql(u8, action, "pane.adopt")) return .pane_adopt;
+    if (std.mem.eql(u8, action, "pane.select_mode")) return .pane_select_mode;
+    if (std.mem.eql(u8, action, "overlay.keycast_toggle")) return .keycast_toggle;
     if (std.mem.eql(u8, action, "split.h")) return .split_h;
     if (std.mem.eql(u8, action, "split.v")) return .split_v;
     if (std.mem.eql(u8, action, "tab.new")) return .tab_new;

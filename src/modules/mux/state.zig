@@ -22,6 +22,8 @@ const OrphanedPaneInfo = ses_client.OrphanedPaneInfo;
 const notification = @import("notification.zig");
 const NotificationManager = notification.NotificationManager;
 
+const OverlayManager = pop.overlay.OverlayManager;
+
 const Pane = @import("pane.zig").Pane;
 
 const BindKey = core.Config.BindKey;
@@ -124,6 +126,7 @@ pub const State = struct {
     renderer: Renderer,
     ses_client: SesClient,
     notifications: NotificationManager,
+    overlays: OverlayManager,
     popups: pop.PopupManager,
     pending_action: ?PendingAction,
     exit_from_shell_death: bool,
@@ -225,6 +228,7 @@ pub const State = struct {
             .renderer = try Renderer.init(allocator, width, height),
             .ses_client = SesClient.init(allocator, uuid, session_name, true, debug, log_file),
             .notifications = NotificationManager.initWithPopConfig(allocator, pop_cfg.carrier.notification),
+            .overlays = OverlayManager.init(allocator),
             .popups = pop.PopupManager.init(allocator),
             .pending_action = null,
             .exit_from_shell_death = false,
@@ -365,6 +369,7 @@ pub const State = struct {
         self.renderer.deinit();
         self.ses_client.deinit();
         self.notifications.deinit();
+        self.overlays.deinit();
         self.popups.deinit();
         var req_it = self.pending_float_requests.iterator();
         while (req_it.next()) |entry| {

@@ -7,6 +7,7 @@ const popup_render = @import("popup_render.zig");
 const borders = @import("borders.zig");
 const mouse_selection = @import("mouse_selection.zig");
 const float_title = @import("float_title.zig");
+const overlay_render = @import("overlay_render.zig");
 
 pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     const renderer = &state.renderer;
@@ -115,6 +116,31 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     // Draw status bar if enabled.
     if (state.config.tabs.status.enabled) {
         statusbar.draw(renderer, state, state.allocator, &state.config, state.term_width, state.term_height, state.tabs, state.active_tab, state.session_name);
+    }
+
+    // Draw overlays (dimming, pane labels, resize info, keycast)
+    if (state.overlays.hasContent() or state.overlays.shouldDim()) {
+        // Get focused pane bounds to exclude from dimming
+        // For floats: use border dimensions + shadow (1 cell right/bottom)
+        const focused_bounds: ?overlay_render.Bounds = blk: {
+            if (state.active_floating) |idx| {
+                if (idx < state.floats.items.len) {
+                    const fp = state.floats.items[idx];
+                    // Include border + 1 for shadow
+                    break :blk .{
+                        .x = fp.border_x,
+                        .y = fp.border_y,
+                        .w = fp.border_w + 1, // shadow right
+                        .h = fp.border_h + 1, // shadow bottom
+                    };
+                }
+            }
+            if (state.currentLayout().getFocusedPane()) |p| {
+                break :blk .{ .x = p.x, .y = p.y, .w = p.width, .h = p.height };
+            }
+            break :blk null;
+        };
+        overlay_render.renderOverlays(renderer, &state.overlays, state.term_width, state.term_height, state.status_height, focused_bounds);
     }
 
     // Draw TAB realm notifications (center of screen, below MUX).

@@ -502,6 +502,11 @@ pub fn runMainLoop(state: *State) !void {
             state.needs_render = true;
         }
 
+        // Update overlays (expire info overlays, keycast entries).
+        if (state.overlays.update()) {
+            state.needs_render = true;
+        }
+
         // Update MUX realm popups (check for timeout).
         const mux_popup_changed = state.popups.update();
         if (mux_popup_changed) {
