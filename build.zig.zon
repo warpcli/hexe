@@ -1,6 +1,6 @@
 .{
     .name = .hexa,
-    .version = "0.0.1",
+    .version = "0.0.2",
     .paths = .{
         "build.zig",
         "build.zig.zon",
@@ -11,8 +11,8 @@
     },
     .dependencies = .{
         .ghostty = .{
-            .url = "git+https://github.com/ghostty-org/ghostty#01ea3744c59af4d973e96c5cce2fe8d4aa485e59",
-            .hash = "ghostty-1.3.0-dev-5UdBCztHSQTgA1VZa_mg8qFdLnXQJc3gWhsAgO6ZMybK",
+            .url = "git+https://github.com/ghostty-org/ghostty#4e17eee5dea3d67aa9b0fec56be7f461c496ffe4",
+            .hash = "ghostty-1.3.0-dev-5UdBCw7QSATpenpLhfop3klSjURk7Aj_yT7u0yPXmgpQ",
         },
         .argonaut = .{
             .url = "git+https://codeberg.org/OhMyDitzzy/argonaut#1d8779fe017aa7fd33774bf86c30d239a080d199",
