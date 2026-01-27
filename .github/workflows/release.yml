@@ -39,7 +39,7 @@ jobs:
 
       - name: Build binary
         env:
-          GITHUB_REF: refs/tags/${{ github.event.release.tag_name }}
+          GITHUB_REF: refs/heads/main
         run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }} -freference-trace=10
 
       - name: Prepare artifact
