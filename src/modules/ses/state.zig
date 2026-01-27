@@ -280,6 +280,7 @@ pub const SesState = struct {
     detached_sessions: std.AutoHashMap([16]u8, DetachedMuxState),
     next_client_id: usize,
     orphan_timeout_hours: u32,
+    detached_session_ttl_hours: u32,
     dirty: bool,
 
     // Binary protocol state (Phase 3+4)
@@ -299,6 +300,7 @@ pub const SesState = struct {
             .detached_sessions = std.AutoHashMap([16]u8, DetachedMuxState).init(page_alloc),
             .next_client_id = 1,
             .orphan_timeout_hours = 24,
+            .detached_session_ttl_hours = 168, // 7 days
             .dirty = false,
             .pane_id_to_pod_vt = std.AutoHashMap(u16, posix.fd_t).init(page_alloc),
             .pod_vt_to_pane_id = std.AutoHashMap(posix.fd_t, u16).init(page_alloc),
@@ -1117,6 +1119,42 @@ pub const SesState = struct {
             self.killPane(uuid) catch |e| {
                 core.logging.logError("ses", "killPane failed in cleanupTimedOut", e);
             };
+        }
+    }
+
+    /// Clean up expired detached sessions (TTL enforcement)
+    pub fn cleanupExpiredDetachedSessions(self: *SesState) void {
+        if (self.detached_session_ttl_hours == 0) return; // 0 = disabled
+
+        const now = std.time.timestamp();
+        const ttl_secs = @as(i64, @intCast(self.detached_session_ttl_hours)) * 3600;
+
+        var to_remove: std.ArrayList([16]u8) = .empty;
+        defer to_remove.deinit(self.allocator);
+
+        var iter = self.detached_sessions.iterator();
+        while (iter.next()) |entry| {
+            const session = entry.value_ptr;
+            if (now - session.detached_at > ttl_secs) {
+                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
+            }
+        }
+
+        for (to_remove.items) |session_id| {
+            // Remove session from detached_sessions map
+            if (self.detached_sessions.fetchRemove(session_id)) |kv| {
+                var session_state = kv.value;
+
+                // Kill all panes in the session
+                for (session_state.pane_uuids) |pane_uuid| {
+                    self.killPane(pane_uuid) catch |e| {
+                        core.logging.logError("ses", "killPane failed in cleanupExpiredSessions", e);
+                    };
+                }
+
+                session_state.deinit();
+                self.dirty = true;
+            }
         }
     }
 

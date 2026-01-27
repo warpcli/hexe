@@ -587,7 +587,7 @@ pub fn handle(state: *State, ev: input.MouseEvent) bool {
 
                 var click_count: u8 = 1;
                 if (same_pane and within_time and within_dist) {
-                    click_count = @min(@as(u8, 3), state.mouse_click_count + 1);
+                    click_count = @min(@as(u8, 4), state.mouse_click_count + 1);
                 }
                 state.mouse_click_last_ms = now_ms;
                 state.mouse_click_count = click_count;
@@ -596,6 +596,7 @@ pub fn handle(state: *State, ev: input.MouseEvent) bool {
                 state.mouse_click_last_y = local.y;
 
                 if (click_count == 2) {
+                    // Double-click: select word (stops at separators)
                     if (mouse_selection.selectWordRange(t.pane, local.x, local.y)) |range| {
                         state.mouse_selection.setRange(state.active_tab, t.pane.uuid, t.pane, range);
                         const bytes = mouse_selection.extractText(state.allocator, t.pane, range) catch {
@@ -614,6 +615,26 @@ pub fn handle(state: *State, ev: input.MouseEvent) bool {
                         return true;
                     }
                 } else if (click_count == 3) {
+                    // Triple-click: select word including adjacent separators
+                    if (mouse_selection.selectWordWithSeparatorsRange(t.pane, local.x, local.y)) |range| {
+                        state.mouse_selection.setRange(state.active_tab, t.pane.uuid, t.pane, range);
+                        const bytes = mouse_selection.extractText(state.allocator, t.pane, range) catch {
+                            state.notifications.showFor("Copy failed", 1200);
+                            state.needs_render = true;
+                            return true;
+                        };
+                        defer state.allocator.free(bytes);
+                        if (bytes.len == 0) {
+                            state.notifications.showFor("No text selected", 1200);
+                        } else {
+                            clipboard.copyToClipboard(state.allocator, bytes);
+                            state.notifications.showFor("Copied selection", 1200);
+                        }
+                        state.needs_render = true;
+                        return true;
+                    }
+                } else if (click_count == 4) {
+                    // Quad-click: select entire line
                     if (mouse_selection.selectLineRange(t.pane, local.x, local.y)) |range| {
                         state.mouse_selection.setRange(state.active_tab, t.pane.uuid, t.pane, range);
                         const bytes = mouse_selection.extractText(state.allocator, t.pane, range) catch {

@@ -291,12 +291,33 @@ pub fn extractText(allocator: std.mem.Allocator, pane: *Pane, range: BufRange) !
     return dupeTrimBlankLines(allocator, slice);
 }
 
+/// Standard word separators for terminal word selection
+const word_separators = [_]u21{
+    ' ',  '\t', '\n', '\r', // Whitespace
+    '\'', '"',  '`',        // Quotes
+    '(',  ')',  '[',  ']', '{', '}', '<', '>', // Brackets
+    ',',  ';',  ':',  '!', '?', '.', // Punctuation
+    '/',  '\\', '|',  '&', // Path/operators
+    '=',  '+',  '-',  '*', '%', '^', '~', '#', '@', '$', // Operators/special
+};
+
 /// Select the word under the given viewport-local coordinate.
 pub fn selectWordRange(pane: *Pane, local_x: u16, local_y: u16) ?BufRange {
     const screen = pane.vt.terminal.screens.active;
     const pages = &screen.pages;
     const pin = pages.pin(.{ .viewport = .{ .x = @intCast(local_x), .y = local_y } }) orelse return null;
-    const sel = screen.selectWord(pin, &[_]u21{}) orelse return null;
+    const sel = screen.selectWord(pin, &word_separators) orelse return null;
+    return bufRangeFromSelection(screen, sel);
+}
+
+/// Select word including adjacent separators (triple-click behavior).
+/// Uses whitespace-only separators so punctuation/symbols are included.
+pub fn selectWordWithSeparatorsRange(pane: *Pane, local_x: u16, local_y: u16) ?BufRange {
+    const whitespace_only = [_]u21{ ' ', '\t', '\n', '\r' };
+    const screen = pane.vt.terminal.screens.active;
+    const pages = &screen.pages;
+    const pin = pages.pin(.{ .viewport = .{ .x = @intCast(local_x), .y = local_y } }) orelse return null;
+    const sel = screen.selectWord(pin, &whitespace_only) orelse return null;
     return bufRangeFromSelection(screen, sel);
 }
 

@@ -104,6 +104,7 @@ pub const Server = struct {
             if (ready == 0) {
                 // Timeout - do periodic cleanup
                 self.ses_state.cleanupOrphanedPanes();
+                self.ses_state.cleanupExpiredDetachedSessions();
                 continue;
             }
 
