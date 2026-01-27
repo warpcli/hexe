@@ -399,7 +399,7 @@ pub fn draw(
             ctx.float_global = fp.parent_tab == null;
 
             if (fp.float_key != 0) {
-                if (state.config.getFloatByKey(fp.float_key)) |fd| {
+                if (state.getLayoutFloatByKey(fp.float_key)) |fd| {
                     ctx.float_destroyable = fd.attributes.destroy;
                     ctx.float_exclusive = fd.attributes.exclusive;
                     ctx.float_per_cwd = fd.attributes.per_cwd;

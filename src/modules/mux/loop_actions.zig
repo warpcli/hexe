@@ -310,7 +310,7 @@ pub fn performAdopt(state: *State, orphan_uuid: [32]u8, destroy_current: bool) v
     state.needs_render = true;
 }
 
-pub fn toggleNamedFloat(state: *State, float_def: *const core.FloatDef) void {
+pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) void {
     // Get current directory from focused pane (for pwd floats).
     // Use refreshPaneCwd which queries ses for pod panes.
     var current_dir: ?[]const u8 = null;
@@ -521,7 +521,7 @@ pub fn createAdhocFloat(
     return pane.uuid;
 }
 
-pub fn createNamedFloat(state: *State, float_def: *const core.FloatDef, current_dir: ?[]const u8, parent_uuid: ?[32]u8) !void {
+pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, current_dir: ?[]const u8, parent_uuid: ?[32]u8) !void {
     const pane = try state.allocator.create(Pane);
     errdefer state.allocator.destroy(pane);
 

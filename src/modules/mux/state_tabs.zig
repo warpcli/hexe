@@ -148,7 +148,7 @@ pub fn adoptStickyPanes(self: anytype) void {
     const cwd = std.posix.getcwd(&cwd_buf) catch return;
 
     // Check each float definition for sticky floats.
-    for (self.config.floats) |*float_def| {
+    for (self.active_layout_floats) |*float_def| {
         if (!float_def.attributes.sticky) continue;
 
         // Try to find a sticky pane in ses matching this directory + key.
@@ -162,7 +162,7 @@ pub fn adoptStickyPanes(self: anytype) void {
 }
 
 /// Adopt a pane from ses as a float with given float definition.
-pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const core.FloatDef, cwd: []const u8) !void {
+pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const core.LayoutFloatDef, cwd: []const u8) !void {
     const pane = try self.allocator.create(Pane);
     errdefer self.allocator.destroy(pane);
 
@@ -518,7 +518,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 // These are config pointers that can't be serialized, so we look
                 // up the FloatDef by the restored float_key.
                 if (pane.float_key != 0) {
-                    if (self.config.getFloatByKey(pane.float_key)) |float_def| {
+                    if (self.getLayoutFloatByKey(pane.float_key)) |float_def| {
                         const style = if (float_def.style) |*s| s else if (self.config.float_style_default) |*s| s else null;
                         if (style) |s| {
                             pane.float_style = s;

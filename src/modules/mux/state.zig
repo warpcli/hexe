@@ -67,6 +67,14 @@ pub const PaneProcInfo = struct {
 };
 
 pub const State = struct {
+
+    /// Get float definition by key from active layout
+    pub fn getLayoutFloatByKey(self: *const State, key: u8) ?*const core.LayoutFloatDef {
+        for (self.active_layout_floats) |*f| {
+            if (f.key == key) return f;
+        }
+        return null;
+    }
     pub const MouseDragSplitResize = struct {
         split: *layout_mod.LayoutNode.Split,
         dir: layout_mod.SplitDir,
@@ -105,6 +113,8 @@ pub const State = struct {
     allocator: std.mem.Allocator,
     config: core.Config,
     pop_config: pop.PopConfig,
+    ses_config: core.SesConfig,
+    active_layout_floats: []const core.LayoutFloatDef,
     tabs: std.ArrayList(Tab),
     active_tab: usize,
     /// Per-tab remembered floating focus (by pane UUID).
@@ -200,6 +210,17 @@ pub const State = struct {
     pub fn init(allocator: std.mem.Allocator, width: u16, height: u16, debug: bool, log_file: ?[]const u8) !State {
         const cfg = core.Config.load(allocator);
         const pop_cfg = pop.PopConfig.load(allocator);
+        const ses_cfg = core.SesConfig.load(allocator);
+
+        // Find enabled layout's floats
+        var layout_floats: []const core.LayoutFloatDef = &[_]core.LayoutFloatDef{};
+        for (ses_cfg.layouts) |*layout| {
+            if (layout.enabled) {
+                layout_floats = layout.floats;
+                break;
+            }
+        }
+
         const status_h: u16 = if (cfg.tabs.status.enabled) 1 else 0;
         const layout_h = height - status_h;
 
@@ -210,6 +231,8 @@ pub const State = struct {
             .allocator = allocator,
             .config = cfg,
             .pop_config = pop_cfg,
+            .ses_config = ses_cfg,
+            .active_layout_floats = layout_floats,
             .tabs = .empty,
             .active_tab = 0,
             .tab_last_floating_uuid = .empty,
@@ -365,6 +388,8 @@ pub const State = struct {
         self.tab_last_floating_uuid.deinit(self.allocator);
         self.tab_last_focus_kind.deinit(self.allocator);
         self.config.deinit();
+        var ses_cfg = self.ses_config;
+        ses_cfg.deinit(self.allocator);
         self.osc_reply_buf.deinit(self.allocator);
         self.renderer.deinit();
         self.ses_client.deinit();
@@ -433,7 +458,7 @@ pub const State = struct {
         return state_tabs.adoptStickyPanes(self);
     }
 
-    pub fn adoptAsFloat(self: *State, uuid: [32]u8, pane_id: u16, float_def: *const core.FloatDef, cwd: []const u8) !void {
+    pub fn adoptAsFloat(self: *State, uuid: [32]u8, pane_id: u16, float_def: *const core.LayoutFloatDef, cwd: []const u8) !void {
         return state_tabs.adoptAsFloat(self, uuid, pane_id, float_def, cwd);
     }
 

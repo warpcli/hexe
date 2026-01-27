@@ -96,7 +96,7 @@ fn buildPaneQuery(state: *State) PaneQuery {
             float_sticky = p.sticky;
             // Look up float def for other attributes.
             if (float_key != 0) {
-                if (state.config.getFloatByKey(float_key)) |fd| {
+                if (state.getLayoutFloatByKey(float_key)) |fd| {
                     float_exclusive = fd.attributes.exclusive;
                     float_per_cwd = fd.attributes.per_cwd;
                     float_global = fd.attributes.global or fd.attributes.per_cwd;
@@ -773,7 +773,7 @@ fn dispatchAction(state: *State, action: BindAction) bool {
             return true;
         },
         .float_toggle => |fk| {
-            if (cfg.getFloatByKey(fk)) |float_def| {
+            if (state.getLayoutFloatByKey(fk)) |float_def| {
                 actions.toggleNamedFloat(state, float_def);
                 state.needs_render = true;
                 return true;

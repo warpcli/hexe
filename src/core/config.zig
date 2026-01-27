@@ -249,6 +249,149 @@ pub const NotificationConfig = struct {
 /// Panes configuration (placeholder for future use)
 pub const PanesConfig = struct {};
 
+// ===== Layout definitions for ses section =====
+
+/// Single pane in a layout
+pub const LayoutPaneDef = struct {
+    cwd: ?[]const u8 = null,
+    command: ?[]const u8 = null,
+
+    pub fn deinit(self: *LayoutPaneDef, allocator: std.mem.Allocator) void {
+        if (self.cwd) |c| allocator.free(@constCast(c));
+        if (self.command) |c| allocator.free(@constCast(c));
+    }
+};
+
+/// Split or pane (recursive definition)
+pub const LayoutSplitDef = union(enum) {
+    pane: LayoutPaneDef,
+    split: struct {
+        dir: []const u8, // "h" or "v"
+        ratio: f32 = 0.5,
+        first: *LayoutSplitDef,
+        second: *LayoutSplitDef,
+    },
+
+    pub fn deinit(self: *LayoutSplitDef, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .pane => |*p| {
+                var pane = @constCast(p);
+                pane.deinit(allocator);
+            },
+            .split => |*s| {
+                allocator.free(@constCast(s.dir));
+                s.first.deinit(allocator);
+                allocator.destroy(s.first);
+                s.second.deinit(allocator);
+                allocator.destroy(s.second);
+            },
+        }
+    }
+};
+
+/// Tab in a layout
+pub const LayoutTabDef = struct {
+    name: []const u8,
+    enabled: bool = true,
+    root: ?LayoutSplitDef = null,
+
+    pub fn deinit(self: *LayoutTabDef, allocator: std.mem.Allocator) void {
+        allocator.free(@constCast(self.name));
+        if (self.root) |*r| {
+            var root = @constCast(r);
+            root.deinit(allocator);
+        }
+    }
+};
+
+/// Float in a layout (includes all FloatDef fields + enabled)
+pub const LayoutFloatDef = struct {
+    enabled: bool = true,
+    key: u8,
+    command: ?[]const u8 = null,
+    title: ?[]const u8 = null,
+    attributes: FloatAttributes = .{},
+    width_percent: ?u8 = null,
+    height_percent: ?u8 = null,
+    pos_x: ?u8 = null,
+    pos_y: ?u8 = null,
+    padding_x: ?u8 = null,
+    padding_y: ?u8 = null,
+    color: ?BorderColor = null,
+    style: ?FloatStyle = null,
+
+    pub fn deinit(self: *LayoutFloatDef, allocator: std.mem.Allocator) void {
+        if (self.command) |c| allocator.free(@constCast(c));
+        if (self.title) |t| allocator.free(@constCast(t));
+        // TODO: style.module cleanup if needed
+    }
+};
+
+/// Full layout definition
+pub const LayoutDef = struct {
+    name: []const u8,
+    enabled: bool = false,
+    tabs: []LayoutTabDef = &[_]LayoutTabDef{},
+    floats: []LayoutFloatDef = &[_]LayoutFloatDef{},
+
+    pub fn deinit(self: *LayoutDef, allocator: std.mem.Allocator) void {
+        allocator.free(@constCast(self.name));
+        for (self.tabs) |*tab| {
+            var t = @constCast(tab);
+            t.deinit(allocator);
+        }
+        if (self.tabs.len > 0) {
+            allocator.free(self.tabs);
+        }
+        for (self.floats) |*float| {
+            var f = @constCast(float);
+            f.deinit(allocator);
+        }
+        if (self.floats.len > 0) {
+            allocator.free(self.floats);
+        }
+    }
+};
+
+/// Ses configuration
+pub const SesConfig = struct {
+    layouts: []LayoutDef = &[_]LayoutDef{},
+
+    pub fn deinit(self: *SesConfig, allocator: std.mem.Allocator) void {
+        for (self.layouts) |*layout| {
+            var l = @constCast(layout);
+            l.deinit(allocator);
+        }
+        if (self.layouts.len > 0) {
+            allocator.free(self.layouts);
+        }
+    }
+
+    pub fn load(allocator: std.mem.Allocator) SesConfig {
+        var config = SesConfig{};
+
+        var runtime = LuaRuntime.init(allocator) catch return config;
+        defer runtime.deinit();
+
+        // Set section to "ses"
+        runtime.setHexeSection("ses");
+
+        // Load global config
+        const config_path = lua_runtime.getConfigPath(allocator, "config.lua") catch return config;
+        defer allocator.free(config_path);
+
+        runtime.loadConfig(config_path) catch return config;
+
+        // Access the "ses" section
+        if (runtime.pushTable(-1, "ses")) {
+            parseSesConfig(&runtime, &config, allocator);
+            runtime.pop();
+        }
+
+        return config;
+    }
+};
+
 pub const Config = struct {
     pub const KeyMod = enum {
         alt,
@@ -392,9 +535,6 @@ pub const Config = struct {
     float_color: BorderColor = .{},
     float_style_default: ?FloatStyle = null,
 
-    // Named floats
-    floats: []FloatDef = &[_]FloatDef{},
-
     // Splits
     splits: SplitsConfig = .{},
 
@@ -474,25 +614,7 @@ pub const Config = struct {
                 }
                 alloc.free(self.input.binds);
             }
-            for (self.floats) |f| {
-                if (f.command) |cmd| {
-                    alloc.free(cmd);
-                }
-                if (f.title) |t| {
-                    alloc.free(t);
-                }
-            }
-            if (self.floats.len > 0) {
-                alloc.free(self.floats);
-            }
         }
-    }
-
-    pub fn getFloatByKey(self: *const Config, key: u8) ?*const FloatDef {
-        for (self.floats) |*f| {
-            if (f.key == key) return f;
-        }
-        return null;
     }
 };
 
@@ -517,9 +639,9 @@ fn parseConfig(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocat
     if (runtime.getBool(-1, "confirm_on_disown")) |v| config.confirm_on_disown = v;
     if (runtime.getBool(-1, "confirm_on_close")) |v| config.confirm_on_close = v;
 
-    // Parse floats
-    if (runtime.pushTable(-1, "floats")) {
-        parseFloats(runtime, config, allocator);
+    // Parse float defaults
+    if (runtime.pushTable(-1, "float")) {
+        parseFloat(runtime, config, allocator);
         runtime.pop();
     }
 
@@ -754,183 +876,47 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     return null;
 }
 
-fn parseFloats(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocator) void {
-    var float_list = std.ArrayList(FloatDef).empty;
+fn parseFloat(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocator) void {
+    // Parse default float settings from float = {} table
+    var width: ?u8 = null;
+    var height: ?u8 = null;
+    var pad_x: ?u8 = null;
+    var pad_y: ?u8 = null;
+    var color: ?BorderColor = null;
+    var style: ?FloatStyle = null;
 
-    // Default values (from first keyless entry)
-    var def_width: ?u8 = null;
-    var def_height: ?u8 = null;
-    var def_pos_x: ?u8 = null;
-    var def_pos_y: ?u8 = null;
-    var def_pad_x: ?u8 = null;
-    var def_pad_y: ?u8 = null;
-    var def_color: ?BorderColor = null;
-    var def_style: ?FloatStyle = null;
-    var def_attrs = FloatAttributes{};
-
-    const len = runtime.getArrayLen(-1);
-    for (1..len + 1) |i| {
-        if (!runtime.pushArrayElement(-1, i)) continue;
-        defer runtime.pop();
-
-        const key_str = runtime.getString(-1, "key") orelse "";
-
-        // First entry without key = defaults
-        if (i == 1 and key_str.len == 0) {
-            parseFloatDefaults(runtime, &def_width, &def_height, &def_pos_x, &def_pos_y, &def_pad_x, &def_pad_y, &def_color, &def_style, &def_attrs, allocator);
-            // Apply to config defaults
-            if (def_width) |w| config.float_width_percent = w;
-            if (def_height) |h| config.float_height_percent = h;
-            if (def_pad_x) |p| config.float_padding_x = p;
-            if (def_pad_y) |p| config.float_padding_y = p;
-            if (def_color) |c| config.float_color = c;
-            if (def_style) |s| config.float_style_default = s;
-            continue;
-        }
-
-        if (key_str.len == 0) continue;
-        const key = key_str[0];
-
-        const command = runtime.getStringAlloc(-1, "command");
-        const title = runtime.getStringAlloc(-1, "title");
-
-        // Parse attributes
-        var attrs = def_attrs;
-        if (runtime.pushTable(-1, "attributes")) {
-            if (runtime.getBool(-1, "exclusive")) |v| attrs.exclusive = v;
-            if (runtime.getBool(-1, "per_cwd")) |v| attrs.per_cwd = v;
-            if (runtime.getBool(-1, "sticky")) |v| attrs.sticky = v;
-            if (runtime.getBool(-1, "global")) |v| attrs.global = v;
-            if (runtime.getBool(-1, "destroy")) |v| attrs.destroy = v;
-            if (runtime.getBool(-1, "isolated")) |v| attrs.isolated = v;
-            runtime.pop();
-        }
-
-        // Parse per-float overrides
-        var width: ?u8 = def_width;
-        var height: ?u8 = def_height;
-        var pos_x: ?u8 = def_pos_x;
-        var pos_y: ?u8 = def_pos_y;
-        var pad_x: ?u8 = def_pad_x;
-        var pad_y: ?u8 = def_pad_y;
-        var color: ?BorderColor = def_color;
-        var style: ?FloatStyle = def_style;
-
-        if (runtime.pushTable(-1, "size")) {
-            if (runtime.getInt(u8, -1, "width")) |v| width = constrainPercent(v, 10, 100);
-            if (runtime.getInt(u8, -1, "height")) |v| height = constrainPercent(v, 10, 100);
-            runtime.pop();
-        }
+    if (runtime.pushTable(-1, "size")) {
         if (runtime.getInt(u8, -1, "width")) |v| width = constrainPercent(v, 10, 100);
         if (runtime.getInt(u8, -1, "height")) |v| height = constrainPercent(v, 10, 100);
-
-        if (runtime.pushTable(-1, "position")) {
-            if (runtime.getInt(u8, -1, "x")) |v| pos_x = constrainPercent(v, 0, 100);
-            if (runtime.getInt(u8, -1, "y")) |v| pos_y = constrainPercent(v, 0, 100);
-            runtime.pop();
-        }
-        if (runtime.getInt(u8, -1, "pos_x")) |v| pos_x = constrainPercent(v, 0, 100);
-        if (runtime.getInt(u8, -1, "pos_y")) |v| pos_y = constrainPercent(v, 0, 100);
-
-        if (runtime.pushTable(-1, "padding")) {
-            if (runtime.getInt(u8, -1, "x")) |v| pad_x = constrainPercent(v, 0, 10);
-            if (runtime.getInt(u8, -1, "y")) |v| pad_y = constrainPercent(v, 0, 10);
-            runtime.pop();
-        }
-        if (runtime.getInt(u8, -1, "padding_x")) |v| pad_x = constrainPercent(v, 0, 10);
-        if (runtime.getInt(u8, -1, "padding_y")) |v| pad_y = constrainPercent(v, 0, 10);
-
-        if (runtime.pushTable(-1, "color")) {
-            var c = color orelse BorderColor{};
-            if (runtime.getInt(u8, -1, "active")) |v| c.active = v;
-            if (runtime.getInt(u8, -1, "passive")) |v| c.passive = v;
-            color = c;
-            runtime.pop();
-        }
-
-        if (runtime.pushTable(-1, "style")) {
-            style = parseFloatStyle(runtime, allocator);
-            runtime.pop();
-        }
-
-        float_list.append(allocator, .{
-            .key = key,
-            .command = command,
-            .title = title,
-            .attributes = attrs,
-            .width_percent = width,
-            .height_percent = height,
-            .pos_x = pos_x,
-            .pos_y = pos_y,
-            .padding_x = pad_x,
-            .padding_y = pad_y,
-            .color = color,
-            .style = style,
-        }) catch continue;
-    }
-
-    config.floats = float_list.toOwnedSlice(allocator) catch &[_]FloatDef{};
-}
-
-fn parseFloatDefaults(
-    runtime: *LuaRuntime,
-    width: *?u8,
-    height: *?u8,
-    pos_x: *?u8,
-    pos_y: *?u8,
-    pad_x: *?u8,
-    pad_y: *?u8,
-    color: *?BorderColor,
-    style: *?FloatStyle,
-    attrs: *FloatAttributes,
-    allocator: std.mem.Allocator,
-) void {
-    if (runtime.pushTable(-1, "size")) {
-        if (runtime.getInt(u8, -1, "width")) |v| width.* = constrainPercent(v, 10, 100);
-        if (runtime.getInt(u8, -1, "height")) |v| height.* = constrainPercent(v, 10, 100);
         runtime.pop();
     }
-    if (runtime.getInt(u8, -1, "width")) |v| width.* = constrainPercent(v, 10, 100);
-    if (runtime.getInt(u8, -1, "height")) |v| height.* = constrainPercent(v, 10, 100);
-
-    if (runtime.pushTable(-1, "position")) {
-        if (runtime.getInt(u8, -1, "x")) |v| pos_x.* = constrainPercent(v, 0, 100);
-        if (runtime.getInt(u8, -1, "y")) |v| pos_y.* = constrainPercent(v, 0, 100);
-        runtime.pop();
-    }
-    if (runtime.getInt(u8, -1, "pos_x")) |v| pos_x.* = constrainPercent(v, 0, 100);
-    if (runtime.getInt(u8, -1, "pos_y")) |v| pos_y.* = constrainPercent(v, 0, 100);
 
     if (runtime.pushTable(-1, "padding")) {
-        if (runtime.getInt(u8, -1, "x")) |v| pad_x.* = constrainPercent(v, 0, 10);
-        if (runtime.getInt(u8, -1, "y")) |v| pad_y.* = constrainPercent(v, 0, 10);
+        if (runtime.getInt(u8, -1, "x")) |v| pad_x = constrainPercent(v, 0, 10);
+        if (runtime.getInt(u8, -1, "y")) |v| pad_y = constrainPercent(v, 0, 10);
         runtime.pop();
     }
-    if (runtime.getInt(u8, -1, "padding_x")) |v| pad_x.* = constrainPercent(v, 0, 10);
-    if (runtime.getInt(u8, -1, "padding_y")) |v| pad_y.* = constrainPercent(v, 0, 10);
 
     if (runtime.pushTable(-1, "color")) {
         var c = BorderColor{};
         if (runtime.getInt(u8, -1, "active")) |v| c.active = v;
         if (runtime.getInt(u8, -1, "passive")) |v| c.passive = v;
-        color.* = c;
+        color = c;
         runtime.pop();
     }
 
     if (runtime.pushTable(-1, "style")) {
-        style.* = parseFloatStyle(runtime, allocator);
+        style = parseFloatStyle(runtime, allocator);
         runtime.pop();
     }
 
-    if (runtime.pushTable(-1, "attributes")) {
-        if (runtime.getBool(-1, "exclusive")) |v| attrs.exclusive = v;
-        if (runtime.getBool(-1, "per_cwd")) |v| attrs.per_cwd = v;
-        if (runtime.getBool(-1, "sticky")) |v| attrs.sticky = v;
-        if (runtime.getBool(-1, "global")) |v| attrs.global = v;
-        if (runtime.getBool(-1, "destroy")) |v| attrs.destroy = v;
-        if (runtime.getBool(-1, "isolated")) |v| attrs.isolated = v;
-        runtime.pop();
-    }
+    // Apply to config defaults
+    if (width) |w| config.float_width_percent = w;
+    if (height) |h| config.float_height_percent = h;
+    if (pad_x) |p| config.float_padding_x = p;
+    if (pad_y) |p| config.float_padding_y = p;
+    if (color) |c| config.float_color = c;
+    if (style) |s| config.float_style_default = s;
 }
 
 fn parseFloatStyle(runtime: *LuaRuntime, allocator: std.mem.Allocator) FloatStyle {
@@ -1298,4 +1284,257 @@ fn constrainPercent(val: u8, min: u8, max: u8) u8 {
     if (val < min) return min;
     if (val > max) return max;
     return val;
+}
+
+// ===== Ses config parsing =====
+
+fn parseSesConfig(runtime: *LuaRuntime, config: *SesConfig, allocator: std.mem.Allocator) void {
+    // Parse layouts array
+    if (runtime.pushTable(-1, "layouts")) {
+        config.layouts = parseLayouts(runtime, allocator);
+        runtime.pop();
+    }
+}
+
+fn parseLayouts(runtime: *LuaRuntime, allocator: std.mem.Allocator) []LayoutDef {
+    var layout_list = std.ArrayList(LayoutDef).empty;
+
+    const len = runtime.getArrayLen(-1);
+    for (1..len + 1) |i| {
+        if (!runtime.pushArrayElement(-1, i)) continue;
+        defer runtime.pop();
+
+        const layout_name = runtime.getString(-1, "name") orelse continue;
+        const name = allocator.dupe(u8, layout_name) catch continue;
+
+        const enabled = runtime.getBool(-1, "enabled") orelse false;
+
+        // Parse tabs array
+        var tabs: []LayoutTabDef = &[_]LayoutTabDef{};
+        if (runtime.pushTable(-1, "tabs")) {
+            tabs = parseLayoutTabs(runtime, allocator);
+            runtime.pop();
+        }
+
+        // Parse floats array
+        var floats: []LayoutFloatDef = &[_]LayoutFloatDef{};
+        if (runtime.pushTable(-1, "floats")) {
+            floats = parseLayoutFloats(runtime, allocator);
+            runtime.pop();
+        }
+
+        layout_list.append(allocator, .{
+            .name = name,
+            .enabled = enabled,
+            .tabs = tabs,
+            .floats = floats,
+        }) catch {
+            allocator.free(name);
+            continue;
+        };
+    }
+
+    return layout_list.toOwnedSlice(allocator) catch &[_]LayoutDef{};
+}
+
+fn parseLayoutTabs(runtime: *LuaRuntime, allocator: std.mem.Allocator) []LayoutTabDef {
+    var tab_list = std.ArrayList(LayoutTabDef).empty;
+
+    const len = runtime.getArrayLen(-1);
+    for (1..len + 1) |i| {
+        if (!runtime.pushArrayElement(-1, i)) continue;
+        defer runtime.pop();
+
+        const tab_name = runtime.getString(-1, "name") orelse continue;
+        const name = allocator.dupe(u8, tab_name) catch continue;
+
+        const enabled = runtime.getBool(-1, "enabled") orelse true;
+
+        // Parse root split if present
+        var root: ?LayoutSplitDef = null;
+        if (runtime.pushTable(-1, "root")) {
+            root = parseLayoutSplit(runtime, allocator);
+            runtime.pop();
+        }
+
+        tab_list.append(allocator, .{
+            .name = name,
+            .enabled = enabled,
+            .root = root,
+        }) catch {
+            allocator.free(name);
+            continue;
+        };
+    }
+
+    return tab_list.toOwnedSlice(allocator) catch &[_]LayoutTabDef{};
+}
+
+fn parseLayoutFloats(runtime: *LuaRuntime, allocator: std.mem.Allocator) []LayoutFloatDef {
+    var float_list = std.ArrayList(LayoutFloatDef).empty;
+
+    const len = runtime.getArrayLen(-1);
+    for (1..len + 1) |i| {
+        if (!runtime.pushArrayElement(-1, i)) continue;
+        defer runtime.pop();
+
+        const key_str = runtime.getString(-1, "key") orelse continue;
+        if (key_str.len == 0) continue;
+        const key = key_str[0];
+
+        const enabled = runtime.getBool(-1, "enabled") orelse true;
+        const command = runtime.getStringAlloc(-1, "command");
+        const title = runtime.getStringAlloc(-1, "title");
+
+        // Parse attributes
+        var attrs = FloatAttributes{};
+        if (runtime.pushTable(-1, "attributes")) {
+            if (runtime.getBool(-1, "exclusive")) |v| attrs.exclusive = v;
+            if (runtime.getBool(-1, "per_cwd")) |v| attrs.per_cwd = v;
+            if (runtime.getBool(-1, "sticky")) |v| attrs.sticky = v;
+            if (runtime.getBool(-1, "global")) |v| attrs.global = v;
+            if (runtime.getBool(-1, "destroy")) |v| attrs.destroy = v;
+            if (runtime.getBool(-1, "isolated")) |v| attrs.isolated = v;
+            runtime.pop();
+        }
+
+        // Parse size, position, padding, color, style (same as mux float parsing)
+        var width: ?u8 = null;
+        var height: ?u8 = null;
+        var pos_x: ?u8 = null;
+        var pos_y: ?u8 = null;
+        var pad_x: ?u8 = null;
+        var pad_y: ?u8 = null;
+        var color: ?BorderColor = null;
+        var style: ?FloatStyle = null;
+
+        if (runtime.pushTable(-1, "size")) {
+            if (runtime.getInt(u8, -1, "width")) |v| width = constrainPercent(v, 10, 100);
+            if (runtime.getInt(u8, -1, "height")) |v| height = constrainPercent(v, 10, 100);
+            runtime.pop();
+        }
+
+        if (runtime.pushTable(-1, "position")) {
+            if (runtime.getInt(u8, -1, "x")) |v| pos_x = constrainPercent(v, 0, 100);
+            if (runtime.getInt(u8, -1, "y")) |v| pos_y = constrainPercent(v, 0, 100);
+            runtime.pop();
+        }
+
+        if (runtime.pushTable(-1, "padding")) {
+            if (runtime.getInt(u8, -1, "x")) |v| pad_x = constrainPercent(v, 0, 10);
+            if (runtime.getInt(u8, -1, "y")) |v| pad_y = constrainPercent(v, 0, 10);
+            runtime.pop();
+        }
+
+        if (runtime.pushTable(-1, "color")) {
+            var c = BorderColor{};
+            if (runtime.getInt(u8, -1, "active")) |v| c.active = v;
+            if (runtime.getInt(u8, -1, "passive")) |v| c.passive = v;
+            color = c;
+            runtime.pop();
+        }
+
+        if (runtime.pushTable(-1, "style")) {
+            style = parseFloatStyle(runtime, allocator);
+            runtime.pop();
+        }
+
+        float_list.append(allocator, .{
+            .enabled = enabled,
+            .key = key,
+            .command = command,
+            .title = title,
+            .attributes = attrs,
+            .width_percent = width,
+            .height_percent = height,
+            .pos_x = pos_x,
+            .pos_y = pos_y,
+            .padding_x = pad_x,
+            .padding_y = pad_y,
+            .color = color,
+            .style = style,
+        }) catch continue;
+    }
+
+    return float_list.toOwnedSlice(allocator) catch &[_]LayoutFloatDef{};
+}
+
+fn parseLayoutSplit(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?LayoutSplitDef {
+    // Check if this is a split (has array elements) or a pane
+    const array_len = runtime.getArrayLen(-1);
+
+    if (array_len >= 2) {
+        // This is a split with children
+        const dir_str = runtime.getString(-1, "dir") orelse "h";
+        const dir = allocator.dupe(u8, dir_str) catch return null;
+
+        const ratio_f64 = runtime.getNumber(-1, "ratio") orelse 0.5;
+        const ratio: f32 = @floatCast(ratio_f64);
+
+        // Parse first child
+        if (!runtime.pushArrayElement(-1, 1)) {
+            allocator.free(dir);
+            return null;
+        }
+        const first_child = parseLayoutSplit(runtime, allocator) orelse {
+            runtime.pop();
+            allocator.free(dir);
+            return null;
+        };
+        runtime.pop();
+
+        const first = allocator.create(LayoutSplitDef) catch {
+            allocator.free(dir);
+            var fc = first_child;
+            fc.deinit(allocator);
+            return null;
+        };
+        first.* = first_child;
+
+        // Parse second child
+        if (!runtime.pushArrayElement(-1, 2)) {
+            allocator.free(dir);
+            first.deinit(allocator);
+            allocator.destroy(first);
+            return null;
+        }
+        const second_child = parseLayoutSplit(runtime, allocator) orelse {
+            runtime.pop();
+            allocator.free(dir);
+            first.deinit(allocator);
+            allocator.destroy(first);
+            return null;
+        };
+        runtime.pop();
+
+        const second = allocator.create(LayoutSplitDef) catch {
+            allocator.free(dir);
+            first.deinit(allocator);
+            allocator.destroy(first);
+            var sc = second_child;
+            sc.deinit(allocator);
+            return null;
+        };
+        second.* = second_child;
+
+        return LayoutSplitDef{
+            .split = .{
+                .dir = dir,
+                .ratio = ratio,
+                .first = first,
+                .second = second,
+            },
+        };
+    } else {
+        // This is a pane
+        const cwd = runtime.getStringAlloc(-1, "cwd");
+        const command = runtime.getStringAlloc(-1, "command");
+
+        return LayoutSplitDef{
+            .pane = .{
+                .cwd = cwd,
+                .command = command,
+            },
+        };
+    }
 }
