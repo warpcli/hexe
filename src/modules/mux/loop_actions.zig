@@ -743,6 +743,9 @@ pub fn focusPaneByUuid(state: *State, uuid: [32]u8) void {
 
 /// Handle input when pane select mode is active.
 /// Returns true if input was consumed.
+/// - Lowercase (a-z): Focus that pane
+/// - Uppercase (A-Z): Swap focused pane position with target
+/// - ESC: Cancel
 pub fn handlePaneSelectInput(state: *State, byte: u8) bool {
     if (!state.overlays.isPaneSelectActive()) return false;
 
@@ -753,15 +756,23 @@ pub fn handlePaneSelectInput(state: *State, byte: u8) bool {
         return true;
     }
 
-    // Check for valid label (1-9, a-z)
-    const label = if (byte >= 'A' and byte <= 'Z') byte + 32 else byte; // lowercase
+    // Uppercase = swap, lowercase = focus
+    const is_swap = byte >= 'A' and byte <= 'Z';
+    const label: u8 = if (is_swap) byte + 32 else byte;
 
-    if (state.overlays.findPaneByLabel(label)) |uuid| {
-        if (state.overlays.isPaneSelectSwapMode()) {
-            // TODO: Swap panes - for now just focus
-            focusPaneByUuid(state, uuid);
+    // Only handle a-z
+    if (label < 'a' or label > 'z') return true;
+
+    if (state.overlays.findPaneByLabel(label)) |target_uuid| {
+        if (is_swap) {
+            // Swap: exchange positions of focused pane and target pane
+            const focused = getCurrentFocusedPane(state);
+            const target = state.findPaneByUuid(target_uuid);
+            if (focused != null and target != null and focused.? != target.?) {
+                swapPanePositions(state, focused.?, target.?);
+            }
         } else {
-            focusPaneByUuid(state, uuid);
+            focusPaneByUuid(state, target_uuid);
         }
         state.overlays.exitPaneSelectMode();
         state.needs_render = true;
@@ -770,4 +781,123 @@ pub fn handlePaneSelectInput(state: *State, byte: u8) bool {
 
     // Invalid label - ignore but consume
     return true;
+}
+
+/// Get the currently focused pane (float or split).
+fn getCurrentFocusedPane(state: *State) ?*Pane {
+    if (state.active_floating) |idx| {
+        if (idx < state.floats.items.len) return state.floats.items[idx];
+    }
+    return state.currentLayout().getFocusedPane();
+}
+
+/// Swap the screen positions of two panes.
+/// VTs, backends, and UUIDs stay with their pane objects — only the
+/// position in the layout / float array changes so each pane renders
+/// where the other one used to be.
+fn swapPanePositions(state: *State, pane_a: *Pane, pane_b: *Pane) void {
+    if (pane_a == pane_b) return;
+
+    const a_float = pane_a.floating;
+    const b_float = pane_b.floating;
+
+    if (!a_float and !b_float) {
+        // Both are split panes — swap pointers in the layout hashmap.
+        const layout = state.currentLayout();
+
+        var key_a: ?u16 = null;
+        var key_b: ?u16 = null;
+        var it = layout.splits.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.* == pane_a) key_a = entry.key_ptr.*;
+            if (entry.value_ptr.* == pane_b) key_b = entry.key_ptr.*;
+        }
+        if (key_a == null or key_b == null) return;
+
+        // Swap *Pane values in the hashmap
+        layout.splits.putAssumeCapacity(key_a.?, pane_b);
+        layout.splits.putAssumeCapacity(key_b.?, pane_a);
+
+        // Swap pane IDs so each pane.id matches its new hashmap key
+        const tmp_id = pane_a.id;
+        pane_a.id = pane_b.id;
+        pane_b.id = tmp_id;
+
+        // Keep focus on the same pane (follow it to its new slot)
+        if (layout.focused_split_id == key_a.?) {
+            layout.focused_split_id = key_b.?;
+        } else if (layout.focused_split_id == key_b.?) {
+            layout.focused_split_id = key_a.?;
+        }
+
+        // Recalculate — assigns new x/y/w/h and resizes VTs + backends
+        layout.recalculateLayout();
+    } else if (a_float and b_float) {
+        // Both are floats — swap their position/border fields, then resize.
+        swapFloatPositions(pane_a, pane_b);
+    } else {
+        // Mixed split + float — not supported yet
+        state.notifications.show("Cannot swap split with float");
+        return;
+    }
+
+    state.renderer.invalidate();
+    state.force_full_render = true;
+    state.needs_render = true;
+}
+
+/// Swap position and border fields between two float panes, then resize VTs.
+fn swapFloatPositions(a: *Pane, b: *Pane) void {
+    // Content area
+    const ax = a.x;     const ay = a.y;
+    const aw = a.width;  const ah = a.height;
+    a.x = b.x;           a.y = b.y;
+    a.width = b.width;   a.height = b.height;
+    b.x = ax;            b.y = ay;
+    b.width = aw;        b.height = ah;
+
+    // Border area
+    const abx = a.border_x; const aby = a.border_y;
+    const abw = a.border_w; const abh = a.border_h;
+    a.border_x = b.border_x; a.border_y = b.border_y;
+    a.border_w = b.border_w; a.border_h = b.border_h;
+    b.border_x = abx; b.border_y = aby;
+    b.border_w = abw; b.border_h = abh;
+
+    // Layout percentages
+    const awp = a.float_width_pct;  const ahp = a.float_height_pct;
+    const axp = a.float_pos_x_pct;  const ayp = a.float_pos_y_pct;
+    const apx = a.float_pad_x;      const apy = a.float_pad_y;
+    a.float_width_pct = b.float_width_pct;   a.float_height_pct = b.float_height_pct;
+    a.float_pos_x_pct = b.float_pos_x_pct;   a.float_pos_y_pct = b.float_pos_y_pct;
+    a.float_pad_x = b.float_pad_x;            a.float_pad_y = b.float_pad_y;
+    b.float_width_pct = awp;  b.float_height_pct = ahp;
+    b.float_pos_x_pct = axp;  b.float_pos_y_pct = ayp;
+    b.float_pad_x = apx;      b.float_pad_y = apy;
+
+    // Resize VTs to their new dimensions
+    a.vt.resize(a.width, a.height) catch {};
+    b.vt.resize(b.width, b.height) catch {};
+
+    // Resize backends
+    switch (a.backend) {
+        .local => |*pty| pty.setSize(a.width, a.height) catch {},
+        .pod => |pod| {
+            var payload: [4]u8 = undefined;
+            std.mem.writeInt(u16, payload[0..2], a.width, .big);
+            std.mem.writeInt(u16, payload[2..4], a.height, .big);
+            const ft = @intFromEnum(core.pod_protocol.FrameType.resize);
+            core.wire.writeMuxVt(pod.vt_fd, pod.pane_id, ft, &payload) catch {};
+        },
+    }
+    switch (b.backend) {
+        .local => |*pty| pty.setSize(b.width, b.height) catch {},
+        .pod => |pod| {
+            var payload: [4]u8 = undefined;
+            std.mem.writeInt(u16, payload[0..2], b.width, .big);
+            std.mem.writeInt(u16, payload[2..4], b.height, .big);
+            const ft = @intFromEnum(core.pod_protocol.FrameType.resize);
+            core.wire.writeMuxVt(pod.vt_fd, pod.pane_id, ft, &payload) catch {};
+        },
+    }
 }

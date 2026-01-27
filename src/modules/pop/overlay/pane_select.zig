@@ -3,7 +3,7 @@ const std = @import("std");
 /// Pane label for select mode
 pub const PaneLabel = struct {
     uuid: [32]u8,
-    label: u8, // '1'-'9', 'a'-'z'
+    label: u8, // 'a'-'z'
     x: u16, // pane top-left x
     y: u16, // pane top-left y
     width: u16,
@@ -79,22 +79,18 @@ pub const PaneSelectState = struct {
     }
 };
 
-/// Generate label character for pane index (1-9, then a-z)
+/// Generate label character for pane index (a-z, 26 panes max)
 pub fn labelForIndex(idx: usize) ?u8 {
-    if (idx < 9) {
-        return '1' + @as(u8, @intCast(idx));
-    } else if (idx < 9 + 26) {
-        return 'a' + @as(u8, @intCast(idx - 9));
+    if (idx < 26) {
+        return 'a' + @as(u8, @intCast(idx));
     }
     return null;
 }
 
 /// Parse label character back to index
 pub fn indexFromLabel(label: u8) ?usize {
-    if (label >= '1' and label <= '9') {
-        return label - '1';
-    } else if (label >= 'a' and label <= 'z') {
-        return 9 + (label - 'a');
+    if (label >= 'a' and label <= 'z') {
+        return label - 'a';
     }
     return null;
 }
