@@ -814,9 +814,11 @@ fn swapPanePositions(state: *State, pane_a: *Pane, pane_b: *Pane) void {
         }
         if (key_a == null or key_b == null) return;
 
-        // Swap *Pane values in the hashmap
-        layout.splits.putAssumeCapacity(key_a.?, pane_b);
-        layout.splits.putAssumeCapacity(key_b.?, pane_a);
+        // Swap *Pane pointers directly via getPtr
+        const ptr_a = layout.splits.getPtr(key_a.?) orelse return;
+        const ptr_b = layout.splits.getPtr(key_b.?) orelse return;
+        ptr_a.* = pane_b;
+        ptr_b.* = pane_a;
 
         // Swap pane IDs so each pane.id matches its new hashmap key
         const tmp_id = pane_a.id;
