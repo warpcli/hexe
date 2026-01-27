@@ -38,6 +38,8 @@ jobs:
         uses: mlugg/setup-zig@v2
 
       - name: Build binary
+        env:
+          GITHUB_REF: refs/tags/${{ github.event.release.tag_name }}
         run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }} -freference-trace=10
 
       - name: Prepare artifact
