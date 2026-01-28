@@ -382,11 +382,39 @@ pub const SesConfig = struct {
 
         runtime.loadConfig(config_path) catch return config;
 
-        // Access the "ses" section
+        // Access the "ses" section of global config
         if (runtime.pushTable(-1, "ses")) {
             parseSesConfig(&runtime, &config, allocator);
             runtime.pop();
         }
+
+        // Pop global config table
+        runtime.pop();
+
+        // Try to load local .hexe.lua from current directory
+        const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;
+        defer allocator.free(local_path);
+
+        // Check if local config exists
+        std.fs.cwd().access(local_path, .{}) catch {
+            // No local config, use global only
+            return config;
+        };
+
+        // Local config exists, load it and merge/overwrite
+        runtime.loadConfig(local_path) catch {
+            // Failed to load local config, but global is already loaded
+            return config;
+        };
+
+        // Access the "ses" section of local config and merge
+        if (runtime.pushTable(-1, "ses")) {
+            parseSesConfig(&runtime, &config, allocator);
+            runtime.pop();
+        }
+
+        // Pop local config table
+        runtime.pop();
 
         return config;
     }
@@ -569,6 +597,7 @@ pub const Config = struct {
         // Let a single config.lua avoid building other sections.
         runtime.setHexeSection("mux");
 
+        // Load global config
         runtime.loadConfig(path) catch |err| {
             switch (err) {
                 error.FileNotFound => {
@@ -584,13 +613,55 @@ pub const Config = struct {
             return config;
         };
 
-        // Access the "mux" section of the config table
+        // Access the "mux" section of the global config table
         if (runtime.pushTable(-1, "mux")) {
             parseConfig(&runtime, &config, allocator);
             runtime.pop();
         } else {
             config.status_message = allocator.dupe(u8, "no 'mux' section in config") catch null;
         }
+
+        // Pop global config table
+        runtime.pop();
+
+        // Try to load local .hexe.lua from current directory
+        const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;
+        defer allocator.free(local_path);
+
+        // Check if local config exists
+        std.fs.cwd().access(local_path, .{}) catch {
+            // No local config, use global only
+            if (config.status != .@"error") {
+                if (PARSE_ERROR) |msg| {
+                    config.status = .@"error";
+                    config.status_message = msg;
+                    PARSE_ERROR = null;
+                }
+            }
+            return config;
+        };
+
+        // Local config exists, load it and merge/overwrite
+        runtime.loadConfig(local_path) catch {
+            // Failed to load local config, but global is already loaded
+            if (config.status != .@"error") {
+                if (PARSE_ERROR) |msg| {
+                    config.status = .@"error";
+                    config.status_message = msg;
+                    PARSE_ERROR = null;
+                }
+            }
+            return config;
+        };
+
+        // Access the "mux" section of the local config table and merge
+        if (runtime.pushTable(-1, "mux")) {
+            parseConfig(&runtime, &config, allocator);
+            runtime.pop();
+        }
+
+        // Pop local config table
+        runtime.pop();
 
         if (config.status != .@"error") {
             if (PARSE_ERROR) |msg| {

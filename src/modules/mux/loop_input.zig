@@ -766,6 +766,9 @@ fn handleScrollKeys(state: *State, inp: []const u8) ?usize {
     if (pane == null) return null;
     const p = pane.?;
 
+    // Don't intercept scroll keys in alternate screen mode - let the app handle them
+    if (p.vt.inAltScreen()) return null;
+
     // PageUp: ESC [ 5 ~
     if (inp.len >= 4 and inp[2] == '5' and inp[3] == '~') {
         p.scrollUp(5);

@@ -357,6 +357,7 @@ fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
 
     runtime.setHexeSection("shp");
 
+    // Load global config
     runtime.loadConfig(path) catch |err| {
         switch (err) {
             error.FileNotFound => {
@@ -375,20 +376,59 @@ fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
         return config;
     };
 
-    // Access the "shp" section of the config table
-    if (!runtime.pushTable(-1, "shp")) {
-        return config;
-    }
-    defer runtime.pop();
+    // Access the "shp" section of the global config table
+    if (runtime.pushTable(-1, "shp")) {
+        config.has_config = true;
 
-    config.has_config = true;
-
-    // Parse prompt.left and prompt.right
-    if (runtime.pushTable(-1, "prompt")) {
-        config.left = parseModules(&runtime, allocator, "left");
-        config.right = parseModules(&runtime, allocator, "right");
+        // Parse prompt.left and prompt.right from global config
+        if (runtime.pushTable(-1, "prompt")) {
+            config.left = parseModules(&runtime, allocator, "left");
+            config.right = parseModules(&runtime, allocator, "right");
+            runtime.pop();
+        }
         runtime.pop();
     }
+
+    // Pop global config table
+    runtime.pop();
+
+    // Try to load local .hexe.lua from current directory
+    const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;
+    defer allocator.free(local_path);
+
+    // Check if local config exists
+    std.fs.cwd().access(local_path, .{}) catch {
+        // No local config, use global only
+        return config;
+    };
+
+    // Local config exists, load it and merge/overwrite
+    runtime.loadConfig(local_path) catch {
+        // Failed to load local config, but global is already loaded
+        return config;
+    };
+
+    // Access the "shp" section of local config and merge
+    if (runtime.pushTable(-1, "shp")) {
+        config.has_config = true;
+
+        // Parse prompt.left and prompt.right from local config (overwrites global)
+        if (runtime.pushTable(-1, "prompt")) {
+            // Free global modules before overwriting
+            deinitModules(config.left, allocator);
+            deinitModules(config.right, allocator);
+            if (config.left.len > 0) allocator.free(config.left);
+            if (config.right.len > 0) allocator.free(config.right);
+
+            config.left = parseModules(&runtime, allocator, "left");
+            config.right = parseModules(&runtime, allocator, "right");
+            runtime.pop();
+        }
+        runtime.pop();
+    }
+
+    // Pop local config table
+    runtime.pop();
 
     return config;
 }
