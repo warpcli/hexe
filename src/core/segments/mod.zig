@@ -30,6 +30,7 @@ pub const sudo = @import("sudo.zig");
 pub const character = @import("character.zig");
 pub const duration = @import("duration.zig");
 pub const jobs = @import("jobs.zig");
+pub const pod_name = @import("pod_name.zig");
 
 // Custom segments (shell command runner)
 pub const custom = @import("custom.zig");
@@ -72,4 +73,5 @@ pub const registry = std.StaticStringMap(SegmentFn).initComptime(.{
     .{ "char", character.render },
     .{ "duration", duration.render },
     .{ "jobs", jobs.render },
+    .{ "pod_name", pod_name.render },
 });

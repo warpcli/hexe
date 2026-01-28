@@ -548,7 +548,7 @@ fn renderModulesSimple(ctx: *segment.Context, modules: []const ModuleDef, stdout
     const alloc = std.heap.page_allocator;
 
     // Known built-in segments that return null when they have nothing to show
-    const conditional_segments = [_][]const u8{ "status", "sudo", "git_branch", "git_status", "jobs", "duration" };
+    const conditional_segments = [_][]const u8{ "status", "sudo", "git_branch", "git_status", "jobs", "duration", "pod_name" };
 
     const ModuleResult = struct {
         when_passed: bool = true,

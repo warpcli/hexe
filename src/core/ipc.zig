@@ -14,17 +14,50 @@ pub const Server = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !Server {
+        // Check if socket file exists and if something is listening
+        if (std.fs.cwd().access(path, .{})) |_| {
+            // Socket file exists - try to connect to see if something is listening
+            const test_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch {
+                // Can't create socket, just try to delete the file
+                std.fs.cwd().deleteFile(path) catch {};
+                return initSocket(allocator, path);
+            };
+            defer posix.close(test_fd);
+
+            var addr: posix.sockaddr.un = .{
+                .family = posix.AF.UNIX,
+                .path = undefined,
+            };
+            @memset(&addr.path, 0);
+            const path_len = @min(path.len, addr.path.len - 1);
+            @memcpy(addr.path[0..path_len], path[0..path_len]);
+
+            if (posix.connect(test_fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un))) |_| {
+                // Connect succeeded - something is actually listening
+                return error.AddressInUse;
+            } else |_| {
+                // Connect failed - stale socket, safe to remove
+                std.fs.cwd().deleteFile(path) catch {};
+            }
+        } else |_| {
+            // Socket file doesn't exist - nothing to clean up
+        }
+
+        return initSocket(allocator, path);
+    }
+
+    fn initSocket(allocator: std.mem.Allocator, path: []const u8) !Server {
         // Create socket
         const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
         errdefer posix.close(fd);
-
-        // Remove existing socket file if present
-        std.fs.cwd().deleteFile(path) catch {};
 
         // Ensure parent directory exists
         if (std.fs.path.dirname(path)) |dir| {
             std.fs.cwd().makePath(dir) catch {};
         }
+
+        // Remove socket file if it still exists (race condition protection)
+        std.fs.cwd().deleteFile(path) catch {};
 
         // Bind to path
         var addr: posix.sockaddr.un = .{
