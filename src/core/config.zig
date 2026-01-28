@@ -58,6 +58,10 @@ pub const WhenDef = struct {
     bash: ?[]const u8 = null,
     /// Lua script condition
     lua: ?[]const u8 = null,
+    /// Fast env var check (true if set and non-empty)
+    env: ?[]const u8 = null,
+    /// Fast env var check (true if NOT set or empty)
+    env_not: ?[]const u8 = null,
 
     pub fn deinit(self: *WhenDef, allocator: std.mem.Allocator) void {
         if (self.all) |items| {
@@ -73,6 +77,8 @@ pub const WhenDef = struct {
         }
         if (self.bash) |s| allocator.free(@constCast(s));
         if (self.lua) |s| allocator.free(@constCast(s));
+        if (self.env) |s| allocator.free(@constCast(s));
+        if (self.env_not) |s| allocator.free(@constCast(s));
         self.* = .{};
     }
 };

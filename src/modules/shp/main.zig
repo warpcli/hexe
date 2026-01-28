@@ -313,6 +313,18 @@ fn evalPromptWhen(allocator: std.mem.Allocator, lua_rt: *?LuaRuntime, ctx: *segm
 }
 
 fn evalPromptWhenClause(allocator: std.mem.Allocator, lua_rt: *?LuaRuntime, ctx: *segment.Context, when: core.WhenDef) bool {
+    // Fast path: check env var without spawning any process
+    if (when.env) |env_name| {
+        const val = std.posix.getenv(env_name);
+        if (val == null or val.?.len == 0) return false;
+    }
+
+    // Fast path: check env var is NOT set
+    if (when.env_not) |env_name| {
+        const val = std.posix.getenv(env_name);
+        if (val != null and val.?.len > 0) return false;
+    }
+
     if (when.lua) |lua_code| {
         if (lua_rt.* == null) {
             lua_rt.* = LuaRuntime.init(allocator) catch null;
@@ -322,9 +334,10 @@ fn evalPromptWhenClause(allocator: std.mem.Allocator, lua_rt: *?LuaRuntime, ctx:
     }
 
     if (when.bash) |bash_code| {
+        // Use -c instead of -lc to avoid slow login shell initialization
         const res = std.process.Child.run(.{
             .allocator = allocator,
-            .argv = &.{ "/bin/bash", "-lc", bash_code },
+            .argv = &.{ "/bin/bash", "-c", bash_code },
         }) catch return false;
         allocator.free(res.stdout);
         allocator.free(res.stderr);
@@ -495,6 +508,8 @@ fn parseWhenPrompt(runtime: *LuaRuntime) ?core.WhenDef {
     var when: core.WhenDef = .{};
     when.bash = runtime.getStringAlloc(-1, "bash");
     when.lua = runtime.getStringAlloc(-1, "lua");
+    when.env = runtime.getStringAlloc(-1, "env");
+    when.env_not = runtime.getStringAlloc(-1, "env_not");
     return when;
 }
 
@@ -552,7 +567,7 @@ fn renderModulesSimple(ctx: *segment.Context, modules: []const ModuleDef, stdout
 
     const ModuleResult = struct {
         when_passed: bool = true,
-        when_lua_passed: bool = true,
+        needs_bash_check: bool = false,
         output: ?[]const u8 = null,
         width: u16 = 0,
         should_render: bool = true,
@@ -562,18 +577,48 @@ fn renderModulesSimple(ctx: *segment.Context, modules: []const ModuleDef, stdout
     var results: [32]ModuleResult = [_]ModuleResult{.{}} ** 32;
     const mod_count = @min(modules.len, 32);
 
-    // Evaluate all `when` on the main thread.
-    // This avoids Lua VM thread-safety issues and keeps semantics simple.
+    // PHASE 1: Fast checks on main thread (env vars, lua)
+    // These are instant - no process spawning
     var lua_rt: ?LuaRuntime = null;
     defer if (lua_rt) |*rt| rt.deinit();
 
     for (modules[0..mod_count], 0..) |mod, i| {
         if (mod.when) |w| {
-            results[i].when_passed = evalPromptWhen(alloc, &lua_rt, ctx, w);
+            // Fast path: env checks (instant, no process spawn)
+            if (w.env) |env_name| {
+                const val = std.posix.getenv(env_name);
+                if (val == null or val.?.len == 0) {
+                    results[i].when_passed = false;
+                    continue;
+                }
+            }
+            if (w.env_not) |env_name| {
+                const val = std.posix.getenv(env_name);
+                if (val != null and val.?.len > 0) {
+                    results[i].when_passed = false;
+                    continue;
+                }
+            }
+
+            // Lua checks (fast, embedded VM)
+            if (w.lua) |lua_code| {
+                if (lua_rt == null) {
+                    lua_rt = LuaRuntime.init(alloc) catch null;
+                }
+                if (lua_rt == null or !evalLuaWhen(&lua_rt.?, ctx, lua_code)) {
+                    results[i].when_passed = false;
+                    continue;
+                }
+            }
+
+            // Mark for bash check in parallel phase
+            if (w.bash != null) {
+                results[i].needs_bash_check = true;
+            }
         }
     }
 
-    // Thread function for running a module's commands
+    // PHASE 2: Parallel execution of bash conditions AND commands
     const ThreadContext = struct {
         mod: *const ModuleDef,
         result: *ModuleResult,
@@ -582,6 +627,31 @@ fn renderModulesSimple(ctx: *segment.Context, modules: []const ModuleDef, stdout
 
     const thread_fn = struct {
         fn run(tctx: ThreadContext) void {
+            // Run bash condition if needed
+            if (tctx.result.needs_bash_check) {
+                if (tctx.mod.when) |w| {
+                    if (w.bash) |bash_code| {
+                        const res = std.process.Child.run(.{
+                            .allocator = tctx.alloc,
+                            .argv = &.{ "/bin/bash", "-c", bash_code },
+                        }) catch {
+                            tctx.result.when_passed = false;
+                            return;
+                        };
+                        tctx.alloc.free(res.stdout);
+                        tctx.alloc.free(res.stderr);
+                        const ok = switch (res.term) {
+                            .Exited => |code| code == 0,
+                            else => false,
+                        };
+                        if (!ok) {
+                            tctx.result.when_passed = false;
+                            return;
+                        }
+                    }
+                }
+            }
+
             if (!tctx.result.when_passed) return;
 
             // Run command
@@ -611,10 +681,11 @@ fn renderModulesSimple(ctx: *segment.Context, modules: []const ModuleDef, stdout
         }
     }.run;
 
-    // Spawn threads for modules with commands or when conditions
+    // Spawn threads for modules that need bash checks or have commands
     var threads: [32]?std.Thread = [_]?std.Thread{null} ** 32;
     for (modules[0..mod_count], 0..) |*mod, i| {
-        if (mod.when != null or mod.command != null) {
+        // Only spawn thread if: needs bash check, or has command and when_passed
+        if (results[i].needs_bash_check or (mod.command != null and results[i].when_passed)) {
             threads[i] = std.Thread.spawn(.{}, thread_fn, .{ThreadContext{
                 .mod = mod,
                 .result = &results[i],
