@@ -318,15 +318,22 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
         current_dir = state.refreshPaneCwd(focused);
     }
 
-    // Find existing float by key (and directory if pwd).
+    // per_cwd floats are unique per *split cwd*, not per tab.
+    // So when toggling we only match an existing float if its stored cwd matches
+    // the cwd of the currently focused split pane.
+
+    // Find existing float by key (and directory if per_cwd).
     for (state.floats.items, 0..) |pane, i| {
         if (pane.float_key == float_def.key) {
-            // Tab-bound: skip if on wrong tab.
-            if (pane.parent_tab) |parent| {
-                if (parent != state.active_tab) continue;
+            // Only tab-bound floats use parent_tab filtering.
+            // per_cwd/global floats are shared across tabs.
+            if (!float_def.attributes.per_cwd and !float_def.attributes.global) {
+                if (pane.parent_tab) |parent| {
+                    if (parent != state.active_tab) continue;
+                }
             }
 
-            // For pwd floats, also check directory match.
+            // For per_cwd floats, also check directory match.
             if (float_def.attributes.per_cwd and pane.is_pwd) {
                 // Both dirs must exist and match, or both be null.
                 const dirs_match = if (pane.pwd_dir) |pane_dir| blk: {
@@ -339,7 +346,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 if (!dirs_match) continue;
             }
 
-            // Toggle visibility (per-tab for global floats).
+            // Toggle visibility (per-tab for global/per_cwd floats).
             const old_uuid = state.getCurrentFocusedUuid();
             pane.toggleVisibleOnTab(state.active_tab);
             if (pane.isVisibleOnTab(state.active_tab)) {
@@ -851,31 +858,52 @@ fn swapPanePositions(state: *State, pane_a: *Pane, pane_b: *Pane) void {
 /// Swap position and border fields between two float panes, then resize VTs.
 fn swapFloatPositions(a: *Pane, b: *Pane) void {
     // Content area
-    const ax = a.x;     const ay = a.y;
-    const aw = a.width;  const ah = a.height;
-    a.x = b.x;           a.y = b.y;
-    a.width = b.width;   a.height = b.height;
-    b.x = ax;            b.y = ay;
-    b.width = aw;        b.height = ah;
+    const ax = a.x;
+    const ay = a.y;
+    const aw = a.width;
+    const ah = a.height;
+    a.x = b.x;
+    a.y = b.y;
+    a.width = b.width;
+    a.height = b.height;
+    b.x = ax;
+    b.y = ay;
+    b.width = aw;
+    b.height = ah;
 
     // Border area
-    const abx = a.border_x; const aby = a.border_y;
-    const abw = a.border_w; const abh = a.border_h;
-    a.border_x = b.border_x; a.border_y = b.border_y;
-    a.border_w = b.border_w; a.border_h = b.border_h;
-    b.border_x = abx; b.border_y = aby;
-    b.border_w = abw; b.border_h = abh;
+    const abx = a.border_x;
+    const aby = a.border_y;
+    const abw = a.border_w;
+    const abh = a.border_h;
+    a.border_x = b.border_x;
+    a.border_y = b.border_y;
+    a.border_w = b.border_w;
+    a.border_h = b.border_h;
+    b.border_x = abx;
+    b.border_y = aby;
+    b.border_w = abw;
+    b.border_h = abh;
 
     // Layout percentages
-    const awp = a.float_width_pct;  const ahp = a.float_height_pct;
-    const axp = a.float_pos_x_pct;  const ayp = a.float_pos_y_pct;
-    const apx = a.float_pad_x;      const apy = a.float_pad_y;
-    a.float_width_pct = b.float_width_pct;   a.float_height_pct = b.float_height_pct;
-    a.float_pos_x_pct = b.float_pos_x_pct;   a.float_pos_y_pct = b.float_pos_y_pct;
-    a.float_pad_x = b.float_pad_x;            a.float_pad_y = b.float_pad_y;
-    b.float_width_pct = awp;  b.float_height_pct = ahp;
-    b.float_pos_x_pct = axp;  b.float_pos_y_pct = ayp;
-    b.float_pad_x = apx;      b.float_pad_y = apy;
+    const awp = a.float_width_pct;
+    const ahp = a.float_height_pct;
+    const axp = a.float_pos_x_pct;
+    const ayp = a.float_pos_y_pct;
+    const apx = a.float_pad_x;
+    const apy = a.float_pad_y;
+    a.float_width_pct = b.float_width_pct;
+    a.float_height_pct = b.float_height_pct;
+    a.float_pos_x_pct = b.float_pos_x_pct;
+    a.float_pos_y_pct = b.float_pos_y_pct;
+    a.float_pad_x = b.float_pad_x;
+    a.float_pad_y = b.float_pad_y;
+    b.float_width_pct = awp;
+    b.float_height_pct = ahp;
+    b.float_pos_x_pct = axp;
+    b.float_pos_y_pct = ayp;
+    b.float_pad_x = apx;
+    b.float_pad_y = apy;
 
     // Resize VTs to their new dimensions
     a.vt.resize(a.width, a.height) catch {};
