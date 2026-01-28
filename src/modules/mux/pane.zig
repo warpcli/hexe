@@ -84,6 +84,8 @@ pub const Pane = struct {
     // Capture raw output for blocking floats
     capture_output: bool = false,
     captured_output: std.ArrayList(u8) = .empty,
+    // Dim background when this float is visible (focus mode)
+    dim_background: bool = false,
     // For tab-bound floats: which tab owns this float
     // null = global float (special=true or pwd=true)
     parent_tab: ?usize = null,

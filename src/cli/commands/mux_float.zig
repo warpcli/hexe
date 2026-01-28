@@ -14,6 +14,8 @@ pub fn runMuxFloat(
     pass_env: bool,
     extra_env: []const u8,
     isolated: bool,
+    size: []const u8,
+    focus: bool,
 ) !void {
     if (command.len == 0) {
         print("Error: --command is required\n", .{});
@@ -21,6 +23,32 @@ pub fn runMuxFloat(
     }
 
     const posix = std.posix;
+
+    // Parse size parameter (format: width,height,shift_x,shift_y)
+    var size_width: u16 = 0;
+    var size_height: u16 = 0;
+    var shift_x: i16 = 0;
+    var shift_y: i16 = 0;
+
+    if (size.len > 0) {
+        var it = std.mem.splitScalar(u8, size, ',');
+        var idx: usize = 0;
+        while (it.next()) |part| {
+            const trimmed = std.mem.trim(u8, part, " ");
+            if (trimmed.len == 0) {
+                idx += 1;
+                continue;
+            }
+            switch (idx) {
+                0 => size_width = std.fmt.parseInt(u16, trimmed, 10) catch 0,
+                1 => size_height = std.fmt.parseInt(u16, trimmed, 10) catch 0,
+                2 => shift_x = std.fmt.parseInt(i16, trimmed, 10) catch 0,
+                3 => shift_y = std.fmt.parseInt(i16, trimmed, 10) catch 0,
+                else => break,
+            }
+            idx += 1;
+        }
+    }
 
     // Collect env entries.
     var env_list: std.ArrayList([]const u8) = .empty;
@@ -84,7 +112,8 @@ pub fn runMuxFloat(
 
     // Build FloatRequest.
     const flags: u8 = (if (true) @as(u8, 1) else 0) | // wait_for_exit always true for CLI
-        (if (isolated) @as(u8, 2) else 0);
+        (if (isolated) @as(u8, 2) else 0) |
+        (if (focus) @as(u8, 4) else 0);
     const req = wire.FloatRequest{
         .flags = flags,
         .cmd_len = @intCast(command.len),
@@ -92,6 +121,10 @@ pub fn runMuxFloat(
         .cwd_len = @intCast(cwd.len),
         .result_path_len = @intCast(actual_result_path.len),
         .env_count = @intCast(env_list.items.len),
+        .size_width = size_width,
+        .size_height = size_height,
+        .shift_x = shift_x,
+        .shift_y = shift_y,
     };
 
     // Build trailing data: cmd + title + cwd + result_path + env entries (each: u16 len + bytes).

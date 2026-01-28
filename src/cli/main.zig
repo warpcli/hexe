@@ -172,6 +172,8 @@ pub fn main() !void {
     const mux_float_pass_env = try mux_float.flag("", "pass-env", null);
     const mux_float_extra_env = try mux_float.string("", "extra-env", null);
     const mux_float_isolated = try mux_float.flag("", "isolated", null);
+    const mux_float_size = try mux_float.string("", "size", null);
+    const mux_float_focus = try mux_float.flag("", "focus", null);
     const mux_float_instance = try mux_float.string("I", "instance", null);
 
     const mux_notify = try mux_cmd.newCommand("notify", "Send notification");
@@ -360,7 +362,7 @@ pub fn main() !void {
         } else if (found_mux and found_attach) {
             print("Usage: hexe mux attach [OPTIONS] <name>\n\nAttach to existing session by name or UUID prefix\n\nOptions:\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n  -I, --instance <NAME>    Target a specific instance\n", .{});
         } else if (found_mux and found_float) {
-            print("Usage: hexe mux float [OPTIONS]\n\nSpawn a transient float pane (blocking)\n\nOptions:\n  -u, --uuid <UUID>             Target mux UUID (optional if inside mux)\n  -c, --command <COMMAND>       Command to run in the float\n      --title <TEXT>            Border title for the float\n      --cwd <PATH>              Working directory for the float\n      --result-file <PATH>      Read selection from PATH after exit\n      --pass-env                Send current environment to the pod\n      --extra-env <KEY=VAL,..>   Extra environment variables (comma-separated)\n      --isolated                Run command with filesystem/cgroup isolation\n  -I, --instance <NAME>         Target a specific instance\n", .{});
+            print("Usage: hexe mux float [OPTIONS]\n\nSpawn a transient float pane (blocking)\n\nOptions:\n  -u, --uuid <UUID>             Target mux UUID (optional if inside mux)\n  -c, --command <COMMAND>       Command to run in the float\n      --title <TEXT>            Border title for the float\n      --cwd <PATH>              Working directory for the float\n      --result-file <PATH>      Read selection from PATH after exit\n      --pass-env                Send current environment to the pod\n      --extra-env <KEY=VAL,..>   Extra environment variables (comma-separated)\n      --isolated                Run command with filesystem/cgroup isolation\n      --size <W,H,X,Y>          Size and position: width%,height%,shift_x,shift_y\n      --focus                   Dim background to focus on the float\n  -I, --instance <NAME>         Target a specific instance\n", .{});
         } else if (found_shp and found_prompt) {
             print("Usage: hexe shp prompt [OPTIONS]\n\nRender shell prompt\n\nOptions:\n  -s, --status <N>    Exit status of last command\n  -d, --duration <N>  Duration of last command in ms\n  -r, --right         Render right prompt\n  -S, --shell <SHELL> Shell type (bash, zsh, fish)\n  -j, --jobs <N>      Number of background jobs\n", .{});
         } else if (found_shp and found_init) {
@@ -545,6 +547,8 @@ pub fn main() !void {
                 mux_float_pass_env.*,
                 mux_float_extra_env.*,
                 mux_float_isolated.*,
+                mux_float_size.*,
+                mux_float_focus.*,
             );
         } else if (mux_notify.happened) {
             if (mux_notify_instance.*.len > 0) setInstanceFromCli(mux_notify_instance.*);

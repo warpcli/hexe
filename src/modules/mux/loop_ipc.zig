@@ -532,6 +532,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
 
     const wait_for_exit = (fr.flags & 1) != 0;
     const isolated = (fr.flags & 2) != 0;
+    const focus = (fr.flags & 4) != 0;
 
     // Build extra_env (isolated flag).
     var extra_env_list: std.ArrayList([]const u8) = .empty;
@@ -579,7 +580,14 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
     const command = state.allocator.dupe(u8, cmd) catch return;
     defer state.allocator.free(command);
 
-    const new_uuid = actions.createAdhocFloat(state, command, title, spawn_cwd, env_items, extra_items, use_pod) catch {
+    const float_size = actions.FloatSize{
+        .width = fr.size_width,
+        .height = fr.size_height,
+        .shift_x = fr.shift_x,
+        .shift_y = fr.shift_y,
+        .dim_background = focus,
+    };
+    const new_uuid = actions.createAdhocFloatWithSize(state, command, title, spawn_cwd, env_items, extra_items, use_pod, float_size) catch {
         // Spawn failed — if wait_for_exit, send error result so CLI doesn't hang.
         if (wait_for_exit) {
             const ctl_fd = state.ses_client.getCtlFd() orelse return;

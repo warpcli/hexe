@@ -421,6 +421,14 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
     }
 }
 
+pub const FloatSize = struct {
+    width: u16 = 0, // 0 = use config default
+    height: u16 = 0, // 0 = use config default
+    shift_x: i16 = 0, // shift from center (-50 to 50)
+    shift_y: i16 = 0, // shift from center (-50 to 50)
+    dim_background: bool = false, // dim the background when this float is visible
+};
+
 pub fn createAdhocFloat(
     state: *State,
     command: []const u8,
@@ -430,16 +438,30 @@ pub fn createAdhocFloat(
     extra_env: ?[]const []const u8,
     use_pod: bool,
 ) ![32]u8 {
+    return createAdhocFloatWithSize(state, command, title, cwd, env, extra_env, use_pod, .{});
+}
+
+pub fn createAdhocFloatWithSize(
+    state: *State,
+    command: []const u8,
+    title: ?[]const u8,
+    cwd: ?[]const u8,
+    env: ?[]const []const u8,
+    extra_env: ?[]const []const u8,
+    use_pod: bool,
+    size: FloatSize,
+) ![32]u8 {
     const pane = try state.allocator.create(Pane);
     errdefer state.allocator.destroy(pane);
 
     const cfg = &state.config;
     const style = if (cfg.float_style_default) |*s| s else null;
     const shadow_enabled = if (style) |s| s.shadow_color != null else false;
-    const width_pct: u16 = cfg.float_width_percent;
-    const height_pct: u16 = cfg.float_height_percent;
-    const pos_x_pct: u16 = 50;
-    const pos_y_pct: u16 = 50;
+    const width_pct: u16 = if (size.width > 0) size.width else cfg.float_width_percent;
+    const height_pct: u16 = if (size.height > 0) size.height else cfg.float_height_percent;
+    // Base position at center (50%), then apply shift
+    const pos_x_pct: u16 = @intCast(@as(i32, 50) + @as(i32, size.shift_x));
+    const pos_y_pct: u16 = @intCast(@as(i32, 50) + @as(i32, size.shift_y));
     const pad_x_cfg: u16 = cfg.float_padding_x;
     const pad_y_cfg: u16 = cfg.float_padding_y;
     const border_color = cfg.float_color;
@@ -513,6 +535,7 @@ pub fn createAdhocFloat(
 
     pane.parent_tab = state.active_tab;
     pane.sticky = false;
+    pane.dim_background = size.dim_background;
 
     if (style) |s| {
         pane.float_style = s;
