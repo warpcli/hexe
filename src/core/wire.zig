@@ -91,6 +91,8 @@ pub const MsgType = enum(u16) {
     float_result = 0x012E,
     pane_exited = 0x012F,
     replay_backlogs = 0x0130, // MUX tells SES it's ready for backlog replay
+    kill_session = 0x0131, // CLI → SES: kill a detached session
+    clear_sessions = 0x0132, // CLI → SES: kill all detached sessions
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -379,6 +381,26 @@ pub const FloatResult = extern struct {
     uuid: [32]u8 align(1),
     exit_code: i32 align(1),
     output_len: u32 align(1),
+};
+
+/// KillSession: kill a specific detached session by name or UUID prefix.
+/// Followed by: id bytes (id_len).
+pub const KillSession = extern struct {
+    id_len: u16 align(1),
+};
+
+/// KillSessionResult: response to kill_session.
+/// If success=0, followed by error message bytes (error_len).
+pub const KillSessionResult = extern struct {
+    success: u8 align(1),
+    killed_panes: u16 align(1),
+    error_len: u16 align(1),
+};
+
+/// ClearSessionsResult: response to clear_sessions.
+pub const ClearSessionsResult = extern struct {
+    killed_sessions: u16 align(1),
+    killed_panes: u16 align(1),
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

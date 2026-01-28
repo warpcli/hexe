@@ -76,7 +76,9 @@ pub fn runMuxFloat(
         result_file
     else blk: {
         const tmp_uuid = ipc.generateUuid();
-        owned_result_path = std.fmt.allocPrint(allocator, "/tmp/hexe-float-{s}.result", .{tmp_uuid}) catch break :blk "";
+        const socket_dir = ipc.getSocketDir(allocator) catch break :blk "";
+        defer allocator.free(socket_dir);
+        owned_result_path = std.fmt.allocPrint(allocator, "{s}/float-{s}.result", .{ socket_dir, tmp_uuid }) catch break :blk "";
         break :blk owned_result_path.?;
     };
 

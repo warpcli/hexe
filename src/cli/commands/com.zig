@@ -978,3 +978,93 @@ fn writeJsonStr(stdout: std.fs.File, s: []const u8) void {
     }
 }
 
+pub fn runSesKill(allocator: std.mem.Allocator, target: []const u8) !void {
+    const wire = core.wire;
+    const posix = std.posix;
+
+    if (target.len == 0) {
+        print("Error: session name or UUID prefix required\n", .{});
+        return;
+    }
+
+    const fd = connectSesCliChannel(allocator) orelse return;
+    defer posix.close(fd);
+
+    // Send kill_session request.
+    const ks = wire.KillSession{ .id_len = @intCast(target.len) };
+    wire.writeControlWithTrail(fd, .kill_session, std.mem.asBytes(&ks), target) catch {
+        print("Error: failed to send request\n", .{});
+        return;
+    };
+
+    // Read response.
+    const hdr = wire.readControlHeader(fd) catch {
+        print("Error: failed to read response\n", .{});
+        return;
+    };
+    const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+    if (msg_type != .kill_session or hdr.payload_len < @sizeOf(wire.KillSessionResult)) {
+        print("Error: unexpected response\n", .{});
+        return;
+    }
+
+    const result = wire.readStruct(wire.KillSessionResult, fd) catch {
+        print("Error: failed to read result\n", .{});
+        return;
+    };
+
+    if (result.success != 0) {
+        print("Killed session ({d} panes)\n", .{result.killed_panes});
+    } else {
+        // Read error message.
+        if (result.error_len > 0) {
+            var err_buf: [256]u8 = undefined;
+            const err_len = @min(result.error_len, err_buf.len);
+            wire.readExact(fd, err_buf[0..err_len]) catch {
+                print("Error: session not found\n", .{});
+                return;
+            };
+            print("Error: {s}\n", .{err_buf[0..err_len]});
+        } else {
+            print("Error: session not found\n", .{});
+        }
+    }
+}
+
+pub fn runSesClear(allocator: std.mem.Allocator, force: bool) !void {
+    const wire = core.wire;
+    const posix = std.posix;
+
+    if (!force) {
+        print("Warning: This will kill ALL detached sessions. Use -f to confirm.\n", .{});
+        return;
+    }
+
+    const fd = connectSesCliChannel(allocator) orelse return;
+    defer posix.close(fd);
+
+    // Send clear_sessions request (no payload).
+    wire.writeControl(fd, .clear_sessions, &.{}) catch {
+        print("Error: failed to send request\n", .{});
+        return;
+    };
+
+    // Read response.
+    const hdr = wire.readControlHeader(fd) catch {
+        print("Error: failed to read response\n", .{});
+        return;
+    };
+    const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+    if (msg_type != .clear_sessions or hdr.payload_len < @sizeOf(wire.ClearSessionsResult)) {
+        print("Error: unexpected response\n", .{});
+        return;
+    }
+
+    const result = wire.readStruct(wire.ClearSessionsResult, fd) catch {
+        print("Error: failed to read result\n", .{});
+        return;
+    };
+
+    print("Killed {d} sessions ({d} panes)\n", .{ result.killed_sessions, result.killed_panes });
+}
+

@@ -1636,6 +1636,12 @@ pub const Server = struct {
                 }
                 self.handleBinaryStatus(fd, full_mode);
             },
+            .kill_session => {
+                self.handleKillSession(fd, hdr.payload_len, &buf);
+            },
+            .clear_sessions => {
+                self.handleClearSessions(fd);
+            },
             else => {
                 self.skipBinaryPayload(fd, hdr.payload_len, &buf);
                 posix.close(fd);
@@ -2031,6 +2037,72 @@ pub const Server = struct {
             if (client.mux_ctl_fd) |mux_fd| return mux_fd;
         }
         return null;
+    }
+
+    /// Handle kill_session CLI request.
+    fn handleKillSession(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        defer posix.close(fd);
+
+        if (payload_len < @sizeOf(wire.KillSession)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 15 };
+            wire.writeControlWithTrail(fd, .kill_session, std.mem.asBytes(&result), "invalid payload") catch {};
+            return;
+        }
+
+        const ks = wire.readStruct(wire.KillSession, fd) catch {
+            const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 11 };
+            wire.writeControlWithTrail(fd, .kill_session, std.mem.asBytes(&result), "read failed") catch {};
+            return;
+        };
+
+        if (ks.id_len == 0 or ks.id_len > buf.len) {
+            const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 10 };
+            wire.writeControlWithTrail(fd, .kill_session, std.mem.asBytes(&result), "invalid id") catch {};
+            return;
+        }
+
+        wire.readExact(fd, buf[0..ks.id_len]) catch {
+            const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 11 };
+            wire.writeControlWithTrail(fd, .kill_session, std.mem.asBytes(&result), "read failed") catch {};
+            return;
+        };
+        const session_id_str = buf[0..ks.id_len];
+
+        ses.debugLog("kill_session: id={s}", .{session_id_str});
+
+        // Find session by name or UUID prefix.
+        const session_id = self.ses_state.findDetachedSessionByNameOrPrefix(session_id_str) orelse {
+            const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 17 };
+            wire.writeControlWithTrail(fd, .kill_session, std.mem.asBytes(&result), "session not found") catch {};
+            return;
+        };
+
+        // Kill the session.
+        const killed_panes = self.ses_state.killDetachedSession(session_id) orelse {
+            const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 11 };
+            wire.writeControlWithTrail(fd, .kill_session, std.mem.asBytes(&result), "kill failed") catch {};
+            return;
+        };
+
+        ses.debugLog("kill_session: killed {d} panes", .{killed_panes});
+        const result = wire.KillSessionResult{ .success = 1, .killed_panes = @intCast(killed_panes), .error_len = 0 };
+        wire.writeControl(fd, .kill_session, std.mem.asBytes(&result)) catch {};
+    }
+
+    /// Handle clear_sessions CLI request.
+    fn handleClearSessions(self: *Server, fd: posix.fd_t) void {
+        defer posix.close(fd);
+
+        ses.debugLog("clear_sessions: starting", .{});
+        const counts = self.ses_state.killAllDetachedSessions();
+        ses.debugLog("clear_sessions: killed {d} sessions, {d} panes", .{ counts.sessions, counts.panes });
+
+        const result = wire.ClearSessionsResult{
+            .killed_sessions = @intCast(counts.sessions),
+            .killed_panes = @intCast(counts.panes),
+        };
+        wire.writeControl(fd, .clear_sessions, std.mem.asBytes(&result)) catch {};
     }
 
     pub fn stop(self: *Server) void {

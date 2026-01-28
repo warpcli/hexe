@@ -84,6 +84,14 @@ pub fn main() !void {
     const ses_list_instance = try ses_list.string("I", "instance", null);
     const ses_list_json = try ses_list.flag("j", "json", null);
 
+    const ses_kill = try ses_cmd.newCommand("kill", "Kill a detached session");
+    const ses_kill_target = try ses_kill.stringPositional(null);
+    const ses_kill_instance = try ses_kill.string("I", "instance", null);
+
+    const ses_clear = try ses_cmd.newCommand("clear", "Kill all detached sessions");
+    const ses_clear_instance = try ses_clear.string("I", "instance", null);
+    const ses_clear_force = try ses_clear.flag("f", "force", null);
+
     // POD subcommands (mostly for ses-internal use)
     const pod_daemon = try pod_cmd.newCommand("daemon", "Start a per-pane pod daemon");
     const pod_daemon_uuid = try pod_daemon.string("u", "uuid", null);
@@ -255,6 +263,7 @@ pub fn main() !void {
     var found_new = false;
     var found_attach = false;
     var found_kill = false;
+    var found_clear = false;
     var found_gc = false;
     var found_float = false;
     var found_prompt = false;
@@ -285,6 +294,7 @@ pub fn main() !void {
         if (std.mem.eql(u8, arg, "new")) found_new = true;
         if (std.mem.eql(u8, arg, "attach")) found_attach = true;
         if (std.mem.eql(u8, arg, "kill")) found_kill = true;
+        if (std.mem.eql(u8, arg, "clear")) found_clear = true;
         if (std.mem.eql(u8, arg, "gc")) found_gc = true;
         if (std.mem.eql(u8, arg, "float")) found_float = true;
         if (std.mem.eql(u8, arg, "prompt")) found_prompt = true;
@@ -320,6 +330,10 @@ pub fn main() !void {
                 print("Usage: hexe pod new [OPTIONS]\n\nCreate a standalone pod and print a JSON line once ready.\n\nOptions:\n  -n, --name <NAME>         Pod name (also used for ps/alias)\n  -S, --shell <CMD>         Shell/command to run (default: $SHELL)\n  -C, --cwd <DIR>           Working directory\n      --labels <a,b,c>      Comma-separated labels\n      --alias               Create pod@<name>.sock alias symlink\n  -d, --debug               Enable debug output\n  -L, --logfile <PATH>      Log debug output to PATH\n  -I, --instance <NAME>     Run under instance namespace\n  -T, --test-only           Mark as test-only (requires instance)\n", .{});
             } else if (found_ses and found_list) {
                 print("Usage: hexe ses list [OPTIONS]\n\nList all sessions and panes\n\nOptions:\n  -d, --details           Show extra details\n  -j, --json              Output as JSON\n  -I, --instance <NAME>   Target a specific instance\n", .{});
+        } else if (found_ses and found_kill) {
+            print("Usage: hexe ses kill <name|uuid-prefix>\n\nKill a detached session by name or UUID prefix\n\nOptions:\n  -I, --instance <NAME>   Target a specific instance\n", .{});
+        } else if (found_ses and found_clear) {
+            print("Usage: hexe ses clear [OPTIONS]\n\nKill all detached sessions\n\nOptions:\n  -f, --force             Skip confirmation\n  -I, --instance <NAME>   Target a specific instance\n", .{});
         } else if (found_ses and found_status) {
             print("Usage: hexe ses status [OPTIONS]\n\nShow daemon status and socket path\n\nOptions:\n  -I, --instance <NAME>   Target a specific instance\n", .{});
         } else if (found_shp and found_exit_intent) {
@@ -365,7 +379,7 @@ pub fn main() !void {
         } else if (found_pop) {
             print("Usage: hexe pop <command>\n\nPopup overlays\n\nCommands:\n  notify   Show notification\n  confirm  Yes/No dialog\n  choose   Select from options\n", .{});
         } else if (found_ses) {
-            print("Usage: hexe ses <command>\n\nSession daemon management\n\nCommands:\n  daemon  Start the session daemon\n  status  Show daemon info\n  list    List sessions and panes\n", .{});
+            print("Usage: hexe ses <command>\n\nSession daemon management\n\nCommands:\n  daemon  Start the session daemon\n  status  Show daemon info\n  list    List sessions and panes\n  kill    Kill a detached session\n  clear   Kill all detached sessions\n", .{});
         } else if (found_pod) {
             print("Usage: hexe pod <command>\n\nPer-pane PTY daemon\n\nCommands:\n  daemon  Start a per-pane pod daemon\n  new     Create a standalone pod\n  list    List discoverable pods\n  send    Send input to a pod\n  attach  Attach to a pod\n  kill    Kill a pod\n  gc      Clean stale pod metadata\n", .{});
         } else if (found_mux) {
@@ -422,6 +436,12 @@ pub fn main() !void {
         } else if (ses_list.happened) {
             if (ses_list_instance.*.len > 0) setInstanceFromCli(ses_list_instance.*);
             try cli_cmds.runList(allocator, ses_list_details.*, ses_list_json.*);
+        } else if (ses_kill.happened) {
+            if (ses_kill_instance.*.len > 0) setInstanceFromCli(ses_kill_instance.*);
+            try cli_cmds.runSesKill(allocator, ses_kill_target.*);
+        } else if (ses_clear.happened) {
+            if (ses_clear_instance.*.len > 0) setInstanceFromCli(ses_clear_instance.*);
+            try cli_cmds.runSesClear(allocator, ses_clear_force.*);
         }
     } else if (pod_cmd.happened) {
         if (pod_daemon.happened) {

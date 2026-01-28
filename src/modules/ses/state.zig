@@ -1169,4 +1169,68 @@ pub const SesState = struct {
     pub fn getPane(self: *SesState, uuid: [32]u8) ?*Pane {
         return self.panes.getPtr(uuid);
     }
+
+    /// Kill a detached session by its 16-byte binary session_id.
+    /// Returns the number of panes killed, or null if session not found.
+    pub fn killDetachedSession(self: *SesState, session_id: [16]u8) ?usize {
+        const kv = self.detached_sessions.fetchRemove(session_id) orelse return null;
+        var session_state = kv.value;
+
+        var killed_panes: usize = 0;
+        for (session_state.pane_uuids) |pane_uuid| {
+            self.killPane(pane_uuid) catch |e| {
+                core.logging.logError("ses", "killPane failed in killDetachedSession", e);
+                continue;
+            };
+            killed_panes += 1;
+        }
+
+        session_state.deinit();
+        self.dirty = true;
+        return killed_panes;
+    }
+
+    /// Kill all detached sessions.
+    /// Returns the number of sessions and panes killed.
+    pub fn killAllDetachedSessions(self: *SesState) struct { sessions: usize, panes: usize } {
+        var session_ids: std.ArrayList([16]u8) = .empty;
+        defer session_ids.deinit(self.allocator);
+
+        // Collect all session IDs first to avoid iterator invalidation.
+        var iter = self.detached_sessions.keyIterator();
+        while (iter.next()) |key| {
+            session_ids.append(self.allocator, key.*) catch continue;
+        }
+
+        var total_sessions: usize = 0;
+        var total_panes: usize = 0;
+
+        for (session_ids.items) |session_id| {
+            if (self.killDetachedSession(session_id)) |panes_killed| {
+                total_sessions += 1;
+                total_panes += panes_killed;
+            }
+        }
+
+        return .{ .sessions = total_sessions, .panes = total_panes };
+    }
+
+    /// Find a detached session by name or UUID prefix.
+    /// Returns the 16-byte session_id if found.
+    pub fn findDetachedSessionByNameOrPrefix(self: *SesState, id: []const u8) ?[16]u8 {
+        var iter = self.detached_sessions.iterator();
+        while (iter.next()) |entry| {
+            const session = entry.value_ptr;
+            // Check name match (exact).
+            if (std.mem.eql(u8, session.session_name, id)) {
+                return entry.key_ptr.*;
+            }
+            // Check UUID prefix match.
+            const hex_id = std.fmt.bytesToHex(entry.key_ptr.*, .lower);
+            if (id.len <= hex_id.len and std.mem.startsWith(u8, &hex_id, id)) {
+                return entry.key_ptr.*;
+            }
+        }
+        return null;
+    }
 };
