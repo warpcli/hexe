@@ -186,7 +186,7 @@ pub fn clampLocalToPane(local_x: u16, local_y: u16, pane_w: u16, pane_h: u16) Po
     return clampToPane(local_x, local_y, pane_w, pane_h);
 }
 
-pub fn applyOverlay(renderer: *Renderer, pane_x: u16, pane_y: u16, pane_w: u16, pane_h: u16, range: Range) void {
+pub fn applyOverlay(renderer: *Renderer, pane_x: u16, pane_y: u16, pane_w: u16, pane_h: u16, range: Range, selection_color: u8) void {
     if (pane_w == 0 or pane_h == 0) return;
     const a = clampToPane(range.a.x, range.a.y, pane_w, pane_h);
     const b = clampToPane(range.b.x, range.b.y, pane_w, pane_h);
@@ -198,7 +198,8 @@ pub fn applyOverlay(renderer: *Renderer, pane_x: u16, pane_y: u16, pane_w: u16, 
         const end_x: u16 = if (y == norm.end.y) norm.end.x else (pane_w - 1);
         var x: u16 = start_x;
         while (x <= end_x) : (x += 1) {
-            renderer.invertCell(pane_x + x, pane_y + y);
+            const cell = renderer.next.get(pane_x + x, pane_y + y);
+            cell.bg = .{ .palette = selection_color };
         }
     }
 }
@@ -209,7 +210,7 @@ pub fn applyOverlay(renderer: *Renderer, pane_x: u16, pane_y: u16, pane_w: u16, 
 /// "middle lines" case), the default overlay would invert all remaining cells
 /// to the right margin. This function trims the overlay to the last non-space
 /// cell on each visible row.
-pub fn applyOverlayTrimmed(renderer: *Renderer, render_state: *const ghostty.RenderState, pane_x: u16, pane_y: u16, pane_w: u16, pane_h: u16, range: Range) void {
+pub fn applyOverlayTrimmed(renderer: *Renderer, render_state: *const ghostty.RenderState, pane_x: u16, pane_y: u16, pane_w: u16, pane_h: u16, range: Range, selection_color: u8) void {
     if (pane_w == 0 or pane_h == 0) return;
 
     const a = clampToPane(range.a.x, range.a.y, pane_w, pane_h);
@@ -218,7 +219,7 @@ pub fn applyOverlayTrimmed(renderer: *Renderer, render_state: *const ghostty.Ren
 
     const row_slice = render_state.row_data.slice();
     if (row_slice.len == 0 or render_state.cols == 0 or render_state.rows == 0) {
-        applyOverlay(renderer, pane_x, pane_y, pane_w, pane_h, range);
+        applyOverlay(renderer, pane_x, pane_y, pane_w, pane_h, range, selection_color);
         return;
     }
 
@@ -266,7 +267,8 @@ pub fn applyOverlayTrimmed(renderer: *Renderer, render_state: *const ghostty.Ren
 
         var x: u16 = start_x;
         while (x <= end_x) : (x += 1) {
-            renderer.invertCell(pane_x + x, pane_y + y);
+            const cell = renderer.next.get(pane_x + x, pane_y + y);
+            cell.bg = .{ .palette = selection_color };
         }
     }
 }

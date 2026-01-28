@@ -535,6 +535,9 @@ pub const Config = struct {
     float_color: BorderColor = .{},
     float_style_default: ?FloatStyle = null,
 
+    // Selection color (palette index, default 240)
+    selection_color: u8 = 240,
+
     // Splits
     splits: SplitsConfig = .{},
 
@@ -638,6 +641,9 @@ fn parseConfig(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocat
     if (runtime.getBool(-1, "confirm_on_detach")) |v| config.confirm_on_detach = v;
     if (runtime.getBool(-1, "confirm_on_disown")) |v| config.confirm_on_disown = v;
     if (runtime.getBool(-1, "confirm_on_close")) |v| config.confirm_on_close = v;
+
+    // Selection color
+    if (runtime.getInt(u8, -1, "selection_color")) |v| config.selection_color = v;
 
     // Parse float defaults
     if (runtime.pushTable(-1, "float")) {

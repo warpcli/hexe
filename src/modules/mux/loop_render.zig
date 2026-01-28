@@ -22,7 +22,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         renderer.drawRenderState(render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height);
 
         if (state.mouse_selection.rangeForPane(state.active_tab, pane.*)) |range| {
-            mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height, range);
+            mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height, range, state.config.selection_color);
         }
 
         const is_scrolled = pane.*.isScrolled();
@@ -65,7 +65,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         renderer.drawRenderState(render_state, pane.x, pane.y, pane.width, pane.height);
 
         if (state.mouse_selection.rangeForPane(state.active_tab, pane)) |range| {
-            mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range);
+            mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range, state.config.selection_color);
         }
 
         if (pane.isScrolled()) {
@@ -98,7 +98,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
                 renderer.drawRenderState(render_state, pane.x, pane.y, pane.width, pane.height);
 
                 if (state.mouse_selection.rangeForPane(state.active_tab, pane)) |range| {
-                    mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range);
+                    mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range, state.config.selection_color);
                 }
             } else |_| {}
 

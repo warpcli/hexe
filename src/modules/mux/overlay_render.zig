@@ -60,9 +60,9 @@ pub fn renderOverlays(
 ) void {
     const content_height = screen_height - status_height;
 
-    // Apply dimming if modal overlay is active
+    // Apply dimming if modal overlay is active (dims entire screen including status bar)
     if (overlays.shouldDim()) {
-        applyDimEffect(renderer, screen_width, content_height, focused_pane_bounds);
+        applyDimEffect(renderer, screen_width, screen_height, focused_pane_bounds);
     }
 
     // Render pane select labels
