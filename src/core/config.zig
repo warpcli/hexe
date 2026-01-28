@@ -3,6 +3,8 @@ const posix = std.posix;
 const lua_runtime = @import("lua_runtime.zig");
 const LuaRuntime = lua_runtime.LuaRuntime;
 
+const log = std.log.scoped(.config);
+
 threadlocal var PARSE_ERROR: ?[]const u8 = null;
 
 fn setParseError(allocator: std.mem.Allocator, msg: []const u8) void {
@@ -615,6 +617,7 @@ pub const Config = struct {
 
         // Access the "mux" section of the global config table
         if (runtime.pushTable(-1, "mux")) {
+            log.debug("parsing mux section from global config", .{});
             parseConfig(&runtime, &config, allocator);
             runtime.pop();
         } else {
@@ -628,9 +631,12 @@ pub const Config = struct {
         const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;
         defer allocator.free(local_path);
 
+        log.debug("checking for local config: {s}", .{local_path});
+
         // Check if local config exists
         std.fs.cwd().access(local_path, .{}) catch {
             // No local config, use global only
+            log.debug("no local config found", .{});
             if (config.status != .@"error") {
                 if (PARSE_ERROR) |msg| {
                     config.status = .@"error";
@@ -641,9 +647,12 @@ pub const Config = struct {
             return config;
         };
 
+        log.info("loading local config from: {s}", .{local_path});
+
         // Local config exists, load it and merge/overwrite
-        runtime.loadConfig(local_path) catch {
+        runtime.loadConfig(local_path) catch |err| {
             // Failed to load local config, but global is already loaded
+            log.warn("failed to load local config: {}", .{err});
             if (config.status != .@"error") {
                 if (PARSE_ERROR) |msg| {
                     config.status = .@"error";
@@ -656,8 +665,11 @@ pub const Config = struct {
 
         // Access the "mux" section of the local config table and merge
         if (runtime.pushTable(-1, "mux")) {
+            log.info("parsing mux section from local config", .{});
             parseConfig(&runtime, &config, allocator);
             runtime.pop();
+        } else {
+            log.warn("no mux section in local config", .{});
         }
 
         // Pop local config table
@@ -767,6 +779,8 @@ fn parseMouseConfig(runtime: *LuaRuntime, config: *Config) void {
 }
 
 fn parseInputConfig(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocator) void {
+    log.debug("parsing input config", .{});
+
     // Parse timing
     if (runtime.pushTable(-1, "timing")) {
         if (runtime.getInt(i64, -1, "hold_ms")) |v| config.input.hold_ms = v;
@@ -777,30 +791,50 @@ fn parseInputConfig(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Al
 
     // Parse binds array
     if (runtime.pushTable(-1, "binds")) {
-        config.input.binds = parseBinds(runtime, allocator);
+        const old_count = config.input.binds.len;
+        config.input.binds = parseBinds(runtime, allocator, config.input.binds);
+        log.info("parsed {} keybindings (was {})", .{config.input.binds.len, old_count});
         runtime.pop();
     }
 }
 
-fn parseBinds(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const Config.Bind {
+fn parseBinds(runtime: *LuaRuntime, allocator: std.mem.Allocator, existing: []const Config.Bind) []const Config.Bind {
     var list = std.ArrayList(Config.Bind).empty;
 
+    // Add existing binds first
+    log.debug("parseBinds: starting with {} existing binds", .{existing.len});
+    for (existing) |bind| {
+        list.append(allocator, bind) catch {};
+    }
+
     const len = runtime.getArrayLen(-1);
+    log.debug("parseBinds: found {} new binds to parse", .{len});
+
     for (1..len + 1) |i| {
         if (runtime.pushArrayElement(-1, i)) {
             if (parseBind(runtime, allocator)) |bind| {
+                log.debug("parseBinds: successfully parsed bind #{}", .{i});
                 list.append(allocator, bind) catch {};
+            } else {
+                log.warn("parseBinds: failed to parse bind #{}", .{i});
             }
             runtime.pop();
         }
     }
 
+    const final_count = list.items.len;
+    log.debug("parseBinds: returning {} total binds", .{final_count});
     return list.toOwnedSlice(allocator) catch &[_]Config.Bind{};
 }
 
 fn parseBind(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?Config.Bind {
     // Parse key (required)
-    const key_str = runtime.getString(-1, "key") orelse return null;
+    const key_str = runtime.getString(-1, "key") orelse {
+        log.warn("parseBind: no 'key' field found", .{});
+        return null;
+    };
+    log.debug("parseBind: parsing bind with key='{s}'", .{key_str});
+
     const key: Config.BindKey = blk: {
         if (key_str.len == 1) break :blk .{ .char = key_str[0] };
         if (std.mem.eql(u8, key_str, "space")) break :blk .space;
@@ -808,6 +842,7 @@ fn parseBind(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?Config.Bind {
         if (std.mem.eql(u8, key_str, "down")) break :blk .down;
         if (std.mem.eql(u8, key_str, "left")) break :blk .left;
         if (std.mem.eql(u8, key_str, "right")) break :blk .right;
+        log.warn("parseBind: invalid key '{s}'", .{key_str});
         return null;
     };
 
@@ -817,13 +852,27 @@ fn parseBind(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?Config.Bind {
         if (runtime.typeOf(-1) == .table) {
             if (runtime.pushTable(-1, "action")) {
                 defer runtime.pop();
-                const action_type = runtime.getString(-1, "type") orelse return null;
-                break :blk parseAction(runtime, action_type) orelse return null;
+                const action_type = runtime.getString(-1, "type") orelse {
+                    log.warn("parseBind: action table has no 'type' field", .{});
+                    return null;
+                };
+                log.debug("parseBind: parsing action type '{s}'", .{action_type});
+                break :blk parseAction(runtime, action_type) orelse {
+                    log.warn("parseBind: failed to parse action type '{s}'", .{action_type});
+                    return null;
+                };
             }
         }
         // Try direct action string
-        const action_str = runtime.getString(-1, "action") orelse return null;
-        break :blk parseSimpleAction(action_str) orelse return null;
+        log.debug("parseBind: trying to parse action as string", .{});
+        const action_str = runtime.getString(-1, "action") orelse {
+            log.warn("parseBind: no 'action' field found (neither table nor string)", .{});
+            return null;
+        };
+        break :blk parseSimpleAction(action_str) orelse {
+            log.warn("parseBind: failed to parse simple action '{s}'", .{action_str});
+            return null;
+        };
     };
 
     // Parse mods (array of modifier values to OR together, or single number)
