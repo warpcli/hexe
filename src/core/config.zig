@@ -319,6 +319,7 @@ pub const LayoutFloatDef = struct {
     command: ?[]const u8 = null,
     title: ?[]const u8 = null,
     attributes: FloatAttributes = .{},
+    has_custom_attributes: bool = false, // true if float has its own attributes table
     width_percent: ?u8 = null,
     height_percent: ?u8 = null,
     pos_x: ?u8 = null,
@@ -570,6 +571,8 @@ pub const Config = struct {
     // Float borders default to active=1, passive=237.
     float_color: BorderColor = .{},
     float_style_default: ?FloatStyle = null,
+    // Default float attributes (from mux.float.attributes)
+    float_default_attributes: FloatAttributes = .{},
 
     // Selection color (palette index, default 240)
     selection_color: u8 = 240,
@@ -1039,6 +1042,17 @@ fn parseFloat(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocato
 
     if (runtime.pushTable(-1, "style")) {
         style = parseFloatStyle(runtime, allocator);
+        runtime.pop();
+    }
+
+    // Parse default attributes
+    if (runtime.pushTable(-1, "attributes")) {
+        if (runtime.getBool(-1, "exclusive")) |v| config.float_default_attributes.exclusive = v;
+        if (runtime.getBool(-1, "per_cwd")) |v| config.float_default_attributes.per_cwd = v;
+        if (runtime.getBool(-1, "sticky")) |v| config.float_default_attributes.sticky = v;
+        if (runtime.getBool(-1, "global")) |v| config.float_default_attributes.global = v;
+        if (runtime.getBool(-1, "destroy")) |v| config.float_default_attributes.destroy = v;
+        if (runtime.getBool(-1, "isolated")) |v| config.float_default_attributes.isolated = v;
         runtime.pop();
     }
 
@@ -1520,7 +1534,9 @@ fn parseLayoutFloats(runtime: *LuaRuntime, allocator: std.mem.Allocator) []Layou
 
         // Parse attributes
         var attrs = FloatAttributes{};
+        var has_custom_attrs = false;
         if (runtime.pushTable(-1, "attributes")) {
+            has_custom_attrs = true;
             if (runtime.getBool(-1, "exclusive")) |v| attrs.exclusive = v;
             if (runtime.getBool(-1, "per_cwd")) |v| attrs.per_cwd = v;
             if (runtime.getBool(-1, "sticky")) |v| attrs.sticky = v;
@@ -1577,6 +1593,7 @@ fn parseLayoutFloats(runtime: *LuaRuntime, allocator: std.mem.Allocator) []Layou
             .command = command,
             .title = title,
             .attributes = attrs,
+            .has_custom_attributes = has_custom_attrs,
             .width_percent = width,
             .height_percent = height,
             .pos_x = pos_x,

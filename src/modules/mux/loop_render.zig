@@ -127,17 +127,18 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     // Draw overlays (dimming, pane labels, resize info, keycast)
     if (state.overlays.hasContent() or state.overlays.shouldDim() or float_dim) {
         // Get focused pane bounds to exclude from dimming
-        // For floats: use border dimensions + shadow (1 cell right/bottom)
+        // For floats: use border dimensions + shadow (1 cell right/bottom) if shadow enabled
         const focused_bounds: ?overlay_render.Bounds = blk: {
             if (state.active_floating) |idx| {
                 if (idx < state.floats.items.len) {
                     const fp = state.floats.items[idx];
-                    // Include border + 1 for shadow
+                    const has_shadow = if (fp.float_style) |s| s.shadow_color != null else false;
+                    const shadow_offset: u16 = if (has_shadow) 1 else 0;
                     break :blk .{
                         .x = fp.border_x,
                         .y = fp.border_y,
-                        .w = fp.border_w + 1, // shadow right
-                        .h = fp.border_h + 1, // shadow bottom
+                        .w = fp.border_w + shadow_offset,
+                        .h = fp.border_h + shadow_offset,
                     };
                 }
             }
