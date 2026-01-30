@@ -191,6 +191,203 @@ fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
     input_csi_u.forwardSanitizedToFocusedPane(state, bytes);
 }
 
+/// Get the exit_key for the currently focused float, if any.
+fn getFocusedFloatExitKey(state: *State) ?[]const u8 {
+    const idx = state.active_floating orelse return null;
+    if (idx >= state.floats.items.len) return null;
+    const pane = state.floats.items[idx];
+    return pane.exit_key;
+}
+
+/// Parsed exit key with modifiers.
+const ParsedExitKey = struct {
+    mods: u8, // 1=Alt, 2=Ctrl, 4=Shift
+    key: []const u8, // The base key (e.g., "k", "Esc", "Enter")
+};
+
+/// Parse an exit_key string into modifiers and base key.
+/// Supports formats: "Alt+k", "A-k", "Ctrl+k", "C-k", "Ctrl+Alt+k", "C-A-k", etc.
+fn parseExitKeySpec(exit_key: []const u8) ParsedExitKey {
+    var mods: u8 = 0;
+    var remaining = exit_key;
+
+    // Parse modifier prefixes.
+    while (remaining.len > 0) {
+        // Check for "Alt+" or "A-"
+        if (remaining.len > 4 and std.ascii.startsWithIgnoreCase(remaining, "Alt+")) {
+            mods |= 1;
+            remaining = remaining[4..];
+            continue;
+        }
+        if (remaining.len > 2 and (std.mem.startsWith(u8, remaining, "A-") or std.mem.startsWith(u8, remaining, "a-"))) {
+            mods |= 1;
+            remaining = remaining[2..];
+            continue;
+        }
+        // Check for "Ctrl+" or "C-"
+        if (remaining.len > 5 and std.ascii.startsWithIgnoreCase(remaining, "Ctrl+")) {
+            mods |= 2;
+            remaining = remaining[5..];
+            continue;
+        }
+        if (remaining.len > 2 and (std.mem.startsWith(u8, remaining, "C-") or std.mem.startsWith(u8, remaining, "c-"))) {
+            mods |= 2;
+            remaining = remaining[2..];
+            continue;
+        }
+        // Check for "Shift+" or "S-"
+        if (remaining.len > 6 and std.ascii.startsWithIgnoreCase(remaining, "Shift+")) {
+            mods |= 4;
+            remaining = remaining[6..];
+            continue;
+        }
+        if (remaining.len > 2 and (std.mem.startsWith(u8, remaining, "S-") or std.mem.startsWith(u8, remaining, "s-"))) {
+            mods |= 4;
+            remaining = remaining[2..];
+            continue;
+        }
+        break;
+    }
+
+    return .{ .mods = mods, .key = remaining };
+}
+
+/// Get the character code for a base key name.
+fn getKeyChar(key: []const u8) ?u8 {
+    if (key.len == 0) return null;
+    if (key.len == 1) return key[0];
+    if (std.ascii.eqlIgnoreCase(key, "Esc") or std.ascii.eqlIgnoreCase(key, "Escape")) return 0x1b;
+    if (std.ascii.eqlIgnoreCase(key, "Enter")) return 0x0d;
+    if (std.ascii.eqlIgnoreCase(key, "Space")) return ' ';
+    if (std.ascii.eqlIgnoreCase(key, "Tab")) return 0x09;
+    return null;
+}
+
+/// Check if a CSI-u event matches an exit_key string.
+fn matchesCsiUExitKey(ev: input_csi_u.CsiUEvent, exit_key: []const u8) bool {
+    // Only match press events.
+    if (ev.event_type != 1) return false;
+    if (exit_key.len == 0) return false;
+
+    const parsed = parseExitKeySpec(exit_key);
+    if (ev.mods != parsed.mods) return false;
+
+    const key_char = getKeyChar(parsed.key) orelse return false;
+    const key_kind = @as(core.Config.BindKeyKind, ev.key);
+
+    if (key_char == ' ') {
+        return key_kind == .space;
+    }
+    return key_kind == .char and ev.key.char == key_char;
+}
+
+/// Check if input matches a pane's exit_key and close the float if so.
+/// Returns bytes consumed if matched, or 0 if no match.
+fn checkExitKey(state: *State, inp: []const u8) usize {
+    const exit_key = getFocusedFloatExitKey(state) orelse return 0;
+    if (exit_key.len == 0) return 0;
+
+    const parsed = parseExitKeySpec(exit_key);
+    const key_char = getKeyChar(parsed.key) orelse return 0;
+
+    // Match the exit_key against input.
+    var consumed: usize = 0;
+    const matched = blk: {
+        // No modifiers - match raw byte.
+        if (parsed.mods == 0) {
+            // Special case for Esc: must be standalone (not part of CSI/SS3).
+            if (key_char == 0x1b) {
+                if (inp.len >= 1 and inp[0] == 0x1b) {
+                    if (inp.len == 1 or (inp[1] != '[' and inp[1] != 'O')) {
+                        consumed = 1;
+                        break :blk true;
+                    }
+                }
+                break :blk false;
+            }
+            // Other keys: direct byte match.
+            if (inp.len >= 1 and inp[0] == key_char) {
+                consumed = 1;
+                break :blk true;
+            }
+            break :blk false;
+        }
+
+        // Alt only (mods == 1): ESC + char.
+        if (parsed.mods == 1) {
+            if (inp.len >= 2 and inp[0] == 0x1b) {
+                // Make sure it's not a CSI/SS3 sequence.
+                if (inp[1] != '[' and inp[1] != 'O') {
+                    if (inp[1] == key_char) {
+                        consumed = 2;
+                        break :blk true;
+                    }
+                    // Also check lowercase version for letters.
+                    if (key_char >= 'A' and key_char <= 'Z') {
+                        if (inp[1] == key_char + 32) {
+                            consumed = 2;
+                            break :blk true;
+                        }
+                    } else if (key_char >= 'a' and key_char <= 'z') {
+                        if (inp[1] == key_char - 32) {
+                            consumed = 2;
+                            break :blk true;
+                        }
+                    }
+                }
+            }
+            break :blk false;
+        }
+
+        // Ctrl only (mods == 2): control character (0x01-0x1a for a-z).
+        if (parsed.mods == 2) {
+            if (inp.len >= 1) {
+                var ctrl_char: u8 = 0;
+                if (key_char >= 'a' and key_char <= 'z') {
+                    ctrl_char = key_char - 'a' + 1;
+                } else if (key_char >= 'A' and key_char <= 'Z') {
+                    ctrl_char = key_char - 'A' + 1;
+                }
+                if (ctrl_char != 0 and inp[0] == ctrl_char) {
+                    consumed = 1;
+                    break :blk true;
+                }
+            }
+            break :blk false;
+        }
+
+        // Ctrl+Alt (mods == 3): ESC + control character.
+        if (parsed.mods == 3) {
+            if (inp.len >= 2 and inp[0] == 0x1b) {
+                if (inp[1] != '[' and inp[1] != 'O') {
+                    var ctrl_char: u8 = 0;
+                    if (key_char >= 'a' and key_char <= 'z') {
+                        ctrl_char = key_char - 'a' + 1;
+                    } else if (key_char >= 'A' and key_char <= 'Z') {
+                        ctrl_char = key_char - 'A' + 1;
+                    }
+                    if (ctrl_char != 0 and inp[1] == ctrl_char) {
+                        consumed = 2;
+                        break :blk true;
+                    }
+                }
+            }
+            break :blk false;
+        }
+
+        break :blk false;
+    };
+
+    if (matched) {
+        main.debugLog("exit_key matched: key={s}", .{exit_key});
+        actions.performClose(state);
+        state.needs_render = true;
+        return consumed;
+    }
+
+    return 0;
+}
+
 fn mergeStdinTail(state: *State, input_bytes: []const u8) struct { merged: []const u8, owned: ?[]u8 } {
     if (state.stdin_tail_len == 0) return .{ .merged = input_bytes, .owned = null };
 
@@ -346,6 +543,17 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                                         .detach => actions.performDetach(state),
                                         .disown => actions.performDisown(state),
                                         .close => actions.performClose(state),
+                                        .pane_close => {
+                                            // Close split pane only (not tab).
+                                            const layout = state.currentLayout();
+                                            if (layout.splitCount() > 1) {
+                                                _ = layout.closePane(layout.focused_split_id);
+                                                if (layout.getFocusedPane()) |new_pane| {
+                                                    state.syncPaneFocus(new_pane, null);
+                                                }
+                                                state.syncStateToSes();
+                                            }
+                                        },
                                         else => {},
                                     }
                                 } else {
@@ -510,9 +718,27 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 }
             }
 
+            // Check for exit_key on focused float (close float if matched).
+            const exit_consumed = checkExitKey(state, inp[i..]);
+            if (exit_consumed > 0) {
+                i += exit_consumed;
+                continue;
+            }
+
             // Kitty keyboard protocol: CSI-u key events with explicit event types.
             // kitty_mode=true enables full press/hold/repeat/release support.
             if (input_csi_u.parse(inp[i..])) |ev| {
+                // Check for exit_key on focused float (close float if matched).
+                if (getFocusedFloatExitKey(state)) |exit_key| {
+                    if (matchesCsiUExitKey(ev, exit_key)) {
+                        main.debugLog("exit_key matched (CSI-u): key={s}", .{exit_key});
+                        actions.performClose(state);
+                        state.needs_render = true;
+                        i += ev.consumed;
+                        continue;
+                    }
+                }
+
                 const bind_when: keybinds.BindWhen = switch (ev.event_type) {
                     1 => .press,
                     2 => .repeat,
@@ -578,13 +804,19 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                             continue;
                         }
                     }
-                    // Handle Alt+Arrow for directional navigation: ESC [ 1 ; 3 <dir>
+                    // Handle modified arrows for directional navigation.
                     if (handleAltArrow(state, inp[i..])) |consumed| {
                         i += consumed;
                         continue;
                     }
                     // Handle scroll keys.
                     if (handleScrollKeys(state, inp[i..])) |consumed| {
+                        i += consumed;
+                        continue;
+                    }
+                    // Swallow any CSI sequences ending with arrow terminators (A/B/C/D)
+                    // to prevent partial Kitty sequences from leaking to shell.
+                    if (swallowCsiArrow(inp[i..])) |consumed| {
                         i += consumed;
                         continue;
                     }
@@ -747,28 +979,103 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) []const u8 {
     return &[_]u8{};
 }
 
-/// Handle Alt+Arrow for directional pane navigation.
-/// Sequence: ESC [ 1 ; 3 <A/B/C/D> (Alt+Up/Down/Right/Left)
-/// Returns number of bytes consumed, or null if not an Alt+Arrow sequence.
-fn handleAltArrow(state: *State, inp: []const u8) ?usize {
-    // Check for ESC [ 1 ; 3 <dir> pattern (6 bytes)
-    if (inp.len >= 6 and inp[0] == 0x1b and inp[1] == '[' and
-        inp[2] == '1' and inp[3] == ';' and inp[4] == '3')
-    {
-        const key: ?core.Config.BindKey = switch (inp[5]) {
-            'A' => .up,
-            'B' => .down,
-            'C' => .right,
-            'D' => .left,
-            else => null,
-        };
+/// Handle modified arrow keys (legacy and Kitty formats).
+/// Legacy: ESC [ 1 ; mods A/B/C/D
+/// Kitty:  ESC [ 1 ; mods : event A/B/C/D
+/// Returns number of bytes consumed, or null if not a modified arrow sequence.
+fn handleModifiedArrows(state: *State, inp: []const u8) ?usize {
+    // Must start with ESC [ 1 ;
+    if (inp.len < 6 or inp[0] != 0x1b or inp[1] != '[' or inp[2] != '1' or inp[3] != ';') return null;
 
-        if (key) |k| {
-            _ = keybinds.handleKeyEvent(state, 1, k, .press, false, false);
-            return 6;
+    var idx: usize = 4;
+
+    // Parse modifier value (one or more digits).
+    var mod_val: u32 = 0;
+    var have_mod = false;
+    while (idx < inp.len) : (idx += 1) {
+        const ch = inp[idx];
+        if (ch >= '0' and ch <= '9') {
+            have_mod = true;
+            mod_val = mod_val * 10 + @as(u32, ch - '0');
+            continue;
         }
+        break;
+    }
+    if (!have_mod or idx >= inp.len) return null;
+
+    // Optional event type after ':'
+    var event_type: u8 = 1; // default to press
+    if (inp[idx] == ':') {
+        idx += 1;
+        var ev: u32 = 0;
+        var have_ev = false;
+        while (idx < inp.len) : (idx += 1) {
+            const ch = inp[idx];
+            if (ch >= '0' and ch <= '9') {
+                have_ev = true;
+                ev = ev * 10 + @as(u32, ch - '0');
+                continue;
+            }
+            break;
+        }
+        if (have_ev) event_type = @intCast(@min(ev, 255));
     }
 
+    if (idx >= inp.len) return null;
+
+    // Check for arrow key terminator
+    const key: ?core.Config.BindKey = switch (inp[idx]) {
+        'A' => .up,
+        'B' => .down,
+        'C' => .right,
+        'D' => .left,
+        else => null,
+    };
+    if (key == null) return null;
+
+    // Convert modifier to our format (mask is mod_val - 1)
+    const mask: u32 = if (mod_val > 0) mod_val - 1 else 0;
+    var mods: u8 = 0;
+    if ((mask & 2) != 0) mods |= 1; // alt
+    if ((mask & 4) != 0) mods |= 2; // ctrl
+    if ((mask & 1) != 0) mods |= 4; // shift
+
+    // Only handle press events (ignore repeat/release for arrows)
+    if (event_type == 1) {
+        _ = keybinds.handleKeyEvent(state, mods, key.?, .press, false, false);
+    }
+
+    return idx + 1;
+}
+
+/// Handle Alt+Arrow for directional pane navigation (legacy wrapper).
+fn handleAltArrow(state: *State, inp: []const u8) ?usize {
+    return handleModifiedArrows(state, inp);
+}
+
+/// Swallow modified CSI arrow sequences (with parameters) ending with A/B/C/D.
+/// Only swallows sequences like ESC[1;3A, NOT plain ESC[A.
+fn swallowCsiArrow(inp: []const u8) ?usize {
+    // Must start with ESC [ followed by a digit (modified arrows start with ESC[1;...)
+    if (inp.len < 4 or inp[0] != 0x1b or inp[1] != '[') return null;
+    // Plain arrows (ESC[A) should NOT be swallowed - they go to the shell
+    if (inp[2] == 'A' or inp[2] == 'B' or inp[2] == 'C' or inp[2] == 'D') return null;
+    // Must start with a digit
+    if (inp[2] < '0' or inp[2] > '9') return null;
+
+    var j: usize = 2;
+    const end = @min(inp.len, 64);
+    while (j < end) : (j += 1) {
+        const ch = inp[j];
+        // Valid CSI intermediate chars for arrows: digits, semicolon, colon
+        if ((ch >= '0' and ch <= '9') or ch == ';' or ch == ':') continue;
+        // Arrow terminators
+        if (ch == 'A' or ch == 'B' or ch == 'C' or ch == 'D') {
+            return j + 1;
+        }
+        // Any other char - not an arrow sequence
+        break;
+    }
     return null;
 }
 

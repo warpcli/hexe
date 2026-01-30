@@ -17,6 +17,7 @@ pub const PendingAction = enum {
     detach,
     disown,
     close,
+    pane_close, // Close split pane only (not tab)
     adopt_choose, // Choosing which orphaned pane to adopt
     adopt_confirm, // Confirming destroy vs swap
 };

@@ -518,6 +518,12 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         offset += fr.result_path_len;
     }
 
+    var exit_key_slice: []const u8 = "";
+    if (fr.exit_key_len > 0 and offset + fr.exit_key_len <= trail_len) {
+        exit_key_slice = buffer[offset .. offset + fr.exit_key_len];
+        offset += fr.exit_key_len;
+    }
+
     // Parse env entries.
     var env_list: std.ArrayList([]const u8) = .empty;
     defer env_list.deinit(state.allocator);
@@ -586,6 +592,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         .shift_x = fr.shift_x,
         .shift_y = fr.shift_y,
         .dim_background = focus,
+        .exit_key = if (exit_key_slice.len > 0) exit_key_slice else null,
     };
     const new_uuid = actions.createAdhocFloatWithSize(state, command, title, spawn_cwd, env_items, extra_items, use_pod, float_size) catch {
         // Spawn failed — if wait_for_exit, send error result so CLI doesn't hang.

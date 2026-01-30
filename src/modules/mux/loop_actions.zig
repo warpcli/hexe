@@ -427,6 +427,7 @@ pub const FloatSize = struct {
     shift_x: i16 = 0, // shift from center (-50 to 50)
     shift_y: i16 = 0, // shift from center (-50 to 50)
     dim_background: bool = false, // dim the background when this float is visible
+    exit_key: ?[]const u8 = null, // key that closes the float (e.g., "Esc")
 };
 
 pub fn createAdhocFloat(
@@ -536,6 +537,9 @@ pub fn createAdhocFloatWithSize(
     pane.parent_tab = state.active_tab;
     pane.sticky = false;
     pane.dim_background = size.dim_background;
+    if (size.exit_key) |ek| {
+        pane.exit_key = state.allocator.dupe(u8, ek) catch null;
+    }
 
     if (style) |s| {
         pane.float_style = s;

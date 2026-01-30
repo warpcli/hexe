@@ -16,6 +16,7 @@ pub fn runMuxFloat(
     isolated: bool,
     size: []const u8,
     focus: bool,
+    exit_key: []const u8,
 ) !void {
     if (command.len == 0) {
         print("Error: --command is required\n", .{});
@@ -120,6 +121,7 @@ pub fn runMuxFloat(
         .title_len = @intCast(title.len),
         .cwd_len = @intCast(cwd.len),
         .result_path_len = @intCast(actual_result_path.len),
+        .exit_key_len = @intCast(@min(exit_key.len, 255)),
         .env_count = @intCast(env_list.items.len),
         .size_width = size_width,
         .size_height = size_height,
@@ -127,7 +129,7 @@ pub fn runMuxFloat(
         .shift_y = shift_y,
     };
 
-    // Build trailing data: cmd + title + cwd + result_path + env entries (each: u16 len + bytes).
+    // Build trailing data: cmd + title + cwd + result_path + exit_key + env entries (each: u16 len + bytes).
     var trail: std.ArrayList(u8) = .empty;
     defer trail.deinit(allocator);
     var tw = trail.writer(allocator);
@@ -135,6 +137,7 @@ pub fn runMuxFloat(
     try tw.writeAll(title);
     try tw.writeAll(cwd);
     try tw.writeAll(actual_result_path);
+    try tw.writeAll(exit_key);
     for (env_list.items) |entry| {
         const entry_len: u16 = @intCast(entry.len);
         try tw.writeAll(std.mem.asBytes(&entry_len));

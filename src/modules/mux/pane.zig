@@ -86,6 +86,8 @@ pub const Pane = struct {
     captured_output: std.ArrayList(u8) = .empty,
     // Dim background when this float is visible (focus mode)
     dim_background: bool = false,
+    // Exit key for adhoc floats (close float when this key is pressed)
+    exit_key: ?[]const u8 = null,
     // For tab-bound floats: which tab owns this float
     // null = global float (special=true or pwd=true)
     parent_tab: ?usize = null,

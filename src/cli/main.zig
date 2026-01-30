@@ -174,6 +174,7 @@ pub fn main() !void {
     const mux_float_isolated = try mux_float.flag("", "isolated", null);
     const mux_float_size = try mux_float.string("", "size", null);
     const mux_float_focus = try mux_float.flag("", "focus", null);
+    const mux_float_exit_key = try mux_float.string("", "key", null);
     const mux_float_instance = try mux_float.string("I", "instance", null);
 
     const mux_notify = try mux_cmd.newCommand("notify", "Send notification");
@@ -538,6 +539,7 @@ pub fn main() !void {
             try runMuxAttach(mux_attach_name.*, mux_attach_dbg.*, mux_attach_log.*);
         } else if (mux_float.happened) {
             if (mux_float_instance.*.len > 0) setInstanceFromCli(mux_float_instance.*);
+            const exit_key = if (mux_float_exit_key.*.len > 0) mux_float_exit_key.* else "Esc";
             try cli_cmds.runMuxFloat(
                 allocator,
                 mux_float_command.*,
@@ -549,6 +551,7 @@ pub fn main() !void {
                 mux_float_isolated.*,
                 mux_float_size.*,
                 mux_float_focus.*,
+                exit_key,
             );
         } else if (mux_notify.happened) {
             if (mux_notify_instance.*.len > 0) setInstanceFromCli(mux_notify_instance.*);

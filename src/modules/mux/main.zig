@@ -27,6 +27,14 @@ fn sighupHandler(_: c_int) callconv(.c) void {
     }
 }
 
+/// SIGTERM/SIGINT handler: gracefully stop the main loop.
+/// This allows the defer cleanup to run (disable kitty keyboard protocol, etc.).
+fn sigtermHandler(_: c_int) callconv(.c) void {
+    if (global_state.load(.acquire)) |state| {
+        state.running = false;
+    }
+}
+
 pub fn debugLog(comptime fmt: []const u8, args: anytype) void {
     if (!debug_enabled) return;
     std.debug.print("[mux] " ++ fmt ++ "\n", args);
@@ -124,6 +132,15 @@ pub fn run(mux_args: MuxArgs) !void {
         .flags = 0,
     };
     _ = std.os.linux.sigaction(posix.SIG.HUP, &sighup_action, null);
+
+    // Handle SIGTERM/SIGINT: graceful shutdown (allows cleanup to run).
+    const sigterm_action = std.os.linux.Sigaction{
+        .handler = .{ .handler = sigtermHandler },
+        .mask = std.os.linux.sigemptyset(),
+        .flags = 0,
+    };
+    _ = std.os.linux.sigaction(posix.SIG.TERM, &sigterm_action, null);
+    _ = std.os.linux.sigaction(posix.SIG.INT, &sigterm_action, null);
 
     // Redirect stderr to a log file or /dev/null to avoid display corruption.
     // When --debug is set without --logfile, default to instance-specific log.

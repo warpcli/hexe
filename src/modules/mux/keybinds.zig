@@ -693,6 +693,38 @@ fn dispatchAction(state: *State, action: BindAction) bool {
             state.needs_render = true;
             return true;
         },
+        .pane_close => {
+            // Close float or split pane, but never the tab.
+            if (state.active_floating != null) {
+                // Close the focused float.
+                if (cfg.confirm_on_close) {
+                    state.pending_action = .close;
+                    state.popups.showConfirm("Close float?", .{}) catch {};
+                    state.needs_render = true;
+                } else {
+                    actions.performClose(state);
+                }
+            } else {
+                // Close split pane if there are multiple splits.
+                const layout = state.currentLayout();
+                if (layout.splitCount() > 1) {
+                    if (cfg.confirm_on_close) {
+                        state.pending_action = .pane_close;
+                        state.popups.showConfirm("Close pane?", .{}) catch {};
+                        state.needs_render = true;
+                    } else {
+                        _ = layout.closePane(layout.focused_split_id);
+                        if (layout.getFocusedPane()) |new_pane| {
+                            state.syncPaneFocus(new_pane, null);
+                        }
+                        state.syncStateToSes();
+                        state.needs_render = true;
+                    }
+                }
+                // If only one pane, do nothing (don't close the tab).
+            }
+            return true;
+        },
         .tab_close => {
             if (cfg.confirm_on_close) {
                 state.pending_action = .close;
