@@ -10,6 +10,7 @@ const input = @import("input.zig");
 const loop_ipc = @import("loop_ipc.zig");
 const actions = @import("loop_actions.zig");
 const focus_move = @import("focus_move.zig");
+const main = @import("main.zig");
 
 pub const BindWhen = core.Config.BindWhen;
 pub const BindKey = core.Config.BindKey;
@@ -53,6 +54,40 @@ pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
         }
         pane.write(bytes) catch {};
     }
+}
+
+/// Forward a key (with modifiers) to the focused pane as legacy escape sequence.
+fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
+    var out: [8]u8 = undefined;
+    var n: usize = 0;
+
+    switch (@as(BindKeyKind, key)) {
+        .space => {
+            if ((mods & 1) != 0) { // Alt
+                out[n] = 0x1b;
+                n += 1;
+            }
+            out[n] = ' ';
+            n += 1;
+        },
+        .char => {
+            var ch: u8 = key.char;
+            if ((mods & 4) != 0 and ch >= 'a' and ch <= 'z') ch = ch - 'a' + 'A'; // Shift
+            if ((mods & 2) != 0) { // Ctrl
+                if (ch >= 'a' and ch <= 'z') ch = ch - 'a' + 1;
+                if (ch >= 'A' and ch <= 'Z') ch = ch - 'A' + 1;
+            }
+            if ((mods & 1) != 0) { // Alt
+                out[n] = 0x1b;
+                n += 1;
+            }
+            out[n] = ch;
+            n += 1;
+        },
+        else => return,
+    }
+
+    if (n > 0) forwardInputToFocusedPane(state, out[0..n]);
 }
 
 /// Legacy focus context for backward compatibility with timer storage.
@@ -222,7 +257,13 @@ pub fn processKeyTimers(state: *State, now_ms: i64) void {
         if (t.kind == .hold) {
             // Enforce context at fire time.
             if (t.focus_ctx == currentFocusContext(state)) {
-                _ = dispatchAction(state, t.action);
+                // Test: Ctrl+Alt+; hold = HOLD notification
+                if (t.mods == 3 and @as(BindKeyKind, t.key) == .char and t.key.char == ';') {
+                    state.notifications.show("HOLD");
+                    state.needs_render = true;
+                } else {
+                    _ = dispatchAction(state, t.action);
+                }
             }
             state.key_timers.items[i].kind = .hold_fired;
             state.key_timers.items[i].deadline_ms = std.math.maxInt(i64);
@@ -302,6 +343,40 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
 
     // --- RELEASE ---
     if (when == .release) {
+        // Test: Ctrl+Alt+; release after hold = HOLD notification
+        if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == ';') {
+            // Check if hold_fired exists - means hold action already fired
+            var had_hold_fired = false;
+            var i: usize = 0;
+            while (i < state.key_timers.items.len) {
+                const t = state.key_timers.items[i];
+                if (t.kind == .hold_fired and t.mods == mods_eff and keyEq(t.key, key)) {
+                    _ = state.key_timers.orderedRemove(i);
+                    had_hold_fired = true;
+                    continue;
+                }
+                i += 1;
+            }
+            // Check if hold was pending (tap)
+            var had_hold_pending = false;
+            i = 0;
+            while (i < state.key_timers.items.len) {
+                const t = state.key_timers.items[i];
+                if (t.kind == .hold and t.mods == mods_eff and keyEq(t.key, key)) {
+                    _ = state.key_timers.orderedRemove(i);
+                    had_hold_pending = true;
+                    continue;
+                }
+                i += 1;
+            }
+            cancelTimer(state, .repeat_active, mods_eff, key);
+            if (had_hold_pending) {
+                state.notifications.show("TAP");
+                state.needs_render = true;
+            }
+            return true;
+        }
+
         // If hold already fired, just clean up
         var had_hold_fired = false;
         var i: usize = 0;
@@ -334,8 +409,14 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
 
         // Tap: hold was pending but didn't fire
         if (had_hold_pending) {
+            main.debugLog("release tap: mods_eff={d} key={any}", .{ mods_eff, key });
             if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |b| {
+                main.debugLog("release tap: found bind, action={any}", .{b.action});
                 _ = dispatchAction(state, b.action);
+            } else {
+                // No press bind - forward key to shell on release
+                main.debugLog("release tap: no bind, forwarding to shell", .{});
+                forwardKeyToPane(state, mods_eff, key);
             }
             return true;
         }
@@ -349,6 +430,15 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
 
     // --- REPEAT ---
     if (when == .repeat) {
+        // Test: Ctrl+Alt+; repeat = REPEAT notification
+        if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == ';') {
+            cancelTimer(state, .hold, mods_eff, key);
+            cancelTimer(state, .hold_fired, mods_eff, key);
+            state.notifications.show("REPEAT");
+            state.needs_render = true;
+            return true;
+        }
+
         // Terminal auto-repeat: cancel hold timer (repeating != holding)
         cancelTimer(state, .hold, mods_eff, key);
         cancelTimer(state, .hold_fired, mods_eff, key);
@@ -375,6 +465,21 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
 
     // --- PRESS ---
     if (when == .press) {
+        // Debug: log all Ctrl+Alt presses
+        if (mods_eff == 3 and @as(BindKeyKind, key) == .char) {
+            main.debugLog("press: Ctrl+Alt+{c} (0x{x})", .{ key.char, key.char });
+        }
+
+        // Test: Ctrl+Alt+; press = arm hold timer for HOLD test
+        if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == ';') {
+            main.debugLog("test key matched, arming hold timer", .{});
+            cancelTimer(state, .hold, mods_eff, key);
+            cancelTimer(state, .hold_fired, mods_eff, key);
+            // Arm hold timer - when it fires, show HOLD notification
+            scheduleTimer(state, .hold, now_ms + cfg.input.hold_ms, mods_eff, key, .mux_quit, focus_ctx);
+            return true;
+        }
+
         // Hardcoded test: Ctrl+Alt+O toggles pane select mode
         if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == 'o') {
             if (state.overlays.isPaneSelectActive()) {
@@ -392,16 +497,24 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
             return true;
         }
 
-        // Check for hold bind - if exists, arm timer and wait for release
-        if (findBestBind(state, mods_eff, key, .hold, false, &query)) |hb| {
-            const hold_ms = hb.hold_ms orelse cfg.input.hold_ms;
-            cancelTimer(state, .hold, mods_eff, key);
-            cancelTimer(state, .hold_fired, mods_eff, key);
-            scheduleTimer(state, .hold, now_ms + hold_ms, mods_eff, key, hb.action, focus_ctx);
-            return true; // Wait for release or hold timeout
+        // For modified keys, ALWAYS defer press until release (tap vs hold behavior).
+        // This prevents keys from leaking to shell while user is still pressing modifiers.
+        if (mods_eff != 0) {
+            main.debugLog("press defer: mods_eff={d} key={any}", .{ mods_eff, key });
+            if (findBestBind(state, mods_eff, key, .hold, false, &query)) |hb| {
+                const hold_ms = hb.hold_ms orelse cfg.input.hold_ms;
+                cancelTimer(state, .hold, mods_eff, key);
+                cancelTimer(state, .hold_fired, mods_eff, key);
+                scheduleTimer(state, .hold, now_ms + hold_ms, mods_eff, key, hb.action, focus_ctx);
+            } else {
+                // No hold bind - arm dummy hold timer to defer until release
+                cancelTimer(state, .hold, mods_eff, key);
+                scheduleTimer(state, .hold, std.math.maxInt(i64), mods_eff, key, .mux_quit, focus_ctx);
+            }
+            return true; // Wait for release
         }
 
-        // No hold bind - fire press immediately
+        // Unmodified keys - fire press immediately
         if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |b| {
             return dispatchAction(state, b.action);
         }

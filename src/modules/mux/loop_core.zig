@@ -25,13 +25,10 @@ pub fn runMainLoop(state: *State) !void {
 
     // Enter alternate screen and reset it.
     const stdout = std.fs.File.stdout();
-    // NOTE: Do not enable kitty keyboard protocol by default.
-    // Some terminals will start emitting CSI-u sequences when they see unknown
-    // keyboard mode requests, and any parsing mismatch can leak garbage into the
-    // underlying shell (e.g. "3u" fragments).
-    // Enable: altscreen, hide cursor, mouse tracking (1000/1002/1006), bracketed paste (2004)
-    try stdout.writeAll("\x1b[?1049h\x1b[2J\x1b[3J\x1b[H\x1b[0m\x1b(B\x1b)0\x0f\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h");
-    defer stdout.writeAll("\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[0m\x1b[?25h\x1b[?1049l") catch {};
+    // Enable: altscreen, hide cursor, mouse tracking (1000/1002/1006), bracketed paste (2004),
+    // kitty keyboard protocol (>3u with flags: 1=disambiguate + 2=report event types)
+    try stdout.writeAll("\x1b[?1049h\x1b[2J\x1b[3J\x1b[H\x1b[0m\x1b(B\x1b)0\x0f\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[>3u");
+    defer stdout.writeAll("\x1b[<u\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[0m\x1b[?25h\x1b[?1049l") catch {};
 
     // Build poll fds.
     var poll_fds: [17]posix.pollfd = undefined; // stdin + up to 16 panes
