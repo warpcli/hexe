@@ -168,17 +168,6 @@ fn findBestBind(state: *State, mods: u8, key: BindKey, on: BindWhen, allow_only_
     return best;
 }
 
-fn hasBind(_: *State, mods: u8, key: BindKey, on: BindWhen, query: *const PaneQuery, binds: []const core.Config.Bind) bool {
-    for (binds) |b| {
-        if (b.on != on) continue;
-        if (b.mods != mods) continue;
-        if (!keyEq(b.key, key)) continue;
-        if (!matchesWhen(b.when, query)) continue;
-        return true;
-    }
-    return false;
-}
-
 fn cancelTimer(state: *State, kind: State.PendingKeyTimerKind, mods: u8, key: BindKey) void {
     var i: usize = 0;
     while (i < state.key_timers.items.len) {
@@ -202,37 +191,6 @@ fn findStoredModsForKey(state: *State, key: BindKey, focus_ctx: FocusContext) ?u
         }
     }
     return null;
-}
-
-fn forwardKeyAsLegacy(state: *State, mods: u8, key: BindKey) void {
-    var out: [8]u8 = undefined;
-    var n: usize = 0;
-
-    // Best-effort mapping used only when a key interaction was deferred.
-    // In legacy terminals we generally won't defer, but keep this safe.
-    switch (@as(BindKeyKind, key)) {
-        .space => {
-            out[n] = ' ';
-            n += 1;
-        },
-        .char => {
-            var ch: u8 = key.char;
-            if ((mods & 4) != 0 and ch >= 'a' and ch <= 'z') ch = ch - 'a' + 'A';
-            if ((mods & 2) != 0) {
-                if (ch >= 'a' and ch <= 'z') ch = ch - 'a' + 1;
-                if (ch >= 'A' and ch <= 'Z') ch = ch - 'A' + 1;
-            }
-            if ((mods & 1) != 0) {
-                out[n] = 0x1b;
-                n += 1;
-            }
-            out[n] = ch;
-            n += 1;
-        },
-        else => return,
-    }
-
-    if (n > 0) forwardInputToFocusedPane(state, out[0..n]);
 }
 
 fn scheduleTimer(state: *State, kind: State.PendingKeyTimerKind, deadline_ms: i64, mods: u8, key: BindKey, action: BindAction, focus_ctx: FocusContext) void {
@@ -293,23 +251,58 @@ pub fn processKeyTimers(state: *State, now_ms: i64) void {
     }
 }
 
-pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, allow_only_tabs: bool, defer_to_release: bool) bool {
+pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, allow_only_tabs: bool, kitty_mode: bool) bool {
     const cfg = &state.config;
-    const focus_ctx = currentFocusContext(state);
     const query = buildPaneQuery(state);
+
+    // =======================================================
+    // LEGACY MODE: Just fire press bindings immediately.
+    // No hold, no repeat, no tap deferral - simple and predictable.
+    // =======================================================
+    if (!kitty_mode) {
+        if (when != .press) return true; // Ignore non-press in legacy
+
+        // Hardcoded test: Ctrl+Alt+O toggles pane select mode
+        if (mods == 3 and @as(BindKeyKind, key) == .char and key.char == 'o') {
+            if (state.overlays.isPaneSelectActive()) {
+                state.overlays.exitPaneSelectMode();
+            } else {
+                actions.enterPaneSelectMode(state, false);
+            }
+            return true;
+        }
+
+        // Hardcoded test: Ctrl+Alt+K toggles keycast mode
+        if (mods == 3 and @as(BindKeyKind, key) == .char and key.char == 'k') {
+            state.overlays.toggleKeycast();
+            state.needs_render = true;
+            return true;
+        }
+
+        if (findBestBind(state, mods, key, .press, allow_only_tabs, &query)) |b| {
+            return dispatchAction(state, b.action);
+        }
+        return false;
+    }
+
+    // =======================================================
+    // KITTY MODE: Full press/hold/repeat/release support.
+    // Terminal sends explicit event types via CSI-u protocol.
+    // =======================================================
+    const focus_ctx = currentFocusContext(state);
     const now_ms = std.time.milliTimestamp();
 
+    // Modifier latching: repeat/release may arrive with mods=0 if user
+    // released the modifier before the primary key. Use stored mods.
     const mods_eff: u8 = blk: {
-        if (!defer_to_release) break :blk mods;
         if (when == .press) break :blk mods;
-        // Repeat/release events may come in without modifiers; reuse stored.
         if (mods != 0) break :blk mods;
         break :blk findStoredModsForKey(state, key, focus_ctx) orelse mods;
     };
 
-    // Release cancels hold.
+    // --- RELEASE ---
     if (when == .release) {
-        // If a hold already fired, swallow the release and do not forward.
+        // If hold already fired, just clean up
         var had_hold_fired = false;
         var i: usize = 0;
         while (i < state.key_timers.items.len) {
@@ -323,8 +316,7 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
         }
         if (had_hold_fired) return true;
 
-        // If a hold was pending but not fired yet, cancel and forward the key
-        // into the pane (short tap behavior).
+        // If hold was pending (not fired), this is a tap - fire press action
         var had_hold_pending = false;
         i = 0;
         while (i < state.key_timers.items.len) {
@@ -337,223 +329,53 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
             i += 1;
         }
 
-        // If we were deferring a tap decision, resolve it now.
-        const tap_action: ?BindAction = blk: {
-            var j: usize = 0;
-            while (j < state.key_timers.items.len) {
-                const t = state.key_timers.items[j];
-                if (t.kind == .tap_pending and t.mods == mods_eff and keyEq(t.key, key)) {
-                    _ = state.key_timers.orderedRemove(j);
-                    break :blk t.action;
-                }
-                j += 1;
-            }
-            break :blk null;
-        };
+        // Clean up repeat_active if any
+        cancelTimer(state, .repeat_active, mods_eff, key);
 
+        // Tap: hold was pending but didn't fire
         if (had_hold_pending) {
-            // Short hold => tap.
-            if (tap_action) |a| {
-                _ = dispatchAction(state, a);
-            } else if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |b| {
+            if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |b| {
                 _ = dispatchAction(state, b.action);
-            } else if (defer_to_release) {
-                forwardKeyAsLegacy(state, mods_eff, key);
-            }
-            // Clean up repeat window if any.
-            cancelTimer(state, .repeat_wait, mods_eff, key);
-            return true;
-        }
-
-        // Repeat deferral resolution.
-        var had_repeat_active = false;
-        var had_repeat_wait = false;
-        i = 0;
-        while (i < state.key_timers.items.len) {
-            const t = state.key_timers.items[i];
-            if (t.mods == mods_eff and keyEq(t.key, key)) {
-                if (t.kind == .repeat_active) {
-                    _ = state.key_timers.orderedRemove(i);
-                    had_repeat_active = true;
-                    continue;
-                }
-                if (t.kind == .repeat_wait) {
-                    _ = state.key_timers.orderedRemove(i);
-                    had_repeat_wait = true;
-                    continue;
-                }
-            }
-            i += 1;
-        }
-        if (had_repeat_active) return true;
-        if (had_repeat_wait) {
-            // Repeat never activated => tap.
-            if (tap_action) |a| {
-                _ = dispatchAction(state, a);
-            } else if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |b| {
-                _ = dispatchAction(state, b.action);
-            } else if (defer_to_release) {
-                forwardKeyAsLegacy(state, mods_eff, key);
             }
             return true;
         }
 
+        // Fire release bind if exists
         if (findBestBind(state, mods_eff, key, .release, allow_only_tabs, &query)) |b| {
             return dispatchAction(state, b.action);
         }
-        // Always consume release events (they are mux-only).
         return true;
     }
 
-    // Repeat: only fire repeat binds, don't participate in double tap.
+    // --- REPEAT ---
     if (when == .repeat) {
-        // Under the "primary key controls the chord" model, repeat mode is entered
-        // by a second press within repeat_ms (not by the terminal's auto-repeat).
-        // Therefore, ignore repeat events unless a repeat_active marker exists.
-
-        var has_active = false;
-        var i: usize = 0;
-        while (i < state.key_timers.items.len) {
-            if (state.key_timers.items[i].kind == .repeat_active and state.key_timers.items[i].mods == mods_eff and keyEq(state.key_timers.items[i].key, key)) {
-                has_active = true;
-                // Keep repeat mode alive while repeats arrive.
-                state.key_timers.items[i].deadline_ms = now_ms + cfg.input.repeat_ms;
-                break;
-            }
-            i += 1;
-        }
-        if (!has_active) return true;
-
-        cancelTimer(state, .tap_pending, mods_eff, key);
+        // Terminal auto-repeat: cancel hold timer (repeating != holding)
         cancelTimer(state, .hold, mods_eff, key);
         cancelTimer(state, .hold_fired, mods_eff, key);
 
+        // Keep repeat_active alive (or create if first repeat event)
+        var found = false;
+        for (state.key_timers.items) |*t| {
+            if (t.kind == .repeat_active and t.mods == mods_eff and keyEq(t.key, key)) {
+                t.deadline_ms = now_ms + cfg.input.repeat_ms;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            scheduleTimer(state, .repeat_active, now_ms + cfg.input.repeat_ms, mods_eff, key, .mux_quit, focus_ctx);
+        }
+
+        // Fire repeat bind
         if (findBestBind(state, mods_eff, key, .repeat, allow_only_tabs, &query)) |b| {
             return dispatchAction(state, b.action);
         }
         return true;
     }
 
-    // Hold scheduling (press only)
-    var hold_scheduled = false;
-    if (when == .press and defer_to_release) {
-        if (findBestBind(state, mods_eff, key, .hold, false, &query)) |hb| {
-            const hold_ms = hb.hold_ms orelse cfg.input.hold_ms;
-            cancelTimer(state, .hold, mods_eff, key);
-            // Clear any previous fired marker for the same chord.
-            cancelTimer(state, .hold_fired, mods_eff, key);
-            scheduleTimer(state, .hold, now_ms + hold_ms, mods_eff, key, hb.action, focus_ctx);
-            hold_scheduled = true;
-        }
-    }
-
-    // Repeat/tap/hold arbitration for modified chords.
-    // - If held past hold_ms: HOLD
-    // - If repeated quickly (repeat event or a second press within repeat_ms): REPEAT
-    // - Otherwise: TAP (fire press action on release)
-    var chord_deferred = false;
-    if (when == .press and defer_to_release and mods_eff != 0) {
-        // If we are already in repeat_active (from rapid presses), treat this press as a repeat.
-        {
-            var j: usize = 0;
-            while (j < state.key_timers.items.len) {
-                const t = state.key_timers.items[j];
-                if (t.kind == .repeat_active and t.mods == mods_eff and keyEq(t.key, key)) {
-                    if (t.deadline_ms > now_ms) {
-                        state.key_timers.items[j].deadline_ms = now_ms + cfg.input.repeat_ms;
-                        return handleKeyEvent(state, mods_eff, key, .repeat, allow_only_tabs, defer_to_release);
-                    }
-                    // Expired repeat mode.
-                    _ = state.key_timers.orderedRemove(j);
-                    break;
-                }
-                j += 1;
-            }
-        }
-
-        const press_bind = findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query);
-        const have_repeat = hasBind(state, mods_eff, key, .repeat, &query, cfg.input.binds);
-        const have_hold = hasBind(state, mods_eff, key, .hold, &query, cfg.input.binds);
-
-        if (press_bind != null or have_repeat or have_hold) {
-            // Second press within repeat_ms => treat as repeat.
-            var k: usize = 0;
-            while (k < state.key_timers.items.len) {
-                if (state.key_timers.items[k].kind == .repeat_wait and state.key_timers.items[k].mods == mods_eff and keyEq(state.key_timers.items[k].key, key)) {
-                    if (state.key_timers.items[k].deadline_ms > now_ms) {
-                        // Activate repeat mode.
-                        state.key_timers.items[k].kind = .repeat_active;
-                        state.key_timers.items[k].deadline_ms = now_ms + cfg.input.repeat_ms;
-                        cancelTimer(state, .tap_pending, mods_eff, key);
-                        cancelTimer(state, .hold, mods_eff, key);
-                        cancelTimer(state, .hold_fired, mods_eff, key);
-                        return handleKeyEvent(state, mods_eff, key, .repeat, allow_only_tabs, defer_to_release);
-                    }
-                    // Window expired; start fresh.
-                    _ = state.key_timers.orderedRemove(k);
-                    break;
-                }
-                k += 1;
-            }
-
-            // Arm tap resolution if we have a press bind.
-            if (press_bind) |pb| {
-                cancelTimer(state, .tap_pending, mods_eff, key);
-                scheduleTimer(state, .tap_pending, std.math.maxInt(i64), mods_eff, key, pb.action, focus_ctx);
-                chord_deferred = true;
-            }
-
-            // Arm repeat window if a repeat bind exists.
-            if (have_repeat) {
-                cancelTimer(state, .repeat_wait, mods_eff, key);
-                cancelTimer(state, .repeat_active, mods_eff, key);
-                scheduleTimer(state, .repeat_wait, now_ms + cfg.input.repeat_ms, mods_eff, key, .mux_quit, focus_ctx);
-                chord_deferred = true;
-            }
-
-            // Arm hold (done above). If we armed anything, consume press now.
-            if (hold_scheduled or chord_deferred) return true;
-        }
-    }
-
-    // Double tap handling (press only)
-    if (when == .press and hasBind(state, mods_eff, key, .double_tap, &query, cfg.input.binds)) {
-        const dt_bind = findBestBind(state, mods_eff, key, .double_tap, allow_only_tabs, &query);
-        const dt_ms = if (dt_bind) |b| (b.double_tap_ms orelse cfg.input.double_tap_ms) else cfg.input.double_tap_ms;
-
-        // Second tap?
-        const had_wait = blk: {
-            for (state.key_timers.items) |t| {
-                if (t.kind == .double_tap_wait and t.mods == mods_eff and keyEq(t.key, key) and t.deadline_ms > now_ms and t.focus_ctx == focus_ctx) {
-                    break :blk true;
-                }
-            }
-            break :blk false;
-        };
-
-        if (had_wait) {
-            cancelTimer(state, .double_tap_wait, mods_eff, key);
-            cancelTimer(state, .delayed_press, mods_eff, key);
-            if (dt_bind) |db| {
-                return dispatchAction(state, db.action);
-            }
-            return true;
-        }
-        scheduleTimer(state, .double_tap_wait, now_ms + dt_ms, mods_eff, key, .mux_quit, focus_ctx); // action ignored
-
-        // If there's a press bind, delay it so it doesn't fire when user intends double.
-        if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |pb| {
-            const delay = pb.double_tap_ms orelse cfg.input.double_tap_ms;
-            cancelTimer(state, .delayed_press, mods_eff, key);
-            scheduleTimer(state, .delayed_press, now_ms + delay, mods_eff, key, pb.action, focus_ctx);
-        }
-        return true;
-    }
-
-    // Normal press
+    // --- PRESS ---
     if (when == .press) {
-        // Hardcoded test: Ctrl+Alt+O toggles pane select mode (overlay test)
-        // mods: alt=1, ctrl=2 => 3
+        // Hardcoded test: Ctrl+Alt+O toggles pane select mode
         if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == 'o') {
             if (state.overlays.isPaneSelectActive()) {
                 state.overlays.exitPaneSelectMode();
@@ -563,19 +385,26 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
             return true;
         }
 
-        // Hardcoded test: Ctrl+Alt+K toggles keycast mode (overlay test)
+        // Hardcoded test: Ctrl+Alt+K toggles keycast mode
         if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == 'k') {
             state.overlays.toggleKeycast();
             state.needs_render = true;
             return true;
         }
 
+        // Check for hold bind - if exists, arm timer and wait for release
+        if (findBestBind(state, mods_eff, key, .hold, false, &query)) |hb| {
+            const hold_ms = hb.hold_ms orelse cfg.input.hold_ms;
+            cancelTimer(state, .hold, mods_eff, key);
+            cancelTimer(state, .hold_fired, mods_eff, key);
+            scheduleTimer(state, .hold, now_ms + hold_ms, mods_eff, key, hb.action, focus_ctx);
+            return true; // Wait for release or hold timeout
+        }
+
+        // No hold bind - fire press immediately
         if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |b| {
             return dispatchAction(state, b.action);
         }
-
-        // No press action matched, but we armed hold/repeat/tap deferral.
-        if (hold_scheduled or chord_deferred) return true;
     }
 
     return false;

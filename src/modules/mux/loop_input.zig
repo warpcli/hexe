@@ -17,6 +17,7 @@ const statusbar = @import("statusbar.zig");
 const keybinds = @import("keybinds.zig");
 const input_csi_u = @import("input_csi_u.zig");
 const loop_mouse = @import("loop_mouse.zig");
+const main = @import("main.zig");
 
 const tab_switch = @import("tab_switch.zig");
 
@@ -509,15 +510,32 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 }
             }
 
-            // If some external layer injects CSI-u key events, translate them to
-            // mux binds / legacy bytes so Alt bindings keep working and no garbage
-            // is forwarded into the shell.
+            // Kitty keyboard protocol: CSI-u key events with explicit event types.
+            // kitty_mode=true enables full press/hold/repeat/release support.
             if (input_csi_u.parse(inp[i..])) |ev| {
-                if (ev.event_type != 3) {
-                    if (keybinds.handleKeyEvent(state, ev.mods, ev.key, .press, false, false)) {
-                        i += ev.consumed;
-                        continue;
-                    }
+                const bind_when: keybinds.BindWhen = switch (ev.event_type) {
+                    1 => .press,
+                    2 => .repeat,
+                    3 => .release,
+                    else => .press,
+                };
+
+                const event_name: []const u8 = switch (ev.event_type) {
+                    1 => "press",
+                    2 => "repeat",
+                    3 => "release",
+                    else => "unknown",
+                };
+                main.debugLog("kitty_mode: CSI-u event={s} mods={d}", .{ event_name, ev.mods });
+
+                // kitty_mode=true for full event handling with modifier latching
+                if (keybinds.handleKeyEvent(state, ev.mods, ev.key, bind_when, false, true)) {
+                    i += ev.consumed;
+                    continue;
+                }
+
+                // Forward unhandled press events to pane (not repeat/release)
+                if (ev.event_type == 1) {
                     var out: [8]u8 = undefined;
                     if (input_csi_u.translateToLegacy(&out, ev)) |out_len| {
                         keybinds.forwardInputToFocusedPane(state, out[0..out_len]);
@@ -577,12 +595,14 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                     if (next >= 0x01 and next <= 0x1a) {
                         // Ctrl+Alt+letter: translate control char back to letter
                         const letter = next + 'a' - 1;
+                        main.debugLog("legacy_mode: Ctrl+Alt+{c}", .{letter});
                         if (keybinds.handleKeyEvent(state, 3, .{ .char = letter }, .press, false, false)) {
                             i += 2;
                             continue;
                         }
                     } else {
                         // Plain Alt+key
+                        main.debugLog("legacy_mode: Alt+{c}", .{next});
                         if (keybinds.handleKeyEvent(state, 1, .{ .char = next }, .press, false, false)) {
                             i += 2;
                             continue;
