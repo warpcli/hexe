@@ -71,6 +71,9 @@ pub const SesClient = struct {
         // Register on CTL channel first, so SES knows our session_id.
         try self.register();
 
+        // Switch to non-blocking mode after successful registration.
+        self.setCtlNonBlocking();
+
         // Now open VT channel — SES can match our session_id.
         if (!self.connectVt(socket_path)) {
             return error.ConnectionRefused;
@@ -82,16 +85,11 @@ pub const SesClient = struct {
         const ctl_client = core.ipc.Client.connect(socket_path) catch return false;
         const ctl_fd = ctl_client.fd;
 
-        // Set non-blocking — periodic sync calls must not block the main loop.
-        const O_NONBLOCK: usize = 0o4000;
-        const flags = posix.fcntl(ctl_fd, posix.F.GETFL, 0) catch {
-            posix.close(ctl_fd);
-            return false;
-        };
-        _ = posix.fcntl(ctl_fd, posix.F.SETFL, flags | O_NONBLOCK) catch {
-            posix.close(ctl_fd);
-            return false;
-        };
+        // Set socket timeouts for initial registration (prevents hanging on dead daemon).
+        // This is needed because register() does blocking I/O waiting for response.
+        const timeout = posix.timeval{ .sec = 5, .usec = 0 };
+        posix.setsockopt(ctl_fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+        posix.setsockopt(ctl_fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
 
         wire.sendHandshake(ctl_fd, wire.SES_HANDSHAKE_MUX_CTL) catch {
             posix.close(ctl_fd);
@@ -100,6 +98,19 @@ pub const SesClient = struct {
         self.ctl_fd = ctl_fd;
         mux.debugLog("ses ctl connected: fd={d}", .{ctl_fd});
         return true;
+    }
+
+    /// Set non-blocking mode on CTL fd after registration succeeds.
+    /// Called after register() so main loop sync calls don't block.
+    fn setCtlNonBlocking(self: *SesClient) void {
+        const fd = self.ctl_fd orelse return;
+        const O_NONBLOCK: usize = 0o4000;
+        const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch return;
+        _ = posix.fcntl(fd, posix.F.SETFL, flags | O_NONBLOCK) catch {};
+        // Clear the socket timeouts now that we're non-blocking.
+        const zero_timeout = posix.timeval{ .sec = 0, .usec = 0 };
+        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&zero_timeout)) catch {};
+        posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&zero_timeout)) catch {};
     }
 
     /// Open the VT data channel to SES.

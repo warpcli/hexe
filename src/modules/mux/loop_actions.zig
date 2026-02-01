@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const core = @import("core");
+const wire = core.wire;
 
 const layout_mod = @import("layout.zig");
 const SplitDir = layout_mod.SplitDir;
@@ -11,6 +12,58 @@ const SesClient = @import("ses_client.zig").SesClient;
 
 const helpers = @import("helpers.zig");
 const float_completion = @import("float_completion.zig");
+
+/// Hide or destroy a float. If it's a CLI-blocking float (capture_output=true),
+/// destroy it and send result back to CLI instead of just hiding.
+pub fn hideOrDestroyFloat(state: *State, pane: *Pane, tab: usize) void {
+    if (pane.capture_output) {
+        // CLI is waiting - destroy the float and send cancellation result.
+        destroyBlockingFloat(state, pane);
+    } else {
+        // Normal float - just hide it.
+        pane.setVisibleOnTab(tab, false);
+    }
+}
+
+/// Destroy a blocking float and send result back to CLI.
+fn destroyBlockingFloat(state: *State, pane: *Pane) void {
+    // Send completion with exit code 130 (like Ctrl+C cancellation).
+    if (state.pending_float_requests.fetchRemove(pane.uuid)) |entry| {
+        if (entry.value.result_path) |path| {
+            std.fs.cwd().deleteFile(path) catch {};
+            state.allocator.free(path);
+        }
+        // Send cancellation result to CLI.
+        const ctl_fd = state.ses_client.getCtlFd() orelse return;
+        const result = wire.FloatResult{
+            .uuid = pane.uuid,
+            .exit_code = 130, // Cancelled (like SIGINT)
+            .output_len = 0,
+        };
+        wire.writeControl(ctl_fd, .float_result, std.mem.asBytes(&result)) catch {};
+    }
+
+    // Find and remove the float from state.floats.
+    for (state.floats.items, 0..) |p, i| {
+        if (p == pane) {
+            _ = state.floats.orderedRemove(i);
+            if (state.ses_client.isConnected()) {
+                state.ses_client.killPane(pane.uuid) catch {};
+            }
+            pane.deinit();
+            state.allocator.destroy(pane);
+            // Fix active_floating index.
+            if (state.active_floating) |afi| {
+                if (afi == i) {
+                    state.active_floating = null;
+                } else if (afi > i) {
+                    state.active_floating = afi - 1;
+                }
+            }
+            break;
+        }
+    }
+}
 
 fn escapeForShell(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
     var out: std.ArrayList(u8) = .empty;
@@ -311,11 +364,24 @@ pub fn performAdopt(state: *State, orphan_uuid: [32]u8, destroy_current: bool) v
 }
 
 pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) void {
-    // Get current directory from focused pane (for pwd floats).
-    // Use refreshPaneCwd which queries ses for pod panes.
+    // Get current directory from ACTUALLY focused pane (float or split).
+    // IMPORTANT: Use getCurrentFocusedPane() which checks active_floating first -
+    // if user is focused on a float, we want THAT float's CWD for per_cwd floats.
+    // Try multiple sources since async caches may be stale:
+    // 1. refreshPaneCwd (VT OSC7 / /proc / ses_cwd cache)
+    // 2. pane_shell.cwd (shell integration)
+    // 3. HOME fallback is handled in Pty.spawnWithEnv
     var current_dir: ?[]const u8 = null;
-    if (state.currentLayout().getFocusedPane()) |focused| {
+    if (getCurrentFocusedPane(state)) |focused| {
         current_dir = state.refreshPaneCwd(focused);
+        // If refreshPaneCwd returned null, try shell integration CWD
+        if (current_dir == null) {
+            if (state.getPaneShell(focused.uuid)) |shell_info| {
+                if (shell_info.cwd) |cwd| {
+                    current_dir = cwd;
+                }
+            }
+        }
     }
 
     // per_cwd floats are unique per *split cwd*, not per tab.
@@ -364,7 +430,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 if (float_def.attributes.exclusive) {
                     for (state.floats.items) |other| {
                         if (other.float_key != float_def.key) {
-                            other.setVisibleOnTab(state.active_tab, false);
+                            hideOrDestroyFloat(state, other, state.active_tab);
                         }
                     }
                 }
@@ -406,7 +472,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
     if (float_def.attributes.exclusive) {
         for (state.floats.items) |pane| {
             if (pane.float_key != float_def.key) {
-                pane.setVisibleOnTab(state.active_tab, false);
+                hideOrDestroyFloat(state, pane, state.active_tab);
             }
         }
     }
@@ -415,7 +481,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
         const new_idx = state.floats.items.len - 1;
         for (state.floats.items, 0..) |pane, i| {
             if (i != new_idx and pane.float_key == float_def.key) {
-                pane.setVisibleOnTab(state.active_tab, false);
+                hideOrDestroyFloat(state, pane, state.active_tab);
             }
         }
     }

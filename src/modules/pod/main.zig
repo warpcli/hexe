@@ -70,7 +70,10 @@ const PodUplink = struct {
 
     pub fn tick(self: *PodUplink, child_pid: posix.pid_t) void {
         const now_ms: i64 = std.time.milliTimestamp();
-        if (now_ms - self.last_sent_ms < 500) return;
+        // Reduced from 500ms to 100ms for more responsive CWD updates.
+        // This ensures float spawns get accurate CWD even when user
+        // changes directory and immediately toggles a float.
+        if (now_ms - self.last_sent_ms < 100) return;
         self.last_sent_ms = now_ms;
 
         const proc_cwd = readProcCwd(self.allocator, child_pid) catch null;

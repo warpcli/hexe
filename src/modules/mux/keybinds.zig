@@ -56,9 +56,9 @@ pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
     }
 }
 
-/// Forward a key (with modifiers) to the focused pane as legacy escape sequence.
+/// Forward a key (with modifiers) to the focused pane as escape sequence.
 fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
-    var out: [8]u8 = undefined;
+    var out: [16]u8 = undefined;
     var n: usize = 0;
 
     switch (@as(BindKeyKind, key)) {
@@ -84,7 +84,41 @@ fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
             out[n] = ch;
             n += 1;
         },
-        else => return,
+        .up, .down, .left, .right => {
+            // Arrow keys: ESC [ A/B/C/D (no mods) or ESC [ 1 ; <mod> A/B/C/D (with mods)
+            const dir_char: u8 = switch (@as(BindKeyKind, key)) {
+                .up => 'A',
+                .down => 'B',
+                .right => 'C',
+                .left => 'D',
+                else => unreachable,
+            };
+
+            out[n] = 0x1b;
+            n += 1;
+            out[n] = '[';
+            n += 1;
+
+            if (mods != 0) {
+                // Convert our mods to CSI modifier parameter:
+                // CSI mod = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0)
+                // Our encoding: alt=1, ctrl=2, shift=4
+                var csi_mod: u8 = 1;
+                if ((mods & 4) != 0) csi_mod |= 1; // shift
+                if ((mods & 1) != 0) csi_mod |= 2; // alt
+                if ((mods & 2) != 0) csi_mod |= 4; // ctrl
+
+                out[n] = '1';
+                n += 1;
+                out[n] = ';';
+                n += 1;
+                out[n] = '0' + csi_mod;
+                n += 1;
+            }
+
+            out[n] = dir_char;
+            n += 1;
+        },
     }
 
     if (n > 0) forwardInputToFocusedPane(state, out[0..n]);
@@ -321,7 +355,7 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
         }
 
         if (findBestBind(state, mods, key, .press, allow_only_tabs, &query)) |b| {
-            return dispatchAction(state, b.action);
+            return dispatchBindWithMode(state, b, mods, key);
         }
         return false;
     }
@@ -412,7 +446,7 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
             main.debugLog("release tap: mods_eff={d} key={any}", .{ mods_eff, key });
             if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |b| {
                 main.debugLog("release tap: found bind, action={any}", .{b.action});
-                _ = dispatchAction(state, b.action);
+                _ = dispatchBindWithMode(state, b, mods_eff, key);
             } else {
                 // No press bind - forward key to shell on release
                 main.debugLog("release tap: no bind, forwarding to shell", .{});
@@ -423,7 +457,7 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
 
         // Fire release bind if exists
         if (findBestBind(state, mods_eff, key, .release, allow_only_tabs, &query)) |b| {
-            return dispatchAction(state, b.action);
+            return dispatchBindWithMode(state, b, mods_eff, key);
         }
         return true;
     }
@@ -458,7 +492,7 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
 
         // Fire repeat bind
         if (findBestBind(state, mods_eff, key, .repeat, allow_only_tabs, &query)) |b| {
-            return dispatchAction(state, b.action);
+            return dispatchBindWithMode(state, b, mods_eff, key);
         }
         return true;
     }
@@ -516,11 +550,33 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
 
         // Unmodified keys - fire press immediately
         if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |b| {
-            return dispatchAction(state, b.action);
+            return dispatchBindWithMode(state, b, mods_eff, key);
         }
     }
 
     return false;
+}
+
+/// Dispatch a bind action respecting its mode setting.
+/// Returns true if key should be consumed, false if it should passthrough.
+fn dispatchBindWithMode(state: *State, bind: core.Config.Bind, mods: u8, key: BindKey) bool {
+    switch (bind.mode) {
+        .passthrough_only => {
+            // Don't execute action, just pass the key through
+            forwardKeyToPane(state, mods, key);
+            return true; // Return true so we don't double-forward
+        },
+        .act_and_passthrough => {
+            // Execute action AND pass the key to pane
+            _ = dispatchAction(state, bind.action);
+            forwardKeyToPane(state, mods, key);
+            return true; // Return true so we don't double-forward
+        },
+        .act_and_consume => {
+            // Execute action and consume (default behavior)
+            return dispatchAction(state, bind.action);
+        },
+    }
 }
 
 fn dispatchAction(state: *State, action: BindAction) bool {

@@ -388,6 +388,77 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "focus_move");
     lua.setField(-2, "action");
 
+    // hx.mode = { act_and_consume = "act_and_consume", act_and_passthrough = "act_and_passthrough", passthrough_only = "passthrough_only" }
+    lua.createTable(0, 3);
+    _ = lua.pushString("act_and_consume");
+    lua.setField(-2, "act_and_consume");
+    _ = lua.pushString("act_and_passthrough");
+    lua.setField(-2, "act_and_passthrough");
+    _ = lua.pushString("passthrough_only");
+    lua.setField(-2, "passthrough_only");
+    lua.setField(-2, "mode");
+
+    // hx.key = { ctrl, alt, shift, super, a-z, 0-9, up, down, left, right, space, ... }
+    // Usage: key = { hx.key.alt, hx.key.right } or key = { hx.key.ctrl, hx.key.alt, hx.key.q }
+    lua.createTable(0, 64);
+    // Modifiers (prefixed with "mod:" to distinguish from keys)
+    _ = lua.pushString("mod:ctrl");
+    lua.setField(-2, "ctrl");
+    _ = lua.pushString("mod:alt");
+    lua.setField(-2, "alt");
+    _ = lua.pushString("mod:shift");
+    lua.setField(-2, "shift");
+    _ = lua.pushString("mod:super");
+    lua.setField(-2, "super");
+    // Arrow keys
+    _ = lua.pushString("up");
+    lua.setField(-2, "up");
+    _ = lua.pushString("down");
+    lua.setField(-2, "down");
+    _ = lua.pushString("left");
+    lua.setField(-2, "left");
+    _ = lua.pushString("right");
+    lua.setField(-2, "right");
+    // Special keys
+    _ = lua.pushString("space");
+    lua.setField(-2, "space");
+    _ = lua.pushString("enter");
+    lua.setField(-2, "enter");
+    _ = lua.pushString("tab");
+    lua.setField(-2, "tab");
+    _ = lua.pushString("esc");
+    lua.setField(-2, "esc");
+    _ = lua.pushString("backspace");
+    lua.setField(-2, "backspace");
+    // Letters a-z
+    inline for ("abcdefghijklmnopqrstuvwxyz") |c| {
+        _ = lua.pushString(&[_]u8{c});
+        lua.setField(-2, &[_:0]u8{c});
+    }
+    // Numbers 0-9
+    inline for ("0123456789") |c| {
+        _ = lua.pushString(&[_]u8{c});
+        lua.setField(-2, &[_:0]u8{c});
+    }
+    // Common punctuation
+    _ = lua.pushString(".");
+    lua.setField(-2, "dot");
+    _ = lua.pushString(",");
+    lua.setField(-2, "comma");
+    _ = lua.pushString(";");
+    lua.setField(-2, "semicolon");
+    _ = lua.pushString("/");
+    lua.setField(-2, "slash");
+    _ = lua.pushString("-");
+    lua.setField(-2, "minus");
+    _ = lua.pushString("=");
+    lua.setField(-2, "equal");
+    _ = lua.pushString("[");
+    lua.setField(-2, "lbracket");
+    _ = lua.pushString("]");
+    lua.setField(-2, "rbracket");
+    lua.setField(-2, "key");
+
     // hx.version
     _ = lua.pushString("0.1.0");
     lua.setField(-2, "version");

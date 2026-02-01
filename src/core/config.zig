@@ -446,6 +446,18 @@ pub const Config = struct {
         double_tap,
     };
 
+    /// Controls what happens when a keybinding matches.
+    pub const BindMode = enum {
+        /// Execute action and consume the key (default).
+        act_and_consume,
+        /// Execute action and also pass the key to the pane.
+        act_and_passthrough,
+        /// Don't execute action, just pass key to pane.
+        /// Useful for explicitly consuming a key combo without action,
+        /// or for conditional passthrough (e.g., when fg=nvim).
+        passthrough_only,
+    };
+
     pub const BindKeyKind = enum {
         char,
         up,
@@ -511,6 +523,8 @@ pub const Config = struct {
         action: BindAction,
         /// Condition for when this bind is active.
         when: ?WhenDef = null,
+        /// Controls whether to consume the key or pass it through.
+        mode: BindMode = .act_and_consume,
 
         // Timing (used by hold/double_tap)
         hold_ms: ?i64 = null,
@@ -838,69 +852,143 @@ fn parseBinds(runtime: *LuaRuntime, allocator: std.mem.Allocator, existing: []co
     return list.toOwnedSlice(allocator) catch &[_]Config.Bind{};
 }
 
+/// Parse a key string into a BindKey.
+/// Supports: single chars (a-z, 0-9), "space", "up", "down", "left", "right", etc.
+fn parseKeyString(key_str: []const u8) ?Config.BindKey {
+    if (key_str.len == 1) return .{ .char = key_str[0] };
+    if (std.mem.eql(u8, key_str, "space")) return .space;
+    if (std.mem.eql(u8, key_str, "up")) return .up;
+    if (std.mem.eql(u8, key_str, "down")) return .down;
+    if (std.mem.eql(u8, key_str, "left")) return .left;
+    if (std.mem.eql(u8, key_str, "right")) return .right;
+    return null;
+}
+
 fn parseBind(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?Config.Bind {
-    // Parse key (required)
-    const key_str = runtime.getString(-1, "key") orelse {
-        log.warn("parseBind: no 'key' field found", .{});
-        return null;
-    };
-    log.debug("parseBind: parsing bind with key='{s}'", .{key_str});
+    // Parse key - supports two formats:
+    // 1. New unified: key = { hx.key.alt, hx.key.right } (array of strings)
+    // 2. Old format: mods = { hx.mod.alt }, key = "right" (separate fields)
 
-    const key: Config.BindKey = blk: {
-        if (key_str.len == 1) break :blk .{ .char = key_str[0] };
-        if (std.mem.eql(u8, key_str, "space")) break :blk .space;
-        if (std.mem.eql(u8, key_str, "up")) break :blk .up;
-        if (std.mem.eql(u8, key_str, "down")) break :blk .down;
-        if (std.mem.eql(u8, key_str, "left")) break :blk .left;
-        if (std.mem.eql(u8, key_str, "right")) break :blk .right;
-        log.warn("parseBind: invalid key '{s}'", .{key_str});
-        return null;
-    };
-
-    // Parse action (required)
-    const action: Config.BindAction = blk: {
-        // Action can be a string or a table with type field
-        if (runtime.typeOf(-1) == .table) {
-            if (runtime.pushTable(-1, "action")) {
-                defer runtime.pop();
-                const action_type = runtime.getString(-1, "type") orelse {
-                    log.warn("parseBind: action table has no 'type' field", .{});
-                    return null;
-                };
-                log.debug("parseBind: parsing action type '{s}'", .{action_type});
-                break :blk parseAction(runtime, action_type) orelse {
-                    log.warn("parseBind: failed to parse action type '{s}'", .{action_type});
-                    return null;
-                };
-            }
-        }
-        // Try direct action string
-        log.debug("parseBind: trying to parse action as string", .{});
-        const action_str = runtime.getString(-1, "action") orelse {
-            log.warn("parseBind: no 'action' field found (neither table nor string)", .{});
-            return null;
-        };
-        break :blk parseSimpleAction(action_str) orelse {
-            log.warn("parseBind: failed to parse simple action '{s}'", .{action_str});
-            return null;
-        };
-    };
-
-    // Parse mods (array of modifier values to OR together, or single number)
     var mods: u8 = 0;
-    if (runtime.pushTable(-1, "mods")) {
+    var key: Config.BindKey = undefined;
+    var key_found = false;
+
+    // Try new unified format first: key = { ... } as array
+    if (runtime.pushTable(-1, "key")) {
         const len = runtime.getArrayLen(-1);
-        for (1..len + 1) |i| {
-            if (runtime.pushArrayElement(-1, i)) {
-                if (runtime.toIntAt(u8, -1)) |m| {
-                    mods |= m;
+        if (len > 0) {
+            // It's an array - parse each element
+            for (1..len + 1) |i| {
+                if (runtime.pushArrayElement(-1, i)) {
+                    if (runtime.toStringAt(-1)) |elem| {
+                        // Check if it's a modifier (prefixed with "mod:")
+                        if (std.mem.startsWith(u8, elem, "mod:")) {
+                            const mod_name = elem[4..];
+                            if (std.mem.eql(u8, mod_name, "ctrl")) {
+                                mods |= 2;
+                            } else if (std.mem.eql(u8, mod_name, "alt")) {
+                                mods |= 1;
+                            } else if (std.mem.eql(u8, mod_name, "shift")) {
+                                mods |= 4;
+                            } else if (std.mem.eql(u8, mod_name, "super")) {
+                                mods |= 8;
+                            }
+                        } else {
+                            // It's a key
+                            if (parseKeyString(elem)) |k| {
+                                key = k;
+                                key_found = true;
+                            }
+                        }
+                    }
+                    runtime.pop();
                 }
-                runtime.pop();
+            }
+            runtime.pop();
+        } else {
+            runtime.pop();
+        }
+    }
+
+    // Fall back to old format if unified format didn't find a key
+    if (!key_found) {
+        const key_str = runtime.getString(-1, "key") orelse {
+            log.warn("parseBind: no 'key' field found", .{});
+            return null;
+        };
+        log.debug("parseBind: parsing bind with key='{s}'", .{key_str});
+
+        key = parseKeyString(key_str) orelse {
+            log.warn("parseBind: invalid key '{s}'", .{key_str});
+            return null;
+        };
+        key_found = true;
+
+        // Parse mods from separate field (old format)
+        if (runtime.pushTable(-1, "mods")) {
+            const len = runtime.getArrayLen(-1);
+            for (1..len + 1) |i| {
+                if (runtime.pushArrayElement(-1, i)) {
+                    if (runtime.toIntAt(u8, -1)) |m| {
+                        mods |= m;
+                    }
+                    runtime.pop();
+                }
+            }
+            runtime.pop();
+        } else if (runtime.getInt(u8, -1, "mods")) |m| {
+            mods = m;
+        }
+    }
+
+    if (!key_found) {
+        log.warn("parseBind: no valid key found", .{});
+        return null;
+    }
+
+    // Parse action (required unless mode is passthrough_only)
+    var action: Config.BindAction = .mux_quit; // default placeholder
+    var action_found = false;
+
+    if (runtime.typeOf(-1) == .table) {
+        if (runtime.pushTable(-1, "action")) {
+            defer runtime.pop();
+            if (runtime.getString(-1, "type")) |action_type| {
+                log.debug("parseBind: parsing action type '{s}'", .{action_type});
+                if (parseAction(runtime, action_type)) |a| {
+                    action = a;
+                    action_found = true;
+                } else {
+                    log.warn("parseBind: failed to parse action type '{s}'", .{action_type});
+                }
+            } else {
+                log.debug("parseBind: action table has no 'type' field", .{});
             }
         }
-        runtime.pop();
-    } else if (runtime.getInt(u8, -1, "mods")) |m| {
-        mods = m;
+    }
+
+    // Try direct action string if table didn't work
+    if (!action_found) {
+        if (runtime.getString(-1, "action")) |action_str| {
+            if (parseSimpleAction(action_str)) |a| {
+                action = a;
+                action_found = true;
+            } else {
+                log.warn("parseBind: failed to parse simple action '{s}'", .{action_str});
+            }
+        }
+    }
+
+    // Parse mode first to check if action is required
+    const mode: Config.BindMode = if (runtime.getString(-1, "mode")) |m|
+        std.meta.stringToEnum(Config.BindMode, m) orelse .act_and_consume
+    else
+        .act_and_consume;
+
+    // Action is only required if mode is not passthrough_only
+    if (!action_found and mode != .passthrough_only) {
+        log.warn("parseBind: no 'action' field found and mode is not passthrough_only", .{});
+        return null;
     }
 
     // Parse on (press/release/repeat/hold/double_tap)
@@ -918,6 +1006,7 @@ fn parseBind(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?Config.Bind {
         .key = key,
         .action = action,
         .when = when,
+        .mode = mode,
         .hold_ms = runtime.getInt(i64, -1, "hold_ms"),
         .double_tap_ms = runtime.getInt(i64, -1, "double_tap_ms"),
     };

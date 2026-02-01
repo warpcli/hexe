@@ -79,9 +79,19 @@ pub const Pty = struct {
             _ = posix.close(@intCast(slave_fd));
             _ = posix.close(@intCast(master_fd));
 
-            // Change to working directory if specified
+            // Change to working directory if specified, fallback to HOME
             if (cwd) |dir| {
-                posix.chdir(dir) catch {};
+                posix.chdir(dir) catch {
+                    // If specified CWD fails, try HOME
+                    if (posix.getenv("HOME")) |home| {
+                        posix.chdir(home) catch {};
+                    }
+                };
+            } else {
+                // No CWD specified - use HOME as default
+                if (posix.getenv("HOME")) |home| {
+                    posix.chdir(home) catch {};
+                }
             }
 
             if (isolate) {
