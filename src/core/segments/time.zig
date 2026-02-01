@@ -3,21 +3,23 @@ const Segment = @import("context.zig").Segment;
 const Context = @import("context.zig").Context;
 const Style = @import("../style.zig").Style;
 
-/// Time segment - displays current time
+const c = @cImport({
+    @cInclude("time.h");
+});
+
+/// Time segment - displays current time in local timezone
 /// Format: HH:MM:SS
 pub fn render(ctx: *Context) ?[]const Segment {
     const timestamp = std.time.timestamp();
-    const epoch_seconds: u64 = @intCast(timestamp);
 
-    // Convert to broken-down time (local time)
-    const seconds_in_day = epoch_seconds % 86400;
-    const hours = (seconds_in_day / 3600) % 24;
-    const minutes = (seconds_in_day % 3600) / 60;
-    const seconds = seconds_in_day % 60;
+    // Use libc's localtime to get proper local time with timezone
+    var time_val: c.time_t = @intCast(timestamp);
+    const local = c.localtime(&time_val);
+    if (local == null) return null;
 
-    // Get timezone offset for local time
-    // For simplicity, we'll use UTC and let the shell handle TZ
-    // A proper implementation would use libc's localtime
+    const hours: u64 = @intCast(local.*.tm_hour);
+    const minutes: u64 = @intCast(local.*.tm_min);
+    const seconds: u64 = @intCast(local.*.tm_sec);
 
     const text = ctx.allocFmt("{d:0>2}:{d:0>2}:{d:0>2}", .{
         hours,

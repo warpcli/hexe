@@ -1024,3 +1024,85 @@ fn swapFloatPositions(a: *Pane, b: *Pane) void {
         },
     }
 }
+
+/// Switch to the next tab, handling focus transitions.
+/// Does NOT wrap around - stays on last tab if already there.
+pub fn switchToNextTab(state: *State) void {
+    // Don't wrap around - if on last tab, do nothing
+    if (state.tabs.items.len <= 1) return;
+    if (state.active_tab >= state.tabs.items.len - 1) return;
+
+    const old_uuid = state.getCurrentFocusedUuid();
+
+    // Unfocus current pane
+    if (state.active_floating) |idx| {
+        if (idx < state.floats.items.len) {
+            const fp = state.floats.items[idx];
+            state.syncPaneUnfocus(fp);
+            state.active_floating = null;
+        }
+    } else if (state.currentLayout().getFocusedPane()) |old_pane| {
+        state.syncPaneUnfocus(old_pane);
+    }
+
+    state.active_tab += 1;
+    restoreFocusInTab(state, old_uuid);
+    state.renderer.invalidate();
+    state.force_full_render = true;
+    state.needs_render = true;
+}
+
+/// Switch to the previous tab, handling focus transitions.
+/// Does NOT wrap around - stays on first tab if already there.
+pub fn switchToPrevTab(state: *State) void {
+    // Don't wrap around - if on first tab, do nothing
+    if (state.tabs.items.len <= 1) return;
+    if (state.active_tab == 0) return;
+
+    const old_uuid = state.getCurrentFocusedUuid();
+
+    // Unfocus current pane
+    if (state.active_floating) |idx| {
+        if (idx < state.floats.items.len) {
+            const fp = state.floats.items[idx];
+            state.syncPaneUnfocus(fp);
+            state.active_floating = null;
+        }
+    } else if (state.currentLayout().getFocusedPane()) |old_pane| {
+        state.syncPaneUnfocus(old_pane);
+    }
+
+    state.active_tab -= 1;
+    restoreFocusInTab(state, old_uuid);
+    state.renderer.invalidate();
+    state.force_full_render = true;
+    state.needs_render = true;
+}
+
+/// Restore focus to the appropriate pane in the current tab.
+fn restoreFocusInTab(state: *State, old_uuid: ?[32]u8) void {
+    // Check if last focus was a float in this tab
+    if (state.tab_last_focus_kind.items.len > state.active_tab and
+        state.tab_last_focus_kind.items[state.active_tab] == .float)
+    {
+        if (state.tab_last_floating_uuid.items.len > state.active_tab) {
+            if (state.tab_last_floating_uuid.items[state.active_tab]) |uuid| {
+                for (state.floats.items, 0..) |pane, fi| {
+                    if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
+                    if (!pane.isVisibleOnTab(state.active_tab)) continue;
+                    if (pane.parent_tab) |parent| {
+                        if (parent != state.active_tab) continue;
+                    }
+                    state.active_floating = fi;
+                    state.syncPaneFocus(pane, old_uuid);
+                    return;
+                }
+            }
+        }
+    }
+
+    // Fall back to focused split pane
+    if (state.currentLayout().getFocusedPane()) |new_pane| {
+        state.syncPaneFocus(new_pane, old_uuid);
+    }
+}

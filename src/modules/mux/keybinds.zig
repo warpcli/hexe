@@ -490,8 +490,12 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
             scheduleTimer(state, .repeat_active, now_ms + cfg.input.repeat_ms, mods_eff, key, .mux_quit, focus_ctx);
         }
 
-        // Fire repeat bind
+        // Fire repeat bind, or fall back to press bind if no repeat bind exists
         if (findBestBind(state, mods_eff, key, .repeat, allow_only_tabs, &query)) |b| {
+            return dispatchBindWithMode(state, b, mods_eff, key);
+        }
+        // No explicit repeat bind - fall back to press bind so holding keys works
+        if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |b| {
             return dispatchBindWithMode(state, b, mods_eff, key);
         }
         return true;
@@ -676,77 +680,11 @@ fn dispatchAction(state: *State, action: BindAction) bool {
             return true;
         },
         .tab_next => {
-            const old_uuid = state.getCurrentFocusedUuid();
-            if (state.active_floating) |idx| {
-                if (idx < state.floats.items.len) {
-                    const fp = state.floats.items[idx];
-                    state.syncPaneUnfocus(fp);
-                    state.active_floating = null;
-                }
-            } else if (state.currentLayout().getFocusedPane()) |old_pane| {
-                state.syncPaneUnfocus(old_pane);
-            }
-            state.nextTab();
-
-            if (state.tab_last_focus_kind.items.len > state.active_tab and state.tab_last_focus_kind.items[state.active_tab] == .float) {
-                if (state.tab_last_floating_uuid.items.len > state.active_tab) {
-                    if (state.tab_last_floating_uuid.items[state.active_tab]) |uuid| {
-                        for (state.floats.items, 0..) |pane, fi| {
-                            if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
-                            if (!pane.isVisibleOnTab(state.active_tab)) continue;
-                            if (pane.parent_tab) |parent| {
-                                if (parent != state.active_tab) continue;
-                            }
-                            state.active_floating = fi;
-                            state.syncPaneFocus(pane, old_uuid);
-                            state.needs_render = true;
-                            return true;
-                        }
-                    }
-                }
-            }
-
-            if (state.currentLayout().getFocusedPane()) |new_pane| {
-                state.syncPaneFocus(new_pane, old_uuid);
-            }
-            state.needs_render = true;
+            actions.switchToNextTab(state);
             return true;
         },
         .tab_prev => {
-            const old_uuid = state.getCurrentFocusedUuid();
-            if (state.active_floating) |idx| {
-                if (idx < state.floats.items.len) {
-                    const fp = state.floats.items[idx];
-                    state.syncPaneUnfocus(fp);
-                    state.active_floating = null;
-                }
-            } else if (state.currentLayout().getFocusedPane()) |old_pane| {
-                state.syncPaneUnfocus(old_pane);
-            }
-            state.prevTab();
-
-            if (state.tab_last_focus_kind.items.len > state.active_tab and state.tab_last_focus_kind.items[state.active_tab] == .float) {
-                if (state.tab_last_floating_uuid.items.len > state.active_tab) {
-                    if (state.tab_last_floating_uuid.items[state.active_tab]) |uuid| {
-                        for (state.floats.items, 0..) |pane, fi| {
-                            if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
-                            if (!pane.isVisibleOnTab(state.active_tab)) continue;
-                            if (pane.parent_tab) |parent| {
-                                if (parent != state.active_tab) continue;
-                            }
-                            state.active_floating = fi;
-                            state.syncPaneFocus(pane, old_uuid);
-                            state.needs_render = true;
-                            return true;
-                        }
-                    }
-                }
-            }
-
-            if (state.currentLayout().getFocusedPane()) |new_pane| {
-                state.syncPaneFocus(new_pane, old_uuid);
-            }
-            state.needs_render = true;
+            actions.switchToPrevTab(state);
             return true;
         },
         .pane_close => {
