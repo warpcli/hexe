@@ -815,8 +815,18 @@ pub const Pane = struct {
         return self.vt.getCursorStyle();
     }
 
-    /// Check if cursor should be visible
+    /// Check if cursor should be visible.
+    /// For local panes, if the shell is in foreground (no app running),
+    /// always show cursor regardless of VT state (apps may not restore it on exit).
     pub fn isCursorVisible(self: *Pane) bool {
+        if (self.backend == .local) {
+            const pty = self.backend.local;
+            const fg_pid = self.getFgPid();
+            // If foreground process is the shell itself, always show cursor
+            if (fg_pid != null and fg_pid.? == pty.child_pid) {
+                return true;
+            }
+        }
         return self.vt.isCursorVisible();
     }
 
@@ -830,11 +840,26 @@ pub const Pane = struct {
     }
 
     /// Get best available current working directory.
+    /// For local panes, prefers /proc (always accurate) over OSC7 (may be stale).
     pub fn getRealCwd(self: *Pane) ?[]const u8 {
+        // For local panes, prefer /proc (always accurate) over OSC7 (may be stale)
+        if (self.backend == .local) {
+            if (self.getFgPid()) |pid| {
+                var path_buf: [64]u8 = undefined;
+                const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pid}) catch null;
+                if (path) |p| {
+                    const link = std.posix.readlink(p, &cwd_buf) catch null;
+                    if (link) |l| return l;
+                }
+            }
+        }
+
+        // Fallback to OSC7
         if (self.vt.getPwd()) |pwd| {
             return pwd;
         }
 
+        // For non-local, try /proc anyway
         if (self.getFgPid()) |pid| {
             var path_buf: [64]u8 = undefined;
             const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pid}) catch return self.ses_cwd;

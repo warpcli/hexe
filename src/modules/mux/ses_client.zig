@@ -561,7 +561,27 @@ pub const SesClient = struct {
         };
         try wire.writeControlWithTrail(fd, .reattach, std.mem.asBytes(&msg), session_id);
 
-        const hdr = try self.readSyncResponse(fd);
+        // Reattach can trigger SES to start backlog replaying pods almost
+        // immediately. During that time SES may also send async `.ok` acks.
+        // If we block waiting for `.session_reattached` while those acks pile
+        // up, we risk a read deadlock (user-visible as a frozen shell).
+        //
+        // We explicitly skip `.ok`/`.get_pane_cwd`/async `.pane_info` here.
+        const hdr = blk: {
+            while (true) {
+                const h = try self.readSyncResponse(fd);
+                const mt: wire.MsgType = @enumFromInt(h.msg_type);
+                if (mt == .ok or mt == .get_pane_cwd) {
+                    self.skipPayload(fd, h.payload_len);
+                    continue;
+                }
+                if (mt == .pane_info and h.payload_len >= @sizeOf(wire.PaneInfoResp)) {
+                    self.skipPayload(fd, h.payload_len);
+                    continue;
+                }
+                break :blk h;
+            }
+        };
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type == .@"error") {
             self.skipPayload(fd, hdr.payload_len);

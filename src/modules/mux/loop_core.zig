@@ -105,6 +105,8 @@ pub fn runMainLoop(state: *State) !void {
                     pane.deinit();
                     state.allocator.destroy(pane);
                     state.needs_render = true;
+                    state.force_full_render = true;
+                    state.renderer.invalidate();
                     state.syncStateToSes();
 
                     // Clear focus if this was the active float, sync focus to tiled pane.
@@ -444,6 +446,8 @@ pub fn runMainLoop(state: *State) !void {
             pane.deinit();
             state.allocator.destroy(pane);
             state.needs_render = true;
+            state.force_full_render = true;
+            state.renderer.invalidate();
             state.syncStateToSes();
 
             // Clear focus if this was the active float, sync focus to tiled pane.

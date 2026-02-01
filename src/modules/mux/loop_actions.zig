@@ -60,6 +60,10 @@ fn destroyBlockingFloat(state: *State, pane: *Pane) void {
                     state.active_floating = afi - 1;
                 }
             }
+            // Ensure proper re-render with cursor restoration.
+            state.needs_render = true;
+            state.force_full_render = true;
+            state.renderer.invalidate();
             break;
         }
     }
@@ -262,6 +266,9 @@ pub fn performClose(state: *State) void {
             }
         }
         state.syncStateToSes();
+        // Force full render to restore cursor state properly.
+        state.force_full_render = true;
+        state.renderer.invalidate();
     } else {
         // Close current tab, or quit if it's the last one.
         if (!state.closeCurrentTab()) {

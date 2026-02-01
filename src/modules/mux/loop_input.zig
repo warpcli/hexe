@@ -1044,9 +1044,10 @@ fn handleModifiedArrows(state: *State, inp: []const u8) ?usize {
     if ((mask & 4) != 0) mods |= 2; // ctrl
     if ((mask & 1) != 0) mods |= 4; // shift
 
-    // Only handle press events (ignore repeat/release for arrows)
-    if (event_type == 1) {
-        _ = keybinds.handleKeyEvent(state, mods, key.?, .press, false, false);
+    // Handle press and repeat events for arrow keys
+    if (event_type == 1 or event_type == 2) {
+        const when: keybinds.BindWhen = if (event_type == 1) .press else .repeat;
+        _ = keybinds.handleKeyEvent(state, mods, key.?, when, false, false);
     }
 
     return idx + 1;
