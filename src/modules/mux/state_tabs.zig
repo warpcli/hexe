@@ -56,13 +56,23 @@ pub fn findPaneByPaneId(self: anytype, pane_id: u16) ?*Pane {
 pub fn createTab(self: anytype) !void {
     const parent_uuid = self.getCurrentFocusedUuid();
 
-    // Get cwd from currently focused pane, or use mux's cwd for first tab.
+    // Get cwd from currently focused pane (float or split), with fallback to mux's cwd.
     var cwd: ?[]const u8 = null;
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (self.tabs.items.len > 0) {
-        if (self.currentLayout().getFocusedPane()) |focused| {
-            // Refresh CWD from ses for pod panes.
-            cwd = self.refreshPaneCwd(focused);
+        // Check active float first, then split pane
+        const focused_pane: ?*Pane = if (self.active_floating) |idx| blk: {
+            if (idx < self.floats.items.len) break :blk self.floats.items[idx];
+            break :blk null;
+        } else self.currentLayout().getFocusedPane();
+
+        if (focused_pane) |focused| {
+            // Use getReliableCwd which tries multiple sources
+            cwd = self.getReliableCwd(focused);
+        }
+        // If pane CWD is null, fall back to mux's current directory
+        if (cwd == null) {
+            cwd = std.posix.getcwd(&cwd_buf) catch null;
         }
     } else {
         // First tab - use mux's current directory.

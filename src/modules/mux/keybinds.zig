@@ -635,7 +635,15 @@ fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .split_h => {
             const parent_uuid = state.getCurrentFocusedUuid();
-            const cwd = if (state.currentLayout().getFocusedPane()) |p| state.refreshPaneCwd(p) else null;
+            var cwd: ?[]const u8 = null;
+            if (state.currentLayout().getFocusedPane()) |p| {
+                cwd = state.getReliableCwd(p);
+            }
+            // Fallback to mux's CWD if pane CWD unavailable
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (cwd == null) {
+                cwd = std.posix.getcwd(&cwd_buf) catch null;
+            }
             if (state.currentLayout().splitFocused(.horizontal, cwd) catch null) |new_pane| {
                 state.syncPaneAux(new_pane, parent_uuid);
             }
@@ -645,7 +653,15 @@ fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .split_v => {
             const parent_uuid = state.getCurrentFocusedUuid();
-            const cwd = if (state.currentLayout().getFocusedPane()) |p| state.refreshPaneCwd(p) else null;
+            var cwd: ?[]const u8 = null;
+            if (state.currentLayout().getFocusedPane()) |p| {
+                cwd = state.getReliableCwd(p);
+            }
+            // Fallback to mux's CWD if pane CWD unavailable
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (cwd == null) {
+                cwd = std.posix.getcwd(&cwd_buf) catch null;
+            }
             if (state.currentLayout().splitFocused(.vertical, cwd) catch null) |new_pane| {
                 state.syncPaneAux(new_pane, parent_uuid);
             }

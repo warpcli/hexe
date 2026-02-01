@@ -8,9 +8,28 @@ const actions = @import("loop_actions.zig");
 /// This is shared by both keybindings and IPC/CLI requests to avoid
 /// dependency cycles between modules.
 ///
-/// For left/right: if no split/float is found in that direction,
-/// automatically switch to the previous/next tab for seamless navigation.
+/// Behavior depends on current focus:
+/// - Non-navigatable float: left/right switches tabs directly (up/down ignored)
+/// - Navigatable float or split: directional navigation, tab switch at edge
 pub fn perform(state: *State, dir: layout_mod.Layout.Direction) bool {
+    // Check if we're on a non-navigatable float
+    if (state.active_floating) |idx| {
+        if (idx < state.floats.items.len) {
+            const float_pane = state.floats.items[idx];
+            if (!float_pane.navigatable) {
+                // Non-navigatable float: left/right switches tabs, up/down ignored
+                switch (dir) {
+                    .left => actions.switchToPrevTab(state),
+                    .right => actions.switchToNextTab(state),
+                    .up, .down => {}, // Ignore vertical navigation
+                }
+                state.needs_render = true;
+                return true;
+            }
+        }
+    }
+
+    // Navigatable float or split: use directional navigation
     const old_uuid = state.getCurrentFocusedUuid();
     const cursor = blk: {
         if (state.active_floating) |idx| {

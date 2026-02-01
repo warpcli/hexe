@@ -5,11 +5,21 @@ const Style = @import("../style.zig").Style;
 
 const c = @cImport({
     @cInclude("time.h");
+    @cInclude("stdlib.h");
 });
+
+var tz_initialized: bool = false;
 
 /// Time segment - displays current time in local timezone
 /// Format: HH:MM:SS
 pub fn render(ctx: *Context) ?[]const Segment {
+    // Ensure TZDIR is set for Nix/non-standard glibc environments
+    if (!tz_initialized) {
+        _ = c.setenv("TZDIR", "/usr/share/zoneinfo", 0); // Don't override if already set
+        c.tzset();
+        tz_initialized = true;
+    }
+
     const timestamp = std.time.timestamp();
 
     // Use libc's localtime to get proper local time with timezone

@@ -554,6 +554,10 @@ pub const State = struct {
         return state_sync.getSpawnCwd(self, pane);
     }
 
+    pub fn getReliableCwd(self: *State, pane: *Pane) ?[]const u8 {
+        return state_sync.getReliableCwd(self, pane);
+    }
+
     pub fn syncFocusedPaneInfo(self: *State) void {
         return state_sync.syncFocusedPaneInfo(self);
     }

@@ -77,6 +77,8 @@ pub const Pane = struct {
     is_pwd: bool = false,
     // Sticky float - survives mux exit, can be reattached
     sticky: bool = false,
+    // Navigatable float - directional navigation works like splits
+    navigatable: bool = false,
     // Cached CWD from ses daemon (for pod panes where /proc access is in ses)
     ses_cwd: ?[]const u8 = null,
     // Exit status for local panes (set when process exits)

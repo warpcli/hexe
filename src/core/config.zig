@@ -166,6 +166,9 @@ pub const FloatAttributes = struct {
     destroy: bool = false,
     /// Run the float command in an isolated pod child (filesystem sandbox + best-effort cgroup limits).
     isolated: bool = false,
+    /// If true, directional navigation (left/right/up/down) works like splits.
+    /// If false (default), left/right switches tabs directly.
+    navigatable: bool = false,
 };
 
 pub const FloatDef = struct {
@@ -1636,6 +1639,7 @@ fn parseLayoutFloats(runtime: *LuaRuntime, allocator: std.mem.Allocator) []Layou
             if (runtime.getBool(-1, "global")) |v| attrs.global = v;
             if (runtime.getBool(-1, "destroy")) |v| attrs.destroy = v;
             if (runtime.getBool(-1, "isolated")) |v| attrs.isolated = v;
+            if (runtime.getBool(-1, "navigatable")) |v| attrs.navigatable = v;
             runtime.pop();
         }
 

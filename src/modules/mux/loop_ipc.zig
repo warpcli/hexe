@@ -563,12 +563,24 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         }
     }
 
-    // Determine spawn cwd.
-    const focused_pane = if (state.active_floating) |idx| blk: {
-        if (idx < state.floats.items.len) break :blk state.floats.items[idx];
-        break :blk @as(?*Pane, null);
-    } else state.currentLayout().getFocusedPane();
-    const spawn_cwd: ?[]const u8 = if (cwd_slice.len > 0) cwd_slice else if (focused_pane) |pane| state.getSpawnCwd(pane) else null;
+    // Determine spawn cwd - use explicit cwd if provided, else try focused pane, else mux cwd.
+    var spawn_cwd: ?[]const u8 = null;
+    var mux_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    if (cwd_slice.len > 0) {
+        spawn_cwd = cwd_slice;
+    } else {
+        const focused_pane = if (state.active_floating) |idx| blk: {
+            if (idx < state.floats.items.len) break :blk state.floats.items[idx];
+            break :blk @as(?*Pane, null);
+        } else state.currentLayout().getFocusedPane();
+        if (focused_pane) |pane| {
+            spawn_cwd = state.getReliableCwd(pane);
+        }
+        // Fallback to mux's CWD
+        if (spawn_cwd == null) {
+            spawn_cwd = std.posix.getcwd(&mux_cwd_buf) catch null;
+        }
+    }
 
     // Unfocus current pane.
     const old_uuid = state.getCurrentFocusedUuid();

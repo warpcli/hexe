@@ -79,20 +79,18 @@ pub const Pty = struct {
             _ = posix.close(@intCast(slave_fd));
             _ = posix.close(@intCast(master_fd));
 
-            // Change to working directory if specified, fallback to HOME
+            // Change to working directory if specified.
+            // If not specified, inherit parent's CWD naturally.
+            // Only fall back to HOME if specified CWD doesn't exist.
             if (cwd) |dir| {
                 posix.chdir(dir) catch {
-                    // If specified CWD fails, try HOME
+                    // Specified directory doesn't exist - fall back to HOME
                     if (posix.getenv("HOME")) |home| {
                         posix.chdir(home) catch {};
                     }
                 };
-            } else {
-                // No CWD specified - use HOME as default
-                if (posix.getenv("HOME")) |home| {
-                    posix.chdir(home) catch {};
-                }
             }
+            // If cwd is null, we inherit the parent process's CWD
 
             if (isolate) {
                 isolation.applyChildIsolation(cwd);

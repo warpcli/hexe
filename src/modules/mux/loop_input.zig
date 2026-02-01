@@ -568,7 +568,11 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                                                     state.skip_dead_check = true;
                                                 },
                                                 .pod => {
-                                                    const cwd = state.getSpawnCwd(pane);
+                                                    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+                                                    var cwd = state.getReliableCwd(pane);
+                                                    if (cwd == null) {
+                                                        cwd = std.posix.getcwd(&cwd_buf) catch null;
+                                                    }
                                                     const old_aux = state.ses_client.getPaneAux(pane.uuid) catch SesClient.PaneAuxInfo{
                                                         .created_from = null,
                                                         .focused_from = null,

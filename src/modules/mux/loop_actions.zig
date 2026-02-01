@@ -165,7 +165,11 @@ pub fn performDisown(state: *State) void {
         switch (p.backend) {
             .pod => {
                 // Get current working directory from the process before orphaning.
-                const cwd = state.getSpawnCwd(p);
+                var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+                var cwd = state.getReliableCwd(p);
+                if (cwd == null) {
+                    cwd = std.posix.getcwd(&cwd_buf) catch null;
+                }
 
                 // Get the old pane's auxiliary info (created_from, focused_from) to inherit.
                 const old_aux = state.ses_client.getPaneAux(p.uuid) catch SesClient.PaneAuxInfo{
@@ -367,21 +371,15 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
     // Get current directory from ACTUALLY focused pane (float or split).
     // IMPORTANT: Use getCurrentFocusedPane() which checks active_floating first -
     // if user is focused on a float, we want THAT float's CWD for per_cwd floats.
-    // Try multiple sources since async caches may be stale:
-    // 1. refreshPaneCwd (VT OSC7 / /proc / ses_cwd cache)
-    // 2. pane_shell.cwd (shell integration)
-    // 3. HOME fallback is handled in Pty.spawnWithEnv
+    // Uses getReliableCwd which tries multiple sources, then falls back to mux CWD.
     var current_dir: ?[]const u8 = null;
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (getCurrentFocusedPane(state)) |focused| {
-        current_dir = state.refreshPaneCwd(focused);
-        // If refreshPaneCwd returned null, try shell integration CWD
-        if (current_dir == null) {
-            if (state.getPaneShell(focused.uuid)) |shell_info| {
-                if (shell_info.cwd) |cwd| {
-                    current_dir = cwd;
-                }
-            }
-        }
+        current_dir = state.getReliableCwd(focused);
+    }
+    // Fallback to mux's CWD if pane CWD unavailable
+    if (current_dir == null) {
+        current_dir = std.posix.getcwd(&cwd_buf) catch null;
     }
 
     // per_cwd floats are unique per *split cwd*, not per tab.
@@ -732,6 +730,9 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
 
     // For sticky floats, set sticky.
     pane.sticky = float_def.attributes.sticky;
+
+    // For navigatable floats, set navigatable.
+    pane.navigatable = float_def.attributes.navigatable;
 
     // Store style reference.
     if (style) |s| {
