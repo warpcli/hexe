@@ -205,6 +205,23 @@ pub fn run(mux_args: MuxArgs) !void {
     };
     debugLog("ses connected (started={})", .{state.ses_client.just_started_daemon});
 
+    // If server resolved to a different name (collision avoidance), update state.
+    if (state.ses_client.resolved_name) |resolved| {
+        if (!std.mem.eql(u8, resolved, state.session_name)) {
+            debugLog("session name resolved from '{s}' to '{s}'", .{ state.session_name, resolved });
+            // Free old owned name if any
+            if (state.session_name_owned) |old| {
+                allocator.free(old);
+            }
+            // Duplicate and store the resolved name
+            const duped = allocator.dupe(u8, resolved) catch null;
+            if (duped) |d| {
+                state.session_name = d;
+                state.session_name_owned = d;
+            }
+        }
+    }
+
     // Show notification if we just started the daemon.
     if (state.ses_client.just_started_daemon) {
         state.notifications.showFor("ses daemon started", 2000);
@@ -212,13 +229,22 @@ pub fn run(mux_args: MuxArgs) !void {
 
     // Handle --attach: try session first, then orphaned pane.
     if (mux_args.attach) |uuid_prefix| {
+        debugLog("attach: trying to reattach with prefix={s}", .{uuid_prefix});
+        std.debug.print("[mux] ATTACH: starting reattach for '{s}'\n", .{uuid_prefix});
         if (state.reattachSession(uuid_prefix)) {
+            debugLog("attach: reattachSession succeeded", .{});
+            std.debug.print("[mux] ATTACH: reattachSession returned TRUE, tabs={d}\n", .{state.tabs.items.len});
             state.notifications.show("Session reattached");
         } else if (state.attachOrphanedPane(uuid_prefix)) {
+            debugLog("attach: attachOrphanedPane succeeded", .{});
+            std.debug.print("[mux] ATTACH: reattachSession FALSE, attachOrphanedPane TRUE\n", .{});
             state.notifications.show("Attached to orphaned pane");
         } else {
-            try state.createTab();
-            state.notifications.show("Session/pane not found, created new");
+            // Session/pane not found - EXIT with error, don't create new session
+            debugLog("attach: both reattach methods failed, exiting", .{});
+            std.debug.print("Session or pane '{s}' not found\n", .{uuid_prefix});
+            std.debug.print("Use 'hexe mux list' to see available sessions\n", .{});
+            return; // Exit without entering main loop
         }
     } else {
         // Create first tab with one pane (will use ses if connected).
@@ -226,9 +252,11 @@ pub fn run(mux_args: MuxArgs) !void {
     }
 
     // Auto-adopt sticky panes from ses for this directory.
+    std.debug.print("[mux] ATTACH: calling adoptStickyPanes\n", .{});
     state.adoptStickyPanes();
 
     // Continue with main loop.
+    std.debug.print("[mux] ATTACH: entering main loop\n", .{});
     try loop_core.runMainLoop(&state);
 }
 

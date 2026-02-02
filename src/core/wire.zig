@@ -141,9 +141,10 @@ pub const Register = extern struct {
     name_len: u16 align(1),
 };
 
-/// Registered (response to Register). No trailing data.
+/// Registered (response to Register).
+/// Trailing data: resolved session_name (may differ from requested if collision).
 pub const Registered = extern struct {
-    _pad: u8 align(1) = 0,
+    name_len: u16 align(1) = 0,
 };
 
 /// CreatePane: lengths of variable fields.

@@ -315,6 +315,53 @@ pub const SesState = struct {
         return id;
     }
 
+    /// Check if a session name is already in use by a detached session or connected client.
+    fn isSessionNameInUse(self: *SesState, name: []const u8) bool {
+        // Check detached sessions
+        var iter = self.detached_sessions.valueIterator();
+        while (iter.next()) |detached| {
+            if (std.ascii.eqlIgnoreCase(detached.session_name, name)) {
+                return true;
+            }
+        }
+        // Check connected clients
+        for (self.clients.items) |*client| {
+            if (client.session_name) |client_name| {
+                if (std.ascii.eqlIgnoreCase(client_name, name)) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    /// Resolve a session name to ensure uniqueness.
+    /// If name conflicts, appends "-2", "-3", etc. until unique.
+    /// Returns allocated string that caller must free.
+    pub fn resolveSessionName(self: *SesState, requested_name: []const u8) ?[]u8 {
+        // If name is not in use, just return a copy
+        if (!self.isSessionNameInUse(requested_name)) {
+            return self.allocator.dupe(u8, requested_name) catch null;
+        }
+
+        // Name is in use, try appending suffix
+        var suffix: u32 = 2;
+        var buf: [128]u8 = undefined;
+        while (suffix < 100) : (suffix += 1) {
+            const resolved = std.fmt.bufPrint(&buf, "{s}-{d}", .{ requested_name, suffix }) catch break;
+            if (!self.isSessionNameInUse(resolved)) {
+                return self.allocator.dupe(u8, resolved) catch null;
+            }
+        }
+
+        // Fallback: use first 8 chars of a random UUID
+        var uuid_bytes: [4]u8 = undefined;
+        std.crypto.random.bytes(&uuid_bytes);
+        const hex = std.fmt.bytesToHex(&uuid_bytes, .lower);
+        const fallback = std.fmt.bufPrint(&buf, "{s}-{s}", .{ requested_name, hex }) catch return null;
+        return self.allocator.dupe(u8, fallback) catch null;
+    }
+
     /// Connect the VT data channel (③) to a POD socket.
     /// On success, stores the fd in the pane and populates routing tables.
     pub fn connectPodVt(self: *SesState, uuid: [32]u8, pod_socket_path: []const u8, pane_id: u16) void {
@@ -1155,6 +1202,81 @@ pub const SesState = struct {
                 session_state.deinit();
                 self.dirty = true;
             }
+        }
+    }
+
+    /// Clean up detached sessions:
+    /// 1. Remove sessions with no live panes (all panes dead)
+    /// 2. Remove duplicate sessions with same name (keep most recent)
+    pub fn cleanupDetachedSessions(self: *SesState) void {
+        var to_remove: std.ArrayList([16]u8) = .empty;
+        defer to_remove.deinit(self.allocator);
+
+        // First pass: find sessions with no live panes
+        var iter = self.detached_sessions.iterator();
+        while (iter.next()) |entry| {
+            const session = entry.value_ptr;
+            var has_live_panes = false;
+
+            for (session.pane_uuids) |pane_uuid| {
+                if (self.panes.get(pane_uuid)) |pane| {
+                    // Check if pod process is still alive
+                    if (std.c.kill(pane.pod_pid, 0) == 0) {
+                        has_live_panes = true;
+                        break;
+                    }
+                }
+            }
+
+            if (!has_live_panes) {
+                to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
+                ses.debugLog("cleanup: session {s} has no live panes, removing", .{session.session_name});
+            }
+        }
+
+        // Second pass: find duplicate names (keep most recent)
+        var name_to_newest = std.StringHashMap(struct { session_id: [16]u8, detached_at: i64 }).init(self.allocator);
+        defer name_to_newest.deinit();
+
+        iter = self.detached_sessions.iterator();
+        while (iter.next()) |entry| {
+            const session = entry.value_ptr;
+            const name = session.session_name;
+
+            if (name_to_newest.get(name)) |existing| {
+                // Duplicate name found - keep the newer one
+                if (session.detached_at > existing.detached_at) {
+                    // Current is newer, remove the old one
+                    to_remove.append(self.allocator, existing.session_id) catch continue;
+                    name_to_newest.put(name, .{ .session_id = entry.key_ptr.*, .detached_at = session.detached_at }) catch continue;
+                    ses.debugLog("cleanup: removing older duplicate session '{s}'", .{name});
+                } else {
+                    // Old is newer, remove current
+                    to_remove.append(self.allocator, entry.key_ptr.*) catch continue;
+                    ses.debugLog("cleanup: removing older duplicate session '{s}'", .{name});
+                }
+            } else {
+                name_to_newest.put(name, .{ .session_id = entry.key_ptr.*, .detached_at = session.detached_at }) catch continue;
+            }
+        }
+
+        // Remove collected sessions
+        for (to_remove.items) |session_id| {
+            if (self.detached_sessions.fetchRemove(session_id)) |kv| {
+                var session_state = kv.value;
+
+                // Kill orphaned panes
+                for (session_state.pane_uuids) |pane_uuid| {
+                    self.killPane(pane_uuid) catch {};
+                }
+
+                session_state.deinit();
+                self.dirty = true;
+            }
+        }
+
+        if (to_remove.items.len > 0) {
+            ses.debugLog("cleanup: removed {d} sessions, {d} remaining", .{ to_remove.items.len, self.detached_sessions.count() });
         }
     }
 

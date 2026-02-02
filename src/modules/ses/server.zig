@@ -672,16 +672,28 @@ pub const Server = struct {
             break :blk cid;
         };
 
+        // Resolve session name to ensure uniqueness (avoid collisions with detached sessions)
+        const resolved_name: ?[]u8 = if (name_slice.len > 0)
+            self.ses_state.resolveSessionName(name_slice)
+        else
+            null;
+        defer if (resolved_name) |rn| self.allocator.free(rn);
+
         if (self.ses_state.getClient(client_id)) |client| {
             client.keepalive = (reg.keepalive != 0);
             client.session_id = session_id;
             client.mux_ctl_fd = fd;
             if (client.session_name) |old| client.allocator.free(old);
-            client.session_name = if (name_slice.len > 0) client.allocator.dupe(u8, name_slice) catch null else null;
+            // Store the resolved name (duplicated since resolved_name will be freed)
+            client.session_name = if (resolved_name) |rn| client.allocator.dupe(u8, rn) catch null else null;
         }
-        ses.debugLog("registered: session={s} name={s} client_id={d}", .{ reg.session_id[0..8], name_slice, client_id });
 
-        wire.writeControl(fd, .registered, std.mem.asBytes(&wire.Registered{})) catch {};
+        const final_name = resolved_name orelse name_slice;
+        ses.debugLog("registered: session={s} name={s} (requested={s}) client_id={d}", .{ reg.session_id[0..8], final_name, name_slice, client_id });
+
+        // Send Registered response with resolved name
+        const resp = wire.Registered{ .name_len = @intCast(final_name.len) };
+        wire.writeControlWithTrail(fd, .registered, std.mem.asBytes(&resp), final_name) catch {};
     }
 
     fn handleBinarySyncState(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {

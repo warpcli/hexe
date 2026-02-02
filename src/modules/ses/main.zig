@@ -98,6 +98,9 @@ pub fn run(args: SesArgs) !void {
     // Verifies pods are still alive before restoring them.
     persist.load(allocator, &ses_state) catch {};
 
+    // Clean up sessions with dead panes and duplicate names.
+    ses_state.cleanupDetachedSessions();
+
     // Initialize server (uses page_allocator internally)
     var srv = server.Server.init(allocator, &ses_state) catch |err| {
         return err;
