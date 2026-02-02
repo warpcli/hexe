@@ -338,8 +338,8 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "super");
     lua.setField(-2, "mod");
 
-    // hx.when = { press = "press", release = "release", repeat = "repeat", hold = "hold", double_tap = "double_tap" }
-    lua.createTable(0, 5);
+    // hx.when = { press = "press", release = "release", repeat = "repeat", hold = "hold" }
+    lua.createTable(0, 4);
     _ = lua.pushString("press");
     lua.setField(-2, "press");
     _ = lua.pushString("release");
@@ -348,8 +348,6 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "repeat");
     _ = lua.pushString("hold");
     lua.setField(-2, "hold");
-    _ = lua.pushString("double_tap");
-    lua.setField(-2, "double_tap");
     lua.setField(-2, "when");
 
     // hx.action = { mux_quit = "mux.quit", tab_new = "tab.new", ... }

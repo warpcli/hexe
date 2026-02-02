@@ -446,7 +446,6 @@ pub const Config = struct {
         release,
         repeat,
         hold,
-        double_tap,
     };
 
     /// Controls what happens when a keybinding matches.
@@ -529,9 +528,8 @@ pub const Config = struct {
         /// Controls whether to consume the key or pass it through.
         mode: BindMode = .act_and_consume,
 
-        // Timing (used by hold/double_tap)
+        // Timing (used by hold)
         hold_ms: ?i64 = null,
-        double_tap_ms: ?i64 = null,
     };
 
     pub fn modsMaskFromStrings(mods: ?[]const []const u8) u8 {
@@ -550,12 +548,12 @@ pub const Config = struct {
     pub const InputConfig = struct {
         binds: []const Bind = &[_]Bind{},
 
-        // Default timings
+        // Two thresholds define three modes:
+        // < tap_ms = REPEAT (no action)
+        // tap_ms to hold_ms = TAP (fires action)
+        // > hold_ms = HOLD (fires hold action if defined)
+        tap_ms: i64 = 200,
         hold_ms: i64 = 600,
-        // If the same chord's primary key is pressed again within this window
-        // (while modifiers remain logically held), treat it as repeat mode.
-        repeat_ms: i64 = 100,
-        double_tap_ms: i64 = 250,
     };
 
     pub const MouseConfig = struct {
@@ -811,9 +809,8 @@ fn parseInputConfig(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Al
 
     // Parse timing
     if (runtime.pushTable(-1, "timing")) {
+        if (runtime.getInt(i64, -1, "tap_ms")) |v| config.input.tap_ms = v;
         if (runtime.getInt(i64, -1, "hold_ms")) |v| config.input.hold_ms = v;
-        if (runtime.getInt(i64, -1, "repeat_ms")) |v| config.input.repeat_ms = v;
-        if (runtime.getInt(i64, -1, "double_tap_ms")) |v| config.input.double_tap_ms = v;
         runtime.pop();
     }
 
@@ -994,7 +991,7 @@ fn parseBind(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?Config.Bind {
         return null;
     }
 
-    // Parse on (press/release/repeat/hold/double_tap)
+    // Parse on (press/release/repeat/hold)
     const on: Config.BindWhen = if (runtime.getString(-1, "on")) |o|
         std.meta.stringToEnum(Config.BindWhen, o) orelse .press
     else
@@ -1011,7 +1008,6 @@ fn parseBind(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?Config.Bind {
         .when = when,
         .mode = mode,
         .hold_ms = runtime.getInt(i64, -1, "hold_ms"),
-        .double_tap_ms = runtime.getInt(i64, -1, "double_tap_ms"),
     };
 }
 

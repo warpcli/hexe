@@ -57,7 +57,7 @@ pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
 }
 
 /// Forward a key (with modifiers) to the focused pane as escape sequence.
-fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
+pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
     var out: [16]u8 = undefined;
     var n: usize = 0;
 
@@ -226,7 +226,6 @@ fn findBestBind(state: *State, mods: u8, key: BindKey, on: BindWhen, allow_only_
         var score: u8 = 0;
         if (b.when != null) score += 2; // Conditional binds are more specific.
         if (b.hold_ms != null) score += 1;
-        if (b.double_tap_ms != null) score += 1;
 
         if (best == null or score > best_score or score == best_score) {
             best = b;
@@ -256,13 +255,21 @@ fn findStoredModsForKey(state: *State, key: BindKey, focus_ctx: FocusContext) ?u
         if (!keyEq(t.key, key)) continue;
         if (t.focus_ctx != focus_ctx) continue;
         switch (t.kind) {
-            .tap_pending, .hold, .hold_fired, .repeat_wait, .repeat_active, .double_tap_wait, .delayed_press => return t.mods,
+            .tap_pending, .hold, .hold_fired, .repeat_wait, .repeat_active, .repeat_locked, .delayed_press => return t.mods,
         }
     }
     return null;
 }
 
 fn scheduleTimer(state: *State, kind: State.PendingKeyTimerKind, deadline_ms: i64, mods: u8, key: BindKey, action: BindAction, focus_ctx: FocusContext) void {
+    scheduleTimerFull(state, kind, deadline_ms, mods, key, action, focus_ctx, 0, false);
+}
+
+fn scheduleTimerWithStart(state: *State, kind: State.PendingKeyTimerKind, deadline_ms: i64, mods: u8, key: BindKey, action: BindAction, focus_ctx: FocusContext, press_start_ms: i64) void {
+    scheduleTimerFull(state, kind, deadline_ms, mods, key, action, focus_ctx, press_start_ms, false);
+}
+
+fn scheduleTimerFull(state: *State, kind: State.PendingKeyTimerKind, deadline_ms: i64, mods: u8, key: BindKey, action: BindAction, focus_ctx: FocusContext, press_start_ms: i64, is_repeat: bool) void {
     state.key_timers.append(state.allocator, .{
         .kind = kind,
         .deadline_ms = deadline_ms,
@@ -270,6 +277,8 @@ fn scheduleTimer(state: *State, kind: State.PendingKeyTimerKind, deadline_ms: i6
         .key = key,
         .action = action,
         .focus_ctx = focus_ctx,
+        .press_start_ms = press_start_ms,
+        .is_repeat = is_repeat,
     }) catch {};
 }
 
@@ -277,7 +286,7 @@ pub fn processKeyTimers(state: *State, now_ms: i64) void {
     var i: usize = 0;
     while (i < state.key_timers.items.len) {
         const t = state.key_timers.items[i];
-        if (t.kind == .hold_fired or t.kind == .repeat_wait or t.kind == .repeat_active) {
+        if (t.kind == .hold_fired or t.kind == .repeat_wait or t.kind == .repeat_active or t.kind == .repeat_locked) {
             i += 1;
             continue;
         }
@@ -313,14 +322,18 @@ pub fn processKeyTimers(state: *State, now_ms: i64) void {
         }
 
         switch (t.kind) {
-            .double_tap_wait => {},
-            .tap_pending => {},
+            .tap_pending => {
+                // Quick release timer expired without same key pressed again = TAP
+                main.debugLog("tap_pending expired: firing action", .{});
+                _ = dispatchAction(state, t.action);
+            },
             .delayed_press => {
                 _ = dispatchAction(state, t.action);
             },
             .hold_fired => {},
             .repeat_wait => {},
             .repeat_active => {},
+            .repeat_locked => {},
             .hold => unreachable,
         }
     }
@@ -425,12 +438,16 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
         }
         if (had_hold_fired) return true;
 
-        // If hold was pending (not fired), this is a tap - fire press action
+        // Find and remove hold timer, getting press_start_ms and is_repeat
         var had_hold_pending = false;
+        var press_start_ms: i64 = 0;
+        var was_repeat = false;
         i = 0;
         while (i < state.key_timers.items.len) {
             const t = state.key_timers.items[i];
             if (t.kind == .hold and t.mods == mods_eff and keyEq(t.key, key)) {
+                press_start_ms = t.press_start_ms;
+                was_repeat = t.is_repeat;
                 _ = state.key_timers.orderedRemove(i);
                 had_hold_pending = true;
                 continue;
@@ -441,16 +458,38 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
         // Clean up repeat_active if any
         cancelTimer(state, .repeat_active, mods_eff, key);
 
-        // Tap: hold was pending but didn't fire
+        // Determine action based on press duration
         if (had_hold_pending) {
-            main.debugLog("release tap: mods_eff={d} key={any}", .{ mods_eff, key });
-            if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |b| {
-                main.debugLog("release tap: found bind, action={any}", .{b.action});
-                _ = dispatchBindWithMode(state, b, mods_eff, key);
+            const duration_ms = now_ms - press_start_ms;
+            main.debugLog("release: mods_eff={d} key={any} duration={d}ms was_repeat={}", .{ mods_eff, key, duration_ms, was_repeat });
+
+            // If this was part of a repeat sequence, don't fire tap
+            if (was_repeat) {
+                main.debugLog("release: was_repeat=true, not firing tap", .{});
+                return true;
+            }
+
+            // Find the bind to use
+            const maybe_bind = findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query);
+
+            if (duration_ms >= cfg.input.tap_ms) {
+                // 300ms+ = TAP - fire immediately
+                main.debugLog("release: TAP (duration >= {d}ms)", .{cfg.input.tap_ms});
+                if (maybe_bind) |b| {
+                    _ = dispatchBindWithMode(state, b, mods_eff, key);
+                } else {
+                    forwardKeyToPane(state, mods_eff, key);
+                }
             } else {
-                // No press bind - forward key to shell on release
-                main.debugLog("release tap: no bind, forwarding to shell", .{});
-                forwardKeyToPane(state, mods_eff, key);
+                // <300ms = quick release, defer to see if same key comes again (repeat)
+                main.debugLog("release: quick (<{d}ms), scheduling tap_pending", .{cfg.input.tap_ms});
+                if (maybe_bind) |b| {
+                    // Schedule tap_pending - will fire action after tap_ms if no repeat
+                    scheduleTimer(state, .tap_pending, now_ms + cfg.input.tap_ms, mods_eff, key, b.action, focus_ctx);
+                } else {
+                    // No bind - forward key to pane immediately (no repeat detection needed)
+                    forwardKeyToPane(state, mods_eff, key);
+                }
             }
             return true;
         }
@@ -478,27 +517,30 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
         cancelTimer(state, .hold_fired, mods_eff, key);
 
         // Keep repeat_active alive (or create if first repeat event)
+        const repeat_timeout: i64 = 100; // Internal: terminal repeat event tracking
         var found = false;
         for (state.key_timers.items) |*t| {
             if (t.kind == .repeat_active and t.mods == mods_eff and keyEq(t.key, key)) {
-                t.deadline_ms = now_ms + cfg.input.repeat_ms;
+                t.deadline_ms = now_ms + repeat_timeout;
                 found = true;
                 break;
             }
         }
         if (!found) {
-            scheduleTimer(state, .repeat_active, now_ms + cfg.input.repeat_ms, mods_eff, key, .mux_quit, focus_ctx);
+            scheduleTimer(state, .repeat_active, now_ms + repeat_timeout, mods_eff, key, .mux_quit, focus_ctx);
         }
 
-        // Fire repeat bind, or fall back to press bind if no repeat bind exists
+        // Fire repeat bind ONLY if explicitly defined - no fallback to press
+        // This ensures keybinds only trigger on TAP (press+release), not on hold/repeat
         if (findBestBind(state, mods_eff, key, .repeat, allow_only_tabs, &query)) |b| {
             return dispatchBindWithMode(state, b, mods_eff, key);
         }
-        // No explicit repeat bind - fall back to press bind so holding keys works
-        if (findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query)) |b| {
-            return dispatchBindWithMode(state, b, mods_eff, key);
+        // No repeat bind - for modified keys, consume but don't trigger action
+        // For unmodified keys, forward to pane
+        if (mods_eff != 0) {
+            return true; // Consume repeat for modified keys (don't forward to pane)
         }
-        return true;
+        return false; // Forward repeat to pane for unmodified keys
     }
 
     // --- PRESS ---
@@ -508,13 +550,62 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
             main.debugLog("press: Ctrl+Alt+{c} (0x{x})", .{ key.char, key.char });
         }
 
+        // Check for repeat_locked - if same key, still in repeat mode; if different key, exit repeat mode
+        var in_repeat_mode = false;
+        var i: usize = 0;
+        while (i < state.key_timers.items.len) {
+            const t = state.key_timers.items[i];
+            if (t.kind == .repeat_locked) {
+                if (t.mods == mods_eff and keyEq(t.key, key)) {
+                    // Same key - still in repeat mode
+                    in_repeat_mode = true;
+                    main.debugLog("press: repeat_locked for same key, still REPEAT", .{});
+                    i += 1;
+                } else {
+                    // Different key - exit repeat mode
+                    main.debugLog("press: repeat_locked for different key, exiting repeat mode", .{});
+                    _ = state.key_timers.orderedRemove(i);
+                    // Don't increment i, continue checking
+                }
+                continue;
+            }
+            i += 1;
+        }
+
+        // Check if there's a tap_pending for this key - rapid press = entering REPEAT mode
+        var had_tap_pending = false;
+        i = 0;
+        while (i < state.key_timers.items.len) {
+            const t = state.key_timers.items[i];
+            if (t.kind == .tap_pending and t.mods == mods_eff and keyEq(t.key, key)) {
+                _ = state.key_timers.orderedRemove(i);
+                had_tap_pending = true;
+                main.debugLog("press: found tap_pending, entering REPEAT mode", .{});
+                continue;
+            }
+            i += 1;
+        }
+
+        if (had_tap_pending or in_repeat_mode) {
+            // In repeat mode - don't trigger bind
+            // Mark is_repeat=true so release also doesn't fire
+            cancelTimer(state, .hold, mods_eff, key);
+            scheduleTimerFull(state, .hold, std.math.maxInt(i64), mods_eff, key, .mux_quit, focus_ctx, now_ms, true);
+            // Lock this key combo in repeat mode (persists until different key pressed)
+            if (had_tap_pending) {
+                // Only schedule new repeat_locked when first entering repeat mode
+                scheduleTimer(state, .repeat_locked, std.math.maxInt(i64), mods_eff, key, .mux_quit, focus_ctx);
+            }
+            return true;
+        }
+
         // Test: Ctrl+Alt+; press = arm hold timer for HOLD test
         if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == ';') {
             main.debugLog("test key matched, arming hold timer", .{});
             cancelTimer(state, .hold, mods_eff, key);
             cancelTimer(state, .hold_fired, mods_eff, key);
             // Arm hold timer - when it fires, show HOLD notification
-            scheduleTimer(state, .hold, now_ms + cfg.input.hold_ms, mods_eff, key, .mux_quit, focus_ctx);
+            scheduleTimerWithStart(state, .hold, now_ms + cfg.input.hold_ms, mods_eff, key, .mux_quit, focus_ctx, now_ms);
             return true;
         }
 
@@ -543,11 +634,11 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
                 const hold_ms = hb.hold_ms orelse cfg.input.hold_ms;
                 cancelTimer(state, .hold, mods_eff, key);
                 cancelTimer(state, .hold_fired, mods_eff, key);
-                scheduleTimer(state, .hold, now_ms + hold_ms, mods_eff, key, hb.action, focus_ctx);
+                scheduleTimerWithStart(state, .hold, now_ms + hold_ms, mods_eff, key, hb.action, focus_ctx, now_ms);
             } else {
                 // No hold bind - arm dummy hold timer to defer until release
                 cancelTimer(state, .hold, mods_eff, key);
-                scheduleTimer(state, .hold, std.math.maxInt(i64), mods_eff, key, .mux_quit, focus_ctx);
+                scheduleTimerWithStart(state, .hold, std.math.maxInt(i64), mods_eff, key, .mux_quit, focus_ctx, now_ms);
             }
             return true; // Wait for release
         }

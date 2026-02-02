@@ -764,8 +764,9 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                     continue;
                 }
 
-                // Forward unhandled press events to pane (not repeat/release)
-                if (ev.event_type == 1) {
+                // Forward unhandled press AND repeat events to pane (not release)
+                // Repeat events are essential for key repeat (e.g., holding arrow keys)
+                if (ev.event_type == 1 or ev.event_type == 2) {
                     var out: [8]u8 = undefined;
                     if (input_csi_u.translateToLegacy(&out, ev)) |out_len| {
                         keybinds.forwardInputToFocusedPane(state, out[0..out_len]);
@@ -1044,10 +1045,22 @@ fn handleModifiedArrows(state: *State, inp: []const u8) ?usize {
     if ((mask & 4) != 0) mods |= 2; // ctrl
     if ((mask & 1) != 0) mods |= 4; // shift
 
-    // Handle press and repeat events for arrow keys
-    if (event_type == 1 or event_type == 2) {
-        const when: keybinds.BindWhen = if (event_type == 1) .press else .repeat;
-        _ = keybinds.handleKeyEvent(state, mods, key.?, when, false, false);
+    // Handle press, repeat, and release events for arrow keys
+    // Release is needed for tap detection (modified keys defer until release)
+    if (event_type >= 1 and event_type <= 3) {
+        const when: keybinds.BindWhen = switch (event_type) {
+            1 => .press,
+            2 => .repeat,
+            3 => .release,
+            else => .press,
+        };
+        // Use kitty_mode=true since we have event type info from Kitty protocol
+        if (!keybinds.handleKeyEvent(state, mods, key.?, when, false, true)) {
+            // No keybind matched - forward arrow key to pane (but not release)
+            if (event_type == 1 or event_type == 2) {
+                keybinds.forwardKeyToPane(state, mods, key.?);
+            }
+        }
     }
 
     return idx + 1;

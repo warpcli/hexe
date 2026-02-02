@@ -206,7 +206,6 @@ pub const State = struct {
     // Keybinding timers (hold/double-tap delayed press)
     key_timers: std.ArrayList(PendingKeyTimer),
 
-
     pub fn init(allocator: std.mem.Allocator, width: u16, height: u16, debug: bool, log_file: ?[]const u8) !State {
         const cfg = core.Config.load(allocator);
         const pop_cfg = pop.PopConfig.load(allocator);
@@ -434,7 +433,7 @@ pub const State = struct {
         }
     }
 
-    pub const PendingKeyTimerKind = enum { delayed_press, tap_pending, hold, hold_fired, repeat_wait, repeat_active, double_tap_wait };
+    pub const PendingKeyTimerKind = enum { delayed_press, tap_pending, hold, hold_fired, repeat_wait, repeat_active, repeat_locked };
 
     pub const PendingKeyTimer = struct {
         kind: PendingKeyTimerKind,
@@ -443,6 +442,8 @@ pub const State = struct {
         key: BindKey,
         action: BindAction,
         focus_ctx: FocusContext,
+        press_start_ms: i64 = 0, // When the key was first pressed (for tap vs repeat detection)
+        is_repeat: bool = false, // True if this press was part of a repeat sequence (don't fire tap)
     };
 
     pub fn nextKeyTimerDeadlineMs(self: *const State, now_ms: i64) ?i64 {
@@ -450,7 +451,7 @@ pub const State = struct {
         for (self.key_timers.items) |t| {
             if (t.kind == .hold_fired) continue;
             if (t.kind == .repeat_wait or t.kind == .repeat_active) continue;
-            if (t.kind == .tap_pending) continue;
+            // tap_pending needs to fire to trigger deferred tap action
             if (t.deadline_ms <= now_ms) return now_ms;
             const d = t.deadline_ms;
             if (next == null or d < next.?) next = d;
