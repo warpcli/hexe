@@ -447,20 +447,14 @@ pub const Pane = struct {
     }
 
     fn handleOscQuery(self: *Pane, seq: []const u8, code: u32) bool {
+        // Don't handle color queries (10/11/12) locally - forward them to the real
+        // terminal. Local responses arrive synchronously and can cause issues with
+        // apps that switch to raw input mode right after sending queries (like `gh`).
+        // The real terminal will respond asynchronously through consumeOscReplyFromTerminal.
+        _ = self;
         _ = seq;
-        if (!(code == 10 or code == 11 or code == 12)) return false;
-
-        const color = switch (code) {
-            10 => "ffff/ffff/ffff",
-            11 => "0000/0000/0000",
-            12 => "ffff/ffff/ffff",
-            else => "0000/0000/0000",
-        };
-
-        var buf: [48]u8 = undefined;
-        const resp = std.fmt.bufPrint(&buf, "\x1b]{d};rgb:{s}\x07", .{ code, color }) catch return true;
-        self.write(resp) catch {};
-        return true;
+        _ = code;
+        return false;
     }
 
     fn handleTerminalQueries(self: *Pane, data: []const u8) void {

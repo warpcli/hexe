@@ -641,13 +641,13 @@ pub fn readControlHeader(fd: posix.fd_t) !ControlHeader {
 }
 
 /// Non-blocking variant: returns WouldBlock if no data available on first byte,
-/// but spin-waits on remaining bytes (header in-flight).
+/// but waits on remaining bytes (header in-flight).
 pub fn tryReadControlHeader(fd: posix.fd_t) !ControlHeader {
     var buf: [@sizeOf(ControlHeader)]u8 = undefined;
     // First byte: propagate WouldBlock (no data available).
     const first = posix.read(fd, buf[0..1]) catch |err| return err;
     if (first == 0) return error.ConnectionClosed;
-    // Remaining bytes: spin-wait (header in-flight).
+    // Remaining bytes: wait with yield (header in-flight).
     var off: usize = 1;
     while (off < buf.len) {
         const n = posix.read(fd, buf[off..]) catch |err| switch (err) {
@@ -689,13 +689,13 @@ pub fn readMuxVtHeader(fd: posix.fd_t) !MuxVtHeader {
 }
 
 /// Non-blocking variant: returns error.WouldBlock if no data available.
-/// Once the first byte arrives, spin-waits for the remaining header bytes.
+/// Once the first byte arrives, waits for the remaining header bytes.
 pub fn tryReadMuxVtHeader(fd: posix.fd_t) !MuxVtHeader {
     var buf: [@sizeOf(MuxVtHeader)]u8 = undefined;
     // First byte: propagate WouldBlock (no frame available).
     const first = posix.read(fd, buf[0..1]) catch |err| return err;
     if (first == 0) return error.ConnectionClosed;
-    // Remaining bytes: spin-wait (frame is in-flight from SES).
+    // Remaining bytes: wait with yield (frame is in-flight from SES).
     var off: usize = 1;
     while (off < buf.len) {
         const n = posix.read(fd, buf[off..]) catch |err| switch (err) {

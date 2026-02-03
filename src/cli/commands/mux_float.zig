@@ -112,7 +112,7 @@ pub fn runMuxFloat(
     };
 
     // Build FloatRequest.
-    const flags: u8 = (if (true) @as(u8, 1) else 0) | // wait_for_exit always true for CLI
+    const flags: u8 = 1 | // wait_for_exit always true for CLI
         (if (isolated) @as(u8, 2) else 0) |
         (if (focus) @as(u8, 4) else 0);
     const req = wire.FloatRequest{
@@ -194,17 +194,5 @@ pub fn runMuxFloat(
             print("Unexpected response from ses\n", .{});
             return;
         },
-    }
-
-    // Free env entries we allocated.
-    if (pass_env) {
-        for (env_list.items) |entry| {
-            // Only free entries we allocated (pass_env entries).
-            // extra_env entries are slices of the input, not owned.
-            if (std.mem.indexOfScalar(u8, entry, '=')) |_| {
-                // Check if this was allocated by us.
-                // pass_env entries were allocPrint'd.
-            }
-        }
     }
 }

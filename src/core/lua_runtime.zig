@@ -202,13 +202,6 @@ pub const LuaRuntime = struct {
         return null;
     }
 
-    /// Check if a field exists and is a table
-    pub fn hasTable(self: *Self, table_idx: i32, key: [:0]const u8) bool {
-        _ = self.lua.getField(table_idx, key);
-        defer self.lua.pop(1);
-        return self.lua.typeOf(-1) == .table;
-    }
-
     /// Push a table field onto the stack (caller must pop when done)
     pub fn pushTable(self: *Self, table_idx: i32, key: [:0]const u8) bool {
         _ = self.lua.getField(table_idx, key);

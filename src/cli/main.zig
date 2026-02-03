@@ -291,9 +291,6 @@ pub fn main() !void {
         if (std.mem.eql(u8, arg, "status")) found_status = true;
         if (std.mem.eql(u8, arg, "notify")) found_notify = true;
         if (std.mem.eql(u8, arg, "daemon")) found_daemon = true;
-        if (std.mem.eql(u8, arg, "list")) found_list = true;
-        if (std.mem.eql(u8, arg, "new")) found_new = true;
-        if (std.mem.eql(u8, arg, "info")) found_info = true;
         if (std.mem.eql(u8, arg, "new")) found_new = true;
         if (std.mem.eql(u8, arg, "attach")) found_attach = true;
         if (std.mem.eql(u8, arg, "kill")) found_kill = true;
@@ -306,7 +303,6 @@ pub fn main() !void {
         if (std.mem.eql(u8, arg, "confirm")) found_confirm = true;
         if (std.mem.eql(u8, arg, "choose")) found_choose = true;
         if (std.mem.eql(u8, arg, "send")) found_send = true;
-        if (std.mem.eql(u8, arg, "attach")) found_attach = true;
         if (std.mem.eql(u8, arg, "focus")) found_focus = true;
         if (std.mem.eql(u8, arg, "exit-intent")) found_exit_intent = true;
         if (std.mem.eql(u8, arg, "shell-event")) found_shell_event = true;

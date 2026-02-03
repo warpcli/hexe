@@ -142,15 +142,16 @@ const PodUplink = struct {
         const client = core.ipc.Client.connect(ses_path) catch return false;
         const fd = client.fd;
 
-        // Binary handshake: send 0x03 + 16 raw UUID bytes.
-        var handshake: [17]u8 = undefined;
+        // Binary handshake: send [channel_type, version] + 16 raw UUID bytes.
+        var handshake: [18]u8 = undefined;
         handshake[0] = wire.SES_HANDSHAKE_POD_CTL;
+        handshake[1] = wire.PROTOCOL_VERSION;
         // Convert 32-char hex UUID to 16 binary bytes.
         const uuid_bin = core.uuid.hexToBin(self.uuid) orelse {
             posix.close(fd);
             return false;
         };
-        @memcpy(handshake[1..17], &uuid_bin);
+        @memcpy(handshake[2..18], &uuid_bin);
         wire.writeAll(fd, &handshake) catch {
             posix.close(fd);
             return false;
@@ -532,10 +533,6 @@ const RingBuffer = struct {
     buf: []u8,
     start: usize = 0,
     len: usize = 0,
-
-    pub fn capacity(self: *const RingBuffer) usize {
-        return self.buf.len;
-    }
 
     pub fn available(self: *const RingBuffer) usize {
         return self.buf.len - self.len;

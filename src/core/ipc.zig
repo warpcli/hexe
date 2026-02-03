@@ -14,6 +14,9 @@ pub const Server = struct {
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !Server {
+        // Validate path length to avoid silent truncation
+        if (path.len >= 108) return error.NameTooLong; // sockaddr_un.path max
+
         // Check if socket file exists and if something is listening
         if (std.fs.cwd().access(path, .{})) |_| {
             // Socket file exists - try to connect to see if something is listening
@@ -121,6 +124,9 @@ pub const Client = struct {
     fd: posix.fd_t,
 
     pub fn connect(path: []const u8) !Client {
+        // Validate path length to avoid silent truncation
+        if (path.len >= 108) return error.NameTooLong; // sockaddr_un.path max
+
         const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
         errdefer posix.close(fd);
 
@@ -129,8 +135,7 @@ pub const Client = struct {
             .path = undefined,
         };
         @memset(&addr.path, 0);
-        const path_len = @min(path.len, addr.path.len - 1);
-        @memcpy(addr.path[0..path_len], path[0..path_len]);
+        @memcpy(addr.path[0..path.len], path);
 
         try posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
 

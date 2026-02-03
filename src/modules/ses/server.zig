@@ -649,12 +649,19 @@ pub const Server = struct {
 
         // Read trailing name.
         var name_slice: []const u8 = "";
-        if (reg.name_len > 0 and reg.name_len <= buf.len) {
-            wire.readExact(fd, buf[0..reg.name_len]) catch {
-                self.sendBinaryError(fd, "register: name read failed");
+        if (reg.name_len > 0) {
+            if (reg.name_len <= buf.len) {
+                wire.readExact(fd, buf[0..reg.name_len]) catch {
+                    self.sendBinaryError(fd, "register: name read failed");
+                    return;
+                };
+                name_slice = buf[0..reg.name_len];
+            } else {
+                // Name too large - drain bytes to keep stream aligned, then reject
+                self.skipBinaryPayload(fd, reg.name_len, buf);
+                self.sendBinaryError(fd, "register: name too long");
                 return;
-            };
-            name_slice = buf[0..reg.name_len];
+            }
         }
 
         // Convert 32-byte hex session_id to 16-byte binary.

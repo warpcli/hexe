@@ -226,7 +226,7 @@ pub const SesClient = struct {
         try self.register();
     }
 
-    /// Tell ses this mux is exiting normally.
+    /// Tell ses this mux is exiting normally, then close connections.
     pub fn shutdown(self: *SesClient, preserve_sticky: bool) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
         var msg: wire.Disconnect = .{
@@ -235,6 +235,11 @@ pub const SesClient = struct {
         };
         // Best-effort: don't block on a reply.
         wire.writeControl(fd, .disconnect, std.mem.asBytes(&msg)) catch {};
+        // Close fds after notifying
+        if (self.ctl_fd) |cfd| posix.close(cfd);
+        if (self.vt_fd) |vfd| posix.close(vfd);
+        self.ctl_fd = null;
+        self.vt_fd = null;
     }
 
     /// Sync current mux state to ses (fire-and-forget).

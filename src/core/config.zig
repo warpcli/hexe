@@ -35,7 +35,6 @@ pub const SpinnerDef = struct {
     pub fn deinit(self: *SpinnerDef, allocator: std.mem.Allocator) void {
         allocator.free(self.kind);
         if (self.colors.len > 0) allocator.free(self.colors);
-        if (self.placeholder_color) |_| {}
         self.* = .{};
     }
 };
