@@ -18,6 +18,8 @@ pub fn perform(state: *State, dir: layout_mod.Layout.Direction) bool {
             const float_pane = state.floats.items[idx];
             if (!float_pane.navigatable) {
                 // Non-navigatable float: left/right switches tabs, up/down ignored
+                // Restore cursor when switching away from float
+                state.cursor_needs_restore = true;
                 switch (dir) {
                     .left => actions.switchToPrevTab(state),
                     .right => actions.switchToNextTab(state),
@@ -43,11 +45,16 @@ pub fn perform(state: *State, dir: layout_mod.Layout.Direction) bool {
         break :blk @as(?layout_mod.CursorPos, null);
     };
 
+    // Track if we're moving FROM a float - may need cursor restoration
+    const was_on_float = state.active_floating != null;
+
     if (focus_nav.focusDirectionAny(state, dir, cursor)) |target| {
         if (target.kind == .float) {
             state.active_floating = target.float_index;
         } else {
             state.active_floating = null;
+            // Moving from float to split - restore cursor in case float hid it
+            if (was_on_float) state.cursor_needs_restore = true;
         }
         state.syncPaneFocus(target.pane, old_uuid);
         state.renderer.invalidate();

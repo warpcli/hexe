@@ -1048,6 +1048,8 @@ pub fn switchToNextTab(state: *State) void {
             const fp = state.floats.items[idx];
             state.syncPaneUnfocus(fp);
             state.active_floating = null;
+            // Restore cursor when switching away from float
+            state.cursor_needs_restore = true;
         }
     } else if (state.currentLayout().getFocusedPane()) |old_pane| {
         state.syncPaneUnfocus(old_pane);
@@ -1075,6 +1077,8 @@ pub fn switchToPrevTab(state: *State) void {
             const fp = state.floats.items[idx];
             state.syncPaneUnfocus(fp);
             state.active_floating = null;
+            // Restore cursor when switching away from float
+            state.cursor_needs_restore = true;
         }
     } else if (state.currentLayout().getFocusedPane()) |old_pane| {
         state.syncPaneUnfocus(old_pane);

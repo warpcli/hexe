@@ -380,6 +380,12 @@ fn checkExitKey(state: *State, inp: []const u8) usize {
 
     if (matched) {
         main.debugLog("exit_key matched: key={s}", .{exit_key});
+        // Mark the float as closed by exit key (for error exit code)
+        if (state.active_floating) |idx| {
+            if (idx < state.floats.items.len) {
+                state.floats.items[idx].closed_by_exit_key = true;
+            }
+        }
         actions.performClose(state);
         state.needs_render = true;
         return consumed;
@@ -736,6 +742,12 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 if (getFocusedFloatExitKey(state)) |exit_key| {
                     if (matchesCsiUExitKey(ev, exit_key)) {
                         main.debugLog("exit_key matched (CSI-u): key={s}", .{exit_key});
+                        // Mark the float as closed by exit key (for error exit code)
+                        if (state.active_floating) |idx| {
+                            if (idx < state.floats.items.len) {
+                                state.floats.items[idx].closed_by_exit_key = true;
+                            }
+                        }
                         actions.performClose(state);
                         state.needs_render = true;
                         i += ev.consumed;

@@ -63,26 +63,41 @@ pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
 
     switch (@as(BindKeyKind, key)) {
         .space => {
-            if ((mods & 1) != 0) { // Alt
-                out[n] = 0x1b;
+            if ((mods & 2) != 0) { // Ctrl+Space = NUL
+                out[n] = 0x00;
+                n += 1;
+            } else {
+                if ((mods & 1) != 0) { // Alt
+                    out[n] = 0x1b;
+                    n += 1;
+                }
+                out[n] = ' ';
                 n += 1;
             }
-            out[n] = ' ';
-            n += 1;
         },
         .char => {
             var ch: u8 = key.char;
-            if ((mods & 4) != 0 and ch >= 'a' and ch <= 'z') ch = ch - 'a' + 'A'; // Shift
-            if ((mods & 2) != 0) { // Ctrl
-                if (ch >= 'a' and ch <= 'z') ch = ch - 'a' + 1;
-                if (ch >= 'A' and ch <= 'Z') ch = ch - 'A' + 1;
-            }
-            if ((mods & 1) != 0) { // Alt
+            // Shift+Tab = backtab (CSI Z)
+            if ((mods & 4) != 0 and ch == 0x09) {
                 out[n] = 0x1b;
                 n += 1;
+                out[n] = '[';
+                n += 1;
+                out[n] = 'Z';
+                n += 1;
+            } else {
+                if ((mods & 4) != 0 and ch >= 'a' and ch <= 'z') ch = ch - 'a' + 'A'; // Shift
+                if ((mods & 2) != 0) { // Ctrl
+                    if (ch >= 'a' and ch <= 'z') ch = ch - 'a' + 1;
+                    if (ch >= 'A' and ch <= 'Z') ch = ch - 'A' + 1;
+                }
+                if ((mods & 1) != 0) { // Alt
+                    out[n] = 0x1b;
+                    n += 1;
+                }
+                out[n] = ch;
+                n += 1;
             }
-            out[n] = ch;
-            n += 1;
         },
         .up, .down, .left, .right => {
             // Arrow keys: ESC [ A/B/C/D (no mods) or ESC [ 1 ; <mod> A/B/C/D (with mods)

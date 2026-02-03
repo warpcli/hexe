@@ -160,7 +160,8 @@ pub fn runMuxFloat(
                 print("Error reading float result\n", .{});
                 return;
             };
-            // Read output if any.
+            const exit_code: u8 = if (result.exit_code >= 0) @intCast(@min(result.exit_code, 255)) else 1;
+            // Read output if any (but skip output if exit key was pressed - code 130)
             if (result.output_len > 0) {
                 const output = allocator.alloc(u8, result.output_len) catch {
                     print("Error allocating output buffer\n", .{});
@@ -171,12 +172,12 @@ pub fn runMuxFloat(
                     print("Error reading output\n", .{});
                     return;
                 };
-                if (output.len > 0) {
+                // Only output if not cancelled via exit key (130 = exit key pressed)
+                if (output.len > 0 and exit_code != 130) {
                     _ = posix.write(posix.STDOUT_FILENO, output) catch {};
                     _ = posix.write(posix.STDOUT_FILENO, "\n") catch {};
                 }
             }
-            const exit_code: u8 = if (result.exit_code >= 0) @intCast(@min(result.exit_code, 255)) else 1;
             std.process.exit(exit_code);
         },
         .@"error" => {

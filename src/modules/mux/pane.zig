@@ -90,6 +90,8 @@ pub const Pane = struct {
     dim_background: bool = false,
     // Exit key for adhoc floats (close float when this key is pressed)
     exit_key: ?[]const u8 = null,
+    // Set when float is closed via exit key (to return error exit code)
+    closed_by_exit_key: bool = false,
     // For tab-bound floats: which tab owns this float
     // null = global float (special=true or pwd=true)
     parent_tab: ?usize = null,
@@ -447,14 +449,25 @@ pub const Pane = struct {
     }
 
     fn handleOscQuery(self: *Pane, seq: []const u8, code: u32) bool {
-        // Don't handle color queries (10/11/12) locally - forward them to the real
-        // terminal. Local responses arrive synchronously and can cause issues with
-        // apps that switch to raw input mode right after sending queries (like `gh`).
-        // The real terminal will respond asynchronously through consumeOscReplyFromTerminal.
-        _ = self;
         _ = seq;
-        _ = code;
-        return false;
+        // Only handle color queries (10/11/12) locally - other queries are forwarded
+        // to the real terminal. We handle these locally because:
+        // 1. They're common queries from shells/prompts
+        // 2. Responding locally avoids timing issues with async terminal responses
+        // 3. The mux doesn't have real colors, so we return sensible defaults
+        if (!(code == 10 or code == 11 or code == 12)) return false;
+
+        const color = switch (code) {
+            10 => "ffff/ffff/ffff", // foreground
+            11 => "0000/0000/0000", // background
+            12 => "ffff/ffff/ffff", // cursor
+            else => "0000/0000/0000",
+        };
+
+        var buf: [48]u8 = undefined;
+        const resp = std.fmt.bufPrint(&buf, "\x1b]{d};rgb:{s}\x07", .{ code, color }) catch return true;
+        self.write(resp) catch {};
+        return true;
     }
 
     fn handleTerminalQueries(self: *Pane, data: []const u8) void {

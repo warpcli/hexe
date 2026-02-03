@@ -226,9 +226,12 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     cursor_len += pos_seq.len;
 
     // Always output cursor visibility state to ensure correct terminal state
-    const vis_seq = if (cursor_visible) "\x1b[?25h" else "\x1b[?25l";
+    // If cursor_needs_restore is set (e.g., after float death), force cursor visible
+    const should_show = cursor_visible or state.cursor_needs_restore;
+    const vis_seq = if (should_show) "\x1b[?25h" else "\x1b[?25l";
     @memcpy(cursor_buf[cursor_len..][0..vis_seq.len], vis_seq);
     cursor_len += vis_seq.len;
+    state.cursor_needs_restore = false;
 
     // Write everything as a single iovec list.
     var iovecs = [_]std.posix.iovec_const{

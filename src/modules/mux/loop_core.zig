@@ -112,6 +112,8 @@ pub fn runMainLoop(state: *State) !void {
                     // Clear focus if this was the active float, sync focus to tiled pane.
                     if (was_active) {
                         state.active_floating = null;
+                        // Force cursor restoration - float may have hidden cursor
+                        state.cursor_needs_restore = true;
                         if (state.currentLayout().getFocusedPane()) |tiled| {
                             state.syncPaneFocus(tiled, null);
                         }
@@ -453,6 +455,8 @@ pub fn runMainLoop(state: *State) !void {
             // Clear focus if this was the active float, sync focus to tiled pane.
             if (was_active) {
                 state.active_floating = null;
+                // Force cursor restoration - float may have hidden cursor
+                state.cursor_needs_restore = true;
                 if (state.currentLayout().getFocusedPane()) |tiled| {
                     state.syncPaneFocus(tiled, null);
                 }

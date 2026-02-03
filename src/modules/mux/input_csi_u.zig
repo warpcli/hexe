@@ -118,6 +118,20 @@ pub fn translateToLegacy(out: *[8]u8, ev: CsiUEvent) ?usize {
         else => return null,
     };
 
+    // Shift+Tab = backtab (CSI Z)
+    if ((ev.mods & 4) != 0 and ch == 0x09) {
+        out[0] = 0x1b;
+        out[1] = '[';
+        out[2] = 'Z';
+        return 3;
+    }
+
+    // Ctrl+Space = NUL
+    if ((ev.mods & 2) != 0 and ch == ' ') {
+        out[0] = 0x00;
+        return 1;
+    }
+
     if ((ev.mods & 4) != 0) {
         if (ch >= 'a' and ch <= 'z') ch = ch - 'a' + 'A';
     }

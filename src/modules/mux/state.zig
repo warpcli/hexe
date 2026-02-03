@@ -128,6 +128,8 @@ pub const State = struct {
     detach_mode: bool,
     needs_render: bool,
     force_full_render: bool,
+    /// When true, force cursor visible on next render (set after float death)
+    cursor_needs_restore: bool,
     term_width: u16,
     term_height: u16,
     status_height: u16,
@@ -266,6 +268,7 @@ pub const State = struct {
             .detach_mode = false,
             .needs_render = true,
             .force_full_render = true,
+            .cursor_needs_restore = false,
             .term_width = width,
             .term_height = height,
             .status_height = status_h,
