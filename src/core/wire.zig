@@ -376,8 +376,8 @@ pub const FloatRequest = extern struct {
     size_height: u16 align(1), // height percentage (0 = default)
     shift_x: i16 align(1), // horizontal shift from center (-50 to 50)
     shift_y: i16 align(1), // vertical shift from center (-50 to 50)
-    // Source pane UUID (zeroed if not called from within a pane)
-    source_uuid: [32]u8 align(1),
+    // Source session ID as 32-char hex (zeroed if not called from within a mux session)
+    source_session_id: [32]u8 align(1),
 };
 
 /// FloatCreated: response when float is created (no wait).

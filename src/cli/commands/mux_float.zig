@@ -111,11 +111,11 @@ pub fn runMuxFloat(
         break :blk owned_result_path.?;
     };
 
-    // Get source pane UUID from environment (if running inside a mux pane).
-    var source_uuid: [32]u8 = .{0} ** 32;
-    if (std.posix.getenv("HEXE_PANE_UUID")) |uuid_str| {
-        if (uuid_str.len == 32) {
-            @memcpy(&source_uuid, uuid_str);
+    // Get source session ID from environment (if running inside a mux pane).
+    var source_session_id: [32]u8 = .{0} ** 32;
+    if (std.posix.getenv("HEXE_SESSION")) |sid| {
+        if (sid.len == 32) {
+            @memcpy(&source_session_id, sid);
         }
     }
 
@@ -135,7 +135,7 @@ pub fn runMuxFloat(
         .size_height = size_height,
         .shift_x = shift_x,
         .shift_y = shift_y,
-        .source_uuid = source_uuid,
+        .source_session_id = source_session_id,
     };
 
     // Build trailing data: cmd + title + cwd + result_path + exit_key + env entries (each: u16 len + bytes).

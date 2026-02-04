@@ -1453,8 +1453,8 @@ pub const Server = struct {
                         return;
                     };
                 }
-                // Find the MUX that owns the source pane (or fallback to any MUX).
-                const mux_fd = self.findMuxCtlForUuid(fr.source_uuid) orelse {
+                // Find the MUX for the source session (or fallback to any MUX).
+                const mux_fd = self.findMuxCtlForSessionId(fr.source_session_id) orelse {
                     self.sendBinaryError(fd, "no_mux");
                     posix.close(fd);
                     return;
@@ -2043,6 +2043,26 @@ pub const Server = struct {
             if (pane.attached_to) |client_id| {
                 if (self.ses_state.getClient(client_id)) |client| {
                     return client.mux_ctl_fd;
+                }
+            }
+        }
+        // Fallback: try any connected MUX.
+        return self.findAnyMuxCtl();
+    }
+
+    /// Find the MUX CTL fd for a given session ID (32-char hex).
+    /// Falls back to findAnyMuxCtl if session_id is zeroed or not found.
+    fn findMuxCtlForSessionId(self: *Server, session_hex: [32]u8) ?posix.fd_t {
+        const zero: [32]u8 = .{0} ** 32;
+        if (std.mem.eql(u8, &session_hex, &zero)) return self.findAnyMuxCtl();
+
+        // Convert 32-char hex to 16-byte binary for comparison with client.session_id.
+        const session_bin = core.uuid.hexToBin(session_hex) orelse return self.findAnyMuxCtl();
+
+        for (self.ses_state.clients.items) |client| {
+            if (client.session_id) |csid| {
+                if (std.mem.eql(u8, &csid, &session_bin)) {
+                    if (client.mux_ctl_fd) |mux_fd| return mux_fd;
                 }
             }
         }

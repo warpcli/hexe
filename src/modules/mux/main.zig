@@ -227,6 +227,13 @@ pub fn run(mux_args: MuxArgs) !void {
         state.notifications.showFor("ses daemon started", 2000);
     }
 
+    // Export session ID so child panes can identify their parent mux.
+    // Must happen BEFORE createTab/reattach which fork pane shells.
+    var session_id_z: [33]u8 = undefined;
+    @memcpy(session_id_z[0..32], &state.uuid);
+    session_id_z[32] = 0;
+    _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
+
     // Handle --attach: try session first, then orphaned pane.
     if (mux_args.attach) |uuid_prefix| {
         debugLog("attach: trying to reattach with prefix={s}", .{uuid_prefix});
@@ -235,6 +242,9 @@ pub fn run(mux_args: MuxArgs) !void {
             debugLog("attach: reattachSession succeeded", .{});
             std.debug.print("[mux] ATTACH: reattachSession returned TRUE, tabs={d}\n", .{state.tabs.items.len});
             state.notifications.show("Session reattached");
+            // Reattach may change state.uuid — update env for subsequent panes.
+            @memcpy(session_id_z[0..32], &state.uuid);
+            _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
         } else if (state.attachOrphanedPane(uuid_prefix)) {
             debugLog("attach: attachOrphanedPane succeeded", .{});
             std.debug.print("[mux] ATTACH: reattachSession FALSE, attachOrphanedPane TRUE\n", .{});
