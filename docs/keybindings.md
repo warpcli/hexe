@@ -72,48 +72,76 @@ Optional:
 
 Matching uses the detected foreground program name when available (Linux: `/proc/<pid>/comm`), and falls back to shell integration metadata.
 
-## Float Title Styling
+### `mode`
 
-Float titles are rendered by the float border renderer. The float title text comes from the float definition (`floats[].title`).
+The `mode` field controls what happens when a keybind matches:
 
-The optional `style.title` section controls where and how that title string is rendered. It behaves like a tiny status module: when a float has a `title`, the title string is used as the module output.
+- **`act_and_consume`** (default): Execute the action and consume the key (key is NOT sent to pane)
+- **`act_and_passthrough`**: Execute the action AND forward the key to the pane
+- **`passthrough_only`**: Don't execute any action, just forward the key to the pane
+
+Example use cases:
 
 ```lua
-style = {
-  title = {
-    position = "topcenter",
-    outputs = {
-      { style = "bg:0 fg:1", format = "[" },
-      { style = "bg:237 fg:250", format = " $output " },
-      { style = "bg:0 fg:1", format = "]" },
-    },
-  },
+-- Default: Alt+T creates tab, key is consumed
+{
+  when = "press",
+  mods = { hx.mod.alt },
+  key = "t",
+  action = { type = hx.action.tab_new },
+  -- mode = "act_and_consume" is implicit
+}
+
+-- Execute action AND send key to pane (e.g., for logging/notifications)
+{
+  when = "press",
+  mods = { hx.mod.ctrl },
+  key = "s",
+  mode = "act_and_passthrough",
+  action = { type = hx.action.notify, message = "Saved!" },
+}
+
+-- Passthrough only: useful for conditional forwarding
+-- When in nvim, forward Ctrl+W to pane (let nvim handle it)
+{
+  when = "press",
+  mods = { hx.mod.ctrl },
+  key = "w",
+  mode = "passthrough_only",
+  context = { program = { include = { "nvim", "vim" } } },
 }
 ```
 
-This enables "automatic context routing": the same key can do different things depending on whether a split or a float is focused.
+**Important**: Keys without ANY keybinding pass through to panes unchanged. You only need `passthrough_only` when you want to explicitly forward a key in specific contexts while consuming it in others.
 
 ### `action`
 
 Actions are dispatchers that trigger mux operations.
 
 Supported action types:
-- `mux.quit`
-- `mux.detach`
-- `pane.disown`
-- `pane.adopt`
-- `split.h`
-- `split.v`
-- `tab.new`
-- `tab.next`
-- `tab.prev`
-- `tab.close`
-- `float.toggle` (requires `action.float`)
-- `focus.move` (requires `action.dir`)
+- `mux_quit` - quit the mux session
+- `mux_detach` - detach from session (leave running)
+- `pane_disown` - disown current pane (orphan it)
+- `pane_adopt` - adopt orphaned panes
+- `pane_close` - close current float or split pane
+- `pane_select_mode` - enter pane select mode
+- `keycast_toggle` - toggle keycast overlay
+- `split_h` - split horizontally
+- `split_v` - split vertically
+- `split_resize` - resize split (requires `dir`)
+- `tab_new` - create new tab
+- `tab_next` - switch to next tab
+- `tab_prev` - switch to previous tab
+- `tab_close` - close current tab
+- `float_toggle` - toggle named float (requires `float`)
+- `float_nudge` - move float position (requires `dir`)
+- `focus_move` - move focus (requires `dir`)
 
 Action parameters:
-- `float.toggle`: `{ type = hx.action.float_toggle, float = "p" }`
-- `focus.move`: `{ type = hx.action.focus_move, dir = "left" }`
+- `float_toggle`: `{ type = hx.action.float_toggle, float = "p" }`
+- `focus_move`: `{ type = hx.action.focus_move, dir = "left" }`
+- `split_resize`: `{ type = hx.action.split_resize, dir = "left" }`
+- `float_nudge`: `{ type = hx.action.float_nudge, dir = "up" }`
 
 ## Advanced gestures
 
@@ -132,7 +160,7 @@ Runs when the key is pressed.
 Runs while the key is held and repeat events are generated.
 
 Notes:
-- If there is no `repeat` binding for the key, repeat events fall back to `press` behavior.
+- If there is no `repeat` binding for the key, repeat events are NOT forwarded (to prevent accidental repeated actions).
 - Useful for repeating navigation actions.
 
 ```lua
@@ -189,15 +217,13 @@ Notes:
 ### Same key, different action depending on focus
 
 ```lua
-{ mods = { hx.mod.alt }, key = "x", when = "press", context = { focus = "float" }, action = { type = hx.action.tab_close } }
+{ mods = { hx.mod.alt }, key = "x", when = "press", context = { focus = "float" }, action = { type = hx.action.pane_close } }
 { mods = { hx.mod.alt }, key = "x", when = "press", context = { focus = "split" }, action = { type = hx.action.tab_close } }
 ```
 
-(Replace the actions with whatever you prefer. The important bit is `context.focus`.)
-
 ### Float toggles
 
-Named floats are still configured under `floats[]` (command, size, style, attributes), and are triggered via binds:
+Named floats are configured under `floats[]` (command, size, style, attributes), and are triggered via binds:
 
 ```lua
 { mods = { hx.mod.alt }, key = "p", when = "press", context = { focus = "any" }, action = { type = hx.action.float_toggle, float = "p" } }
@@ -212,6 +238,78 @@ If you want Hexe to handle `Alt+Arrow` everywhere except inside Neovim (so Neovi
 ```
 
 Then Neovim can call `hexe mux focus left|right|up|down` when it needs to move between mux panes.
+
+### Passthrough keys to specific programs
+
+Forward Ctrl+W to pane only when running vim/nvim (otherwise mux handles it):
+
+```lua
+-- In vim: let vim handle Ctrl+W (window commands)
+{
+  when = "press",
+  mods = { hx.mod.ctrl },
+  key = "w",
+  mode = "passthrough_only",
+  context = { program = { include = { "nvim", "vim" } } },
+}
+
+-- Outside vim: close pane
+{
+  when = "press",
+  mods = { hx.mod.ctrl },
+  key = "w",
+  context = { program = { exclude = { "nvim", "vim" } } },
+  action = { type = hx.action.pane_close },
+}
+```
+
+## Float Title Styling
+
+Float titles are rendered by the float border renderer. The float title text comes from the float definition (`floats[].title`).
+
+The optional `style.title` section controls where and how that title string is rendered:
+
+```lua
+style = {
+  title = {
+    position = "topcenter",
+    outputs = {
+      { style = "bg:0 fg:1", format = "[" },
+      { style = "bg:237 fg:250", format = " $output " },
+      { style = "bg:0 fg:1", format = "]" },
+    },
+  },
+}
+```
+
+## Terminal support and fallback behavior
+
+Hexe uses progressive enhancement:
+
+- On mux start, Hexe enables kitty keyboard protocol (`CSI > ... u`).
+- Terminals that support it will send CSI-u key events, including repeat/release if requested.
+- Terminals that don't support it ignore the enable sequence and keep sending legacy escape sequences.
+
+### Key forwarding behavior
+
+**Keys without bindings**: Pass through raw to the pane unchanged. This preserves all escape sequences (Shift+Tab, F-keys, etc.).
+
+**Keys with bindings**:
+- `act_and_consume`: Key is consumed, not sent to pane
+- `act_and_passthrough`: Action runs, key is translated and sent to pane
+- `passthrough_only`: Key is translated and sent to pane (no action)
+
+For passthrough modes, keys are translated to legacy sequences:
+- Shift+Tab becomes `ESC [ Z` (backtab)
+- Ctrl+Space becomes NUL (0x00)
+- Arrow keys with mods become `ESC [ 1 ; <mod> A/B/C/D`
+- Ctrl+letter becomes control character (0x01-0x1A)
+- Alt+key gets ESC prefix
+
+Practical implications:
+- Your binds work in many terminals (legacy parsing fallback).
+- Release detection is best-effort and only active when the terminal reports release events.
+- Keys you don't bind pass through unchanged, preserving complex sequences.
 
 ## Conditional `when` (Prompt + Status Modules)
 
@@ -314,16 +412,3 @@ For statusbar `lua`, `ctx` includes:
 - `ctx.last_command`
 - `ctx.cwd`
 - `ctx.now_ms`
-
-## Terminal support and fallback behavior
-
-Hexe uses progressive enhancement:
-
-- On mux start, Hexe enables kitty keyboard protocol (`CSI > ... u`).
-- Terminals that support it will send CSI-u key events, including repeat/release if requested.
-- Terminals that don't support it ignore the enable sequence and keep sending legacy escape sequences.
-- For CSI-u key events that are not consumed by mux binds, Hexe translates them back into legacy bytes and forwards them into the focused pane.
-
-Practical implications:
-- Your binds work in many terminals (legacy parsing fallback).
-- Release detection is best-effort and only active when the terminal reports release events.

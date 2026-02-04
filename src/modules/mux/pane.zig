@@ -174,19 +174,23 @@ pub const Pane = struct {
     ) !void {
         self.* = .{ .allocator = allocator, .id = id, .x = x, .y = y, .width = width, .height = height };
 
+        // Generate UUID first so we can pass it to the spawned process
+        self.uuid = core.ipc.generateUuid();
+
         const cmd = command orelse (posix.getenv("SHELL") orelse "/bin/sh");
         var env_pairs: ?[]const [2][]const u8 = null;
         defer if (env_pairs) |pairs| allocator.free(pairs);
 
+        // Always include HEXE_PANE_UUID in the environment
+        const uuid_env = [_][2][]const u8{.{ "HEXE_PANE_UUID", &self.uuid }};
         var pty = if (extra_env) |env_lines| blk: {
-            env_pairs = try buildEnvPairs(allocator, env_lines);
+            env_pairs = try buildEnvPairsWithExtra(allocator, env_lines, &uuid_env);
             break :blk try core.Pty.spawnWithEnv(cmd, cwd, env_pairs);
-        } else try core.Pty.spawnWithCwd(cmd, cwd);
+        } else try core.Pty.spawnWithEnv(cmd, cwd, &uuid_env);
         errdefer pty.close();
         try pty.setSize(width, height);
 
         self.backend = .{ .local = pty };
-        self.uuid = core.ipc.generateUuid();
 
         try self.vt.init(allocator, width, height);
         errdefer self.vt.deinit();
@@ -245,6 +249,27 @@ pub const Pane = struct {
         var pairs: std.ArrayList([2][]const u8) = .empty;
         errdefer pairs.deinit(allocator);
 
+        for (lines) |line| {
+            const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+            if (eq == 0 or eq + 1 > line.len) continue;
+            const key = line[0..eq];
+            const value = line[eq + 1 ..];
+            try pairs.append(allocator, .{ key, value });
+        }
+
+        return pairs.toOwnedSlice(allocator);
+    }
+
+    fn buildEnvPairsWithExtra(allocator: std.mem.Allocator, lines: []const []const u8, extra: []const [2][]const u8) ![]const [2][]const u8 {
+        var pairs: std.ArrayList([2][]const u8) = .empty;
+        errdefer pairs.deinit(allocator);
+
+        // Add extra pairs first (like HEXE_PANE_UUID)
+        for (extra) |pair| {
+            try pairs.append(allocator, pair);
+        }
+
+        // Then add parsed lines
         for (lines) |line| {
             const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
             if (eq == 0 or eq + 1 > line.len) continue;
@@ -643,7 +668,13 @@ pub const Pane = struct {
             payload = payload[0 .. payload.len - 1];
         }
 
-        if (payload.len == 0 or (payload.len == 1 and payload[0] == '?')) return;
+        if (payload.len == 0) return;
+
+        // Clipboard query (read request) - respond with clipboard content
+        if (payload.len == 1 and payload[0] == '?') {
+            self.respondToClipboardQuery(seq[start + 5 .. sel_end]);
+            return;
+        }
 
         const decoder = std.base64.standard.Decoder;
         const out_len = decoder.calcSizeForSlice(payload) catch return;
@@ -678,6 +709,53 @@ pub const Pane = struct {
         }
         _ = child.wait() catch {};
         return true;
+    }
+
+    fn respondToClipboardQuery(self: *Pane, selection: []const u8) void {
+        // Read from system clipboard and send OSC 52 response
+        const content = self.getSystemClipboard() orelse return;
+        defer self.allocator.free(content);
+
+        // Encode content as base64
+        const encoder = std.base64.standard.Encoder;
+        const encoded_len = encoder.calcSize(content.len);
+        const encoded = self.allocator.alloc(u8, encoded_len) catch return;
+        defer self.allocator.free(encoded);
+        _ = encoder.encode(encoded, content);
+
+        // Build response: OSC 52 ; <selection> ; <base64> ST
+        // Use BEL (0x07) as terminator for wider compatibility
+        var response_buf: [8192]u8 = undefined;
+        const response = std.fmt.bufPrint(&response_buf, "\x1b]52;{s};{s}\x07", .{ selection, encoded }) catch return;
+
+        // Send response to the pane
+        self.write(response) catch {};
+    }
+
+    fn getSystemClipboard(self: *Pane) ?[]u8 {
+        if (std.posix.getenv("WAYLAND_DISPLAY") != null) {
+            if (self.readClipboardCommand(&.{"wl-paste"})) |content| return content;
+        }
+        if (std.posix.getenv("DISPLAY") != null) {
+            if (self.readClipboardCommand(&.{ "xclip", "-selection", "clipboard", "-out" })) |content| return content;
+            if (self.readClipboardCommand(&.{ "xsel", "--clipboard", "--output" })) |content| return content;
+        }
+        return null;
+    }
+
+    fn readClipboardCommand(self: *Pane, argv: []const []const u8) ?[]u8 {
+        var child = std.process.Child.init(argv, self.allocator);
+        child.stdin_behavior = .Ignore;
+        child.stdout_behavior = .Pipe;
+        child.stderr_behavior = .Ignore;
+
+        child.spawn() catch return null;
+
+        const stdout = child.stdout orelse return null;
+        const content = stdout.readToEndAlloc(self.allocator, 1024 * 1024) catch return null;
+        _ = child.wait() catch {};
+
+        return content;
     }
 
     fn containsClearSeq(tail: []const u8, data: []const u8) bool {

@@ -1453,8 +1453,8 @@ pub const Server = struct {
                         return;
                     };
                 }
-                // Find active MUX (use first connected client with mux_ctl_fd).
-                const mux_fd = self.findAnyMuxCtl() orelse {
+                // Find the MUX that owns the source pane (or fallback to any MUX).
+                const mux_fd = self.findMuxCtlForUuid(fr.source_uuid) orelse {
                     self.sendBinaryError(fd, "no_mux");
                     posix.close(fd);
                     return;

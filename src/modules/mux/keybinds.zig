@@ -550,10 +550,17 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
         if (findBestBind(state, mods_eff, key, .repeat, allow_only_tabs, &query)) |b| {
             return dispatchBindWithMode(state, b, mods_eff, key);
         }
-        // No repeat bind - for modified keys, consume but don't trigger action
-        // For unmodified keys, forward to pane
+        // No repeat bind - check if there's any other binding for this key
         if (mods_eff != 0) {
-            return true; // Consume repeat for modified keys (don't forward to pane)
+            const has_press = findBestBind(state, mods_eff, key, .press, false, &query) != null;
+            const has_hold = findBestBind(state, mods_eff, key, .hold, false, &query) != null;
+            const has_release = findBestBind(state, mods_eff, key, .release, false, &query) != null;
+            if (has_press or has_hold or has_release) {
+                // Has other bindings - consume repeat to prevent re-triggering
+                return true;
+            }
+            // No bindings at all - let repeat pass through
+            return false;
         }
         return false; // Forward repeat to pane for unmodified keys
     }
@@ -641,9 +648,19 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
             return true;
         }
 
-        // For modified keys, ALWAYS defer press until release (tap vs hold behavior).
-        // This prevents keys from leaking to shell while user is still pressing modifiers.
+        // For modified keys, only defer if there's an actual binding.
+        // Keys without bindings should pass through raw to preserve escape sequences.
         if (mods_eff != 0) {
+            // Check if ANY binding exists for this key+mods combo
+            const has_press = findBestBind(state, mods_eff, key, .press, false, &query) != null;
+            const has_hold = findBestBind(state, mods_eff, key, .hold, false, &query) != null;
+            const has_release = findBestBind(state, mods_eff, key, .release, false, &query) != null;
+
+            if (!has_press and !has_hold and !has_release) {
+                // No bindings - don't consume, let raw input pass through
+                return false;
+            }
+
             main.debugLog("press defer: mods_eff={d} key={any}", .{ mods_eff, key });
             if (findBestBind(state, mods_eff, key, .hold, false, &query)) |hb| {
                 const hold_ms = hb.hold_ms orelse cfg.input.hold_ms;
@@ -651,7 +668,7 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
                 cancelTimer(state, .hold_fired, mods_eff, key);
                 scheduleTimerWithStart(state, .hold, now_ms + hold_ms, mods_eff, key, hb.action, focus_ctx, now_ms);
             } else {
-                // No hold bind - arm dummy hold timer to defer until release
+                // Has press/release bind but no hold - arm dummy hold timer to defer until release
                 cancelTimer(state, .hold, mods_eff, key);
                 scheduleTimerWithStart(state, .hold, std.math.maxInt(i64), mods_eff, key, .mux_quit, focus_ctx, now_ms);
             }

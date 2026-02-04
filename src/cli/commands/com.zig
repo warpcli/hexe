@@ -708,17 +708,29 @@ pub fn runFocusMove(allocator: std.mem.Allocator, dir: []const u8) !void {
     defer client.close();
     const fd = client.fd;
 
-    const pane_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse return;
-    if (pane_uuid.len != 32) return;
+    const pane_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
+        print("Error: HEXE_PANE_UUID not set (not running inside mux?)\n", .{});
+        return;
+    };
+    if (pane_uuid.len != 32) {
+        print("Error: HEXE_PANE_UUID invalid length\n", .{});
+        return;
+    }
 
     // Send versioned CLI handshake.
-    wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch return;
+    wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch {
+        print("Error: handshake failed\n", .{});
+        return;
+    };
 
     // Send focus_move message.
     var fm: wire.FocusMove = undefined;
     @memcpy(&fm.uuid, pane_uuid[0..32]);
     fm.dir = dir_byte;
-    wire.writeControl(fd, .focus_move, std.mem.asBytes(&fm)) catch return;
+    wire.writeControl(fd, .focus_move, std.mem.asBytes(&fm)) catch {
+        print("Error: failed to send focus_move\n", .{});
+        return;
+    };
 }
 
 /// Ask mux whether the current shell should be allowed to exit.

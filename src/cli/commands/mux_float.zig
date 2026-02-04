@@ -111,6 +111,14 @@ pub fn runMuxFloat(
         break :blk owned_result_path.?;
     };
 
+    // Get source pane UUID from environment (if running inside a mux pane).
+    var source_uuid: [32]u8 = .{0} ** 32;
+    if (std.posix.getenv("HEXE_PANE_UUID")) |uuid_str| {
+        if (uuid_str.len == 32) {
+            @memcpy(&source_uuid, uuid_str);
+        }
+    }
+
     // Build FloatRequest.
     const flags: u8 = 1 | // wait_for_exit always true for CLI
         (if (isolated) @as(u8, 2) else 0) |
@@ -127,6 +135,7 @@ pub fn runMuxFloat(
         .size_height = size_height,
         .shift_x = shift_x,
         .shift_y = shift_y,
+        .source_uuid = source_uuid,
     };
 
     // Build trailing data: cmd + title + cwd + result_path + exit_key + env entries (each: u16 len + bytes).
