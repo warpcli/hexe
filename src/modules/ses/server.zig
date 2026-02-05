@@ -80,6 +80,20 @@ pub const Server = struct {
                 self.ses_state.dirty = false;
                 last_save = now_ms;
             }
+            // Remove old pod_vt fds from poll set (closed by connectPodVt).
+            // Must happen BEFORE adding new fds to prevent fd-reuse duplicates.
+            for (self.ses_state.pending_remove_poll_fds.items) |old_fd| {
+                var j: usize = 1;
+                while (j < poll_fds.items.len) {
+                    if (poll_fds.items[j].fd == old_fd) {
+                        _ = poll_fds.orderedRemove(j);
+                        break;
+                    }
+                    j += 1;
+                }
+            }
+            self.ses_state.pending_remove_poll_fds.clearRetainingCapacity();
+
             // Add any newly created pod_vt fds to the poll set.
             for (self.ses_state.pending_poll_fds.items) |new_fd| {
                 poll_fds.append(page_alloc, .{
@@ -119,6 +133,12 @@ pub const Server = struct {
             var i: usize = 1;
             while (i < poll_fds.items.len) {
                 const pfd = &poll_fds.items[i];
+
+                // Handle invalid fds (closed but not yet removed from poll set).
+                if (pfd.revents & posix.POLL.NVAL != 0) {
+                    _ = poll_fds.orderedRemove(i);
+                    continue;
+                }
 
                 if (pfd.revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) != 0) {
                     // Check if this is a VT routing fd (pod_vt or mux_vt).
@@ -269,7 +289,12 @@ pub const Server = struct {
                 for (self.ses_state.clients.items) |*client| {
                     if (client.session_id) |csid| {
                         if (std.mem.eql(u8, &csid, &session_id)) {
-                            if (client.mux_vt_fd) |old| posix.close(old);
+                            if (client.mux_vt_fd) |old| {
+                                // Remove old VT fd from poll set before closing
+                                // to prevent fd-reuse causing duplicate poll entries.
+                                self.ses_state.pending_remove_poll_fds.append(self.ses_state.allocator, old) catch {};
+                                posix.close(old);
+                            }
                             client.mux_vt_fd = conn.fd;
                             ses.debugLog("MUX VT: assigned fd={d} to client_id={d}", .{ conn.fd, client.id });
                             found = true;
@@ -311,6 +336,7 @@ pub const Server = struct {
                 if (self.ses_state.panes.getPtr(uuid_hex)) |pane| {
                     if (pane.pod_ctl_fd) |old_fd| {
                         _ = self.binary_ctl_fds.remove(old_fd);
+                        self.ses_state.pending_remove_poll_fds.append(self.ses_state.allocator, old_fd) catch {};
                         posix.close(old_fd);
                     }
                     pane.pod_ctl_fd = conn.fd;
@@ -694,6 +720,10 @@ pub const Server = struct {
             // Store the resolved name (duplicated since resolved_name will be freed)
             client.session_name = if (resolved_name) |rn| client.allocator.dupe(u8, rn) catch null else null;
         }
+
+        // If this session_id matches a detached session, the MUX has successfully
+        // restored it — remove the detached entry now.
+        self.ses_state.removeDetachedSession(session_id);
 
         const final_name = resolved_name orelse name_slice;
         ses.debugLog("registered: session={s} name={s} (requested={s}) client_id={d}", .{ reg.session_id[0..8], final_name, name_slice, client_id });
@@ -1118,11 +1148,8 @@ pub const Server = struct {
             return;
         }
         const reattach_result = result.?;
-        defer {
-            self.allocator.free(reattach_result.mux_state_json);
-            self.allocator.free(reattach_result.pane_uuids);
-        }
-        self.ses_state.markDirty();
+        // Data is borrowed from detached_sessions — don't free here.
+        // It will be freed when removeDetachedSession is called on successful re-register.
 
         // Send SessionReattached: header + mux_state bytes + pane_count * 32 UUID bytes.
         var resp = wire.SessionReattached{

@@ -289,6 +289,8 @@ pub const SesState = struct {
     pod_vt_to_pane_id: std.AutoHashMap(posix.fd_t, u16),
     /// Fds that need to be added to the server poll set (populated by connectPodVt).
     pending_poll_fds: std.ArrayList(posix.fd_t),
+    /// Fds that need to be removed from the server poll set (old fds closed by connectPodVt).
+    pending_remove_poll_fds: std.ArrayList(posix.fd_t),
 
     pub fn init(_: std.mem.Allocator) SesState {
         // Always use page_allocator to avoid GPA issues after fork/daemonization
@@ -305,6 +307,7 @@ pub const SesState = struct {
             .pane_id_to_pod_vt = std.AutoHashMap(u16, posix.fd_t).init(page_alloc),
             .pod_vt_to_pane_id = std.AutoHashMap(posix.fd_t, u16).init(page_alloc),
             .pending_poll_fds = .empty,
+            .pending_remove_poll_fds = .empty,
         };
     }
 
@@ -394,6 +397,9 @@ pub const SesState = struct {
             if (pane.pod_vt_fd) |old_fd| {
                 ses.debugLog("connectPodVt: closing old fd={d}", .{old_fd});
                 _ = self.pod_vt_to_pane_id.remove(old_fd);
+                // Track for removal from poll_fds BEFORE closing, to prevent
+                // fd reuse causing duplicate poll entries that block on read.
+                self.pending_remove_poll_fds.append(self.allocator, old_fd) catch {};
                 posix.close(old_fd);
             }
             pane.pod_vt_fd = fd;
@@ -704,29 +710,35 @@ pub const SesState = struct {
         pane_uuids: [][32]u8, // UUIDs of panes to adopt
     };
 
-    /// Reattach to a detached session - returns mux state and pane UUIDs
-    /// Note: Panes remain in "detached" state until adoptPane is called for each
+    /// Reattach to a detached session - returns mux state and pane UUIDs.
+    /// The session is NOT removed from detached_sessions yet — call
+    /// removeDetachedSession() after the MUX confirms successful restore.
     pub fn reattachSession(self: *SesState, session_id: [16]u8, client_id: usize) !?ReattachResult {
         _ = client_id; // Client will adopt panes individually
 
-        // Find the detached session
-        const detached = self.detached_sessions.fetchRemove(session_id) orelse return null;
-        const detached_state = detached.value;
-        self.dirty = true;
+        // Find the detached session (don't remove yet).
+        const detached_state = self.detached_sessions.get(session_id) orelse return null;
 
-        // Clear session_id from panes (they're no longer part of a detached session)
-        // But keep them as "detached" state - adoptPane will mark them as attached
-        for (detached_state.pane_uuids) |uuid| {
-            if (self.panes.getPtr(uuid)) |pane| {
-                pane.session_id = null;
-            }
-        }
-
-        // Return the stored state (caller takes ownership)
+        // Return the stored state (caller borrows — session stays in map as safety net).
         return .{
             .mux_state_json = detached_state.mux_state_json,
             .pane_uuids = detached_state.pane_uuids,
         };
+    }
+
+    /// Remove a detached session after successful reattach.
+    pub fn removeDetachedSession(self: *SesState, session_id: [16]u8) void {
+        if (self.detached_sessions.fetchRemove(session_id)) |kv| {
+            // Clear session_id from panes so they can be adopted.
+            for (kv.value.pane_uuids) |uuid| {
+                if (self.panes.getPtr(uuid)) |pane| {
+                    pane.session_id = null;
+                }
+            }
+            var state = kv.value;
+            state.deinit();
+            self.dirty = true;
+        }
     }
 
     /// List detached sessions

@@ -406,14 +406,6 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         self.session_name_owned = duped;
     }
 
-    // Re-register with ses using restored UUID and session_name.
-    std.debug.print("[mux] REATTACH: calling updateSession uuid={s} name={s}\n", .{ self.uuid[0..8], self.session_name });
-    self.ses_client.updateSession(self.uuid, self.session_name) catch |e| {
-        core.logging.logError("mux", "updateSession failed in restoreLayout", e);
-        std.debug.print("[mux] REATTACH: updateSession FAILED: {s}\n", .{@errorName(e)});
-    };
-    std.debug.print("[mux] REATTACH: updateSession done\n", .{});
-
     // Remember active tab/floating from the stored state.
     // We apply these after restoring tabs/floats so indices are valid.
     const wanted_active_tab: usize = if (root.get("active_tab")) |at| @intCast(at.integer) else 0;
@@ -483,24 +475,36 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                     var uuid_arr: [32]u8 = undefined;
                     @memcpy(&uuid_arr, uuid_str[0..32]);
 
-                    if (uuid_pane_map.get(uuid_arr)) |info| {
-                        const pane = self.allocator.create(Pane) catch continue;
-                        const vt_fd = self.ses_client.getVtFd() orelse continue;
-
-                        pane.initWithPod(self.allocator, pane_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, uuid_arr) catch {
-                            self.allocator.destroy(pane);
-                            continue;
-                        };
-
-                        // Restore pane properties.
-                        pane.focused = if (pane_obj.get("focused")) |f| (f == .bool and f.bool) else false;
-
-                        tab.layout.splits.put(pane_id, pane) catch {
-                            pane.deinit();
-                            self.allocator.destroy(pane);
-                            continue;
-                        };
+                    // Try adopting from pre-collected pane_uuids first,
+                    // then try adopting directly from SES by UUID.
+                    var adopt_info: ?AdoptInfo = uuid_pane_map.get(uuid_arr);
+                    if (adopt_info == null) {
+                        // pane_uuids was empty — try adopting directly from SES.
+                        if (self.ses_client.adoptPane(uuid_arr)) |adopt_res| {
+                            adopt_info = .{ .pane_id = adopt_res.pane_id };
+                        } else |_| {}
                     }
+
+                    const info = adopt_info orelse continue;
+                    const pane = self.allocator.create(Pane) catch continue;
+                    const vt_fd = self.ses_client.getVtFd() orelse {
+                        self.allocator.destroy(pane);
+                        continue;
+                    };
+
+                    pane.initWithPod(self.allocator, pane_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, uuid_arr) catch {
+                        self.allocator.destroy(pane);
+                        continue;
+                    };
+
+                    // Restore pane properties.
+                    pane.focused = if (pane_obj.get("focused")) |f| (f == .bool and f.bool) else false;
+
+                    tab.layout.splits.put(pane_id, pane) catch {
+                        pane.deinit();
+                        self.allocator.destroy(pane);
+                        continue;
+                    };
                 }
             }
 
@@ -538,9 +542,22 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             var uuid_arr: [32]u8 = undefined;
             @memcpy(&uuid_arr, uuid_str[0..32]);
 
-            if (uuid_pane_map.get(uuid_arr)) |info| {
+            {
+                // Try adopting from pre-collected pane_uuids first,
+                // then try adopting directly from SES by UUID.
+                var adopt_info: ?AdoptInfo = uuid_pane_map.get(uuid_arr);
+                if (adopt_info == null) {
+                    if (self.ses_client.adoptPane(uuid_arr)) |adopt_res| {
+                        adopt_info = .{ .pane_id = adopt_res.pane_id };
+                    } else |_| {}
+                }
+
+                const info = adopt_info orelse continue;
                 const pane = self.allocator.create(Pane) catch continue;
-                const vt_fd = self.ses_client.getVtFd() orelse continue;
+                const vt_fd = self.ses_client.getVtFd() orelse {
+                    self.allocator.destroy(pane);
+                    continue;
+                };
 
                 pane.initWithPod(self.allocator, 0, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, uuid_arr) catch {
                     self.allocator.destroy(pane);
@@ -604,6 +621,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         }
     }
 
+
     // Prune dead pane nodes from layout trees. Pods that died during detach
     // (e.g., from SIGPIPE) leave orphan nodes in the tree that would corrupt
     // the layout by allocating space for non-existent panes.
@@ -656,8 +674,21 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     };
     std.debug.print("[mux] REATTACH: requestBacklogReplay done\n", .{});
 
-    std.debug.print("[mux] REATTACH: returning tabs.len>0 = {}\n", .{self.tabs.items.len > 0});
-    return self.tabs.items.len > 0;
+    if (self.tabs.items.len == 0) {
+        std.debug.print("[mux] REATTACH: no tabs restored, returning false\n", .{});
+        return false;
+    }
+
+    // Restore succeeded — re-register with SES using restored UUID/name.
+    // This also removes the detached session from SES (via handleBinaryRegister).
+    std.debug.print("[mux] REATTACH: calling updateSession uuid={s} name={s}\n", .{ self.uuid[0..8], self.session_name });
+    self.ses_client.updateSession(self.uuid, self.session_name) catch |e| {
+        core.logging.logError("mux", "updateSession failed in restoreLayout", e);
+        std.debug.print("[mux] REATTACH: updateSession FAILED: {s}\n", .{@errorName(e)});
+    };
+
+    std.debug.print("[mux] REATTACH: returning true, tabs={d} floats={d}\n", .{ self.tabs.items.len, self.floats.items.len });
+    return true;
 }
 
 /// Attach to orphaned pane by UUID prefix (for --attach CLI).
