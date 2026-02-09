@@ -98,25 +98,58 @@ fn formatKeycastInput(inp: []const u8, buf: *[32]u8) struct { consumed: usize, t
                 }
                 return .{ .consumed = inp.len, .text = "" };
             }
-            // Other CSI - skip
-            return .{ .consumed = 3, .text = "" };
+            // Other CSI sequences - properly parse to the final byte
+            // CSI sequences end with a byte in range 0x40-0x7E
+            var j: usize = 2;
+            while (j < inp.len and j < 64) : (j += 1) {
+                const ch = inp[j];
+                // CSI final byte is 0x40..0x7E (includes A-Z, a-z, @, etc.)
+                if (ch >= 0x40 and ch <= 0x7e) {
+                    return .{ .consumed = j + 1, .text = "" };
+                }
+            }
+            // Incomplete or too long - consume what we have
+            return .{ .consumed = inp.len, .text = "" };
         }
 
-        // SS3 sequence: ESC O (arrow keys on some terminals)
-        if (next == 'O' and inp.len >= 3) {
-            const dir_name: []const u8 = switch (inp[2]) {
-                'A' => "Up",
-                'B' => "Down",
-                'C' => "Right",
-                'D' => "Left",
-                'H' => "Home",
-                'F' => "End",
-                else => "",
-            };
-            if (dir_name.len > 0) {
-                writer.writeAll(dir_name) catch {};
-                return .{ .consumed = 3, .text = buf[0..stream.pos] };
+        // OSC sequence: ESC ] ... (terminated by BEL or ESC \)
+        if (next == ']') {
+            var j: usize = 2;
+            const BEL: u8 = 0x07;
+            while (j < inp.len and j < 1024) : (j += 1) {
+                const ch = inp[j];
+                if (ch == BEL) {
+                    return .{ .consumed = j + 1, .text = "" };
+                }
+                if (ch == 0x1b and j + 1 < inp.len and inp[j + 1] == '\\') {
+                    return .{ .consumed = j + 2, .text = "" };
+                }
             }
+            // Incomplete or too long - consume what we have
+            return .{ .consumed = inp.len, .text = "" };
+        }
+
+        // SS3 sequence: ESC O (arrow keys and function keys on some terminals)
+        if (next == 'O') {
+            if (inp.len >= 3) {
+                const dir_name: []const u8 = switch (inp[2]) {
+                    'A' => "Up",
+                    'B' => "Down",
+                    'C' => "Right",
+                    'D' => "Left",
+                    'H' => "Home",
+                    'F' => "End",
+                    else => "",
+                };
+                if (dir_name.len > 0) {
+                    writer.writeAll(dir_name) catch {};
+                    return .{ .consumed = 3, .text = buf[0..stream.pos] };
+                }
+                // Unknown SS3 sequence - skip it (3 bytes total: ESC O <char>)
+                return .{ .consumed = 3, .text = "" };
+            }
+            // Incomplete SS3 - just consume ESC for now
+            return .{ .consumed = 1, .text = "Esc" };
         }
 
         // Alt+key: ESC <char>
@@ -169,13 +202,52 @@ fn formatKeycastInput(inp: []const u8, buf: *[32]u8) struct { consumed: usize, t
     return .{ .consumed = 1, .text = buf[0..stream.pos] };
 }
 
+/// Check if the focused pane is in password input mode.
+/// Ghostty detects password input based on termios state (echo disabled).
+fn isFocusedPaneInPasswordMode(state: *State) bool {
+    const pane = if (state.active_floating) |idx|
+        state.floats.items[idx]
+    else
+        state.currentLayout().getFocusedPane() orelse return false;
+
+    // Ghostty tracks password input via terminal.flags.password_input
+    return pane.vt.terminal.flags.password_input;
+}
+
 /// Record input for keycast if enabled
 fn recordKeycastInput(state: *State, inp: []const u8) void {
     if (!state.overlays.isKeycastEnabled()) return;
     if (inp.len == 0) return;
 
+    // Don't show keycast during bracketed paste
+    if (state.in_bracketed_paste) return;
+
+    // Don't show keycast if focused pane might be in password mode
+    if (isFocusedPaneInPasswordMode(state)) return;
+
     var i: usize = 0;
     while (i < inp.len) {
+        // Check for bracketed paste start: ESC[200~
+        if (i + 5 < inp.len and
+            inp[i] == 0x1b and inp[i + 1] == '[' and
+            inp[i + 2] == '2' and inp[i + 3] == '0' and
+            inp[i + 4] == '0' and inp[i + 5] == '~')
+        {
+            state.in_bracketed_paste = true;
+            return; // Stop recording for the rest of this input
+        }
+
+        // Check for bracketed paste end: ESC[201~
+        if (i + 5 < inp.len and
+            inp[i] == 0x1b and inp[i + 1] == '[' and
+            inp[i + 2] == '2' and inp[i + 3] == '0' and
+            inp[i + 4] == '1' and inp[i + 5] == '~')
+        {
+            state.in_bracketed_paste = false;
+            i += 6;
+            continue;
+        }
+
         var buf: [32]u8 = undefined;
         const result = formatKeycastInput(inp[i..], &buf);
         if (result.text.len > 0) {

@@ -172,6 +172,9 @@ pub const State = struct {
     stdin_tail: [256]u8 = undefined,
     stdin_tail_len: u8 = 0,
 
+    // Track bracketed paste mode to suppress keycast during paste
+    in_bracketed_paste: bool = false,
+
     pending_float_requests: std.AutoHashMap([32]u8, PendingFloatRequest),
 
     mouse_selection: mouse_selection.MouseSelection,

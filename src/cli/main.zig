@@ -414,6 +414,11 @@ pub fn main() !void {
     parser.parse(args) catch |err| {
         if (err == error.HelpRequested) return;
         if (err == error.SubCommandRequired) {
+            // Default to 'hexe mux new' if no arguments given
+            if (args.len == 1) {
+                try runMuxNew("", false, "");
+                return;
+            }
             // Show help for the deepest command that happened
             if (pop_cmd.happened) {
                 const help = try pop_cmd.usage(null);
@@ -706,7 +711,62 @@ fn runPodDaemon(
 // MUX handlers
 // ============================================================================
 
+fn showNestedMuxConfirmation(pane_uuid: []const u8) !bool {
+    const wire = core.wire;
+    const posix = std.posix;
+
+    var target_uuid: [32]u8 = undefined;
+    @memcpy(&target_uuid, pane_uuid[0..32]);
+
+    const allocator = std.heap.page_allocator;
+    const fd = cli_cmds.connectSesCliChannel(allocator) orelse return false;
+
+    const message = "Start nested mux session?";
+    const timeout_ms: i32 = 0; // No timeout
+
+    const pc = wire.PopConfirm{
+        .uuid = target_uuid,
+        .timeout_ms = timeout_ms,
+        .msg_len = @intCast(message.len),
+    };
+
+    wire.writeControlWithTrail(fd, .pop_confirm, std.mem.asBytes(&pc), message) catch {
+        posix.close(fd);
+        return false;
+    };
+
+    // Wait for binary PopResponse
+    const hdr = wire.readControlHeader(fd) catch {
+        posix.close(fd);
+        return false;
+    };
+    const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+    if (msg_type != .pop_response or hdr.payload_len < @sizeOf(wire.PopResponse)) {
+        posix.close(fd);
+        return false;
+    }
+    const resp = wire.readStruct(wire.PopResponse, fd) catch {
+        posix.close(fd);
+        return false;
+    };
+    posix.close(fd);
+
+    // Return true if confirmed (response_type == 1), false otherwise
+    return resp.response_type == 1;
+}
+
 fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8) !void {
+    // Check if we're already inside a mux (nested session)
+    if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
+        if (pane_uuid.len >= 32) {
+            // We're inside a mux - show confirmation popup
+            if (!try showNestedMuxConfirmation(pane_uuid)) {
+                // User cancelled or timeout
+                return;
+            }
+        }
+    }
+
     // Call mux run() directly
     try mux.run(.{
         .name = if (name.len > 0) name else null,
