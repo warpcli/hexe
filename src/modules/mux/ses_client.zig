@@ -862,18 +862,12 @@ pub const SesClient = struct {
         mux.debugLog("requestBacklogReplay: sending replay_backlogs", .{});
         try wire.writeControl(fd, .replay_backlogs, &.{});
 
-        // Wait for ok response directly - don't use readSyncResponse because
-        // it skips .ok messages (treating them as fire-and-forget acks).
-        // We specifically need the .ok here.
-        const hdr = try wire.readControlHeader(fd);
-        const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-        if (msg_type == .ok) {
-            self.skipPayload(fd, hdr.payload_len);
-        } else {
-            // Unexpected response, skip it
-            self.skipPayload(fd, hdr.payload_len);
-        }
-        mux.debugLog("requestBacklogReplay: done", .{});
+        // Fire-and-forget: Don't wait for .ok response.
+        // This is called BEFORE MUX enters its event loop during reattach.
+        // Since the ctl_fd is non-blocking and no event loop is running yet,
+        // any blocking read would busy-spin forever. The .ok from SES will
+        // arrive later and be handled normally by the event loop.
+        mux.debugLog("requestBacklogReplay: sent (fire-and-forget)", .{});
     }
 };
 
