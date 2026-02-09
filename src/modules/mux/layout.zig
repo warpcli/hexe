@@ -71,7 +71,7 @@ pub const Layout = struct {
     }
 
     /// Apply notification config to a pane
-    fn configurePaneNotifications(self: *Layout, pane: *Pane) void {
+    pub fn configurePaneNotifications(self: *Layout, pane: *Pane) void {
         if (self.pane_pop_cfg) |cfg| {
             pane.configureNotificationsFromPop(cfg);
         }
@@ -92,7 +92,7 @@ pub const Layout = struct {
         }
     }
 
-    fn freeNode(self: *Layout, node: *LayoutNode) void {
+    pub fn freeNode(self: *Layout, node: *LayoutNode) void {
         switch (node.*) {
             .pane => {},
             .split => |split| {

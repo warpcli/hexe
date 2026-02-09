@@ -627,6 +627,240 @@ pub const State = struct {
         }
     }
 
+    /// Apply a saved layout template to the active tab.
+    /// The tree_json describes the split structure with optional CWDs per leaf.
+    pub fn applyLayout(self: *State, source_uuid: [32]u8, tree_json: []const u8) void {
+        const mux = @import("main.zig");
+        mux.debugLog("applyLayout: uuid={s} json_len={d}", .{ source_uuid[0..8], tree_json.len });
+
+        // Parse the template JSON.
+        const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, tree_json, .{}) catch {
+            mux.debugLog("applyLayout: json parse failed", .{});
+            return;
+        };
+        defer parsed.deinit();
+
+        const root_obj = switch (parsed.value) {
+            .object => |o| o,
+            else => return,
+        };
+
+        // Count leaf nodes in the template.
+        const leaf_count = countLeaves(parsed.value);
+        if (leaf_count == 0) return;
+
+        // Collect CWDs from template leaves (in traversal order).
+        var cwds: std.ArrayList(?[]const u8) = .empty;
+        defer cwds.deinit(self.allocator);
+        collectCwds(parsed.value, &cwds, self.allocator);
+
+        // Find active tab.
+        if (self.active_tab >= self.tabs.items.len) return;
+        const tab = &self.tabs.items[self.active_tab];
+
+        // Find the source pane to keep alive.
+        var source_pane: ?*Pane = null;
+        var source_id: ?u16 = null;
+        {
+            var it = tab.layout.splits.iterator();
+            while (it.next()) |entry| {
+                if (std.mem.eql(u8, &entry.value_ptr.*.uuid, &source_uuid)) {
+                    source_pane = entry.value_ptr.*;
+                    source_id = entry.key_ptr.*;
+                    break;
+                }
+            }
+        }
+        if (source_pane == null) {
+            mux.debugLog("applyLayout: source pane not found", .{});
+            return;
+        }
+
+        // Close all OTHER panes in this tab.
+        var to_close: std.ArrayList(u16) = .empty;
+        defer to_close.deinit(self.allocator);
+        {
+            var it = tab.layout.splits.keyIterator();
+            while (it.next()) |id_ptr| {
+                if (id_ptr.* != source_id.?) {
+                    to_close.append(self.allocator, id_ptr.*) catch continue;
+                }
+            }
+        }
+        for (to_close.items) |id| {
+            if (tab.layout.splits.fetchRemove(id)) |kv| {
+                if (tab.layout.ses_client) |ses| {
+                    ses.killPane(kv.value.uuid) catch {};
+                }
+                kv.value.deinit();
+                self.allocator.destroy(kv.value);
+            }
+        }
+
+        // Free old tree nodes.
+        if (tab.layout.root) |root| {
+            tab.layout.freeNode(root);
+            tab.layout.root = null;
+        }
+
+        // Create N-1 new panes via ses.
+        var new_pane_ids: std.ArrayList(u16) = .empty;
+        defer new_pane_ids.deinit(self.allocator);
+
+        // First pane ID slot is for the source pane; reassign it.
+        const first_id: u16 = 0;
+        // Move source pane to id 0.
+        _ = tab.layout.splits.fetchRemove(source_id.?);
+        source_pane.?.id = first_id;
+        tab.layout.splits.put(first_id, source_pane.?) catch return;
+        new_pane_ids.append(self.allocator, first_id) catch return;
+
+        var next_id: u16 = 1;
+        var create_idx: usize = 1; // start from second leaf
+        while (create_idx < leaf_count) : (create_idx += 1) {
+            const cwd: ?[]const u8 = if (create_idx < cwds.items.len) cwds.items[create_idx] else null;
+
+            const pane = self.allocator.create(Pane) catch break;
+            if (tab.layout.ses_client) |ses| {
+                if (ses.isConnected()) {
+                    if (ses.createPane(null, cwd, null, null, null, null)) |result| {
+                        if (ses.getVtFd()) |vt_fd| {
+                            pane.initWithPod(self.allocator, next_id, 0, 0, tab.layout.width, tab.layout.height, result.pane_id, vt_fd, result.uuid) catch {
+                                self.allocator.destroy(pane);
+                                break;
+                            };
+                        } else {
+                            pane.init(self.allocator, next_id, 0, 0, tab.layout.width, tab.layout.height) catch {
+                                self.allocator.destroy(pane);
+                                break;
+                            };
+                        }
+                    } else |_| {
+                        pane.init(self.allocator, next_id, 0, 0, tab.layout.width, tab.layout.height) catch {
+                            self.allocator.destroy(pane);
+                            break;
+                        };
+                    }
+                } else {
+                    pane.init(self.allocator, next_id, 0, 0, tab.layout.width, tab.layout.height) catch {
+                        self.allocator.destroy(pane);
+                        break;
+                    };
+                }
+            } else {
+                pane.init(self.allocator, next_id, 0, 0, tab.layout.width, tab.layout.height) catch {
+                    self.allocator.destroy(pane);
+                    break;
+                };
+            }
+            tab.layout.configurePaneNotifications(pane);
+            tab.layout.splits.put(next_id, pane) catch {
+                pane.deinit();
+                self.allocator.destroy(pane);
+                break;
+            };
+            new_pane_ids.append(self.allocator, next_id) catch break;
+            next_id += 1;
+        }
+
+        // Build layout tree from template, assigning pane IDs sequentially.
+        var pane_idx: usize = 0;
+        const new_root = buildTreeFromTemplate(self.allocator, root_obj, new_pane_ids.items, &pane_idx) catch {
+            mux.debugLog("applyLayout: tree build failed", .{});
+            return;
+        };
+
+        tab.layout.root = new_root;
+        tab.layout.next_split_id = next_id;
+        tab.layout.focused_split_id = first_id;
+        source_pane.?.focused = true;
+
+        // Recalculate and sync.
+        tab.layout.recalculateLayout();
+        self.syncStateToSes();
+        self.needs_render = true;
+    }
+
+    fn countLeaves(value: std.json.Value) usize {
+        const obj = switch (value) {
+            .object => |o| o,
+            else => return 0,
+        };
+        const type_str = (obj.get("type") orelse return 0).string;
+        if (std.mem.eql(u8, type_str, "pane")) return 1;
+        if (std.mem.eql(u8, type_str, "split")) {
+            const first = obj.get("first") orelse return 0;
+            const second = obj.get("second") orelse return 0;
+            return countLeaves(first) + countLeaves(second);
+        }
+        return 0;
+    }
+
+    fn collectCwds(value: std.json.Value, list: *std.ArrayList(?[]const u8), allocator: std.mem.Allocator) void {
+        const obj = switch (value) {
+            .object => |o| o,
+            else => return,
+        };
+        const type_str = (obj.get("type") orelse return).string;
+        if (std.mem.eql(u8, type_str, "pane")) {
+            if (obj.get("cwd")) |cwd_val| {
+                switch (cwd_val) {
+                    .string => |s| {
+                        list.append(allocator, s) catch {};
+                        return;
+                    },
+                    else => {},
+                }
+            }
+            list.append(allocator, null) catch {};
+        } else if (std.mem.eql(u8, type_str, "split")) {
+            if (obj.get("first")) |first| collectCwds(first, list, allocator);
+            if (obj.get("second")) |second| collectCwds(second, list, allocator);
+        }
+    }
+
+    fn buildTreeFromTemplate(allocator: std.mem.Allocator, obj: std.json.ObjectMap, pane_ids: []const u16, idx: *usize) !*layout_mod.LayoutNode {
+        const node = try allocator.create(layout_mod.LayoutNode);
+        errdefer allocator.destroy(node);
+
+        const type_str = (obj.get("type") orelse return error.InvalidNode).string;
+
+        if (std.mem.eql(u8, type_str, "pane")) {
+            if (idx.* < pane_ids.len) {
+                node.* = .{ .pane = pane_ids[idx.*] };
+                idx.* += 1;
+            } else {
+                return error.InvalidNode;
+            }
+        } else if (std.mem.eql(u8, type_str, "split")) {
+            const dir_str = (obj.get("dir") orelse return error.InvalidNode).string;
+            const dir: layout_mod.SplitDir = if (std.mem.eql(u8, dir_str, "horizontal")) .horizontal else .vertical;
+            const ratio_val = obj.get("ratio") orelse return error.InvalidNode;
+            const ratio: f32 = switch (ratio_val) {
+                .float => @floatCast(ratio_val.float),
+                .integer => @floatFromInt(ratio_val.integer),
+                else => return error.InvalidNode,
+            };
+            const first_obj = (obj.get("first") orelse return error.InvalidNode).object;
+            const second_obj = (obj.get("second") orelse return error.InvalidNode).object;
+
+            const first = try buildTreeFromTemplate(allocator, first_obj, pane_ids, idx);
+            errdefer allocator.destroy(first);
+            const second = try buildTreeFromTemplate(allocator, second_obj, pane_ids, idx);
+
+            node.* = .{ .split = .{
+                .dir = dir,
+                .ratio = ratio,
+                .first = first,
+                .second = second,
+            } };
+        } else {
+            return error.InvalidNode;
+        }
+
+        return node;
+    }
+
     pub fn getPaneShell(self: *const State, uuid: [32]u8) ?PaneShellInfo {
         if (self.pane_shell.get(uuid)) |v| return v;
         return null;

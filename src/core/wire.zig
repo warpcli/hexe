@@ -93,6 +93,8 @@ pub const MsgType = enum(u16) {
     replay_backlogs = 0x0130, // MUX tells SES it's ready for backlog replay
     kill_session = 0x0131, // CLI → SES: kill a detached session
     clear_sessions = 0x0132, // CLI → SES: kill all detached sessions
+    get_layout = 0x0133, // CLI → SES: get mux state for layout save
+    apply_layout = 0x0134, // CLI → SES → MUX: apply saved layout tree
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -410,6 +412,14 @@ pub const KillSessionResult = extern struct {
 pub const ClearSessionsResult = extern struct {
     killed_sessions: u16 align(1),
     killed_panes: u16 align(1),
+};
+
+/// ApplyLayout: CLI → SES → MUX: apply a saved layout tree.
+/// uuid identifies the source pane (to find the right session/MUX).
+/// Followed by: tree_json bytes (tree_json_len).
+pub const ApplyLayout = extern struct {
+    uuid: [32]u8 align(1),
+    tree_json_len: u32 align(1),
 };
 
 // ─────────────────────────────────────────────────────────────────────────────

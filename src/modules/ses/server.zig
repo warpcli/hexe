@@ -1688,6 +1688,12 @@ pub const Server = struct {
             .clear_sessions => {
                 self.handleClearSessions(fd);
             },
+            .get_layout => {
+                self.handleGetLayout(fd, hdr.payload_len, &buf);
+            },
+            .apply_layout => {
+                self.handleApplyLayout(fd, hdr.payload_len, &buf);
+            },
             else => {
                 self.skipBinaryPayload(fd, hdr.payload_len, &buf);
                 posix.close(fd);
@@ -2169,6 +2175,90 @@ pub const Server = struct {
             .killed_panes = @intCast(counts.panes),
         };
         wire.writeControl(fd, .clear_sessions, std.mem.asBytes(&result)) catch {};
+    }
+
+    /// Handle get_layout CLI request — return last_mux_state for the pane's session.
+    fn handleGetLayout(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        defer posix.close(fd);
+
+        if (payload_len < @sizeOf(wire.PaneUuid)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            self.sendBinaryError(fd, "invalid payload");
+            return;
+        }
+        const pu = wire.readStruct(wire.PaneUuid, fd) catch {
+            self.sendBinaryError(fd, "read failed");
+            return;
+        };
+
+        // Find the client that owns this pane UUID.
+        const client = self.findClientForPaneUuid(pu.uuid) orelse {
+            self.sendBinaryError(fd, "pane not found");
+            return;
+        };
+
+        const mux_state = client.last_mux_state orelse {
+            self.sendBinaryError(fd, "no mux state");
+            return;
+        };
+
+        // Send the raw mux_state JSON back as get_layout response.
+        wire.writeControl(fd, .get_layout, mux_state) catch {};
+    }
+
+    /// Handle apply_layout CLI request — forward layout tree to MUX.
+    fn handleApplyLayout(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        defer posix.close(fd);
+
+        if (payload_len < @sizeOf(wire.ApplyLayout)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            self.sendBinaryError(fd, "invalid payload");
+            return;
+        }
+
+        const al = wire.readStruct(wire.ApplyLayout, fd) catch {
+            self.sendBinaryError(fd, "read failed");
+            return;
+        };
+
+        // Read tree JSON.
+        if (al.tree_json_len == 0 or al.tree_json_len > wire.MAX_PAYLOAD_LEN) {
+            self.sendBinaryError(fd, "invalid json len");
+            return;
+        }
+
+        const json_buf = self.allocator.alloc(u8, al.tree_json_len) catch {
+            self.sendBinaryError(fd, "alloc failed");
+            return;
+        };
+        defer self.allocator.free(json_buf);
+
+        wire.readExact(fd, json_buf) catch {
+            self.sendBinaryError(fd, "read json failed");
+            return;
+        };
+
+        // Find MUX CTL fd for this pane.
+        const mux_fd = self.findMuxCtlForUuid(al.uuid) orelse {
+            self.sendBinaryError(fd, "no mux");
+            return;
+        };
+
+        // Forward to MUX.
+        wire.writeControlWithTrail(mux_fd, .apply_layout, std.mem.asBytes(&al), json_buf) catch {
+            self.sendBinaryError(fd, "forward failed");
+            return;
+        };
+    }
+
+    /// Find the client (MUX) that owns a given pane UUID.
+    fn findClientForPaneUuid(self: *Server, uuid: [32]u8) ?*state.Client {
+        for (self.ses_state.clients.items) |*client| {
+            for (client.pane_uuids.items) |pane_uuid| {
+                if (std.mem.eql(u8, &pane_uuid, &uuid)) return client;
+            }
+        }
+        return null;
     }
 
     pub fn stop(self: *Server) void {

@@ -470,6 +470,15 @@ pub fn getLogPath(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "/tmp/hexe/{s}/log", .{final_instance});
 }
 
+/// Get the layout storage directory path (~/.config/hexe/layouts/).
+pub fn getLayoutDir(allocator: std.mem.Allocator) ![]const u8 {
+    if (posix.getenv("XDG_CONFIG_HOME")) |xdg| {
+        return std.fmt.allocPrint(allocator, "{s}/hexe/layouts", .{xdg});
+    }
+    const home = posix.getenv("HOME") orelse "/tmp";
+    return std.fmt.allocPrint(allocator, "{s}/.config/hexe/layouts", .{home});
+}
+
 // ============================================================================
 // Pop IPC types - for CLI popup commands
 // ============================================================================

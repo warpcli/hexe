@@ -201,6 +201,13 @@ pub fn main() !void {
     const mux_info_last = try mux_info.flag("l", "last", null);
     const mux_info_instance = try mux_info.string("I", "instance", null);
 
+    const mux_layout = try mux_cmd.newCommand("layout", "Save and restore layouts");
+    const mux_layout_save = try mux_layout.newCommand("save", "Save current layout");
+    const mux_layout_save_name = try mux_layout_save.stringPositional(null);
+    const mux_layout_load = try mux_layout.newCommand("load", "Load a saved layout");
+    const mux_layout_load_name = try mux_layout_load.stringPositional(null);
+    const mux_layout_list = try mux_layout.newCommand("list", "List saved layouts");
+
     const mux_focus = try mux_cmd.newCommand("focus", "Move focus to adjacent pane");
     const mux_focus_dir = try mux_focus.stringPositional(null);
 
@@ -276,6 +283,9 @@ pub fn main() !void {
     var found_choose = false;
     var found_send = false;
     var found_focus = false;
+    var found_layout = false;
+    var found_save = false;
+    var found_load = false;
     var found_exit_intent = false;
     var found_shell_event = false;
     var found_spinner = false;
@@ -304,6 +314,9 @@ pub fn main() !void {
         if (std.mem.eql(u8, arg, "choose")) found_choose = true;
         if (std.mem.eql(u8, arg, "send")) found_send = true;
         if (std.mem.eql(u8, arg, "focus")) found_focus = true;
+        if (std.mem.eql(u8, arg, "layout")) found_layout = true;
+        if (std.mem.eql(u8, arg, "save")) found_save = true;
+        if (std.mem.eql(u8, arg, "load")) found_load = true;
         if (std.mem.eql(u8, arg, "exit-intent")) found_exit_intent = true;
         if (std.mem.eql(u8, arg, "shell-event")) found_shell_event = true;
         if (std.mem.eql(u8, arg, "spinner")) found_spinner = true;
@@ -311,7 +324,13 @@ pub fn main() !void {
 
         if (has_help) {
             // Show help for the most specific command found (manual strings to avoid argonaut crash)
-            if (found_mux and found_focus) {
+            if (found_mux and found_layout and found_save) {
+                print("Usage: hexe mux layout save <name>\n\nSave the current tab's layout to disk.\n\nLayouts are stored in ~/.config/hexe/layouts/<name>.json\n", .{});
+            } else if (found_mux and found_layout and found_load) {
+                print("Usage: hexe mux layout load <name>\n\nApply a saved layout to the current tab.\n\nExisting panes are closed and new ones created to match the layout.\n", .{});
+            } else if (found_mux and found_layout) {
+                print("Usage: hexe mux layout <command>\n\nSave and restore layouts\n\nCommands:\n  save <name>  Save current tab's layout\n  load <name>  Apply a saved layout\n  list         List saved layouts\n", .{});
+            } else if (found_mux and found_focus) {
                 print(
                     "Usage: hexe mux focus <dir>\n\nMove focus to adjacent pane in the mux. Intended for editor integration (nvim).\n\nDirs: left, right, up, down\n\nRequires running inside mux (HEXE_PANE_UUID)\n",
                     .{},
@@ -382,7 +401,7 @@ pub fn main() !void {
         } else if (found_pod) {
             print("Usage: hexe pod <command>\n\nPer-pane PTY daemon\n\nCommands:\n  daemon  Start a per-pane pod daemon\n  new     Create a standalone pod\n  list    List discoverable pods\n  send    Send input to a pod\n  attach  Attach to a pod\n  kill    Kill a pod\n  gc      Clean stale pod metadata\n", .{});
         } else if (found_mux) {
-            print("Usage: hexe mux <command>\n\nTerminal multiplexer\n\nCommands:\n  new     Create new multiplexer session\n  attach  Attach to existing session\n  float   Spawn a transient float pane\n  notify  Send notification\n  send    Send keystrokes to pane\n  info    Show pane info\n", .{});
+            print("Usage: hexe mux <command>\n\nTerminal multiplexer\n\nCommands:\n  new      Create new multiplexer session\n  attach   Attach to existing session\n  float    Spawn a transient float pane\n  notify   Send notification\n  send     Send keystrokes to pane\n  info     Show pane info\n  layout   Save and restore layouts\n", .{});
         } else if (found_shp) {
             print("Usage: hexe shp <command>\n\nShell prompt renderer\n\nCommands:\n  prompt       Render shell prompt\n  init         Print shell initialization script\n  exit-intent  Ask mux permission before shell exits\n  shell-event  Send shell metadata to mux\n  spinner      Render/animate a spinner\n", .{});
         } else {
@@ -571,6 +590,14 @@ pub fn main() !void {
                 mux_send_ctrl.*,
                 mux_send_text.*,
             );
+        } else if (mux_layout.happened) {
+            if (mux_layout_save.happened) {
+                try cli_cmds.runLayoutSave(allocator, mux_layout_save_name.*);
+            } else if (mux_layout_load.happened) {
+                try cli_cmds.runLayoutLoad(allocator, mux_layout_load_name.*);
+            } else if (mux_layout_list.happened) {
+                try cli_cmds.runLayoutList(allocator);
+            }
         } else if (mux_focus.happened) {
             try cli_cmds.runFocusMove(allocator, mux_focus_dir.*);
         } else if (mux_info.happened) {
