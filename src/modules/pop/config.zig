@@ -3,6 +3,7 @@ const core = @import("core");
 const lua_runtime = core.lua_runtime;
 const LuaRuntime = core.LuaRuntime;
 const ConfigStatus = core.ConfigStatus;
+const widgets = @import("widgets/mod.zig");
 
 /// Notification style configuration
 pub const NotificationStyle = struct {
@@ -61,6 +62,7 @@ pub const PaneConfig = struct {
 pub const PopConfig = struct {
     carrier: CarrierConfig = .{},
     pane: PaneConfig = .{},
+    widgets: widgets.WidgetsConfig = .{},
     status: ConfigStatus = .loaded,
     status_message: ?[]const u8 = null,
 
@@ -154,6 +156,12 @@ fn parsePopConfig(runtime: *LuaRuntime, config: *PopConfig, allocator: std.mem.A
         parsePaneConfig(runtime, &config.pane, allocator);
         runtime.pop();
     }
+
+    // Parse widgets section
+    if (runtime.pushTable(-1, "widgets")) {
+        parseWidgetsConfig(runtime, &config.widgets);
+        runtime.pop();
+    }
 }
 
 fn parseCarrierConfig(runtime: *LuaRuntime, carrier: *CarrierConfig, allocator: std.mem.Allocator) void {
@@ -184,6 +192,66 @@ fn parsePaneConfig(runtime: *LuaRuntime, pane: *PaneConfig, allocator: std.mem.A
         parseChooseStyle(runtime, &pane.choose);
         runtime.pop();
     }
+}
+
+fn parseWidgetsConfig(runtime: *LuaRuntime, widgets_config: *widgets.WidgetsConfig) void {
+    // Parse pokemon widget config
+    if (runtime.pushTable(-1, "pokemon")) {
+        if (runtime.getBool(-1, "enabled")) |v| widgets_config.pokemon.enabled = v;
+        if (runtime.getString(-1, "position")) |pos_str| {
+            widgets_config.pokemon.position = parsePosition(pos_str);
+        }
+        if (runtime.getNumber(-1, "shiny_chance")) |v| {
+            widgets_config.pokemon.shiny_chance = @floatCast(v);
+        }
+        runtime.pop();
+    }
+
+    // Parse keycast widget config
+    if (runtime.pushTable(-1, "keycast")) {
+        if (runtime.getBool(-1, "enabled")) |v| widgets_config.keycast.enabled = v;
+        if (runtime.getString(-1, "position")) |pos_str| {
+            widgets_config.keycast.position = parsePosition(pos_str);
+        }
+        if (runtime.getInt(i64, -1, "duration_ms")) |v| {
+            widgets_config.keycast.duration_ms = v;
+        }
+        if (runtime.getInt(u8, -1, "max_entries")) |v| {
+            widgets_config.keycast.max_entries = v;
+        }
+        if (runtime.getInt(i64, -1, "grouping_timeout_ms")) |v| {
+            widgets_config.keycast.grouping_timeout_ms = v;
+        }
+        runtime.pop();
+    }
+
+    // Parse digits widget config
+    if (runtime.pushTable(-1, "digits")) {
+        if (runtime.getBool(-1, "enabled")) |v| widgets_config.digits.enabled = v;
+        if (runtime.getString(-1, "position")) |pos_str| {
+            widgets_config.digits.position = parsePosition(pos_str);
+        }
+        if (runtime.getString(-1, "size")) |size_str| {
+            widgets_config.digits.size = parseDigitSize(size_str);
+        }
+        runtime.pop();
+    }
+}
+
+fn parsePosition(pos_str: []const u8) widgets.Position {
+    if (std.mem.eql(u8, pos_str, "topleft")) return .topleft;
+    if (std.mem.eql(u8, pos_str, "topright")) return .topright;
+    if (std.mem.eql(u8, pos_str, "bottomleft")) return .bottomleft;
+    if (std.mem.eql(u8, pos_str, "bottomright")) return .bottomright;
+    if (std.mem.eql(u8, pos_str, "center")) return .center;
+    return .topright; // default
+}
+
+fn parseDigitSize(size_str: []const u8) widgets.digits.Size {
+    if (std.mem.eql(u8, size_str, "small")) return .small;
+    if (std.mem.eql(u8, size_str, "medium")) return .medium;
+    if (std.mem.eql(u8, size_str, "large")) return .large;
+    return .small; // default
 }
 
 fn parseNotificationStyle(runtime: *LuaRuntime, style: *NotificationStyle, allocator: std.mem.Allocator) void {

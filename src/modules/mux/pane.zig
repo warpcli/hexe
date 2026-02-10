@@ -6,7 +6,7 @@ const pod_protocol = core.pod_protocol;
 const wire = core.wire;
 
 const pane_capture = @import("pane_capture.zig");
-const sprite = @import("sprite.zig");
+const widgets = pop.widgets;
 
 const notification = @import("notification.zig");
 const NotificationManager = notification.NotificationManager;
@@ -125,9 +125,9 @@ pub const Pane = struct {
     popups: pop.PopupManager = undefined,
     popups_initialized: bool = false,
 
-    // Pokemon sprite overlay
-    sprite_state: sprite.SpriteState = undefined,
-    sprite_initialized: bool = false,
+    // Pokemon widget
+    pokemon_state: widgets.PokemonState = undefined,
+    pokemon_initialized: bool = false,
 
     pub fn isVisibleOnTab(self: *const Pane, tab: usize) bool {
         if (self.parent_tab != null) {
@@ -204,8 +204,8 @@ pub const Pane = struct {
         self.notifications_initialized = true;
         self.popups = pop.PopupManager.init(allocator);
         self.popups_initialized = true;
-        self.sprite_state = sprite.SpriteState.init(allocator);
-        self.sprite_initialized = true;
+        self.pokemon_state = widgets.PokemonState.init(allocator);
+        self.pokemon_initialized = true;
     }
 
     /// Initialize a pane backed by a per-pane pod process.
@@ -222,8 +222,8 @@ pub const Pane = struct {
         self.notifications_initialized = true;
         self.popups = pop.PopupManager.init(allocator);
         self.popups_initialized = true;
-        self.sprite_state = sprite.SpriteState.init(allocator);
-        self.sprite_initialized = true;
+        self.pokemon_state = widgets.PokemonState.init(allocator);
+        self.pokemon_initialized = true;
 
         // Tell pod initial size via VT channel.
         self.sendResizeToPod(width, height);
@@ -248,8 +248,8 @@ pub const Pane = struct {
         if (self.popups_initialized) {
             self.popups.deinit();
         }
-        if (self.sprite_initialized) {
-            self.sprite_state.deinit();
+        if (self.pokemon_initialized) {
+            self.pokemon_state.deinit();
         }
         if (self.float_title) |t| {
             self.allocator.free(t);

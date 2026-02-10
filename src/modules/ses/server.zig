@@ -1820,6 +1820,7 @@ pub const Server = struct {
 
         // Name
         if (pane.name) |name| {
+            ses.debugLog("pane_info: sending name='{s}' len={d}", .{ name, name.len });
             const n = @min(name.len, trail_buf.len - trail_len);
             @memcpy(trail_buf[trail_len .. trail_len + n], name[0..n]);
             resp.name_len = @intCast(n);

@@ -2,21 +2,37 @@ const std = @import("std");
 const core = @import("core");
 const sprites_embedded = core.sprites_embedded;
 
-/// Sprite display state
-pub const SpriteState = struct {
+/// Pokemon widget configuration
+pub const PokemonConfig = struct {
+    enabled: bool = false,
+    position: Position = .topright,
+    shiny_chance: f32 = 0.01,
+};
+
+/// Widget position options
+pub const Position = enum {
+    topleft,
+    topright,
+    bottomleft,
+    bottomright,
+    center,
+};
+
+/// Pokemon sprite display state for a single pane
+pub const PokemonState = struct {
     show_sprite: bool = false,
     sprite_name: ?[]const u8 = null,
     sprite_content: ?[]const u8 = null,
     manually_toggled: bool = false, // Track if user has manually toggled
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator) SpriteState {
+    pub fn init(allocator: std.mem.Allocator) PokemonState {
         return .{
             .allocator = allocator,
         };
     }
 
-    pub fn deinit(self: *SpriteState) void {
+    pub fn deinit(self: *PokemonState) void {
         if (self.sprite_content) |content| {
             self.allocator.free(content);
         }
@@ -24,7 +40,7 @@ pub const SpriteState = struct {
     }
 
     /// Load a sprite by name from embedded sprite data
-    pub fn loadSprite(self: *SpriteState, name: []const u8, shiny: bool) !void {
+    pub fn loadSprite(self: *PokemonState, name: []const u8, shiny: bool) !void {
         // Clean up previous sprite
         if (self.sprite_content) |content| {
             self.allocator.free(content);
@@ -43,82 +59,68 @@ pub const SpriteState = struct {
     }
 
     /// Toggle sprite display
-    pub fn toggle(self: *SpriteState) void {
+    pub fn toggle(self: *PokemonState) void {
         self.show_sprite = !self.show_sprite;
         self.manually_toggled = true;
     }
 
     /// Hide sprite
-    pub fn hide(self: *SpriteState) void {
+    pub fn hide(self: *PokemonState) void {
         self.show_sprite = false;
         self.manually_toggled = true;
     }
 };
 
-/// Render a sprite overlay centered in the pane
-pub fn renderSpriteOverlay(
-    buf: []u8,
+/// Calculate sprite position based on widget config
+pub fn calculatePosition(
+    config: PokemonConfig,
     pane_x: u16,
     pane_y: u16,
     pane_width: u16,
     pane_height: u16,
-    sprite_content: []const u8,
-) !usize {
-    // Parse sprite dimensions by counting lines and max line width
-    var lines = std.ArrayList([]const u8).init(std.heap.page_allocator);
-    defer lines.deinit();
-
-    var line_iter = std.mem.splitScalar(u8, sprite_content, '\n');
-    var max_visual_width: usize = 0;
-
-    while (line_iter.next()) |line| {
-        try lines.append(line);
-        // Estimate visual width (ignoring ANSI codes)
-        const visual_width = estimateVisualWidth(line);
-        if (visual_width > max_visual_width) {
-            max_visual_width = visual_width;
-        }
-    }
-
-    const sprite_height: u16 = @intCast(lines.items.len);
-    const sprite_width: u16 = @intCast(max_visual_width);
-
-    // Calculate center position
-    const start_y = if (pane_height > sprite_height)
-        pane_y + (pane_height - sprite_height) / 2
-    else
-        pane_y;
-
-    const start_x = if (pane_width > sprite_width)
-        pane_x + (pane_width - sprite_width) / 2
-    else
-        pane_x;
-
-    // Render the sprite
-    var written: usize = 0;
-    for (lines.items, 0..) |line, i| {
-        const y = start_y + @as(u16, @intCast(i));
-        if (y >= pane_y + pane_height) break;
-
-        // Position cursor
-        written += (try std.fmt.bufPrint(
-            buf[written..],
-            "\x1b[{d};{d}H",
-            .{ y + 1, start_x + 1 },
-        )).len;
-
-        // Write the line
-        const to_write = @min(line.len, buf.len - written);
-        @memcpy(buf[written..][0..to_write], line[0..to_write]);
-        written += to_write;
-
-        // Reset at end of line
-        const reset = "\x1b[0m";
-        @memcpy(buf[written..][0..reset.len], reset);
-        written += reset.len;
-    }
-
-    return written;
+    sprite_width: u16,
+    sprite_height: u16,
+) struct { x: u16, y: u16 } {
+    return switch (config.position) {
+        .topleft => .{
+            .x = pane_x + 1,
+            .y = pane_y + 1,
+        },
+        .topright => .{
+            .x = if (pane_width > sprite_width + 2)
+                pane_x + pane_width - sprite_width - 2
+            else
+                pane_x,
+            .y = pane_y + 1,
+        },
+        .bottomleft => .{
+            .x = pane_x + 1,
+            .y = if (pane_height > sprite_height + 2)
+                pane_y + pane_height - sprite_height - 2
+            else
+                pane_y,
+        },
+        .bottomright => .{
+            .x = if (pane_width > sprite_width + 2)
+                pane_x + pane_width - sprite_width - 2
+            else
+                pane_x,
+            .y = if (pane_height > sprite_height + 2)
+                pane_y + pane_height - sprite_height - 2
+            else
+                pane_y,
+        },
+        .center => .{
+            .x = if (pane_width > sprite_width)
+                pane_x + (pane_width - sprite_width) / 2
+            else
+                pane_x,
+            .y = if (pane_height > sprite_height)
+                pane_y + (pane_height - sprite_height) / 2
+            else
+                pane_y,
+        },
+    };
 }
 
 /// Estimate visual width of a line (ignoring ANSI escape sequences)

@@ -1,4 +1,14 @@
 const std = @import("std");
+const pokemon = @import("pokemon.zig");
+
+/// Keycast configuration
+pub const KeycastConfig = struct {
+    enabled: bool = false,
+    position: pokemon.Position = .bottomright,
+    duration_ms: i64 = 2000,           // How long entries stay visible
+    max_entries: u8 = 8,                // Maximum history size
+    grouping_timeout_ms: i64 = 500,    // Keys within this time get grouped (0.5s)
+};
 
 /// Keycast entry for displaying recent keypresses
 pub const KeycastEntry = struct {
@@ -27,7 +37,7 @@ pub const KeycastState = struct {
             .history = undefined,
             .count = 0,
             .duration_ms = 2000,
-            .grouping_timeout_ms = 700, // 0.7 seconds
+            .grouping_timeout_ms = 500, // 0.5 seconds
             .last_keypress_time = 0,
         };
     }
@@ -42,31 +52,15 @@ pub const KeycastState = struct {
 
     /// Check if the key text contains a modifier combination
     fn isModifierCombo(text: []const u8) bool {
-        // Check for abbreviated modifier patterns used by formatKeycastInput:
-        // C-x (Ctrl+x), A-x (Alt+x), C-A-x (Ctrl+Alt+x)
-        if (std.mem.indexOf(u8, text, "C-") != null) return true;
-        if (std.mem.indexOf(u8, text, "A-") != null) return true;
-
-        // Check for full word modifiers (fallback)
+        // Check for common modifier patterns
         if (std.mem.indexOf(u8, text, "Ctrl") != null) return true;
         if (std.mem.indexOf(u8, text, "Alt") != null) return true;
         if (std.mem.indexOf(u8, text, "Shift") != null) return true;
         if (std.mem.indexOf(u8, text, "Meta") != null) return true;
         if (std.mem.indexOf(u8, text, "Super") != null) return true;
         if (std.mem.indexOf(u8, text, "Cmd") != null) return true;
-
-        // Check for special keys that should also start new lines
-        if (std.mem.eql(u8, text, "Enter")) return true;
-        if (std.mem.eql(u8, text, "Tab")) return true;
-        if (std.mem.eql(u8, text, "Esc")) return true;
-        if (std.mem.eql(u8, text, "Bksp")) return true;
-        if (std.mem.eql(u8, text, "Up")) return true;
-        if (std.mem.eql(u8, text, "Down")) return true;
-        if (std.mem.eql(u8, text, "Left")) return true;
-        if (std.mem.eql(u8, text, "Right")) return true;
-        if (std.mem.eql(u8, text, "Home")) return true;
-        if (std.mem.eql(u8, text, "End")) return true;
-
+        // If it contains "+" it's likely a combo (e.g., "Ctrl+S")
+        if (std.mem.indexOf(u8, text, "+") != null) return true;
         return false;
     }
 

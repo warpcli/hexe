@@ -2,6 +2,7 @@ const std = @import("std");
 const ghostty = @import("ghostty-vt");
 const pagepkg = ghostty.page;
 const colorpkg = ghostty.color;
+const pop = @import("pop");
 
 /// Represents a single rendered cell with all its attributes
 pub const Cell = struct {
@@ -580,8 +581,8 @@ pub const Renderer = struct {
     }
 
     /// Draw a sprite overlay centered in the given pane bounds
-    pub fn drawSpriteOverlay(self: *Renderer, pane_x: u16, pane_y: u16, pane_width: u16, pane_height: u16, sprite_content: []const u8) void {
-        const spr = @import("sprite.zig");
+    pub fn drawSpriteOverlay(self: *Renderer, pane_x: u16, pane_y: u16, pane_width: u16, pane_height: u16, sprite_content: []const u8, pokemon_config: pop.widgets.PokemonConfig) void {
+        const widgets = pop.widgets;
         // Render sprite directly to the next buffer
         // We'll parse the ANSI codes and set cells accordingly
         var lines = std.mem.splitScalar(u8, sprite_content, '\n');
@@ -594,7 +595,7 @@ pub const Renderer = struct {
 
         while (lines.next()) |line| {
             temp_lines.append(self.allocator, line) catch continue;
-            const visual_width = spr.estimateVisualWidth(line);
+            const visual_width = widgets.pokemon.estimateVisualWidth(line);
             if (visual_width > max_visual_width) {
                 max_visual_width = visual_width;
             }
@@ -602,13 +603,20 @@ pub const Renderer = struct {
         }
 
         const sprite_width: u16 = @intCast(@min(max_visual_width, pane_width));
+        const sprite_height: u16 = @intCast(line_count);
 
-        // Position at top-right corner with 1 cell padding
-        const start_y = pane_y + 1;
-        const start_x = if (pane_width > sprite_width + 2)
-            pane_x + pane_width - sprite_width - 2
-        else
-            pane_x;
+        // Calculate position based on widget config
+        const pos = widgets.pokemon.calculatePosition(
+            pokemon_config,
+            pane_x,
+            pane_y,
+            pane_width,
+            pane_height,
+            sprite_width,
+            sprite_height,
+        );
+        const start_x = pos.x;
+        const start_y = pos.y;
 
         // Second pass: render lines
         for (temp_lines.items, 0..) |line, i| {

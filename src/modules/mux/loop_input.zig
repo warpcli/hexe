@@ -98,6 +98,64 @@ fn formatKeycastInput(inp: []const u8, buf: *[32]u8) struct { consumed: usize, t
                 }
                 return .{ .consumed = inp.len, .text = "" };
             }
+
+            // CSI-u sequences: ESC [ <codepoint> ; <mod> [:<event>] u
+            // Parse: find 'u' final byte, extract codepoint and modifier
+            var parse_idx: usize = 2;
+            var codepoint: ?u32 = null;
+            var modifier: ?u8 = null;
+
+            // Parse codepoint (digits before ';')
+            const cp_start = parse_idx;
+            while (parse_idx < inp.len and inp[parse_idx] >= '0' and inp[parse_idx] <= '9') : (parse_idx += 1) {}
+            if (parse_idx > cp_start and parse_idx < inp.len and inp[parse_idx] == ';') {
+                codepoint = std.fmt.parseInt(u32, inp[cp_start..parse_idx], 10) catch null;
+                parse_idx += 1; // skip ';'
+
+                // Parse modifier (digits before 'u' or ':')
+                const mod_start = parse_idx;
+                while (parse_idx < inp.len and inp[parse_idx] >= '0' and inp[parse_idx] <= '9') : (parse_idx += 1) {}
+                if (parse_idx > mod_start) {
+                    modifier = std.fmt.parseInt(u8, inp[mod_start..parse_idx], 10) catch null;
+
+                    // Parse optional :event part
+                    var event_type: ?u8 = null;
+                    if (parse_idx < inp.len and inp[parse_idx] == ':') {
+                        parse_idx += 1; // skip ':'
+                        const event_start = parse_idx;
+                        while (parse_idx < inp.len and inp[parse_idx] >= '0' and inp[parse_idx] <= '9') : (parse_idx += 1) {}
+                        if (parse_idx > event_start) {
+                            event_type = std.fmt.parseInt(u8, inp[event_start..parse_idx], 10) catch null;
+                        }
+                    }
+
+                    // Check if we found 'u' and have valid codepoint+modifier
+                    if (parse_idx < inp.len and inp[parse_idx] == 'u' and codepoint != null and modifier != null) {
+                        // Skip key release events (event_type == 3)
+                        if (event_type != null and event_type.? == 3) {
+                            return .{ .consumed = parse_idx + 1, .text = "" };
+                        }
+                        const cp = codepoint.?;
+                        const mod = modifier.?;
+
+                        // Format modifier prefix
+                        if (mod == 3 or mod == 4) writer.writeAll("A-") catch {}; // Alt or Shift+Alt
+                        if (mod == 5 or mod == 6) writer.writeAll("C-") catch {}; // Ctrl or Ctrl+Shift
+                        if (mod == 7 or mod == 8) writer.writeAll("C-A-") catch {}; // Ctrl+Alt or Ctrl+Alt+Shift
+
+                        // Format key character
+                        if (cp >= 32 and cp < 127) {
+                            writer.writeByte(@intCast(cp)) catch {};
+                        } else {
+                            std.fmt.format(writer, "U+{x}", .{cp}) catch {};
+                        }
+
+                        return .{ .consumed = parse_idx + 1, .text = buf[0..stream.pos] };
+                    }
+                }
+            }
+
+            // Not a CSI-u sequence, fall through to generic CSI handler
             // Other CSI sequences - properly parse to the final byte
             // CSI sequences end with a byte in range 0x40-0x7E
             var j: usize = 2;
@@ -251,8 +309,11 @@ fn recordKeycastInput(state: *State, inp: []const u8) void {
         var buf: [32]u8 = undefined;
         const result = formatKeycastInput(inp[i..], &buf);
         if (result.text.len > 0) {
+            std.debug.print("[keycast] recording: '{s}' (bytes: {any})\n", .{ result.text, inp[i..@min(i + result.consumed, inp.len)] });
             state.overlays.recordKeypress(result.text);
             state.needs_render = true;
+        } else if (result.consumed > 0) {
+            std.debug.print("[keycast] skipped: consumed={} bytes={any}\n", .{ result.consumed, inp[i..@min(i + result.consumed, inp.len)] });
         }
         if (result.consumed == 0) break;
         i += result.consumed;

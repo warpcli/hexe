@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const State = @import("state.zig").State;
-const sprite = @import("sprite.zig");
 const winpulse = @import("winpulse.zig");
 const render_mod = @import("render.zig");
 
@@ -112,9 +111,9 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         }
 
         // Draw sprite overlay if enabled
-        if (pane.*.sprite_initialized and pane.*.sprite_state.show_sprite) {
-            if (pane.*.sprite_state.sprite_content) |content| {
-                renderer.drawSpriteOverlay(pane.*.x, pane.*.y, pane.*.width, pane.*.height, content);
+        if (pane.*.pokemon_initialized and pane.*.pokemon_state.show_sprite) {
+            if (pane.*.pokemon_state.sprite_content) |content| {
+                renderer.drawSpriteOverlay(pane.*.x, pane.*.y, pane.*.width, pane.*.height, content, state.pop_config.widgets.pokemon);
             }
         }
     }
@@ -159,9 +158,9 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         }
 
         // Draw sprite overlay if enabled
-        if (pane.sprite_initialized and pane.sprite_state.show_sprite) {
-            if (pane.sprite_state.sprite_content) |content| {
-                renderer.drawSpriteOverlay(pane.x, pane.y, pane.width, pane.height, content);
+        if (pane.pokemon_initialized and pane.pokemon_state.show_sprite) {
+            if (pane.pokemon_state.sprite_content) |content| {
+                renderer.drawSpriteOverlay(pane.x, pane.y, pane.width, pane.height, content, state.pop_config.widgets.pokemon);
             }
         }
     }
@@ -200,9 +199,9 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             }
 
             // Draw sprite overlay if enabled
-            if (pane.sprite_initialized and pane.sprite_state.show_sprite) {
-                if (pane.sprite_state.sprite_content) |content| {
-                    renderer.drawSpriteOverlay(pane.x, pane.y, pane.width, pane.height, content);
+            if (pane.pokemon_initialized and pane.pokemon_state.show_sprite) {
+                if (pane.pokemon_state.sprite_content) |content| {
+                    renderer.drawSpriteOverlay(pane.x, pane.y, pane.width, pane.height, content, state.pop_config.widgets.pokemon);
                 }
             }
         }

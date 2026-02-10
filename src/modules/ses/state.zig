@@ -797,6 +797,7 @@ pub const SesState = struct {
         const uuid = ipc.generateUuid();
         const base_name = ipc.generatePaneName();
         const name = try self.generateUniquePaneName(base_name);
+        ses.debugLog("createPane: generated name='{s}'", .{name});
         errdefer self.allocator.free(name);
         const pod_socket_path = try ipc.getPodSocketPath(self.allocator, &uuid);
         errdefer self.allocator.free(pod_socket_path);

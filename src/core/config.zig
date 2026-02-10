@@ -581,9 +581,6 @@ pub const Config = struct {
     confirm_on_disown: bool = false, // When Alt+z disowns a pane
     confirm_on_close: bool = false, // When Alt+x closes a float/tab
 
-    // Pokemon sprites
-    show_sprites: bool = false, // Show sprites by default on all panes
-
     // Winpulse - highlight focused pane on focus change
     winpulse_enabled: bool = false,
     winpulse_duration_ms: u32 = 50, // Total animation duration
@@ -759,18 +756,6 @@ fn parseConfig(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocat
     if (runtime.getBool(-1, "confirm_on_detach")) |v| config.confirm_on_detach = v;
     if (runtime.getBool(-1, "confirm_on_disown")) |v| config.confirm_on_disown = v;
     if (runtime.getBool(-1, "confirm_on_close")) |v| config.confirm_on_close = v;
-
-    // Sprites
-    if (runtime.getBool(-1, "show_sprites")) |v| config.show_sprites = v;
-
-    // HEXE_POKEMON environment variable overrides config
-    if (std.posix.getenv("HEXE_POKEMON")) |env_val| {
-        if (std.mem.eql(u8, env_val, "true") or std.mem.eql(u8, env_val, "1")) {
-            config.show_sprites = true;
-        } else if (std.mem.eql(u8, env_val, "false") or std.mem.eql(u8, env_val, "0")) {
-            config.show_sprites = false;
-        }
-    }
 
     // Winpulse
     if (runtime.getBool(-1, "winpulse_enabled")) |v| config.winpulse_enabled = v;

@@ -7,6 +7,7 @@ pub const confirm = @import("confirm.zig");
 pub const picker = @import("picker.zig");
 pub const config = @import("config.zig");
 pub const overlay = @import("overlay/mod.zig");
+pub const widgets = @import("widgets/mod.zig");
 
 // Re-export config types
 pub const PopConfig = config.PopConfig;
