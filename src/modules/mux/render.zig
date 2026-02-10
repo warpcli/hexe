@@ -15,6 +15,8 @@ pub const Cell = struct {
     underline: Underline = .none,
     strikethrough: bool = false,
     inverse: bool = false,
+    is_wide_spacer: bool = false, // True if this cell is a spacer for a wide character
+    is_wide_char: bool = false,   // True if this character is wide (takes 2 columns)
 
     pub const Underline = enum(u3) {
         none = 0,
@@ -268,6 +270,7 @@ pub const Renderer = struct {
                     // Tail cell of a wide character: do not overwrite.
                     // We advance the cursor during rendering.
                     render_cell.char = 0;
+                    render_cell.is_wide_spacer = true;
                     self.setCell(offset_x + x, offset_y + y, render_cell);
                     continue;
                 }
@@ -277,6 +280,11 @@ pub const Renderer = struct {
                     // Render as a normal blank so we still clear any prior
                     // screen contents in that column.
                     render_cell.char = ' ';
+                }
+
+                // Mark wide characters (emoji, CJK, etc.)
+                if (raw.wide == .wide) {
+                    render_cell.is_wide_char = true;
                 }
 
                 // RenderState's per-cell `style` is only valid when `style_id != 0`.
@@ -425,7 +433,8 @@ pub const Renderer = struct {
 
                 try self.emitStyleChanges(&seq_buf, new);
                 try self.emitChar(new.char);
-                cursor_x += 1;
+                // Wide characters (emoji, CJK) advance cursor by 2 columns
+                cursor_x += if (new.is_wide_char) 2 else 1;
             }
 
             // If the remainder of the row is a uniform blank run, explicitly
