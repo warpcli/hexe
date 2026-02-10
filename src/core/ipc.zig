@@ -269,98 +269,86 @@ pub fn generateUuid() [32]u8 {
     return uuid_util.generateHex();
 }
 
-/// Pokemon names for session naming (Gen 1)
+/// Greek alphabet names for session naming
+const greek_alphabet_names = [_][]const u8{
+    "alpha",   "beta",    "gamma",   "delta",   "epsilon",
+    "zeta",    "eta",     "theta",   "iota",    "kappa",
+    "lambda",  "mu",      "nu",      "xi",      "omicron",
+    "pi",      "rho",     "sigma",   "tau",     "upsilon",
+    "phi",     "chi",     "psi",     "omega",
+};
+
+// Pokemon names for pane naming (inspired by krabby - https://github.com/yannjor/krabby)
+// Gen 1-5 selection for variety
 const pokemon_names = [_][]const u8{
     "bulbasaur",  "ivysaur",    "venusaur",   "charmander", "charmeleon",
     "charizard",  "squirtle",   "wartortle",  "blastoise",  "caterpie",
     "metapod",    "butterfree", "weedle",     "kakuna",     "beedrill",
     "pidgey",     "pidgeotto",  "pidgeot",    "rattata",    "raticate",
     "spearow",    "fearow",     "ekans",      "arbok",      "pikachu",
-    "raichu",     "sandshrew",  "sandslash",  "nidoran",    "nidorina",
-    "nidoqueen",  "nidorino",   "nidoking",   "clefairy",   "clefable",
-    "vulpix",     "ninetales",  "jigglypuff", "wigglytuff", "zubat",
-    "golbat",     "oddish",     "gloom",      "vileplume",  "paras",
-    "parasect",   "venonat",    "venomoth",   "diglett",    "dugtrio",
-    "meowth",     "persian",    "psyduck",    "golduck",    "mankey",
-    "primeape",   "growlithe",  "arcanine",   "poliwag",    "poliwhirl",
-    "poliwrath",  "abra",       "kadabra",    "alakazam",   "machop",
-    "machoke",    "machamp",    "bellsprout", "weepinbell", "victreebel",
-    "tentacool",  "tentacruel", "geodude",    "graveler",   "golem",
-    "ponyta",     "rapidash",   "slowpoke",   "slowbro",    "magnemite",
-    "magneton",   "farfetchd",  "doduo",      "dodrio",     "seel",
-    "dewgong",    "grimer",     "muk",        "shellder",   "cloyster",
-    "gastly",     "haunter",    "gengar",     "onix",       "drowzee",
-    "hypno",      "krabby",     "kingler",    "voltorb",    "electrode",
-    "exeggcute",  "exeggutor",  "cubone",     "marowak",    "hitmonlee",
-    "hitmonchan", "lickitung",  "koffing",    "weezing",    "rhyhorn",
-    "rhydon",     "chansey",    "tangela",    "kangaskhan", "horsea",
-    "seadra",     "goldeen",    "seaking",    "staryu",     "starmie",
-    "mrmime",     "scyther",    "jynx",       "electabuzz", "magmar",
-    "pinsir",     "tauros",     "magikarp",   "gyarados",   "lapras",
-    "ditto",      "eevee",      "vaporeon",   "jolteon",    "flareon",
-    "porygon",    "omanyte",    "omastar",    "kabuto",     "kabutops",
-    "aerodactyl", "snorlax",    "articuno",   "zapdos",     "moltres",
-    "dratini",    "dragonair",  "dragonite",  "mewtwo",     "mew",
+    "raichu",     "sandshrew",  "sandslash",  "nidoran-f",  "nidorina",
+    "nidoqueen",  "nidoran-m",  "nidorino",   "nidoking",   "clefairy",
+    "clefable",   "vulpix",     "ninetales",  "jigglypuff", "wigglytuff",
+    "zubat",      "golbat",     "oddish",     "gloom",      "vileplume",
+    "paras",      "parasect",   "venonat",    "venomoth",   "diglett",
+    "dugtrio",    "meowth",     "persian",    "psyduck",    "golduck",
+    "mankey",     "primeape",   "growlithe",  "arcanine",   "poliwag",
+    "poliwhirl",  "poliwrath",  "abra",       "kadabra",    "alakazam",
+    "machop",     "machoke",    "machamp",    "bellsprout", "weepinbell",
+    "victreebel", "tentacool",  "tentacruel", "geodude",    "graveler",
+    "golem",      "ponyta",     "rapidash",   "slowpoke",   "slowbro",
+    "magnemite",  "magneton",   "farfetchd",  "doduo",      "dodrio",
+    "seel",       "dewgong",    "grimer",     "muk",        "shellder",
+    "cloyster",   "gastly",     "haunter",    "gengar",     "onix",
+    "drowzee",    "hypno",      "krabby",     "kingler",    "voltorb",
+    "electrode",  "exeggcute",  "exeggutor",  "cubone",     "marowak",
+    "hitmonlee",  "hitmonchan", "lickitung",  "koffing",    "weezing",
+    "rhyhorn",    "rhydon",     "chansey",    "tangela",    "kangaskhan",
+    "horsea",     "seadra",     "goldeen",    "seaking",    "staryu",
+    "starmie",    "mrmime",     "scyther",    "jynx",       "electabuzz",
+    "magmar",     "pinsir",     "tauros",     "magikarp",   "gyarados",
+    "lapras",     "ditto",      "eevee",      "vaporeon",   "jolteon",
+    "flareon",    "porygon",    "omanyte",    "omastar",    "kabuto",
+    "kabutops",   "aerodactyl", "snorlax",    "articuno",   "zapdos",
+    "moltres",    "dratini",    "dragonair",  "dragonite",  "mewtwo",
+    "mew",        "chikorita",  "bayleef",    "meganium",   "cyndaquil",
+    "quilava",    "typhlosion", "totodile",   "croconaw",   "feraligatr",
+    "sentret",    "furret",     "hoothoot",   "noctowl",    "ledyba",
+    "ledian",     "spinarak",   "ariados",    "crobat",     "chinchou",
+    "lanturn",    "pichu",      "cleffa",     "igglybuff",  "togepi",
+    "togetic",    "natu",       "xatu",       "mareep",     "flaaffy",
+    "ampharos",   "bellossom",  "marill",     "azumarill",  "sudowoodo",
+    "politoed",   "hoppip",     "skiploom",   "jumpluff",   "aipom",
+    "sunkern",    "sunflora",   "yanma",      "wooper",     "quagsire",
+    "espeon",     "umbreon",    "murkrow",    "slowking",   "misdreavus",
+    "unown",      "wobbuffet",  "girafarig",  "pineco",     "forretress",
+    "dunsparce",  "gligar",     "steelix",    "snubbull",   "granbull",
+    "qwilfish",   "scizor",     "shuckle",    "heracross",  "sneasel",
+    "teddiursa",  "ursaring",   "slugma",     "magcargo",   "swinub",
+    "piloswine",  "corsola",    "remoraid",   "octillery",  "delibird",
 };
 
-// Star names for pane naming (lowercase, ASCII)
-const star_names = [_][]const u8{
-    "achernar",  "acrux",      "adhafera",   "adhara",     "alcor",
-    "aldebaran", "algol",      "alhena",     "alioth",     "alkaid",
-    "almaak",    "alnair",     "alnilam",    "alnitak",    "alphard",
-    "alphecca",  "alpheratz",  "altair",     "aludra",     "alycone",
-    "ancha",     "ankaa",      "antares",    "arcturus",   "atlas",
-    "atria",     "auva",       "avior",      "bellatrix",  "betelgeuse",
-    "canopus",   "capella",    "castor",     "celaeno",    "chara",
-    "deneb",     "denebola",   "diphda",     "dschubba",   "dubhe",
-    "electra",   "elnath",     "elnin",      "enif",       "fomalhaut",
-    "gacrux",    "garnet",     "hadar",      "hamal",      "izaar",
-    "kitalpha",  "kochab",     "lesath",     "maia",       "markab",
-    "meissa",    "mimosa",     "mira",       "mirach",     "mirfak",
-    "mirzam",    "mizar",      "naos",       "nashira",    "nunki",
-    "peacock",   "phaethon",   "pleione",    "pollux",     "polaris",
-    "procyon",   "rasalhague", "rasalgethi", "regor",      "regulus",
-    "rigel",     "rigil",      "rotanev",    "rukbat",     "sabik",
-    "saiph",     "scheat",     "schedar",    "shaula",     "sirius",
-    "spica",     "suhail",     "tarazed",    "thuban",     "unukalhai",
-    "vega",      "vindemiatrix","wasat",      "wezen",      "zubenelgenubi",
-};
-
-// Constellation names for tab naming (lowercase, ASCII)
-const constellation_names = [_][]const u8{
-    "andromeda", "aquarius", "aquila", "aries", "auriga",
-    "bootes", "cancer", "canis-major", "canis-minor", "capricornus",
-    "cassiopeia", "centaurus", "cepheus", "cetus", "columba",
-    "corvus", "crater", "cygnus", "draco", "equuleus",
-    "eridanus", "gemini", "hercules", "hydra", "lacerta",
-    "leo", "libra", "lupus", "lyra", "monoceros",
-    "orion", "pegasus", "perseus", "phoenix", "pisces",
-    "sagitta", "sagittarius", "scorpius", "serpens", "taurus",
-    "triangulum", "ursa-major", "ursa-minor", "virgo",
-};
-
-/// Generate a random Pokemon name for session naming
+/// Generate a random Greek alphabet name for session naming
 pub fn generateSessionName() []const u8 {
+    var rand_byte: [1]u8 = undefined;
+    std.crypto.random.bytes(&rand_byte);
+    const index = rand_byte[0] % greek_alphabet_names.len;
+    return greek_alphabet_names[index];
+}
+
+/// Generate a random Pokemon name for pane naming.
+pub fn generatePaneName() []const u8 {
     var rand_byte: [1]u8 = undefined;
     std.crypto.random.bytes(&rand_byte);
     const index = rand_byte[0] % pokemon_names.len;
     return pokemon_names[index];
 }
 
-/// Generate a random star name for pane naming.
-pub fn generatePaneName() []const u8 {
-    var rand_byte: [1]u8 = undefined;
-    std.crypto.random.bytes(&rand_byte);
-    const index = rand_byte[0] % star_names.len;
-    return star_names[index];
-}
-
-/// Generate a random constellation name for tab naming.
-pub fn generateTabName() []const u8 {
-    var rand_byte: [1]u8 = undefined;
-    std.crypto.random.bytes(&rand_byte);
-    const index = rand_byte[0] % constellation_names.len;
-    return constellation_names[index];
+/// Generate tab name in format "session-N" (e.g. "alpha-1", "beta-2")
+/// Caller owns the returned memory.
+pub fn generateTabName(allocator: std.mem.Allocator, session_name: []const u8, tab_number: usize) ![]u8 {
+    // Tab numbers start at 1 for user-facing display
+    return std.fmt.allocPrint(allocator, "{s}-{d}", .{ session_name, tab_number + 1 });
 }
 
 const strings = @import("strings.zig");

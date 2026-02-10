@@ -715,10 +715,18 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
         @as(usize, resp.layout_path_len) + @as(usize, resp.last_cmd_len) +
         @as(usize, resp.base_process_len) + @as(usize, resp.sticky_pwd_len);
 
-    // Skip name.
+    // Read and store pane name (Pokemon name).
     if (resp.name_len > 0) {
         if (resp.name_len <= buffer.len) {
             wire.readExact(fd, buffer[0..resp.name_len]) catch return;
+            const pane_name = state.allocator.dupe(u8, buffer[0..resp.name_len]) catch null;
+            if (pane_name) |name| {
+                // Free old name if exists
+                if (state.pane_names.get(resp.uuid)) |old_name| {
+                    state.allocator.free(old_name);
+                }
+                state.pane_names.put(resp.uuid, name) catch {};
+            }
         } else {
             skipPayload(fd, resp.name_len, buffer);
         }

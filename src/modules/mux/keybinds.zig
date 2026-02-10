@@ -756,6 +756,43 @@ fn dispatchAction(state: *State, action: BindAction) bool {
             state.needs_render = true;
             return true;
         },
+        .sprite_toggle => {
+            // Toggle sprite on the focused pane - use the pane's actual Pokemon name!
+            if (state.active_floating) |idx| {
+                if (idx < state.floats.items.len) {
+                    const pane = state.floats.items[idx];
+                    if (pane.sprite_initialized) {
+                        if (pane.sprite_state.show_sprite) {
+                            pane.sprite_state.hide();
+                        } else {
+                            // Get the pane's Pokemon name from pane_names cache
+                            const pokemon_name = state.pane_names.get(pane.uuid) orelse "pikachu";
+
+                            pane.sprite_state.loadSprite(pokemon_name, false) catch {
+                                // Fallback to pikachu if loading fails
+                                pane.sprite_state.loadSprite("pikachu", false) catch {};
+                            };
+                        }
+                        state.needs_render = true;
+                    }
+                }
+            } else if (state.currentLayout().getFocusedPane()) |pane| {
+                if (pane.sprite_initialized) {
+                    if (pane.sprite_state.show_sprite) {
+                        pane.sprite_state.hide();
+                    } else {
+                        // Get the pane's Pokemon name from pane_names cache
+                        const pokemon_name = state.pane_names.get(pane.uuid) orelse "pikachu";
+
+                        pane.sprite_state.loadSprite(pokemon_name, false) catch {
+                            pane.sprite_state.loadSprite("pikachu", false) catch {};
+                        };
+                    }
+                    state.needs_render = true;
+                }
+            }
+            return true;
+        },
         .split_h => {
             const parent_uuid = state.getCurrentFocusedUuid();
             var cwd: ?[]const u8 = null;

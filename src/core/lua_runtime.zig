@@ -357,6 +357,8 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "pane_select_mode");
     _ = lua.pushString("overlay.keycast_toggle");
     lua.setField(-2, "keycast_toggle");
+    _ = lua.pushString("overlay.sprite_toggle");
+    lua.setField(-2, "sprite_toggle");
     _ = lua.pushString("split.h");
     lua.setField(-2, "split_h");
     _ = lua.pushString("split.v");

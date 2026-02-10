@@ -65,6 +65,7 @@ pub const Confirm = struct {
 
     /// Handle keyboard input
     /// Left/Right arrows toggle, Enter to confirm, ESC to cancel
+    /// Y/N keys directly select and confirm
     pub fn handleInput(self: *Confirm, key: u8) InputResult {
         switch (key) {
             27 => { // ESC - cancel
@@ -74,6 +75,18 @@ pub const Confirm = struct {
             },
             '\r' => { // Enter confirms current selection
                 self.result = self.selected == .yes;
+                return .dismissed;
+            },
+            // Y/y - select and confirm Yes
+            'y', 'Y' => {
+                self.selected = .yes;
+                self.result = true;
+                return .dismissed;
+            },
+            // N/n - select and confirm No
+            'n', 'N' => {
+                self.selected = .no;
+                self.result = false;
                 return .dismissed;
             },
             // Left/Right toggle between options

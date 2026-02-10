@@ -80,8 +80,9 @@ pub fn createTab(self: anytype) !void {
         cwd = std.posix.getcwd(&cwd_buf) catch null;
     }
 
-    const base_name = core.ipc.generateTabName();
-    const name_owned = try self.allocator.dupe(u8, base_name);
+    // Generate tab name in format "session-N" (e.g., "alpha-1", "beta-2")
+    const name_owned = try core.ipc.generateTabName(self.allocator, self.session_name, self.tab_counter);
+    self.tab_counter += 1;
     var tab = Tab.initOwned(self.allocator, self.layout_width, self.layout_height, name_owned, self.pop_config.carrier.notification);
     // Set ses client if connected (for new tabs after startup).
     if (self.ses_client.isConnected()) {
@@ -404,6 +405,11 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         const duped = self.allocator.dupe(u8, name_val.string) catch return false;
         self.session_name = duped;
         self.session_name_owned = duped;
+    }
+
+    // Restore tab counter (for session-N tab naming).
+    if (root.get("tab_counter")) |tc_val| {
+        self.tab_counter = @intCast(tc_val.integer);
     }
 
     // Remember active tab/floating from the stored state.

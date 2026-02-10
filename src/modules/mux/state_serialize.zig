@@ -17,6 +17,7 @@ pub fn serializeState(self: anytype) ![]const u8 {
     // Mux UUID and session name (persistent identity).
     try writer.print("\"uuid\":\"{s}\",", .{self.uuid});
     try writer.print("\"session_name\":\"{s}\",", .{self.session_name});
+    try writer.print("\"tab_counter\":{d},", .{self.tab_counter});
 
     // Active tab/float.
     try writer.print("\"active_tab\":{d},", .{self.active_tab});

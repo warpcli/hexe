@@ -635,70 +635,9 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                                         else => {},
                                     }
                                 } else {
-                                    // User cancelled - if exit was from shell death, respawn
+                                    // User cancelled - if exit was from shell death, defer respawn
                                     if (action == .exit and state.exit_from_shell_death) {
-                                        if (state.currentLayout().getFocusedPane()) |pane| {
-                                            switch (pane.backend) {
-                                                .local => {
-                                                    pane.respawn() catch {
-                                                        state.notifications.show("Respawn failed");
-                                                    };
-                                                    state.skip_dead_check = true;
-                                                },
-                                                .pod => {
-                                                    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-                                                    var cwd = state.getReliableCwd(pane);
-                                                    if (cwd == null) {
-                                                        cwd = std.posix.getcwd(&cwd_buf) catch null;
-                                                    }
-                                                    const old_aux = state.ses_client.getPaneAux(pane.uuid) catch SesClient.PaneAuxInfo{
-                                                        .created_from = null,
-                                                        .focused_from = null,
-                                                    };
-                                                    state.ses_client.killPane(pane.uuid) catch {};
-                                                    if (state.ses_client.createPane(null, cwd, null, null, null, null)) |result| {
-                                                        const vt_fd = state.ses_client.getVtFd();
-                                                        var replaced = true;
-                                                        if (vt_fd) |fd| {
-                                                            pane.replaceWithPod(result.pane_id, fd, result.uuid) catch {
-                                                                replaced = false;
-                                                            };
-                                                        } else replaced = false;
-                                                        if (replaced) {
-                                                            const pane_type: SesClient.PaneType = if (pane.floating) .float else .split;
-                                                            const cursor = pane.getCursorPos();
-                                                            const cursor_style = pane.vt.getCursorStyle();
-                                                            const cursor_visible = pane.vt.isCursorVisible();
-                                                            const alt_screen = pane.vt.inAltScreen();
-                                                            const layout_path = helpers.getLayoutPath(state, pane) catch null;
-                                                            defer if (layout_path) |path| state.allocator.free(path);
-                                                            state.ses_client.updatePaneAux(
-                                                                pane.uuid,
-                                                                pane.floating,
-                                                                pane.focused,
-                                                                pane_type,
-                                                                old_aux.created_from,
-                                                                old_aux.focused_from,
-                                                                .{ .x = cursor.x, .y = cursor.y },
-                                                                cursor_style,
-                                                                cursor_visible,
-                                                                alt_screen,
-                                                                .{ .cols = pane.width, .rows = pane.height },
-                                                                pane.getPwd(),
-                                                                null,
-                                                                null,
-                                                                layout_path,
-                                                            ) catch {};
-                                                            state.skip_dead_check = true;
-                                                        } else {
-                                                            state.notifications.show("Respawn failed");
-                                                        }
-                                                    } else |_| {
-                                                        state.notifications.show("Respawn failed");
-                                                    }
-                                                },
-                                            }
-                                        }
+                                        state.needs_respawn = true;
                                     }
                                 }
 

@@ -485,6 +485,7 @@ pub const Config = struct {
         pane_close,
         pane_select_mode,
         keycast_toggle,
+        sprite_toggle,
         split_h,
         split_v,
         split_resize,
@@ -505,6 +506,7 @@ pub const Config = struct {
         pane_close, // close current float or split pane (never closes tab)
         pane_select_mode, // enter pane select mode (focus or swap)
         keycast_toggle, // toggle keycast overlay
+        sprite_toggle, // toggle pokemon sprite overlay
         split_h,
         split_v,
         split_resize: BindKeyKind, // up/down/left/right (resize divider)
@@ -1051,6 +1053,7 @@ fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction
     if (std.mem.eql(u8, action_type, "pane.close")) return .pane_close;
     if (std.mem.eql(u8, action_type, "pane.select_mode")) return .pane_select_mode;
     if (std.mem.eql(u8, action_type, "overlay.keycast_toggle")) return .keycast_toggle;
+    if (std.mem.eql(u8, action_type, "overlay.sprite_toggle")) return .sprite_toggle;
     if (std.mem.eql(u8, action_type, "split.h")) return .split_h;
     if (std.mem.eql(u8, action_type, "split.v")) return .split_v;
     if (std.mem.eql(u8, action_type, "tab.new")) return .tab_new;
@@ -1093,6 +1096,7 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     if (std.mem.eql(u8, action, "pane.close")) return .pane_close;
     if (std.mem.eql(u8, action, "pane.select_mode")) return .pane_select_mode;
     if (std.mem.eql(u8, action, "overlay.keycast_toggle")) return .keycast_toggle;
+    if (std.mem.eql(u8, action, "overlay.sprite_toggle")) return .sprite_toggle;
     if (std.mem.eql(u8, action, "split.h")) return .split_h;
     if (std.mem.eql(u8, action, "split.v")) return .split_v;
     if (std.mem.eql(u8, action, "tab.new")) return .tab_new;

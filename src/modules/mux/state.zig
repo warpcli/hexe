@@ -145,6 +145,8 @@ pub const State = struct {
     pending_exit_intent: bool,
     /// If non-zero and in the future, skip confirm_on_exit for the next last-pane death.
     exit_intent_deadline_ms: i64,
+    /// If true, respawn the focused pane after handling input
+    needs_respawn: bool,
     adopt_orphans: [32]OrphanedPaneInfo = undefined,
     adopt_orphan_count: usize = 0,
     adopt_selected_uuid: ?[32]u8 = null,
@@ -156,6 +158,9 @@ pub const State = struct {
     uuid: [32]u8,
     session_name: []const u8,
     session_name_owned: ?[]const u8,
+
+    /// Tab counter for generating unique tab names (session-N format)
+    tab_counter: usize = 0,
 
     /// Monotonically increasing version counter for state sync.
     /// SES uses this to reject stale/out-of-order updates.
@@ -207,6 +212,9 @@ pub const State = struct {
     /// For local PTY panes we can read this directly in mux.
     /// For pod panes we query it from ses (which can inspect /proc).
     pane_proc: std.AutoHashMap([32]u8, PaneProcInfo),
+
+    /// Pane names (Pokemon names) keyed by pane UUID
+    pane_names: std.AutoHashMap([32]u8, []u8),
 
     // Keybinding timers (hold/double-tap delayed press)
     key_timers: std.ArrayList(PendingKeyTimer),
@@ -286,6 +294,7 @@ pub const State = struct {
             .exit_from_shell_death = false,
             .pending_exit_intent = false,
             .exit_intent_deadline_ms = 0,
+            .needs_respawn = false,
             .skip_dead_check = false,
             .pending_pop_response = false,
             .pending_pop_scope = .mux,
@@ -325,6 +334,8 @@ pub const State = struct {
             .pane_shell = std.AutoHashMap([32]u8, PaneShellInfo).init(allocator),
 
             .pane_proc = std.AutoHashMap([32]u8, PaneProcInfo).init(allocator),
+
+            .pane_names = std.AutoHashMap([32]u8, []u8).init(allocator),
 
             .key_timers = .empty,
         };
@@ -399,6 +410,15 @@ pub const State = struct {
                 entry.value_ptr.deinit(self.allocator);
             }
             self.pane_proc.deinit();
+        }
+
+        // Free pane names.
+        {
+            var it = self.pane_names.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.value_ptr.*);
+            }
+            self.pane_names.deinit();
         }
 
         self.key_timers.deinit(self.allocator);

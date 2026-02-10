@@ -1,6 +1,7 @@
 const std = @import("std");
 
 const State = @import("state.zig").State;
+const sprite = @import("sprite.zig");
 
 const statusbar = @import("statusbar.zig");
 const popup_render = @import("popup_render.zig");
@@ -35,6 +36,13 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         // Draw pane-local notification (PANE realm - bottom of pane).
         if (pane.*.hasActiveNotification()) {
             pane.*.notifications.renderInBounds(renderer, pane.*.x, pane.*.y, pane.*.width, pane.*.height, false);
+        }
+
+        // Draw sprite overlay if enabled
+        if (pane.*.sprite_initialized and pane.*.sprite_state.show_sprite) {
+            if (pane.*.sprite_state.sprite_content) |content| {
+                renderer.drawSpriteOverlay(pane.*.x, pane.*.y, pane.*.width, pane.*.height, content);
+            }
         }
     }
 
@@ -76,6 +84,13 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         if (pane.hasActiveNotification()) {
             pane.notifications.renderInBounds(renderer, pane.x, pane.y, pane.width, pane.height, false);
         }
+
+        // Draw sprite overlay if enabled
+        if (pane.sprite_initialized and pane.sprite_state.show_sprite) {
+            if (pane.sprite_state.sprite_content) |content| {
+                renderer.drawSpriteOverlay(pane.x, pane.y, pane.width, pane.height, content);
+            }
+        }
     }
 
     // Draw active float last so it's on top.
@@ -109,6 +124,13 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             // Draw pane-local notification (PANE realm - bottom of pane).
             if (pane.hasActiveNotification()) {
                 pane.notifications.renderInBounds(renderer, pane.x, pane.y, pane.width, pane.height, false);
+            }
+
+            // Draw sprite overlay if enabled
+            if (pane.sprite_initialized and pane.sprite_state.show_sprite) {
+                if (pane.sprite_state.sprite_content) |content| {
+                    renderer.drawSpriteOverlay(pane.x, pane.y, pane.width, pane.height, content);
+                }
             }
         }
     }
