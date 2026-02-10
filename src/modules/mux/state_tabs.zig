@@ -215,6 +215,12 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
     const vt_fd = self.ses_client.getVtFd() orelse return error.NoVtChannel;
     try pane.initWithPod(self.allocator, id, content_x, content_y, content_w, content_h, pane_id, vt_fd, uuid);
 
+    // Request pane info to populate pane name (Pokemon name) for sprites
+    if (self.ses_client.ctl_fd) |ctl_fd| {
+        const msg = core.wire.PaneUuid{ .uuid = uuid };
+        core.wire.writeControl(ctl_fd, .pane_info, std.mem.asBytes(&msg)) catch {};
+    }
+
     pane.floating = true;
     pane.focused = true;
     pane.float_key = float_def.key;
@@ -503,6 +509,12 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                         continue;
                     };
 
+                    // Request pane info to populate pane name
+                    if (self.ses_client.ctl_fd) |ctl_fd| {
+                        const msg = core.wire.PaneUuid{ .uuid = uuid_arr };
+                        core.wire.writeControl(ctl_fd, .pane_info, std.mem.asBytes(&msg)) catch {};
+                    }
+
                     // Restore pane properties.
                     pane.focused = if (pane_obj.get("focused")) |f| (f == .bool and f.bool) else false;
 
@@ -569,6 +581,12 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                     self.allocator.destroy(pane);
                     continue;
                 };
+
+                // Request pane info to populate pane name
+                if (self.ses_client.ctl_fd) |ctl_fd| {
+                    const msg = core.wire.PaneUuid{ .uuid = uuid_arr };
+                    core.wire.writeControl(ctl_fd, .pane_info, std.mem.asBytes(&msg)) catch {};
+                }
 
                 // Restore float properties.
                 pane.floating = true;
@@ -724,6 +742,13 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
                 self.allocator.destroy(pane);
                 return false;
             };
+
+            // Request pane info to populate pane name
+            if (self.ses_client.ctl_fd) |ctl_fd| {
+                const msg = core.wire.PaneUuid{ .uuid = result.uuid };
+                core.wire.writeControl(ctl_fd, .pane_info, std.mem.asBytes(&msg)) catch {};
+            }
+
             pane.focused = true;
             pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
 

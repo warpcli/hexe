@@ -726,6 +726,28 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
                     state.allocator.free(old_name);
                 }
                 state.pane_names.put(resp.uuid, name) catch {};
+
+                // If show_sprites is enabled by default, load the sprite
+                // But only if not manually toggled and content is null (first load)
+                if (state.config.show_sprites) {
+                    // Find the pane with this UUID and load its sprite
+                    // Check all floats
+                    for (state.floats.items) |pane| {
+                        if (std.mem.eql(u8, pane.uuid[0..], resp.uuid[0..]) and pane.sprite_initialized and
+                            !pane.sprite_state.manually_toggled and pane.sprite_state.sprite_content == null) {
+                            pane.sprite_state.loadSprite(name, false) catch {};
+                        }
+                    }
+                    // Check splits
+                    var split_iter = state.currentLayout().splits.valueIterator();
+                    while (split_iter.next()) |pane| {
+                        if (std.mem.eql(u8, pane.*.uuid[0..], resp.uuid[0..]) and pane.*.sprite_initialized and
+                            !pane.*.sprite_state.manually_toggled and pane.*.sprite_state.sprite_content == null) {
+                            pane.*.sprite_state.loadSprite(name, false) catch {};
+                        }
+                    }
+                    state.needs_render = true;
+                }
             }
         } else {
             skipPayload(fd, resp.name_len, buffer);

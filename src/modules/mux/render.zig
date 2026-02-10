@@ -601,17 +601,12 @@ pub const Renderer = struct {
             line_count += 1;
         }
 
-        const sprite_height: u16 = @intCast(@min(line_count, pane_height));
         const sprite_width: u16 = @intCast(@min(max_visual_width, pane_width));
 
-        // Calculate center position
-        const start_y = if (pane_height > sprite_height)
-            pane_y + (pane_height - sprite_height) / 2
-        else
-            pane_y;
-
-        const start_x = if (pane_width > sprite_width)
-            pane_x + (pane_width - sprite_width) / 2
+        // Position at top-right corner with 1 cell padding
+        const start_y = pane_y + 1;
+        const start_x = if (pane_width > sprite_width + 2)
+            pane_x + pane_width - sprite_width - 2
         else
             pane_x;
 

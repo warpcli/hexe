@@ -7,6 +7,7 @@ pub const SpriteState = struct {
     show_sprite: bool = false,
     sprite_name: ?[]const u8 = null,
     sprite_content: ?[]const u8 = null,
+    manually_toggled: bool = false, // Track if user has manually toggled
     allocator: std.mem.Allocator,
 
     pub fn init(allocator: std.mem.Allocator) SpriteState {
@@ -44,11 +45,13 @@ pub const SpriteState = struct {
     /// Toggle sprite display
     pub fn toggle(self: *SpriteState) void {
         self.show_sprite = !self.show_sprite;
+        self.manually_toggled = true;
     }
 
     /// Hide sprite
     pub fn hide(self: *SpriteState) void {
         self.show_sprite = false;
+        self.manually_toggled = true;
     }
 };
 
@@ -124,17 +127,26 @@ pub fn estimateVisualWidth(line: []const u8) usize {
     var i: usize = 0;
     var in_escape = false;
 
-    while (i < line.len) : (i += 1) {
+    while (i < line.len) {
         if (line[i] == 0x1b) { // ESC
             in_escape = true;
+            i += 1;
         } else if (in_escape) {
             if (line[i] == 'm') {
                 in_escape = false;
             }
+            i += 1;
         } else {
-            // Count visible characters
-            // Unicode box-drawing characters count as 1
-            width += 1;
+            // Count visible characters - handle UTF-8 properly
+            const char_len = std.unicode.utf8ByteSequenceLength(line[i]) catch 1;
+            if (i + char_len <= line.len) {
+                // Valid UTF-8 character
+                width += 1;
+                i += char_len;
+            } else {
+                // Invalid UTF-8, skip
+                i += 1;
+            }
         }
     }
 
