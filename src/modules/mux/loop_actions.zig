@@ -588,9 +588,10 @@ pub fn createAdhocFloatWithSize(
         }
     }
 
-    if (state.ses_client.isConnected()) {
-        state.ses_client.updatePaneName(pane.uuid, pane.float_title) catch {};
-    }
+    // Don't update pane name to float title - keep the pod's Pokemon name
+    // if (state.ses_client.isConnected()) {
+    //     state.ses_client.updatePaneName(pane.uuid, pane.float_title) catch {};
+    // }
 
     pane.border_x = outer_x;
     pane.border_y = outer_y;
@@ -698,9 +699,10 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
         }
     }
 
-    if (state.ses_client.isConnected()) {
-        state.ses_client.updatePaneName(pane.uuid, pane.float_title) catch {};
-    }
+    // Don't update pane name to float title - keep the pod's Pokemon name
+    // if (state.ses_client.isConnected()) {
+    //     state.ses_client.updatePaneName(pane.uuid, pane.float_title) catch {};
+    // }
     // For global floats (special or pwd), set per-tab visibility.
     // For tab-bound floats, use simple visible field.
     if (float_def.attributes.global or float_def.attributes.per_cwd) {

@@ -584,6 +584,11 @@ pub const Config = struct {
     // Pokemon sprites
     show_sprites: bool = false, // Show sprites by default on all panes
 
+    // Winpulse - highlight focused pane on focus change
+    winpulse_enabled: bool = false,
+    winpulse_duration_ms: u32 = 50, // Total animation duration
+    winpulse_brighten_factor: f32 = 1.3, // Brighten factor for focused pane (1.0 = no change, 1.3 = 30% brighter)
+
     // Floating pane defaults
     float_width_percent: u8 = 60,
     float_height_percent: u8 = 60,
@@ -766,6 +771,11 @@ fn parseConfig(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocat
             config.show_sprites = false;
         }
     }
+
+    // Winpulse
+    if (runtime.getBool(-1, "winpulse_enabled")) |v| config.winpulse_enabled = v;
+    if (runtime.getInt(u32, -1, "winpulse_duration_ms")) |v| config.winpulse_duration_ms = v;
+    if (runtime.getNumber(-1, "winpulse_brighten_factor")) |v| config.winpulse_brighten_factor = @floatCast(v);
 
     // Selection color
     if (runtime.getInt(u8, -1, "selection_color")) |v| config.selection_color = v;
