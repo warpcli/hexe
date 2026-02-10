@@ -666,8 +666,11 @@ pub const Renderer = struct {
                             j += 1;
                             continue;
                         };
-                        current_cell.char = codepoint;
-                        self.setCell(x, y, current_cell);
+                        // Only render non-space characters to make background transparent
+                        if (codepoint != ' ') {
+                            current_cell.char = codepoint;
+                            self.setCell(x, y, current_cell);
+                        }
                         x += 1;
                         j += char_len;
                     } else {
