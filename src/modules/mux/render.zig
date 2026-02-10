@@ -424,10 +424,9 @@ pub const Renderer = struct {
                     pending_skip = 0;
                 }
 
-                // Wide-character spacer tail: advance cursor but don't overwrite.
+                // Wide-character spacer tail: skip without emitting.
+                // The cursor is already correctly positioned after the wide char.
                 if (new.char == 0) {
-                    try writeCSI(&self.output, self.allocator, "1C");
-                    cursor_x += 1;
                     continue;
                 }
 
