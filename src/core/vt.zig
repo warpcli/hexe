@@ -9,7 +9,7 @@ pub const Terminal = ghostty.Terminal;
 //
 // We set this to match the pod backlog size so the interactive in-mux
 // scrollback feels consistent with detach/reattach behavior.
-const DEFAULT_SCROLLBACK_BYTES: usize = 4 * 1024 * 1024;
+const DEFAULT_SCROLLBACK_BYTES: usize = 16 * 1024 * 1024;
 
 const ReadonlyStream = @TypeOf((@as(*Terminal, undefined)).vtStream());
 

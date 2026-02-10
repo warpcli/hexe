@@ -1198,18 +1198,49 @@ fn handleScrollKeys(state: *State, inp: []const u8) ?usize {
     // Don't intercept scroll keys in alternate screen mode - let the app handle them
     if (p.vt.inAltScreen()) return null;
 
-    // PageUp: ESC [ 5 ~
-    if (inp.len >= 4 and inp[2] == '5' and inp[3] == '~') {
-        p.scrollUp(5);
-        state.needs_render = true;
-        return 4;
+    // PageUp: ESC [ 5 ~ or ESC [ 5 ; <mod> [: <event>] ~
+    if (inp.len >= 4 and inp[2] == '5') {
+        var j: usize = 3;
+        const end = @min(inp.len, 16);
+        // Scan to tilde, extracting event type if present
+        var event_type: u8 = 1; // default to press
+        while (j < end) : (j += 1) {
+            if (inp[j] == '~') {
+                // Only scroll on press/repeat (not release)
+                if (event_type != 3) {
+                    p.scrollUp(5);
+                    state.needs_render = true;
+                }
+                return j + 1;
+            }
+            if (inp[j] == ':' and j + 1 < end and inp[j + 1] >= '0' and inp[j + 1] <= '9') {
+                event_type = inp[j + 1] - '0';
+            }
+            // Allow digits, semicolon, colon
+            if ((inp[j] >= '0' and inp[j] <= '9') or inp[j] == ';' or inp[j] == ':') continue;
+            break; // Invalid char
+        }
     }
 
-    // PageDown: ESC [ 6 ~
-    if (inp.len >= 4 and inp[2] == '6' and inp[3] == '~') {
-        p.scrollDown(5);
-        state.needs_render = true;
-        return 4;
+    // PageDown: ESC [ 6 ~ or ESC [ 6 ; <mod> [: <event>] ~
+    if (inp.len >= 4 and inp[2] == '6') {
+        var j: usize = 3;
+        const end = @min(inp.len, 16);
+        var event_type: u8 = 1;
+        while (j < end) : (j += 1) {
+            if (inp[j] == '~') {
+                if (event_type != 3) {
+                    p.scrollDown(5);
+                    state.needs_render = true;
+                }
+                return j + 1;
+            }
+            if (inp[j] == ':' and j + 1 < end and inp[j + 1] >= '0' and inp[j + 1] <= '9') {
+                event_type = inp[j + 1] - '0';
+            }
+            if ((inp[j] >= '0' and inp[j] <= '9') or inp[j] == ';' or inp[j] == ':') continue;
+            break;
+        }
     }
 
     // Home: ESC [ H or ESC [ 1 ~

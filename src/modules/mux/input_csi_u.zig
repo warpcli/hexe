@@ -183,6 +183,65 @@ pub fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
                 continue;
             }
 
+            // Handle hybrid sequences: ESC [ <num> ; <mod> [:<event>] ~
+            // These are traditional sequences (like PageUp=5~) with CSI-u event types
+            // Format: ESC [ <digits> ; <modifier> [: <event_type>] ~
+            if (i + 2 < bytes.len and bytes[i + 2] >= '0' and bytes[i + 2] <= '9') {
+                var j: usize = i + 2;
+                const end = @min(bytes.len, i + 128);
+                var found_semicolon = false;
+                var found_colon = false;
+                var event_type: u8 = 1; // default to press
+
+                // Scan for pattern: digits ; digits [:digits] ~
+                while (j < end) : (j += 1) {
+                    const ch = bytes[j];
+                    if (ch == '~') {
+                        // Found tilde terminator - filter by event type
+                        // Only swallow release events (event_type == 3)
+                        if (event_type != 3) {
+                            // Strip event type and forward as traditional sequence
+                            // Convert ESC[5;1:3~ to ESC[5~, or ESC[5~ as-is
+                            const colon_pos = std.mem.indexOf(u8, bytes[i..j+1], ":");
+                            const semi_pos = std.mem.indexOf(u8, bytes[i..j+1], ";");
+
+                            if (colon_pos != null or semi_pos != null) {
+                                // Has modifiers/event type - strip them, keep just keycode~
+                                // Find end of keycode (before semicolon)
+                                var keycode_end = i + 2;
+                                while (keycode_end < j and bytes[keycode_end] >= '0' and bytes[keycode_end] <= '9') : (keycode_end += 1) {}
+                                flush(state, &scratch, &n);
+                                // Forward: ESC [ <keycode> ~
+                                keybinds.forwardInputToFocusedPane(state, bytes[i..keycode_end]);
+                                keybinds.forwardInputToFocusedPane(state, "~");
+                            } else {
+                                // Plain sequence, no modifiers - forward as-is
+                                flush(state, &scratch, &n);
+                                keybinds.forwardInputToFocusedPane(state, bytes[i..j+1]);
+                            }
+                        }
+                        i = j + 1;
+                        break;
+                    }
+                    if (ch == ';') {
+                        found_semicolon = true;
+                        continue;
+                    }
+                    if (ch == ':') {
+                        found_colon = true;
+                        // Parse event type after colon
+                        if (j + 1 < end and bytes[j + 1] >= '0' and bytes[j + 1] <= '9') {
+                            event_type = bytes[j + 1] - '0';
+                        }
+                        continue;
+                    }
+                    if ((ch >= '0' and ch <= '9')) continue;
+                    // Invalid char - not a hybrid sequence
+                    break;
+                }
+                if (j < end and bytes[j] == '~') continue; // Already handled above
+            }
+
             // Last-resort: swallow CSI-u shaped sequences (ESC [ <digits...> u).
             // CSI-u format: ESC [ <digits> [:<digits>] [;<digits>[:<digits>]] u
             // Only swallow if ALL bytes between ESC[ and 'u' are valid CSI-u chars.
