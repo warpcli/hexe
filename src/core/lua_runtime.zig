@@ -473,6 +473,60 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "rbracket");
     lua.setField(-2, "key");
 
+    // hexe.mux = { config = {}, keymap = {}, float = {}, tabs = {}, splits = {} }
+    lua.createTable(0, 5);
+    lua.createTable(0, 0); // hexe.mux.config
+    lua.setField(-2, "config");
+    lua.createTable(0, 0); // hexe.mux.keymap
+    lua.setField(-2, "keymap");
+    lua.createTable(0, 0); // hexe.mux.float
+    lua.setField(-2, "float");
+    lua.createTable(0, 0); // hexe.mux.tabs
+    lua.setField(-2, "tabs");
+    lua.createTable(0, 0); // hexe.mux.splits
+    lua.setField(-2, "splits");
+    lua.setField(-2, "mux");
+
+    // hexe.ses = { layout = {}, session = {} }
+    lua.createTable(0, 2);
+    lua.createTable(0, 0); // hexe.ses.layout
+    lua.setField(-2, "layout");
+    lua.createTable(0, 0); // hexe.ses.session
+    lua.setField(-2, "session");
+    lua.setField(-2, "ses");
+
+    // hexe.shp = { prompt = {}, segment = {} }
+    lua.createTable(0, 2);
+    lua.createTable(0, 0); // hexe.shp.prompt
+    lua.setField(-2, "prompt");
+    lua.createTable(0, 0); // hexe.shp.segment
+    lua.setField(-2, "segment");
+    lua.setField(-2, "shp");
+
+    // hexe.pop = { notify = {}, confirm = {}, choose = {}, widgets = {} }
+    lua.createTable(0, 4);
+    lua.createTable(0, 0); // hexe.pop.notify
+    lua.setField(-2, "notify");
+    lua.createTable(0, 0); // hexe.pop.confirm
+    lua.setField(-2, "confirm");
+    lua.createTable(0, 0); // hexe.pop.choose
+    lua.setField(-2, "choose");
+    lua.createTable(0, 0); // hexe.pop.widgets
+    lua.setField(-2, "widgets");
+    lua.setField(-2, "pop");
+
+    // hexe.autocmd = {}
+    lua.createTable(0, 0);
+    lua.setField(-2, "autocmd");
+
+    // hexe.api = {}
+    lua.createTable(0, 0);
+    lua.setField(-2, "api");
+
+    // hexe.plugin = {}
+    lua.createTable(0, 0);
+    lua.setField(-2, "plugin");
+
     // hx.version
     _ = lua.pushString("0.1.0");
     lua.setField(-2, "version");
