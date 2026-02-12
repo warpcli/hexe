@@ -177,18 +177,40 @@ pub const MuxConfigBuilder = struct {
     }
 };
 
-/// Placeholder for SES section builder
+/// SES section builder - accumulates session/layout configuration
 pub const SesConfigBuilder = struct {
     allocator: std.mem.Allocator,
 
+    // Layouts
+    layouts: std.ArrayList(config.LayoutDef),
+
     pub fn init(allocator: std.mem.Allocator) !*SesConfigBuilder {
         const self = try allocator.create(SesConfigBuilder);
-        self.* = .{ .allocator = allocator };
+        self.* = .{
+            .allocator = allocator,
+            .layouts = std.ArrayList(config.LayoutDef).init(allocator),
+        };
         return self;
     }
 
     pub fn deinit(self: *SesConfigBuilder) void {
-        _ = self;
+        // Clean up layouts
+        for (self.layouts.items) |*layout| {
+            var l = @constCast(layout);
+            l.deinit(self.allocator);
+        }
+        self.layouts.deinit();
+    }
+
+    pub fn build(self: *SesConfigBuilder) !config.SesConfig {
+        var result = config.SesConfig{};
+
+        // Transfer layouts
+        if (self.layouts.items.len > 0) {
+            result.layouts = try self.layouts.toOwnedSlice();
+        }
+
+        return result;
     }
 };
 
