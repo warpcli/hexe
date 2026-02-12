@@ -553,3 +553,133 @@ pub export fn hexe_mux_float_define(L: ?*LuaState) callconv(.C) c_int {
 
     return 0;
 }
+
+/// Lua C function: hexe.mux.tabs.add_segment(position, segment)
+pub export fn hexe_mux_tabs_add_segment(L: ?*LuaState) callconv(.C) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    // Get position (arg 1)
+    const position = lua.toString(1) catch {
+        _ = lua.pushString("tabs.add_segment: position must be a string");
+        lua.raiseError();
+    };
+
+    // Arg 2 must be a table
+    if (lua.typeOf(2) != .table) {
+        _ = lua.pushString("tabs.add_segment: second argument must be a table");
+        lua.raiseError();
+    }
+
+    // Get MuxConfigBuilder
+    const mux = getMuxBuilder(lua) catch {
+        _ = lua.pushString("tabs.add_segment: failed to get config builder");
+        lua.raiseError();
+    };
+
+    // Parse segment fields
+    _ = lua.getField(2, "name");
+    const name = lua.toString(-1) catch {
+        _ = lua.pushString("tabs.add_segment: segment must have a 'name' field");
+        lua.raiseError();
+    };
+    const name_copy = mux.allocator.dupe(u8, name) catch {
+        _ = lua.pushString("tabs.add_segment: failed to allocate name");
+        lua.raiseError();
+    };
+    lua.pop(1);
+
+    // Create basic segment (simplified for now)
+    const segment = config.Segment{
+        .name = name_copy,
+        .priority = 50, // default
+        // TODO: Parse outputs, command, when, etc.
+    };
+
+    // Append to appropriate list
+    if (std.mem.eql(u8, position, "left")) {
+        mux.tabs_config.segments_left.append(segment) catch {
+            _ = lua.pushString("tabs.add_segment: failed to append segment");
+            lua.raiseError();
+        };
+    } else if (std.mem.eql(u8, position, "center")) {
+        mux.tabs_config.segments_center.append(segment) catch {
+            _ = lua.pushString("tabs.add_segment: failed to append segment");
+            lua.raiseError();
+        };
+    } else if (std.mem.eql(u8, position, "right")) {
+        mux.tabs_config.segments_right.append(segment) catch {
+            _ = lua.pushString("tabs.add_segment: failed to append segment");
+            lua.raiseError();
+        };
+    } else {
+        _ = lua.pushString("tabs.add_segment: position must be 'left', 'center', or 'right'");
+        lua.raiseError();
+    }
+
+    return 0;
+}
+
+/// Lua C function: hexe.mux.tabs.set_status(enabled)
+pub export fn hexe_mux_tabs_set_status(L: ?*LuaState) callconv(.C) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    // Get enabled (arg 1)
+    if (lua.typeOf(1) != .boolean) {
+        _ = lua.pushString("tabs.set_status: argument must be a boolean");
+        lua.raiseError();
+    }
+    const enabled = lua.toBoolean(1);
+
+    // Get MuxConfigBuilder
+    const mux = getMuxBuilder(lua) catch {
+        _ = lua.pushString("tabs.set_status: failed to get config builder");
+        lua.raiseError();
+    };
+
+    mux.tabs_config.status_enabled = enabled;
+
+    return 0;
+}
+
+/// Lua C function: hexe.mux.splits.setup(opts)
+pub export fn hexe_mux_splits_setup(L: ?*LuaState) callconv(.C) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    // Arg 1 must be a table
+    if (lua.typeOf(1) != .table) {
+        _ = lua.pushString("splits.setup: argument must be a table");
+        lua.raiseError();
+    }
+
+    // Get MuxConfigBuilder
+    const mux = getMuxBuilder(lua) catch {
+        _ = lua.pushString("splits.setup: failed to get config builder");
+        lua.raiseError();
+    };
+
+    // Parse color table
+    _ = lua.getField(1, "color");
+    if (lua.typeOf(-1) == .table) {
+        var color = config.BorderColor{};
+        _ = lua.getField(-1, "active");
+        if (lua.typeOf(-1) == .number) {
+            const a = lua.toNumber(-1) catch 0;
+            color.active = @intFromFloat(a);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "passive");
+        if (lua.typeOf(-1) == .number) {
+            const p = lua.toNumber(-1) catch 0;
+            color.passive = @intFromFloat(p);
+        }
+        lua.pop(1);
+
+        mux.splits_config.color = color;
+    }
+    lua.pop(1);
+
+    // TODO: Parse separator_v, separator_h, style (Unicode parsing needed)
+
+    return 0;
+}
