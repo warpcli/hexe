@@ -781,3 +781,98 @@ pub export fn hexe_mux_splits_setup(L: ?*LuaState) callconv(.C) c_int {
 
     return 0;
 }
+
+// ===== SES API Functions =====
+
+/// Lua C function: hexe.ses.layout.define(name, opts)
+pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.C) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    // Get name (arg 1)
+    const name_str = lua.toString(1) catch {
+        _ = lua.pushString("layout.define: name must be a string");
+        lua.raiseError();
+    };
+
+    // Arg 2 must be a table
+    if (lua.typeOf(2) != .table) {
+        _ = lua.pushString("layout.define: second argument must be a table");
+        lua.raiseError();
+    }
+
+    // Get SesConfigBuilder
+    const ses = getSesBuilder(lua) catch {
+        _ = lua.pushString("layout.define: failed to get config builder");
+        lua.raiseError();
+    };
+
+    const name = ses.allocator.dupe(u8, name_str) catch {
+        _ = lua.pushString("layout.define: failed to allocate name");
+        lua.raiseError();
+    };
+
+    // Parse enabled
+    _ = lua.getField(2, "enabled");
+    const enabled = if (lua.typeOf(-1) == .boolean)
+        lua.toBoolean(-1)
+    else
+        false;
+    lua.pop(1);
+
+    // Parse tabs array
+    var tabs = std.ArrayList(config.LayoutTabDef).init(ses.allocator);
+    _ = lua.getField(2, "tabs");
+    if (lua.typeOf(-1) == .table) {
+        const tabs_len = lua.rawLen(-1);
+        var i: i32 = 1;
+        while (i <= tabs_len) : (i += 1) {
+            _ = lua.rawGetIndex(-1, i);
+            if (lua.typeOf(-1) == .table) {
+                // Parse tab
+                _ = lua.getField(-1, "name");
+                const tab_name_str = lua.toString(-2) catch {
+                    lua.pop(2); // pop name and tab
+                    continue;
+                };
+                const tab_name = ses.allocator.dupe(u8, tab_name_str) catch {
+                    lua.pop(2);
+                    continue;
+                };
+                lua.pop(1); // pop name
+
+                // Parse root split
+                _ = lua.getField(-1, "root");
+                const root = if (lua.typeOf(-1) == .table)
+                    parseLayoutSplit(lua, -1, ses.allocator)
+                else
+                    null;
+                lua.pop(1); // pop root
+
+                const tab = config.LayoutTabDef{
+                    .name = tab_name,
+                    .enabled = true,
+                    .root = if (root) |r| r.* else null,
+                };
+                tabs.append(tab) catch {};
+            }
+            lua.pop(1); // pop tab
+        }
+    }
+    lua.pop(1); // pop tabs array
+
+    // Create layout
+    const layout = config.LayoutDef{
+        .name = name,
+        .enabled = enabled,
+        .tabs = tabs.toOwnedSlice() catch &[_]config.LayoutTabDef{},
+        .floats = &[_]config.LayoutFloatDef{}, // TODO: Parse floats
+    };
+
+    // Append to layouts
+    ses.layouts.append(layout) catch {
+        _ = lua.pushString("layout.define: failed to append layout");
+        lua.raiseError();
+    };
+
+    return 0;
+}
