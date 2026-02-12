@@ -72,6 +72,69 @@ pub fn getPopBuilder(lua: *Lua) !*config_builder.PopConfigBuilder {
     return builder.pop.?;
 }
 
+// ===== Parsing Helpers =====
+
+/// Parse a key string into BindKey
+fn parseKeyString(key_str: []const u8) ?config.Config.BindKey {
+    if (key_str.len == 1) return .{ .char = key_str[0] };
+    if (std.mem.eql(u8, key_str, "space")) return .space;
+    if (std.mem.eql(u8, key_str, "up")) return .up;
+    if (std.mem.eql(u8, key_str, "down")) return .down;
+    if (std.mem.eql(u8, key_str, "left")) return .left;
+    if (std.mem.eql(u8, key_str, "right")) return .right;
+    return null;
+}
+
+/// Result of parsing a key array
+pub const ParsedKey = struct {
+    mods: u8, // Bitmask of modifiers
+    key: config.Config.BindKey,
+};
+
+/// Parse Lua array of keys into mods + key
+/// Format: { hx.key.ctrl, hx.key.alt, hx.key.q }
+/// Modifiers are prefixed with "mod:", actual keys are not
+pub fn parseKeyArray(lua: *Lua, table_idx: i32) ?ParsedKey {
+    if (lua.typeOf(table_idx) != .table) return null;
+
+    var mods: u8 = 0;
+    var key: ?config.Config.BindKey = null;
+
+    const len = lua.rawLen(table_idx);
+    var i: i32 = 1;
+    while (i <= len) : (i += 1) {
+        _ = lua.rawGetIndex(table_idx, i);
+        defer lua.pop(1);
+
+        const elem = lua.toString(-1) catch continue;
+
+        // Check if it's a modifier (prefixed with "mod:")
+        if (std.mem.startsWith(u8, elem, "mod:")) {
+            const mod_name = elem[4..];
+            if (std.mem.eql(u8, mod_name, "ctrl")) {
+                mods |= 2;
+            } else if (std.mem.eql(u8, mod_name, "alt")) {
+                mods |= 1;
+            } else if (std.mem.eql(u8, mod_name, "shift")) {
+                mods |= 4;
+            } else if (std.mem.eql(u8, mod_name, "super")) {
+                mods |= 8;
+            }
+        } else {
+            // It's a key
+            if (parseKeyString(elem)) |k| {
+                key = k;
+            }
+        }
+    }
+
+    if (key) |k| {
+        return ParsedKey{ .mods = mods, .key = k };
+    }
+
+    return null;
+}
+
 // ===== MUX API Functions =====
 
 /// Lua C function: hexe.mux.config.set(key, value)
