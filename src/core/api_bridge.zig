@@ -402,3 +402,89 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.C) c_int {
 
     return 0;
 }
+
+/// Lua C function: hexe.mux.float.set_defaults(opts)
+pub export fn hexe_mux_float_set_defaults(L: ?*LuaState) callconv(.C) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    // Arg 1 must be a table
+    if (lua.typeOf(1) != .table) {
+        _ = lua.pushString("float.set_defaults: argument must be a table");
+        lua.raiseError();
+    }
+
+    // Get MuxConfigBuilder
+    const mux = getMuxBuilder(lua) catch {
+        _ = lua.pushString("float.set_defaults: failed to get config builder");
+        lua.raiseError();
+    };
+
+    // Initialize float_defaults if not already
+    if (mux.float_defaults == null) {
+        mux.float_defaults = .{};
+    }
+
+    // Parse size table
+    _ = lua.getField(1, "size");
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "width");
+        if (lua.typeOf(-1) == .number) {
+            const w = lua.toNumber(-1) catch 0;
+            mux.float_defaults.?.width_percent = @intFromFloat(w);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "height");
+        if (lua.typeOf(-1) == .number) {
+            const h = lua.toNumber(-1) catch 0;
+            mux.float_defaults.?.height_percent = @intFromFloat(h);
+        }
+        lua.pop(1);
+    }
+    lua.pop(1);
+
+    // Parse padding table
+    _ = lua.getField(1, "padding");
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "x");
+        if (lua.typeOf(-1) == .number) {
+            const x = lua.toNumber(-1) catch 0;
+            mux.float_defaults.?.padding_x = @intFromFloat(x);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "y");
+        if (lua.typeOf(-1) == .number) {
+            const y = lua.toNumber(-1) catch 0;
+            mux.float_defaults.?.padding_y = @intFromFloat(y);
+        }
+        lua.pop(1);
+    }
+    lua.pop(1);
+
+    // Parse color table
+    _ = lua.getField(1, "color");
+    if (lua.typeOf(-1) == .table) {
+        var color = config.BorderColor{};
+        _ = lua.getField(-1, "active");
+        if (lua.typeOf(-1) == .number) {
+            const a = lua.toNumber(-1) catch 0;
+            color.active = @intFromFloat(a);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "passive");
+        if (lua.typeOf(-1) == .number) {
+            const p = lua.toNumber(-1) catch 0;
+            color.passive = @intFromFloat(p);
+        }
+        lua.pop(1);
+
+        mux.float_defaults.?.color = color;
+    }
+    lua.pop(1);
+
+    // TODO: Parse attributes, style (more complex, skip for now)
+
+    return 0;
+}
