@@ -93,8 +93,9 @@ pub const MsgType = enum(u16) {
     replay_backlogs = 0x0130, // MUX tells SES it's ready for backlog replay
     kill_session = 0x0131, // CLI → SES: kill a detached session
     clear_sessions = 0x0132, // CLI → SES: kill all detached sessions
-    get_layout = 0x0133, // CLI → SES: get mux state for layout save
-    apply_layout = 0x0134, // CLI → SES → MUX: apply saved layout tree
+    clear_orphaned_panes = 0x0133, // CLI → SES: kill all orphaned/sticky panes
+    get_layout = 0x0134, // CLI → SES: get mux state for layout save
+    apply_layout = 0x0135, // CLI → SES → MUX: apply saved layout tree
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -414,6 +415,11 @@ pub const ClearSessionsResult = extern struct {
     killed_panes: u16 align(1),
 };
 
+/// ClearOrphanedPanesResult: response to clear_orphaned_panes.
+pub const ClearOrphanedPanesResult = extern struct {
+    killed_panes: u16 align(1),
+};
+
 /// ApplyLayout: CLI → SES → MUX: apply a saved layout tree.
 /// uuid identifies the source pane (to find the right session/MUX).
 /// Followed by: tree_json bytes (tree_json_len).
@@ -707,11 +713,15 @@ pub fn tryReadMuxVtHeader(fd: posix.fd_t) !MuxVtHeader {
     // First byte: propagate WouldBlock (no frame available).
     const first = posix.read(fd, buf[0..1]) catch |err| return err;
     if (first == 0) return error.ConnectionClosed;
-    // Remaining bytes: wait with yield (frame is in-flight from SES).
+    // Remaining bytes: wait with timeout (frame is in-flight from SES).
     var off: usize = 1;
     while (off < buf.len) {
         const n = posix.read(fd, buf[off..]) catch |err| switch (err) {
-            error.WouldBlock => continue,
+            error.WouldBlock => {
+                // Wait for more data with timeout
+                waitForReady(fd, posix.POLL.IN, DEFAULT_IO_TIMEOUT_MS) catch |wait_err| return wait_err;
+                continue;
+            },
             else => return err,
         };
         if (n == 0) return error.ConnectionClosed;
@@ -724,11 +734,36 @@ pub fn tryReadMuxVtHeader(fd: posix.fd_t) !MuxVtHeader {
 // Low-level I/O
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// Default timeout for network I/O operations (10 seconds).
+pub const DEFAULT_IO_TIMEOUT_MS: i32 = 10_000;
+
+/// Wait for fd to be ready with timeout. Returns error.Timeout if timeout expires.
+fn waitForReady(fd: posix.fd_t, events: i16, timeout_ms: i32) !void {
+    var pfd = [_]posix.pollfd{.{
+        .fd = fd,
+        .events = events,
+        .revents = 0,
+    }};
+    const ready = posix.poll(&pfd, timeout_ms) catch |err| return err;
+    if (ready == 0) return error.Timeout;
+    if (pfd[0].revents & posix.POLL.ERR != 0) return error.PollError;
+    if (pfd[0].revents & posix.POLL.HUP != 0) return error.ConnectionClosed;
+    if (pfd[0].revents & posix.POLL.NVAL != 0) return error.InvalidFileDescriptor;
+}
+
 pub fn writeAll(fd: posix.fd_t, data: []const u8) !void {
+    return writeAllTimeout(fd, data, DEFAULT_IO_TIMEOUT_MS);
+}
+
+pub fn writeAllTimeout(fd: posix.fd_t, data: []const u8, timeout_ms: i32) !void {
     var off: usize = 0;
     while (off < data.len) {
         const n = posix.write(fd, data[off..]) catch |err| switch (err) {
-            error.WouldBlock => continue,
+            error.WouldBlock => {
+                // Wait for fd to become writable with timeout
+                waitForReady(fd, posix.POLL.OUT, timeout_ms) catch |wait_err| return wait_err;
+                continue;
+            },
             else => return err,
         };
         if (n == 0) return error.ConnectionClosed;
@@ -737,14 +772,28 @@ pub fn writeAll(fd: posix.fd_t, data: []const u8) !void {
 }
 
 pub fn readExact(fd: posix.fd_t, buf: []u8) !void {
+    return readExactTimeout(fd, buf, DEFAULT_IO_TIMEOUT_MS);
+}
+
+pub fn readExactTimeout(fd: posix.fd_t, buf: []u8, timeout_ms: i32) !void {
     var off: usize = 0;
+    var retries: usize = 0;
+    const MAX_RETRIES = 10; // Prevent infinite retry loops on pathological cases
+
     while (off < buf.len) {
         const n = posix.read(fd, buf[off..]) catch |err| switch (err) {
-            error.WouldBlock => continue,
+            error.WouldBlock => {
+                // Wait for fd to become readable with timeout
+                waitForReady(fd, posix.POLL.IN, timeout_ms) catch |wait_err| return wait_err;
+                retries += 1;
+                if (retries > MAX_RETRIES) return error.TooManyRetries;
+                continue;
+            },
             else => return err,
         };
         if (n == 0) return error.ConnectionClosed;
         off += n;
+        retries = 0; // Reset retry counter on successful read
     }
 }
 

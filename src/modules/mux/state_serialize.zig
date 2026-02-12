@@ -6,6 +6,9 @@ const SplitDir = layout_mod.SplitDir;
 
 const Pane = @import("pane.zig").Pane;
 
+// Current serialization format version
+const SERIALIZE_VERSION: u32 = 1;
+
 /// Serialize entire mux state to JSON for detach.
 pub fn serializeState(self: anytype) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
@@ -13,6 +16,10 @@ pub fn serializeState(self: anytype) ![]const u8 {
     const writer = buf.writer(self.allocator);
 
     try writer.writeAll("{");
+
+    // Version and timestamp for integrity checking
+    try writer.print("\"version\":{d},", .{SERIALIZE_VERSION});
+    try writer.print("\"timestamp\":{d},", .{std.time.timestamp()});
 
     // Mux UUID and session name (persistent identity).
     try writer.print("\"uuid\":\"{s}\",", .{self.uuid});
@@ -69,7 +76,19 @@ pub fn serializeState(self: anytype) ![]const u8 {
     }
     try writer.writeAll("]");
 
+    // Close main object, then add checksum
     try writer.writeAll("}");
+
+    // Calculate checksum of the JSON content for integrity verification
+    const content = buf.items;
+    var hasher = std.hash.Wyhash.init(0);
+    hasher.update(content);
+    const checksum = hasher.final();
+
+    // Reopen the JSON to add checksum field
+    // Remove the closing brace and add checksum
+    _ = buf.pop();
+    try writer.print(",\"_checksum\":{d}}}", .{checksum});
 
     return buf.toOwnedSlice(self.allocator);
 }

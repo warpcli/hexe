@@ -384,6 +384,13 @@ pub fn getSesSocketPath(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/ses.sock", .{dir});
 }
 
+/// Get path to transaction log file for crash recovery.
+pub fn getTxLogPath(allocator: std.mem.Allocator) ![]const u8 {
+    const dir = try getSocketDir(allocator);
+    defer allocator.free(dir);
+    return std.fmt.allocPrint(allocator, "{s}/ses.txlog", .{dir});
+}
+
 /// Check if ses is running by trying to connect.
 /// If socket file exists but connection fails, removes the stale socket.
 pub fn isSesRunning(allocator: std.mem.Allocator) bool {

@@ -794,6 +794,10 @@ fn dispatchAction(state: *State, action: BindAction) bool {
             return true;
         },
         .split_h => {
+            // Prevent split creation during detach (race prevention)
+            if (state.detach_mode) {
+                return true; // Silently ignore during detach
+            }
             const parent_uuid = state.getCurrentFocusedUuid();
             var cwd: ?[]const u8 = null;
             if (state.currentLayout().getFocusedPane()) |p| {
@@ -812,6 +816,10 @@ fn dispatchAction(state: *State, action: BindAction) bool {
             return true;
         },
         .split_v => {
+            // Prevent split creation during detach (race prevention)
+            if (state.detach_mode) {
+                return true; // Silently ignore during detach
+            }
             const parent_uuid = state.getCurrentFocusedUuid();
             var cwd: ?[]const u8 = null;
             if (state.currentLayout().getFocusedPane()) |p| {
@@ -848,6 +856,10 @@ fn dispatchAction(state: *State, action: BindAction) bool {
             return true;
         },
         .tab_new => {
+            // Prevent tab creation during detach (race prevention)
+            if (state.detach_mode) {
+                return true; // Silently ignore during detach
+            }
             state.active_floating = null;
             state.createTab() catch |e| {
                 core.logging.logError("mux", "createTab failed", e);

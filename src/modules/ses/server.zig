@@ -248,6 +248,13 @@ pub const Server = struct {
         // Validate protocol version.
         if (handshake[1] != wire.PROTOCOL_VERSION) {
             ses.debugLog("reject: unsupported protocol version {d} (expected {d})", .{ handshake[1], wire.PROTOCOL_VERSION });
+            // Send error message if this is a CTL channel (can receive error responses)
+            if (handshake[0] == wire.SES_HANDSHAKE_MUX_CTL or handshake[0] == wire.SES_HANDSHAKE_POD_CTL) {
+                // Send version mismatch error
+                const err_msg = "protocol_version_mismatch";
+                const err_payload = wire.Error{ .msg_len = @intCast(err_msg.len) };
+                wire.writeControlWithTrail(conn.fd, .@"error", std.mem.asBytes(&err_payload), err_msg) catch {};
+            }
             var tmp = conn;
             tmp.close();
             return;
@@ -676,6 +683,12 @@ pub const Server = struct {
         // Read trailing name.
         var name_slice: []const u8 = "";
         if (reg.name_len > 0) {
+            if (reg.name_len > wire.MAX_PAYLOAD_LEN) {
+                // Name exceeds protocol limit - drain and reject
+                self.skipBinaryPayload(fd, reg.name_len, buf);
+                self.sendBinaryError(fd, "register: name exceeds MAX_PAYLOAD_LEN");
+                return;
+            }
             if (reg.name_len <= buf.len) {
                 wire.readExact(fd, buf[0..reg.name_len]) catch {
                     self.sendBinaryError(fd, "register: name read failed");
@@ -683,9 +696,9 @@ pub const Server = struct {
                 };
                 name_slice = buf[0..reg.name_len];
             } else {
-                // Name too large - drain bytes to keep stream aligned, then reject
+                // Name too large for buffer - drain bytes to keep stream aligned, then reject
                 self.skipBinaryPayload(fd, reg.name_len, buf);
-                self.sendBinaryError(fd, "register: name too long");
+                self.sendBinaryError(fd, "register: name too long for buffer");
                 return;
             }
         }
@@ -724,6 +737,13 @@ pub const Server = struct {
         // If this session_id matches a detached session, the MUX has successfully
         // restored it — remove the detached entry now.
         self.ses_state.removeDetachedSession(session_id);
+
+        // Transaction log: reattach commit
+        const hex_id: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
+        self.ses_state.txlog.write(.reattach_commit, session_id, &hex_id) catch {};
+
+        // Release session lock (set during reattach in completeReattach)
+        self.ses_state.releaseSessionLock(session_id);
 
         const final_name = resolved_name orelse name_slice;
         ses.debugLog("registered: session={s} name={s} (requested={s}) client_id={d}", .{ reg.session_id[0..8], final_name, name_slice, client_id });
@@ -769,7 +789,7 @@ pub const Server = struct {
     fn handleBinaryCreatePane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
         if (payload_len < @sizeOf(wire.CreatePane)) {
             self.skipBinaryPayload(fd, payload_len, buf);
-            self.sendBinaryError(fd, "invalid_payload");
+            self.sendBinaryError(fd, "create_pane: payload too small for CreatePane struct");
             return;
         }
         const cp = wire.readStruct(wire.CreatePane, fd) catch return;
@@ -854,7 +874,13 @@ pub const Server = struct {
             return;
         };
 
-        if (self.ses_state.findStickyPane(pwd, fs.key)) |pane| {
+        // Get session name for affinity preference
+        const preferred_session = if (self.ses_state.getClient(client_id)) |client|
+            client.session_name
+        else
+            null;
+
+        if (self.ses_state.findStickyPaneWithAffinity(pwd, fs.key, preferred_session)) |pane| {
             _ = self.ses_state.attachPane(pane.uuid, client_id) catch {
                 wire.writeControl(fd, .pane_not_found, &.{}) catch {};
                 return;
@@ -885,18 +911,18 @@ pub const Server = struct {
     fn handleBinaryAdoptPane(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
         if (payload_len < @sizeOf(wire.PaneUuid)) {
             self.skipBinaryPayload(fd, payload_len, buf);
-            self.sendBinaryError(fd, "invalid_payload");
+            self.sendBinaryError(fd, "adopt_pane: payload too small for PaneUuid");
             return;
         }
         const pu = wire.readStruct(wire.PaneUuid, fd) catch return;
 
         const client_id = self.findClientForCtlFd(fd) orelse {
-            self.sendBinaryError(fd, "no_client");
+            self.sendBinaryError(fd, "adopt_pane: client not registered");
             return;
         };
 
         const pane = self.ses_state.attachPane(pu.uuid, client_id) catch {
-            self.sendBinaryError(fd, "adopt_failed");
+            self.sendBinaryError(fd, "adopt_pane: pane not found or already attached");
             return;
         };
         self.ses_state.markDirty();
@@ -937,9 +963,23 @@ pub const Server = struct {
 
         if (self.ses_state.panes.getPtr(ss.uuid)) |pane| {
             if (pane.sticky_pwd) |old| self.allocator.free(old);
+            if (pane.sticky_session_name) |old_ssn| self.allocator.free(old_ssn);
+
             pane.sticky_pwd = if (ss.pwd_len > 0) self.allocator.dupe(u8, buf[0..ss.pwd_len]) catch null else null;
             pane.sticky_key = if (ss.key != 0) ss.key else null;
-            if (pane.sticky_pwd != null) pane.state = .sticky;
+
+            // Store session name for affinity
+            const client_id = self.findClientForCtlFd(fd) orelse null;
+            pane.sticky_session_name = if (client_id) |cid| blk: {
+                if (self.ses_state.getClient(cid)) |client| {
+                    if (client.session_name) |sn| {
+                        break :blk self.allocator.dupe(u8, sn) catch null;
+                    }
+                }
+                break :blk null;
+            } else null;
+
+            if (pane.sticky_pwd != null) _ = pane.transitionState(.sticky, "set_sticky command");
             self.ses_state.markDirty();
         }
         wire.writeControl(fd, .ok, &.{}) catch {};
@@ -1036,20 +1076,20 @@ pub const Server = struct {
     fn handleBinaryDetach(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
         if (payload_len < @sizeOf(wire.Detach)) {
             self.skipBinaryPayload(fd, payload_len, buf);
-            self.sendBinaryError(fd, "invalid_payload");
+            self.sendBinaryError(fd, "detach: payload too small for Detach header");
             return;
         }
         const det = wire.readStruct(wire.Detach, fd) catch return;
         if (det.state_len > wire.MAX_PAYLOAD_LEN) {
             self.skipBinaryPayload(fd, det.state_len, buf);
-            self.sendBinaryError(fd, "state_too_large");
+            self.sendBinaryError(fd, "detach: state too large (exceeds MAX_PAYLOAD_LEN)");
             return;
         }
 
         // Read mux state.
         const state_data = self.allocator.alloc(u8, det.state_len) catch {
             self.skipBinaryPayload(fd, det.state_len, buf);
-            self.sendBinaryError(fd, "alloc_failed");
+            self.sendBinaryError(fd, "detach: memory allocation failed for state data");
             return;
         };
         defer self.allocator.free(state_data);
@@ -1057,12 +1097,12 @@ pub const Server = struct {
 
         // Convert session_id hex to binary.
         const session_id = core.uuid.hexToBin(det.session_id) orelse {
-            self.sendBinaryError(fd, "invalid_session_id");
+            self.sendBinaryError(fd, "detach: invalid session_id hex format");
             return;
         };
 
         const client_id = self.findClientForCtlFd(fd) orelse {
-            self.sendBinaryError(fd, "no_client");
+            self.sendBinaryError(fd, "detach: client not registered");
             return;
         };
 
@@ -1071,10 +1111,21 @@ pub const Server = struct {
         else
             "unknown";
 
+        // Acquire session lock to prevent concurrent reattach
+        self.ses_state.acquireSessionLock(session_id, client_id, .detaching) catch {
+            self.sendBinaryError(fd, "session_locked: another client is attaching this session");
+            return;
+        };
+        // Lock will be released after detach completes
+
         if (self.ses_state.detachSession(client_id, session_id, session_name, state_data)) {
             self.ses_state.markDirty();
+            // Release lock after successful detach
+            self.ses_state.releaseSessionLock(session_id);
             wire.writeControl(fd, .session_detached, &.{}) catch {};
         } else {
+            // Release lock on failure too
+            self.ses_state.releaseSessionLock(session_id);
             self.sendBinaryError(fd, "detach_failed");
         }
     }
@@ -1094,56 +1145,115 @@ pub const Server = struct {
         wire.readExact(fd, buf[0..ra.id_len]) catch return;
         const id_prefix = buf[0..ra.id_len];
 
-        // Find matching session.
-        var matched_session_id: ?[16]u8 = null;
-        var match_count: usize = 0;
+        // Enforce minimum prefix length to avoid ambiguous matches
+        if (id_prefix.len < 4) {
+            self.sendBinaryError(fd, "prefix_too_short: provide at least 4 characters (UUID or session name)");
+            return;
+        }
+
+        // Phase 1: Try UUID prefix match (most specific, unambiguous).
+        // UUID matching takes priority over name matching.
+        var uuid_matched_id: ?[16]u8 = null;
+        var uuid_match_count: usize = 0;
         var ds_iter = self.ses_state.detached_sessions.iterator();
         while (ds_iter.next()) |entry| {
             const key_ptr = entry.key_ptr;
-            const detached = entry.value_ptr;
             const hex_id: [32]u8 = std.fmt.bytesToHex(key_ptr, .lower);
-
             if (std.mem.startsWith(u8, &hex_id, id_prefix)) {
-                matched_session_id = key_ptr.*;
-                match_count += 1;
-            } else if (std.ascii.eqlIgnoreCase(detached.session_name, id_prefix)) {
-                matched_session_id = key_ptr.*;
-                match_count += 1;
-            } else if (id_prefix.len >= 3 and detached.session_name.len >= id_prefix.len) {
-                var match = true;
-                for (id_prefix, 0..) |c, i| {
-                    if (std.ascii.toLower(c) != std.ascii.toLower(detached.session_name[i])) {
-                        match = false;
-                        break;
-                    }
-                }
-                if (match) {
-                    matched_session_id = key_ptr.*;
-                    match_count += 1;
+                uuid_matched_id = key_ptr.*;
+                uuid_match_count += 1;
+            }
+        }
+
+        // If UUID matched uniquely, use it immediately (don't try name matching).
+        if (uuid_match_count == 1) {
+            const session_id = uuid_matched_id.?;
+            const client_id = self.findClientForCtlFd(fd) orelse {
+                self.sendBinaryError(fd, "no_client");
+                return;
+            };
+            self.completeReattach(fd, session_id, client_id);
+            return;
+        }
+
+        // If multiple UUID matches (very rare, but possible with short prefixes), report ambiguity.
+        if (uuid_match_count > 1) {
+            self.sendBinaryError(fd, "ambiguous_uuid_prefix: provide more characters");
+            return;
+        }
+
+        // Phase 2: No UUID match, try exact session name match.
+        // Collect all matching sessions for disambiguation.
+        var name_matches: [16]struct {
+            session_id: [16]u8,
+            name: []const u8,
+        } = undefined;
+        var name_match_count: usize = 0;
+
+        ds_iter = self.ses_state.detached_sessions.iterator();
+        while (ds_iter.next()) |entry| {
+            const key_ptr = entry.key_ptr;
+            const detached = entry.value_ptr;
+
+            // Exact name match (case-insensitive).
+            if (std.ascii.eqlIgnoreCase(detached.session_name, id_prefix)) {
+                if (name_match_count < name_matches.len) {
+                    name_matches[name_match_count] = .{
+                        .session_id = key_ptr.*,
+                        .name = detached.session_name,
+                    };
+                    name_match_count += 1;
                 }
             }
         }
 
-        if (match_count == 0) {
+        if (name_match_count == 0) {
             self.sendBinaryError(fd, "session_not_found");
             return;
         }
-        if (match_count > 1) {
-            self.sendBinaryError(fd, "ambiguous_session_id");
+
+        if (name_match_count == 1) {
+            const session_id = name_matches[0].session_id;
+            const client_id = self.findClientForCtlFd(fd) orelse {
+                self.sendBinaryError(fd, "no_client");
+                return;
+            };
+            self.completeReattach(fd, session_id, client_id);
             return;
         }
 
-        const session_id = matched_session_id.?;
-        const client_id = self.findClientForCtlFd(fd) orelse {
-            self.sendBinaryError(fd, "no_client");
+        // Multiple sessions with the same name - build disambiguation message.
+        var err_buf: [512]u8 = undefined;
+        var err_stream = std.io.fixedBufferStream(&err_buf);
+        const writer = err_stream.writer();
+        writer.print("ambiguous: multiple sessions named '{s}'. Use UUID prefix:\n", .{id_prefix}) catch {};
+        for (name_matches[0..name_match_count]) |match| {
+            const hex_id = std.fmt.bytesToHex(&match.session_id, .lower);
+            writer.print("  {s} ({s})\n", .{ hex_id[0..8], match.name }) catch {};
+        }
+        self.sendBinaryError(fd, err_stream.getWritten());
+    }
+
+    /// Helper to complete reattach after session_id is resolved.
+    fn completeReattach(self: *Server, fd: posix.fd_t, session_id: [16]u8, client_id: usize) void {
+        // Transaction log: reattach start
+        const hex_id: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
+        self.ses_state.txlog.write(.reattach_start, session_id, &hex_id) catch {};
+
+        // Acquire session lock to prevent concurrent reattach
+        self.ses_state.acquireSessionLock(session_id, client_id, .attaching) catch {
+            self.sendBinaryError(fd, "session_locked: another client is attaching this session");
             return;
         };
+        // Note: Lock will be released in handleBinaryRegister after successful registration
 
         const result = self.ses_state.reattachSession(session_id, client_id) catch {
+            self.ses_state.releaseSessionLock(session_id);
             self.sendBinaryError(fd, "reattach_failed");
             return;
         };
         if (result == null) {
+            self.ses_state.releaseSessionLock(session_id);
             self.sendBinaryError(fd, "session_not_found");
             return;
         }
@@ -1193,8 +1303,9 @@ pub const Server = struct {
             return;
         }
         const upn = wire.readStruct(wire.UpdatePaneName, fd) catch return;
-        if (upn.name_len > buf.len) {
+        if (upn.name_len > wire.MAX_PAYLOAD_LEN or upn.name_len > buf.len) {
             self.skipBinaryPayload(fd, upn.name_len, buf);
+            self.sendBinaryError(fd, "update_pane_name: name too large");
             return;
         }
         if (upn.name_len > 0) {
@@ -1236,8 +1347,9 @@ pub const Server = struct {
         }
         const ups = wire.readStruct(wire.UpdatePaneShell, fd) catch return;
         const trail_len = payload_len - @sizeOf(wire.UpdatePaneShell);
-        if (trail_len > buf.len) {
+        if (trail_len > wire.MAX_PAYLOAD_LEN or trail_len > buf.len) {
             self.skipBinaryPayload(fd, trail_len, buf);
+            self.sendBinaryError(fd, "update_pane_shell: payload too large");
             return;
         }
         if (trail_len > 0) {
@@ -1292,8 +1404,9 @@ pub const Server = struct {
             return;
         }
         const cc = wire.readStruct(wire.CwdChanged, fd) catch return;
-        if (cc.cwd_len > buf.len) {
+        if (cc.cwd_len > wire.MAX_PAYLOAD_LEN or cc.cwd_len > buf.len) {
             self.skipBinaryPayload(fd, cc.cwd_len, buf);
+            self.sendBinaryError(fd, "cwd_changed: path too large");
             return;
         }
         if (cc.cwd_len > 0) {
@@ -1314,8 +1427,9 @@ pub const Server = struct {
             return;
         }
         const fc = wire.readStruct(wire.FgChanged, fd) catch return;
-        if (fc.name_len > buf.len) {
+        if (fc.name_len > wire.MAX_PAYLOAD_LEN or fc.name_len > buf.len) {
             self.skipBinaryPayload(fd, fc.name_len, buf);
+            self.sendBinaryError(fd, "fg_changed: name too large");
             return;
         }
         if (fc.name_len > 0) {
@@ -1338,7 +1452,7 @@ pub const Server = struct {
         }
         const ev = wire.readStruct(wire.ShpShellEvent, fd) catch return;
         const trail_len = payload_len - @sizeOf(wire.ShpShellEvent);
-        if (trail_len > buf.len) {
+        if (trail_len > wire.MAX_PAYLOAD_LEN or trail_len > buf.len) {
             self.skipBinaryPayload(fd, trail_len, buf);
             return;
         }
@@ -1687,6 +1801,9 @@ pub const Server = struct {
             },
             .clear_sessions => {
                 self.handleClearSessions(fd);
+            },
+            .clear_orphaned_panes => {
+                self.handleClearOrphanedPanes(fd);
             },
             .get_layout => {
                 self.handleGetLayout(fd, hdr.payload_len, &buf);
@@ -2176,6 +2293,20 @@ pub const Server = struct {
             .killed_panes = @intCast(counts.panes),
         };
         wire.writeControl(fd, .clear_sessions, std.mem.asBytes(&result)) catch {};
+    }
+
+    /// Handle clear_orphaned_panes CLI request.
+    fn handleClearOrphanedPanes(self: *Server, fd: posix.fd_t) void {
+        defer posix.close(fd);
+
+        ses.debugLog("clear_orphaned_panes: starting", .{});
+        const killed = self.ses_state.killAllOrphanedPanes();
+        ses.debugLog("clear_orphaned_panes: killed {d} panes", .{killed});
+
+        const result = wire.ClearOrphanedPanesResult{
+            .killed_panes = @intCast(killed),
+        };
+        wire.writeControl(fd, .clear_orphaned_panes, std.mem.asBytes(&result)) catch {};
     }
 
     /// Handle get_layout CLI request — return last_mux_state for the pane's session.

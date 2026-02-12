@@ -4,13 +4,76 @@ const core = @import("core");
 const ipc = core.ipc;
 const wire = core.wire;
 const ses = @import("main.zig");
+const txlog = @import("txlog.zig");
 
-/// Pane state - minimal, just keeps process alive
+/// Pane state machine for session lifecycle management.
+/// See /doc/code/hexa/SESSION_LIFECYCLE.md for complete documentation.
+///
+/// Valid transitions:
+///   attached  → detached, sticky, orphaned
+///   detached  → attached, orphaned
+///   sticky    → attached, orphaned
+///   orphaned  → attached, sticky
+///
+/// CRITICAL: Always use Pane.transitionState() to change states.
+/// Never set pane.state directly - transitions are validated and logged.
 pub const PaneState = enum {
-    attached, // mux is connected and owns this pane
-    detached, // part of detached session, waiting for reattach
-    sticky, // sticky pwd float, waiting for same pwd+key
-    orphaned, // fully orphaned, any mux can adopt
+    /// Active connection to MUX client. Pane receives input, sends output.
+    /// - attached_to: contains client_id
+    /// - session_id: null (not part of detached session)
+    /// - VT channels: connected to MUX
+    attached,
+
+    /// Part of a detached session (keepalive), waiting for reattachment.
+    /// Full session state preserved for restoration. Cannot be adopted individually.
+    /// - attached_to: null
+    /// - session_id: contains detached session UUID
+    /// - VT channels: disconnected
+    /// - Stored in: detached_sessions map
+    detached,
+
+    /// Half-orphaned pane with sticky pwd+key, waiting for same-directory adoption.
+    /// Prefers reattaching to the same session (session affinity).
+    /// - attached_to: null
+    /// - sticky_pwd: working directory path
+    /// - sticky_key: keybinding identifier
+    /// - sticky_session_name: originating session (optional, for affinity)
+    /// - orphaned_at: timestamp set
+    sticky,
+
+    /// Fully orphaned pane, can be adopted by any MUX.
+    /// No pwd/key restrictions on adoption.
+    /// - attached_to: null
+    /// - sticky_pwd/sticky_key: null or missing
+    /// - orphaned_at: timestamp set
+    orphaned,
+
+    /// Validate state transition and return true if valid.
+    /// Idempotent updates (same state) are always valid.
+    /// Invalid transitions return false and are logged.
+    pub fn isValidTransition(from: PaneState, to: PaneState) bool {
+        // Same state is always valid (idempotent updates)
+        if (from == to) return true;
+
+        return switch (from) {
+            .attached => switch (to) {
+                .detached, .sticky, .orphaned => true,
+                else => false,
+            },
+            .detached => switch (to) {
+                .attached, .orphaned => true,
+                else => false,
+            },
+            .sticky => switch (to) {
+                .attached, .orphaned => true,
+                else => false,
+            },
+            .orphaned => switch (to) {
+                .attached, .sticky => true,
+                else => false,
+            },
+        };
+    }
 };
 
 /// Pane type - split or float
@@ -39,6 +102,7 @@ pub const Pane = struct {
     // For sticky pwd floats
     sticky_pwd: ?[]const u8,
     sticky_key: ?u8,
+    sticky_session_name: ?[]const u8 = null, // Session that created this sticky pane (for affinity)
 
     // Which client owns this pane (null if orphaned/detached)
     attached_to: ?usize,
@@ -83,6 +147,43 @@ pub const Pane = struct {
 
     allocator: std.mem.Allocator,
 
+    /// Transition pane to new state with validation and logging.
+    /// Returns true if transition succeeded, false if invalid.
+    pub fn transitionState(self: *Pane, new_state: PaneState, reason: []const u8) bool {
+        const old_state = self.state;
+
+        // Validate transition
+        if (!PaneState.isValidTransition(old_state, new_state)) {
+            ses.debugLog("INVALID state transition: {s} -> {s} (reason: {s}) uuid={s}", .{
+                @tagName(old_state),
+                @tagName(new_state),
+                reason,
+                self.uuid[0..8],
+            });
+            return false;
+        }
+
+        // Log transition (skip if same state)
+        if (old_state != new_state) {
+            ses.debugLog("state transition: {s} -> {s} (reason: {s}) uuid={s}", .{
+                @tagName(old_state),
+                @tagName(new_state),
+                reason,
+                self.uuid[0..8],
+            });
+        }
+
+        // Update state
+        self.state = new_state;
+
+        // Update timestamps
+        if (new_state == .orphaned and old_state != .orphaned) {
+            self.orphaned_at = std.time.timestamp();
+        }
+
+        return true;
+    }
+
     pub fn deinit(self: *Pane) void {
         if (self.name) |n| {
             self.allocator.free(n);
@@ -90,6 +191,9 @@ pub const Pane = struct {
         self.allocator.free(self.pod_socket_path);
         if (self.sticky_pwd) |pwd| {
             self.allocator.free(pwd);
+        }
+        if (self.sticky_session_name) |ssn| {
+            self.allocator.free(ssn);
         }
         if (self.cwd) |c| {
             self.allocator.free(c);
@@ -248,6 +352,19 @@ pub const Client = struct {
     }
 };
 
+/// Session lock state - prevents concurrent attach/detach
+pub const SessionLockState = enum {
+    attaching, // Reattach in progress
+    detaching, // Detach in progress
+};
+
+/// Session lock entry - tracks ongoing operations
+pub const SessionLock = struct {
+    client_id: usize,
+    state: SessionLockState,
+    locked_at: i64, // Timestamp for timeout detection
+};
+
 /// Detached session info (for listing)
 pub const DetachedSession = struct {
     session_id: [16]u8,
@@ -292,9 +409,23 @@ pub const SesState = struct {
     /// Fds that need to be removed from the server poll set (old fds closed by connectPodVt).
     pending_remove_poll_fds: std.ArrayList(posix.fd_t),
 
+    // Session locks (prevent concurrent attach/detach)
+    session_locks: std.AutoHashMap([16]u8, SessionLock),
+
+    // Transaction log for crash recovery
+    txlog: txlog.TxLog,
+    txlog_path: []const u8, // Owned, must be freed in deinit()
+    txlog_path_is_fallback: bool, // Track if using string literal fallback
+
     pub fn init(_: std.mem.Allocator) SesState {
         // Always use page_allocator to avoid GPA issues after fork/daemonization
         const page_alloc = std.heap.page_allocator;
+
+        // Initialize transaction log path
+        const fallback_path = "/tmp/hexe-ses.txlog";
+        const txlog_path = ipc.getTxLogPath(page_alloc) catch fallback_path;
+        const is_fallback = std.mem.eql(u8, txlog_path, fallback_path);
+
         return .{
             .allocator = page_alloc,
             .panes = std.AutoHashMap([32]u8, Pane).init(page_alloc),
@@ -308,6 +439,10 @@ pub const SesState = struct {
             .pod_vt_to_pane_id = std.AutoHashMap(posix.fd_t, u16).init(page_alloc),
             .pending_poll_fds = .empty,
             .pending_remove_poll_fds = .empty,
+            .session_locks = std.AutoHashMap([16]u8, SessionLock).init(page_alloc),
+            .txlog = txlog.TxLog.init(page_alloc, txlog_path) catch unreachable,
+            .txlog_path = txlog_path,
+            .txlog_path_is_fallback = is_fallback,
         };
     }
 
@@ -419,6 +554,51 @@ pub const SesState = struct {
         self.dirty = true;
     }
 
+    /// Acquire session lock for attach/detach operation.
+    /// Returns error if session is already locked.
+    pub fn acquireSessionLock(self: *SesState, session_id: [16]u8, client_id: usize, state: SessionLockState) !void {
+        // Check if already locked
+        if (self.session_locks.get(session_id)) |existing_lock| {
+            // Check for timeout (30 seconds)
+            const now = std.time.timestamp();
+            const lock_age = now - existing_lock.locked_at;
+            if (lock_age > 30) {
+                // Lock expired, remove it and continue
+                ses.debugLog("acquireSessionLock: expired lock detected, removing (age={d}s)", .{lock_age});
+                _ = self.session_locks.remove(session_id);
+            } else {
+                // Lock still valid
+                return error.SessionLocked;
+            }
+        }
+
+        // Acquire lock
+        const lock = SessionLock{
+            .client_id = client_id,
+            .state = state,
+            .locked_at = std.time.timestamp(),
+        };
+        try self.session_locks.put(session_id, lock);
+        ses.debugLog("acquireSessionLock: locked session {s} for {s}", .{
+            std.fmt.bytesToHex(&session_id, .lower)[0..8],
+            @tagName(state),
+        });
+    }
+
+    /// Release session lock after operation completes.
+    pub fn releaseSessionLock(self: *SesState, session_id: [16]u8) void {
+        if (self.session_locks.remove(session_id)) {
+            ses.debugLog("releaseSessionLock: released session {s}", .{
+                std.fmt.bytesToHex(&session_id, .lower)[0..8],
+            });
+        }
+    }
+
+    /// Check if session is currently locked.
+    pub fn isSessionLocked(self: *SesState, session_id: [16]u8) bool {
+        return self.session_locks.contains(session_id);
+    }
+
     pub fn deinit(self: *SesState) void {
         // Close all panes
         var pane_iter = self.panes.valueIterator();
@@ -449,6 +629,14 @@ pub const SesState = struct {
 
         self.pane_id_to_pod_vt.deinit();
         self.pod_vt_to_pane_id.deinit();
+        self.pending_poll_fds.deinit(self.allocator);
+        self.pending_remove_poll_fds.deinit(self.allocator);
+        self.session_locks.deinit();
+        self.txlog.deinit();
+        // Free txlog_path if it was allocated (not the fallback literal)
+        if (!self.txlog_path_is_fallback) {
+            self.allocator.free(self.txlog_path);
+        }
     }
 
     /// Add a new client connection
@@ -501,6 +689,9 @@ pub const SesState = struct {
                         };
                     }
                 }
+                // Close connection fds before deinit to prevent fd leaks
+                if (client.mux_ctl_fd) |fd| posix.close(fd);
+                if (client.mux_vt_fd) |fd| posix.close(fd);
                 client.deinit();
                 client_index = i;
                 break;
@@ -519,6 +710,9 @@ pub const SesState = struct {
         var client_index: ?usize = null;
         for (self.clients.items, 0..) |*client, i| {
             if (client.id == client_id) {
+                // Close connection fds before deinit to prevent fd leaks
+                if (client.mux_ctl_fd) |fd| posix.close(fd);
+                if (client.mux_vt_fd) |fd| posix.close(fd);
                 client.deinit();
                 client_index = i;
                 break;
@@ -542,9 +736,8 @@ pub const SesState = struct {
                     if (preserve_sticky) {
                         if (self.panes.getPtr(uuid)) |pane| {
                             if (pane.sticky_pwd != null and pane.sticky_key != null) {
-                                pane.state = .sticky;
+                                _ = pane.transitionState(.sticky, "mux shutdown with sticky pwd");
                                 pane.attached_to = null;
-                                pane.orphaned_at = std.time.timestamp();
                                 continue;
                             }
                         }
@@ -554,6 +747,9 @@ pub const SesState = struct {
                     };
                 }
 
+                // Close connection fds before deinit to prevent fd leaks
+                if (client.mux_ctl_fd) |fd| posix.close(fd);
+                if (client.mux_vt_fd) |fd| posix.close(fd);
                 client.deinit();
                 client_index = i;
                 break;
@@ -571,12 +767,15 @@ pub const SesState = struct {
         const hex_id: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
         ses.debugLog("detachSessionDirect: session={s} name={s}", .{ hex_id[0..8], client.session_name orelse "null" });
 
+        // Transaction log: detach start
+        self.txlog.write(.detach_start, session_id, &hex_id) catch {};
+
         var pane_uuids_list: std.ArrayList([32]u8) = .empty;
 
         // Mark all panes as detached and collect UUIDs
         for (client.pane_uuids.items) |uuid| {
             if (self.panes.getPtr(uuid)) |pane| {
-                pane.state = .detached;
+                _ = pane.transitionState(.detached, "session detach");
                 pane.session_id = session_id;
                 pane.attached_to = null;
                 pane_uuids_list.append(self.allocator, uuid) catch continue;
@@ -628,6 +827,9 @@ pub const SesState = struct {
         };
         ses.debugLog("detachSessionDirect: success, detached_sessions.count={d}", .{self.detached_sessions.count()});
         self.dirty = true;
+
+        // Transaction log: detach commit
+        self.txlog.write(.detach_commit, session_id, &hex_id) catch {};
     }
 
     /// Detach a client's session with a specific session ID (mux's UUID)
@@ -643,12 +845,31 @@ pub const SesState = struct {
         const owned_name = self.allocator.dupe(u8, session_name) catch return false;
         errdefer self.allocator.free(owned_name);
 
+        // Backup for rollback: track original pane states before modification
+        const PaneBackup = struct {
+            uuid: [32]u8,
+            state: PaneState,
+            session_id: ?[16]u8,
+            attached_to: ?usize,
+        };
+        var pane_backups: std.ArrayList(PaneBackup) = .empty;
+        defer pane_backups.deinit(self.allocator);
+
         for (self.clients.items, 0..) |*client, i| {
             if (client.id == client_id) {
                 // Mark all panes as detached with session_id and collect UUIDs
                 for (client.pane_uuids.items) |uuid| {
                     if (self.panes.getPtr(uuid)) |pane| {
-                        pane.state = .detached;
+                        // Save original state for rollback
+                        pane_backups.append(self.allocator, .{
+                            .uuid = uuid,
+                            .state = pane.state,
+                            .session_id = pane.session_id,
+                            .attached_to = pane.attached_to,
+                        }) catch continue;
+
+                        // Apply new state
+                        _ = pane.transitionState(.detached, "atomic detach");
                         pane.session_id = session_id;
                         pane.attached_to = null;
                         pane_uuids_list.append(self.allocator, uuid) catch continue;
@@ -671,13 +892,32 @@ pub const SesState = struct {
 
             // Store the full mux state (owned_name already duped above)
             const owned_json = self.allocator.dupe(u8, mux_state_json) catch {
+                ses.debugLog("detachSession: failed to dupe mux_state_json, rolling back", .{});
                 self.allocator.free(owned_name);
-                return true;
+                pane_uuids_list.deinit(self.allocator);
+                // Rollback pane states
+                for (pane_backups.items) |backup| {
+                    if (self.panes.getPtr(backup.uuid)) |pane| {
+                        _ = pane.transitionState(backup.state, "detach rollback (name alloc failure)");
+                        pane.session_id = backup.session_id;
+                        pane.attached_to = backup.attached_to;
+                    }
+                }
+                return false;
             };
             const owned_uuids = pane_uuids_list.toOwnedSlice(self.allocator) catch {
+                ses.debugLog("detachSession: failed to toOwnedSlice, rolling back", .{});
                 self.allocator.free(owned_name);
                 self.allocator.free(owned_json);
-                return true;
+                // Rollback pane states
+                for (pane_backups.items) |backup| {
+                    if (self.panes.getPtr(backup.uuid)) |pane| {
+                        _ = pane.transitionState(backup.state, "detach rollback (uuid list alloc failure)");
+                        pane.session_id = backup.session_id;
+                        pane.attached_to = backup.attached_to;
+                    }
+                }
+                return false;
             };
 
             const detached_state = DetachedMuxState{
@@ -690,9 +930,19 @@ pub const SesState = struct {
             };
 
             self.detached_sessions.put(session_id, detached_state) catch {
+                ses.debugLog("detachSession: failed to put detached_state, rolling back", .{});
                 self.allocator.free(owned_name);
                 self.allocator.free(owned_json);
                 self.allocator.free(owned_uuids);
+                // Rollback pane states
+                for (pane_backups.items) |backup| {
+                    if (self.panes.getPtr(backup.uuid)) |pane| {
+                        _ = pane.transitionState(backup.state, "detach rollback (session map put failure)");
+                        pane.session_id = backup.session_id;
+                        pane.attached_to = backup.attached_to;
+                    }
+                }
+                return false;
             };
             self.dirty = true;
 
@@ -773,10 +1023,10 @@ pub const SesState = struct {
 
         if (pane.sticky_pwd != null and pane.sticky_key != null) {
             // Sticky pwd float - becomes half-orphaned
-            pane.state = .sticky;
+            _ = pane.transitionState(.sticky, "disown with sticky pwd");
         } else {
             // Regular pane - becomes fully orphaned
-            pane.state = .orphaned;
+            _ = pane.transitionState(.orphaned, "disown without sticky pwd");
         }
 
         pane.attached_to = null;
@@ -809,6 +1059,7 @@ pub const SesState = struct {
             try self.allocator.dupe(u8, pwd)
         else
             null;
+        errdefer if (owned_pwd) |pwd| self.allocator.free(pwd);
 
         const now = std.time.timestamp();
 
@@ -830,6 +1081,13 @@ pub const SesState = struct {
             .pane_id = pane_id,
             .allocator = self.allocator,
         };
+
+        // Add errdefer to clean up pane resources if put fails
+        errdefer {
+            if (pane.name) |n| self.allocator.free(n);
+            self.allocator.free(pane.pod_socket_path);
+            if (pane.sticky_pwd) |pwd| self.allocator.free(pwd);
+        }
 
         try self.panes.put(uuid, pane);
         self.dirty = true;
@@ -1015,20 +1273,49 @@ pub const SesState = struct {
     }
 
     /// Find a half-orphaned sticky pane matching pwd and key
+    /// Find a sticky pane by pwd and key, with optional session affinity.
+    /// If preferred_session_name is provided, prefer panes from that session.
     pub fn findStickyPane(self: *SesState, pwd: []const u8, key: u8) ?*Pane {
+        return self.findStickyPaneWithAffinity(pwd, key, null);
+    }
+
+    /// Find a sticky pane with session affinity preference.
+    pub fn findStickyPaneWithAffinity(self: *SesState, pwd: []const u8, key: u8, preferred_session_name: ?[]const u8) ?*Pane {
+        var fallback_pane: ?*Pane = null;
+
         var iter = self.panes.valueIterator();
         while (iter.next()) |pane| {
             if (pane.state == .sticky) {
                 if (pane.sticky_pwd) |spwd| {
                     if (pane.sticky_key) |skey| {
                         if (skey == key and std.mem.eql(u8, spwd, pwd)) {
-                            return @constCast(pane);
+                            // Check for session affinity
+                            if (preferred_session_name) |psn| {
+                                if (pane.sticky_session_name) |ssn| {
+                                    if (std.mem.eql(u8, ssn, psn)) {
+                                        // Perfect match - same session
+                                        ses.debugLog("findStickyPane: affinity match (session={s})", .{psn});
+                                        return @constCast(pane);
+                                    }
+                                }
+                            }
+                            // Save as fallback
+                            if (fallback_pane == null) {
+                                fallback_pane = @constCast(pane);
+                            }
                         }
                     }
                 }
             }
         }
-        return null;
+
+        // Return fallback if no affinity match found
+        if (fallback_pane != null) {
+            if (preferred_session_name) |psn| {
+                ses.debugLog("findStickyPane: using fallback (preferred={s})", .{psn});
+            }
+        }
+        return fallback_pane;
     }
 
     /// Attach an orphaned/detached pane to a client.
@@ -1052,7 +1339,7 @@ pub const SesState = struct {
         pane.needs_backlog_replay = true;
         ses.debugLog("attachPane: marked for deferred backlog replay", .{});
 
-        pane.state = .attached;
+        _ = pane.transitionState(.attached, "pane attached to client");
         pane.attached_to = client_id;
         pane.orphaned_at = null;
         self.dirty = true;
@@ -1103,11 +1390,11 @@ pub const SesState = struct {
 
         // Check if sticky info is set - becomes sticky, otherwise orphaned
         if (pane.sticky_pwd != null and pane.sticky_key != null) {
-            pane.state = .sticky;
-            ses.debugLog("suspendPane: {s} -> sticky (pwd={s}, key={c})", .{ uuid[0..8], pane.sticky_pwd.?, pane.sticky_key.? });
+            _ = pane.transitionState(.sticky, "suspend with sticky pwd");
+            ses.debugLog("suspendPane: {s} pwd={s}, key={c}", .{ uuid[0..8], pane.sticky_pwd.?, pane.sticky_key.? });
         } else {
-            pane.state = .orphaned;
-            ses.debugLog("suspendPane: {s} -> orphaned (pwd={any}, key={any})", .{ uuid[0..8], pane.sticky_pwd != null, pane.sticky_key != null });
+            _ = pane.transitionState(.orphaned, "suspend without sticky pwd");
+            ses.debugLog("suspendPane: {s} pwd={any}, key={any}", .{ uuid[0..8], pane.sticky_pwd != null, pane.sticky_key != null });
         }
         pane.attached_to = null;
         pane.orphaned_at = std.time.timestamp();
@@ -1348,6 +1635,33 @@ pub const SesState = struct {
         }
 
         return .{ .sessions = total_sessions, .panes = total_panes };
+    }
+
+    /// Kill all orphaned and sticky panes (cleanup operation).
+    pub fn killAllOrphanedPanes(self: *SesState) usize {
+        var uuids_to_kill: std.ArrayList([32]u8) = .empty;
+        defer uuids_to_kill.deinit(self.allocator);
+
+        // Collect all orphaned/sticky pane UUIDs first to avoid iterator invalidation.
+        var iter = self.panes.iterator();
+        while (iter.next()) |entry| {
+            const pane = entry.value_ptr;
+            if (pane.state == .orphaned or pane.state == .sticky) {
+                uuids_to_kill.append(self.allocator, entry.key_ptr.*) catch continue;
+            }
+        }
+
+        var killed: usize = 0;
+        for (uuids_to_kill.items) |uuid| {
+            self.killPane(uuid) catch continue;
+            killed += 1;
+        }
+
+        if (killed > 0) {
+            self.dirty = true;
+        }
+
+        return killed;
     }
 
     /// Find a detached session by name or UUID prefix.

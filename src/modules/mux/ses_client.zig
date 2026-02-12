@@ -792,6 +792,16 @@ pub const SesClient = struct {
         return self.ctl_fd;
     }
 
+    /// Check if CTL channel is available. Logs a warning if not.
+    /// Returns true if CTL is available, false otherwise.
+    pub fn ensureCtlConnected(self: *SesClient) bool {
+        if (self.ctl_fd == null) {
+            mux.debugLog("CTL channel not available (disconnected)", .{});
+            return false;
+        }
+        return true;
+    }
+
     // ── Helpers ──────────────────────────────────────────────────────────────
 
     /// Read a response from the CTL fd, skipping any fire-and-forget response

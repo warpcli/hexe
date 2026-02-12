@@ -135,6 +135,7 @@ pub const State = struct {
     active_floating: ?usize,
     running: bool,
     detach_mode: bool,
+    reattach_in_progress: std.atomic.Value(bool),
     needs_render: bool,
     force_full_render: bool,
     /// When true, force cursor visible on next render (set after float death)
@@ -233,6 +234,11 @@ pub const State = struct {
     // Keybinding timers (hold/double-tap delayed press)
     key_timers: std.ArrayList(PendingKeyTimer),
 
+    // Scroll acceleration tracking
+    scroll_repeat_count: u8 = 0,
+    last_scroll_key: u8 = 0, // 5=pageup, 6=pagedown
+    last_scroll_time_ms: i64 = 0,
+
     pub fn init(allocator: std.mem.Allocator, width: u16, height: u16, debug: bool, log_file: ?[]const u8) !State {
         const cfg = core.Config.load(allocator);
         const pop_cfg = pop.PopConfig.load(allocator);
@@ -291,6 +297,7 @@ pub const State = struct {
             .active_floating = null,
             .running = true,
             .detach_mode = false,
+            .reattach_in_progress = std.atomic.Value(bool).init(false),
             .needs_render = true,
             .force_full_render = true,
             .cursor_needs_restore = false,

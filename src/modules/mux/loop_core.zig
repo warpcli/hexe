@@ -93,8 +93,24 @@ pub fn runMainLoop(state: *State) !void {
                 if (!state.floats.items[fi].isAlive()) {
                     // Check if this was the active float.
                     const was_active = if (state.active_floating) |af| af == fi else false;
+                    const exit_code = state.floats.items[fi].getExitCode();
 
                     const pane = state.floats.orderedRemove(fi);
+
+                    // Log float pane death
+                    mux.debugLog("float pane died: uuid={s} exit_code={d} focused={}", .{ pane.uuid[0..8], exit_code, was_active });
+
+                    // Show notification if float died with non-zero exit and wasn't focused
+                    if (!was_active and exit_code != 0) {
+                        const msg = std.fmt.allocPrint(
+                            allocator,
+                            "Background float exited with code {d}",
+                            .{exit_code},
+                        ) catch "Background float exited unexpectedly";
+                        defer if (msg.ptr != "Background float exited unexpectedly".ptr) allocator.free(msg);
+                        state.notifications.showFor(msg, 3000);
+                    }
+
                     float_completion.handleBlockingFloatCompletion(state, pane);
 
                     // Kill in ses (dead panes don't need to be orphaned).
@@ -346,7 +362,20 @@ pub fn runMainLoop(state: *State) !void {
 
         // Handle SES VT channel (multiplexed pod output for all pod panes).
         if (ses_vt_fd_idx) |vidx| {
-            if (poll_fds[vidx].revents & posix.POLL.IN != 0) {
+            const revents = poll_fds[vidx].revents;
+
+            // Check for VT connection errors (HUP, ERR, NVAL).
+            if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
+                mux.debugLog("VT channel error detected: revents=0x{x}", .{revents});
+                // Close the VT fd to prevent further use.
+                if (state.ses_client.vt_fd) |vt_fd| {
+                    posix.close(vt_fd);
+                    state.ses_client.vt_fd = null;
+                    state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
+                }
+                // VT disconnection is critical - all pod panes will freeze.
+                // Could attempt reconnection here, but for now just notify user.
+            } else if (revents & posix.POLL.IN != 0) {
                 const vt_fd = state.ses_client.getVtFd().?;
                 // Read as many frames as available without blocking.
                 var vt_frames: usize = 0;
@@ -388,7 +417,19 @@ pub fn runMainLoop(state: *State) !void {
 
         // Handle ses control messages.
         if (ses_fd_idx) |sidx| {
-            if (poll_fds[sidx].revents & posix.POLL.IN != 0) {
+            const revents = poll_fds[sidx].revents;
+
+            // Check for connection errors (HUP, ERR, NVAL).
+            if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
+                mux.debugLog("CTL channel error detected: revents=0x{x}", .{revents});
+                // Close the CTL fd to prevent further use.
+                if (state.ses_client.ctl_fd) |ctl_fd| {
+                    posix.close(ctl_fd);
+                    state.ses_client.ctl_fd = null;
+                    state.notifications.showFor("Warning: Lost connection to ses daemon (CTL channel)", 5000);
+                }
+                // Continue running - panes still work via VT channel.
+            } else if (revents & posix.POLL.IN != 0) {
                 loop_ipc.handleSesMessage(state, &buffer);
             }
         }
@@ -474,9 +515,29 @@ pub fn runMainLoop(state: *State) !void {
         // Remove dead splits (skip if just respawned a shell).
         if (!state.skip_dead_check) {
             for (dead_splits.items) |dead_id| {
+                // Find the dead pane to get exit status and determine if notification is needed
+                const dead_pane = state.currentLayout().splits.get(dead_id);
+                const was_focused = if (state.currentLayout().getFocusedPane()) |fp| fp.id == dead_id else false;
+                const exit_code = if (dead_pane) |p| p.getExitCode() else 0;
+
                 if (state.currentLayout().splitCount() > 1) {
                     // Multiple splits in tab - close the specific dead pane.
                     _ = state.currentLayout().closePane(dead_id);
+
+                    // Log pane death
+                    mux.debugLog("pane died: id={d} exit_code={d} focused={}", .{ dead_id, exit_code, was_focused });
+
+                    // Show notification if pane died with non-zero exit or was unfocused (unexpected)
+                    if (!was_focused and exit_code != 0) {
+                        const msg = std.fmt.allocPrint(
+                            allocator,
+                            "Background pane exited with code {d}",
+                            .{exit_code},
+                        ) catch "Background pane exited unexpectedly";
+                        defer if (msg.ptr != "Background pane exited unexpectedly".ptr) allocator.free(msg);
+                        state.notifications.showFor(msg, 3000);
+                    }
+
                     if (state.currentLayout().getFocusedPane()) |new_pane| {
                         state.syncPaneFocus(new_pane, null);
                     }

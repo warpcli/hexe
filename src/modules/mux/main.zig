@@ -23,6 +23,16 @@ var global_state: std.atomic.Value(?*State) = std.atomic.Value(?*State).init(nul
 fn sighupHandler(_: c_int) callconv(.c) void {
     if (global_state.load(.acquire)) |state| {
         state.detach_mode = true;
+
+        // If reattach is in progress, give it time to complete (up to 5 seconds)
+        if (state.reattach_in_progress.load(.acquire)) {
+            var i: usize = 0;
+            while (i < 50 and state.reattach_in_progress.load(.acquire)) : (i += 1) {
+                // Sleep 100ms between checks (total max 5 seconds)
+                std.Thread.sleep(100 * std.time.ns_per_ms);
+            }
+        }
+
         state.running = false;
     }
 }
@@ -75,18 +85,22 @@ pub fn run(mux_args: MuxArgs) !void {
         var sessions: [16]ses_client.DetachedSessionInfo = undefined;
         const sess_count = ses.listSessions(&sessions) catch 0;
         if (sess_count > 0) {
-            std.debug.print("Detached sessions:\n", .{});
+            std.debug.print("Detached sessions (attach by name or UUID prefix):\n", .{});
             const instance = std.posix.getenv("HEXE_INSTANCE");
             for (sessions[0..sess_count]) |s| {
                 const name = s.session_name[0..s.session_name_len];
+                const uuid_prefix = s.session_id[0..8];
                 if (instance) |inst| {
                     if (inst.len > 0) {
-                        std.debug.print("  {s} [{s}] {d} tabs - attach with: hexe mux attach --instance {s} {s}\n", .{ name, s.session_id[0..8], s.pane_count, inst, name });
+                        std.debug.print("  [{s}] {s:<12} ({d} tabs)\n", .{ uuid_prefix, name, s.pane_count });
+                        std.debug.print("    → hexe mux attach --instance {s} {s}\n", .{ inst, uuid_prefix });
                     } else {
-                        std.debug.print("  {s} [{s}] {d} tabs - attach with: hexe mux attach {s}\n", .{ name, s.session_id[0..8], s.pane_count, name });
+                        std.debug.print("  [{s}] {s:<12} ({d} tabs)\n", .{ uuid_prefix, name, s.pane_count });
+                        std.debug.print("    → hexe mux attach {s}\n", .{uuid_prefix});
                     }
                 } else {
-                    std.debug.print("  {s} [{s}] {d} tabs - attach with: hexe mux attach {s}\n", .{ name, s.session_id[0..8], s.pane_count, name });
+                    std.debug.print("  [{s}] {s:<12} ({d} tabs)\n", .{ uuid_prefix, name, s.pane_count });
+                    std.debug.print("    → hexe mux attach {s}\n", .{uuid_prefix});
                 }
             }
         }
@@ -209,6 +223,18 @@ pub fn run(mux_args: MuxArgs) !void {
     if (state.ses_client.resolved_name) |resolved| {
         if (!std.mem.eql(u8, resolved, state.session_name)) {
             debugLog("session name resolved from '{s}' to '{s}'", .{ state.session_name, resolved });
+
+            // Notify user about name collision
+            const msg = std.fmt.allocPrint(
+                allocator,
+                "Session name changed: '{s}' -> '{s}' (collision)",
+                .{ state.session_name, resolved },
+            ) catch null;
+            if (msg) |m| {
+                state.notifications.showFor(m, 4000);
+                allocator.free(m);
+            }
+
             // Free old owned name if any
             if (state.session_name_owned) |old| {
                 allocator.free(old);

@@ -177,15 +177,20 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
         off += de.mux_state_len;
 
         // Include --instance flag if not in default instance
+        const uuid_prefix = de.session_id[0..8];
         const instance = std.posix.getenv("HEXE_INSTANCE");
+
+        // Show UUID prominently as primary identifier
+        print("  [{s}] {s:<12} ({d} panes)\n", .{ uuid_prefix, name_str, de.pane_count });
+
         if (instance) |instance_name| {
             if (instance_name.len > 0) {
-                print("  {s} [{s}] {d} panes - reattach: hexe mux attach --instance {s} {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, instance_name, name_str });
+                print("    → hexe mux attach --instance {s} {s}\n", .{ instance_name, uuid_prefix });
             } else {
-                print("  {s} [{s}] {d} panes - reattach: hexe mux attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
+                print("    → hexe mux attach {s}\n", .{uuid_prefix});
             }
         } else {
-            print("  {s} [{s}] {d} panes - reattach: hexe mux attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
+            print("    → hexe mux attach {s}\n", .{uuid_prefix});
         }
 
         if (mux_state.len > 0) {

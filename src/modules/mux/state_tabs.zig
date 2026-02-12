@@ -82,7 +82,15 @@ pub fn createTab(self: anytype) !void {
 
     // Generate tab name in format "session-N" (e.g., "alpha-1", "beta-2")
     const name_owned = try core.ipc.generateTabName(self.allocator, self.session_name, self.tab_counter);
-    self.tab_counter += 1;
+
+    // Increment tab counter with overflow protection.
+    // If counter approaches maximum, wrap to 0 to prevent corruption.
+    if (self.tab_counter < 999) {
+        self.tab_counter += 1;
+    } else {
+        mux.debugLog("VALIDATION: tab_counter reached limit, wrapping to 0", .{});
+        self.tab_counter = 0;
+    }
     var tab = Tab.initOwned(self.allocator, self.layout_width, self.layout_height, name_owned, self.pop_config.carrier.notification);
     // Set ses client if connected (for new tabs after startup).
     if (self.ses_client.isConnected()) {
@@ -322,10 +330,108 @@ pub fn adoptOrphanedPane(self: anytype) bool {
     return true;
 }
 
+/// Validate the structure of mux state JSON before attempting restoration.
+/// This prevents crashes from malformed/corrupted JSON.
+fn validateMuxStateJson(value: *const std.json.Value) bool {
+    // Root must be an object
+    if (value.* != .object) {
+        mux.debugLog("validateMuxStateJson: root is not an object", .{});
+        return false;
+    }
+    const root = value.object;
+
+    // Required fields with type checks
+    const required_fields = .{
+        .{ "uuid", .string },
+        .{ "session_name", .string },
+        .{ "tab_counter", .integer },
+        .{ "tabs", .array },
+        .{ "floats", .array },
+        .{ "active_tab", .integer },
+    };
+
+    inline for (required_fields) |field_spec| {
+        const field_name = field_spec[0];
+        const expected_type = field_spec[1];
+
+        const field_value = root.get(field_name) orelse {
+            mux.debugLog("validateMuxStateJson: missing required field '{s}'", .{field_name});
+            return false;
+        };
+
+        const matches = switch (expected_type) {
+            .string => field_value == .string,
+            .integer => field_value == .integer,
+            .array => field_value == .array,
+            else => false,
+        };
+
+        if (!matches) {
+            mux.debugLog("validateMuxStateJson: field '{s}' has wrong type", .{field_name});
+            return false;
+        }
+    }
+
+    // active_floating can be null or integer
+    if (root.get("active_floating")) |af| {
+        if (af != .null and af != .integer) {
+            mux.debugLog("validateMuxStateJson: active_floating must be null or integer", .{});
+            return false;
+        }
+    }
+
+    // Validate tabs array elements
+    const tabs = root.get("tabs").?.array;
+    for (tabs.items) |tab_val| {
+        if (tab_val != .object) {
+            mux.debugLog("validateMuxStateJson: tabs array contains non-object", .{});
+            return false;
+        }
+        const tab_obj = tab_val.object;
+
+        // Each tab must have name, splits array
+        if (tab_obj.get("name")) |name| {
+            if (name != .string) {
+                mux.debugLog("validateMuxStateJson: tab name is not a string", .{});
+                return false;
+            }
+        } else {
+            mux.debugLog("validateMuxStateJson: tab missing name", .{});
+            return false;
+        }
+
+        if (tab_obj.get("splits")) |splits| {
+            if (splits != .array) {
+                mux.debugLog("validateMuxStateJson: tab splits is not an array", .{});
+                return false;
+            }
+        }
+    }
+
+    // Validate floats array elements
+    const floats = root.get("floats").?.array;
+    for (floats.items) |float_val| {
+        if (float_val != .object) {
+            mux.debugLog("validateMuxStateJson: floats array contains non-object", .{});
+            return false;
+        }
+    }
+
+    mux.debugLog("validateMuxStateJson: validation passed", .{});
+    return true;
+}
+
 /// Reattach to a detached session, restoring full state.
 pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     mux.debugLog("reattachSession: starting with prefix={s}", .{session_id_prefix});
     std.debug.print("[mux] REATTACH: starting for prefix={s}\n", .{session_id_prefix});
+
+    // Set flag to prevent SIGHUP from interrupting reattach
+    self.reattach_in_progress.store(true, .release);
+    defer self.reattach_in_progress.store(false, .release);
+
+    // Track reattach start time for timeout detection
+    const reattach_start = std.time.milliTimestamp();
 
     if (!self.ses_client.isConnected()) {
         mux.debugLog("reattachSession: ses_client not connected, aborting", .{});
@@ -365,6 +471,68 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     defer parsed.deinit();
 
     std.debug.print("[mux] REATTACH: JSON parsed OK\n", .{});
+
+    // Validate JSON schema before attempting to use it
+    if (!validateMuxStateJson(&parsed.value)) {
+        mux.debugLog("reattachSession: JSON schema validation failed", .{});
+        std.debug.print("[mux] REATTACH: JSON schema INVALID\n", .{});
+        return false;
+    }
+    std.debug.print("[mux] REATTACH: JSON schema valid\n", .{});
+
+    // Validate serialization version and checksum for integrity
+    if (parsed.value.object.get("version")) |ver_val| {
+        if (ver_val == .integer) {
+            const version: u32 = @intCast(ver_val.integer);
+            if (version > 1) {
+                mux.debugLog("reattachSession: unsupported version {d}, current is 1", .{version});
+                self.notifications.showFor("Warning: Session data from newer version, may be incompatible", 5000);
+            }
+        }
+    }
+
+    // Verify checksum if present
+    if (parsed.value.object.get("_checksum")) |checksum_val| {
+        if (checksum_val == .integer) {
+            const stored_checksum: u64 = @intCast(checksum_val.integer);
+            // Recalculate checksum on content before the checksum field
+            // Find where ",\"_checksum\":" starts in the JSON
+            const json_str = reattach_result.mux_state_json;
+            if (std.mem.lastIndexOf(u8, json_str, ",\"_checksum\":")) |checksum_pos| {
+                const content_only = json_str[0..checksum_pos];
+                var hasher = std.hash.Wyhash.init(0);
+                hasher.update(content_only);
+                hasher.update("}"); // Add the closing brace that was part of original
+                const calculated_checksum = hasher.final();
+
+                if (calculated_checksum != stored_checksum) {
+                    mux.debugLog("reattachSession: checksum mismatch! stored={d} calculated={d}", .{ stored_checksum, calculated_checksum });
+                    self.notifications.showFor("Warning: Session data integrity check failed (corrupted?)", 5000);
+                    // Continue anyway but user is warned
+                }
+            }
+        }
+    }
+
+    // Check timeout after JSON parsing
+    {
+        const elapsed = std.time.milliTimestamp() - reattach_start;
+        if (elapsed > 30000) {
+            mux.debugLog("reattachSession: timeout after JSON parse ({d}ms > 30s), aborting", .{elapsed});
+            self.notifications.showFor("Reattach timeout: JSON parsing took too long", 5000);
+            return false;
+        } else if (elapsed > 10000) {
+            const msg = std.fmt.allocPrint(
+                self.allocator,
+                "Warning: reattach slow ({d}s elapsed)",
+                .{@divTrunc(elapsed, 1000)},
+            ) catch "Warning: reattach taking longer than expected";
+            defer if (msg.ptr != "Warning: reattach taking longer than expected".ptr) self.allocator.free(msg);
+            self.notifications.showFor(msg, 3000);
+            mux.debugLog("reattachSession: slow progress warning after JSON parse ({d}ms)", .{elapsed});
+        }
+    }
+
     const root = parsed.value.object;
 
     // Clear current UI state before restoring.
@@ -409,50 +577,151 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     // Restore session name (must dupe since parsed JSON will be freed).
     if (root.get("session_name")) |name_val| {
+        var restored_name = name_val.string;
+
+        // VALIDATION: Detect and fix corrupted session_name.
+        // Session names should be Greek letters (alpha, beta, ...) optionally with
+        // collision suffix "-2", "-3", etc. They should NEVER be tab names like "alpha-1".
+        // Tab names have format "session-N" where N starts at 1.
+        //
+        // If the restored name looks like a tab name (ends with "-1", "-2", etc.),
+        // strip the suffix to recover the actual session name.
+        //
+        // Heuristic: If name ends with "-N" where N is a single digit >= 1,
+        // it's likely a corrupted tab name. Strip the suffix.
+        if (restored_name.len >= 3) {
+            const last_char = restored_name[restored_name.len - 1];
+            if (last_char >= '1' and last_char <= '9') {
+                // Check if there's a dash before the digit.
+                if (restored_name[restored_name.len - 2] == '-') {
+                    // This looks like "alpha-1" format (tab name).
+                    // Strip the "-N" suffix to recover session name.
+                    restored_name = restored_name[0 .. restored_name.len - 2];
+                    mux.debugLog("VALIDATION: stripped corrupted tab-format suffix from session_name, recovered: {s}", .{restored_name});
+                    std.debug.print("[mux] REATTACH: session_name was corrupted (tab format), recovered: {s}\n", .{restored_name});
+                }
+            }
+        }
+
         // Free previous owned name if any.
         if (self.session_name_owned) |old| {
             self.allocator.free(old);
         }
-        // Dupe the name from JSON.
-        const duped = self.allocator.dupe(u8, name_val.string) catch return false;
+        // Dupe the validated name from JSON.
+        const duped = self.allocator.dupe(u8, restored_name) catch return false;
         self.session_name = duped;
         self.session_name_owned = duped;
     }
 
     // Restore tab counter (for session-N tab naming).
     if (root.get("tab_counter")) |tc_val| {
-        self.tab_counter = @intCast(tc_val.integer);
+        if (tc_val == .integer) {
+            const restored_counter: usize = @intCast(tc_val.integer);
+            // Validate tab_counter is reasonable (not absurdly large).
+            // A counter > 1000 suggests corruption or overflow.
+            if (restored_counter > 1000) {
+                mux.debugLog("VALIDATION: tab_counter suspiciously large ({d}), resetting to 0", .{restored_counter});
+                self.tab_counter = 0;
+            } else {
+                self.tab_counter = restored_counter;
+            }
+        } else {
+            mux.debugLog("VALIDATION: tab_counter is not an integer type, defaulting to 0", .{});
+            self.tab_counter = 0;
+        }
     }
 
     // Remember active tab/floating from the stored state.
     // We apply these after restoring tabs/floats so indices are valid.
-    const wanted_active_tab: usize = if (root.get("active_tab")) |at| @intCast(at.integer) else 0;
-    const wanted_active_floating: ?usize = if (root.get("active_floating")) |af|
-        if (af == .null) null else @intCast(af.integer)
-    else
-        null;
+    const wanted_active_tab: usize = if (root.get("active_tab")) |at| blk: {
+        if (at != .integer) {
+            mux.debugLog("reattachSession: active_tab is not an integer, defaulting to 0", .{});
+            break :blk 0;
+        }
+        break :blk @intCast(at.integer);
+    } else 0;
+    const wanted_active_floating: ?usize = if (root.get("active_floating")) |af| blk: {
+        if (af == .null) break :blk null;
+        if (af != .integer) {
+            mux.debugLog("reattachSession: active_floating is not an integer, defaulting to null", .{});
+            break :blk null;
+        }
+        break :blk @intCast(af.integer);
+    } else null;
 
     // Build a map of UUID -> pane_id for adopted panes.
     const AdoptInfo = struct { pane_id: u16 };
     var uuid_pane_map = std.AutoHashMap([32]u8, AdoptInfo).init(self.allocator);
     defer uuid_pane_map.deinit();
 
+    // Track which UUIDs have been used during restoration to detect duplicates in JSON.
+    var used_uuids = std.AutoHashMap([32]u8, void).init(self.allocator);
+    defer used_uuids.deinit();
+
     mux.debugLog("reattachSession: adopting {d} panes", .{reattach_result.pane_uuids.len});
     std.debug.print("[mux] REATTACH: adopting {d} panes\n", .{reattach_result.pane_uuids.len});
+    // Track adoption failures for user notification
+    var failed_adoptions: usize = 0;
+    const total_panes = reattach_result.pane_uuids.len;
+
     for (reattach_result.pane_uuids, 0..) |uuid, i| {
-        mux.debugLog("reattachSession: adopting pane {d}/{d} uuid={s}", .{ i + 1, reattach_result.pane_uuids.len, uuid[0..8] });
-        std.debug.print("[mux] REATTACH: adoptPane {d}/{d} uuid={s}\n", .{ i + 1, reattach_result.pane_uuids.len, uuid[0..8] });
+        mux.debugLog("reattachSession: adopting pane {d}/{d} uuid={s}", .{ i + 1, total_panes, uuid[0..8] });
+        std.debug.print("[mux] REATTACH: adoptPane {d}/{d} uuid={s}\n", .{ i + 1, total_panes, uuid[0..8] });
+
+        // Check for duplicate UUID in the list
+        if (uuid_pane_map.contains(uuid)) {
+            mux.debugLog("reattachSession: DUPLICATE UUID detected: {s}, skipping", .{uuid[0..8]});
+            std.debug.print("[mux] REATTACH: DUPLICATE UUID {s}, skipping\n", .{uuid[0..8]});
+            failed_adoptions += 1;
+            continue;
+        }
+
         const adopt_result = self.ses_client.adoptPane(uuid) catch |e| {
             mux.debugLog("reattachSession: adoptPane failed for uuid={s}: {s}", .{ uuid[0..8], @errorName(e) });
             std.debug.print("[mux] REATTACH: adoptPane FAILED: {s}\n", .{@errorName(e)});
+            failed_adoptions += 1;
             continue;
         };
         mux.debugLog("reattachSession: adoptPane success, pane_id={d}", .{adopt_result.pane_id});
         std.debug.print("[mux] REATTACH: adoptPane OK pane_id={d}\n", .{adopt_result.pane_id});
-        uuid_pane_map.put(uuid, .{ .pane_id = adopt_result.pane_id }) catch continue;
+        uuid_pane_map.put(uuid, .{ .pane_id = adopt_result.pane_id }) catch {
+            failed_adoptions += 1;
+            continue;
+        };
     }
     mux.debugLog("reattachSession: adopted {d} panes into uuid_pane_map", .{uuid_pane_map.count()});
     std.debug.print("[mux] REATTACH: adopted {d} panes total\n", .{uuid_pane_map.count()});
+
+    // Notify user if some panes failed to reattach
+    if (failed_adoptions > 0) {
+        const msg = std.fmt.allocPrint(
+            self.allocator,
+            "Warning: {d}/{d} panes failed to reattach",
+            .{ failed_adoptions, total_panes },
+        ) catch "Warning: Some panes failed to reattach";
+        defer if (msg.ptr != "Warning: Some panes failed to reattach".ptr) self.allocator.free(msg);
+        self.notifications.showFor(msg, 5000);
+        mux.debugLog("reattachSession: notified user about {d} failed adoptions", .{failed_adoptions});
+    }
+
+    // Check timeout after pane adoption
+    {
+        const elapsed = std.time.milliTimestamp() - reattach_start;
+        if (elapsed > 30000) {
+            mux.debugLog("reattachSession: timeout after pane adoption ({d}ms > 30s), aborting", .{elapsed});
+            self.notifications.showFor("Reattach timeout: pane adoption took too long", 5000);
+            return false;
+        } else if (elapsed > 10000) {
+            const msg = std.fmt.allocPrint(
+                self.allocator,
+                "Warning: reattach slow ({d}s elapsed, {d} panes adopted)",
+                .{ @divTrunc(elapsed, 1000), uuid_pane_map.count() },
+            ) catch "Warning: reattach taking longer than expected";
+            defer if (msg.ptr != "Warning: reattach taking longer than expected".ptr) self.allocator.free(msg);
+            self.notifications.showFor(msg, 3000);
+            mux.debugLog("reattachSession: slow progress warning after adoption ({d}ms)", .{elapsed});
+        }
+    }
 
     // Restore tabs.
     if (root.get("tabs")) |tabs_arr| {
@@ -493,6 +762,12 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                     var uuid_arr: [32]u8 = undefined;
                     @memcpy(&uuid_arr, uuid_str[0..32]);
 
+                    // Check for duplicate UUID - if already used, skip this pane.
+                    if (used_uuids.contains(uuid_arr)) {
+                        mux.debugLog("reattachSession: duplicate UUID in splits: {s}, skipping", .{uuid_arr[0..8]});
+                        continue;
+                    }
+
                     // Try adopting from pre-collected pane_uuids first,
                     // then try adopting directly from SES by UUID.
                     var adopt_info: ?AdoptInfo = uuid_pane_map.get(uuid_arr);
@@ -504,6 +779,9 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                     }
 
                     const info = adopt_info orelse continue;
+
+                    // Mark this UUID as used.
+                    used_uuids.put(uuid_arr, {}) catch {};
                     const pane = self.allocator.create(Pane) catch continue;
                     const vt_fd = self.ses_client.getVtFd() orelse {
                         self.allocator.destroy(pane);
@@ -545,7 +823,11 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 }
             }
 
-            self.tabs.append(self.allocator, tab) catch continue;
+            self.tabs.append(self.allocator, tab) catch {
+                // Clean up tab and all its panes on append failure
+                tab.deinit();
+                continue;
+            };
         }
     }
 
@@ -572,6 +854,12 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             var uuid_arr: [32]u8 = undefined;
             @memcpy(&uuid_arr, uuid_str[0..32]);
 
+            // Check for duplicate UUID - if already used, skip this float.
+            if (used_uuids.contains(uuid_arr)) {
+                mux.debugLog("reattachSession: duplicate UUID in floats: {s}, skipping", .{uuid_arr[0..8]});
+                continue;
+            }
+
             {
                 // Try adopting from pre-collected pane_uuids first,
                 // then try adopting directly from SES by UUID.
@@ -583,6 +871,9 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 }
 
                 const info = adopt_info orelse continue;
+
+                // Mark this UUID as used.
+                used_uuids.put(uuid_arr, {}) catch {};
                 const pane = self.allocator.create(Pane) catch continue;
                 const vt_fd = self.ses_client.getVtFd() orelse {
                     self.allocator.destroy(pane);
@@ -613,10 +904,15 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 pane.float_pad_y = if (pane_obj.get("float_pad_y")) |py| @intCast(py.integer) else 0;
                 pane.is_pwd = if (pane_obj.get("is_pwd")) |ip| (ip == .bool and ip.bool) else false;
                 pane.sticky = if (pane_obj.get("sticky")) |s| (s == .bool and s.bool) else false;
-                pane.parent_tab = if (pane_obj.get("parent_tab")) |pt|
-                    @intCast(pt.integer)
-                else
-                    null;
+                pane.parent_tab = if (pane_obj.get("parent_tab")) |pt| blk: {
+                    if (pt != .integer) {
+                        mux.debugLog("reattachSession: parent_tab is not an integer for float pane", .{});
+                        break :blk null;
+                    }
+                    const parent_idx: usize = @intCast(pt.integer);
+                    // Validate against tabs count (will be validated again after all tabs restored)
+                    break :blk parent_idx;
+                } else null;
 
                 // Re-apply float style and border color from config definition.
                 // These are config pointers that can't be serialized, so we look
@@ -668,19 +964,76 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     // Remove tabs that have no live panes (all pods died).
     {
         var i: usize = 0;
+        var removed_tabs: usize = 0;
         while (i < self.tabs.items.len) {
             if (self.tabs.items[i].layout.splits.count() == 0) {
-                var dead_tab = self.tabs.orderedRemove(i);
-                dead_tab.deinit();
+                // Don't remove the LAST tab - keep at least one tab always.
+                if (self.tabs.items.len > 1) {
+                    const tab_name = self.tabs.items[i].name;
+                    mux.debugLog("reattachSession: removing empty tab: {s}", .{tab_name});
+                    var dead_tab = self.tabs.orderedRemove(i);
+                    dead_tab.deinit();
+                    removed_tabs += 1;
+                    // Don't increment i, next tab shifted into this position
+                } else {
+                    mux.debugLog("reattachSession: keeping last empty tab to prevent zero tabs", .{});
+                    i += 1;
+                }
             } else {
                 i += 1;
             }
         }
+
+        // Notify user if tabs were removed
+        if (removed_tabs > 0) {
+            const msg = std.fmt.allocPrint(
+                self.allocator,
+                "Warning: {d} empty tab(s) removed (all panes died)",
+                .{removed_tabs},
+            ) catch "Warning: Empty tabs were removed";
+            defer if (msg.ptr != "Warning: Empty tabs were removed".ptr) self.allocator.free(msg);
+            self.notifications.showFor(msg, 4000);
+            mux.debugLog("reattachSession: removed {d} empty tabs", .{removed_tabs});
+        }
+    }
+
+    // Safety check: ensure we have at least one tab.
+    // If all tabs were empty and removed, create a new one.
+    if (self.tabs.items.len == 0) {
+        mux.debugLog("reattachSession: CRITICAL - all tabs removed, creating new tab", .{});
+        self.createTab() catch {
+            mux.debugLog("reattachSession: FAILED to create recovery tab", .{});
+            return false;
+        };
+        self.notifications.showFor("Warning: All tabs were empty, created new tab", 5000);
     }
 
     // Recalculate all layouts for current terminal size.
     for (self.tabs.items) |*tab| {
         tab.layout.resize(self.layout_width, self.layout_height);
+    }
+
+    // Validate and fix parent_tab indices for floating panes
+    var invalid_parent_tabs: usize = 0;
+    for (self.floats.items) |fp| {
+        if (fp.parent_tab) |parent_idx| {
+            if (parent_idx >= self.tabs.items.len) {
+                mux.debugLog("reattachSession: invalid parent_tab {d} (only {d} tabs), setting to null", .{ parent_idx, self.tabs.items.len });
+                fp.parent_tab = null;
+                invalid_parent_tabs += 1;
+            }
+        }
+    }
+    // Notify user if any parent_tab links were broken
+    if (invalid_parent_tabs > 0) {
+        const msg = std.fmt.allocPrint(
+            self.allocator,
+            "Warning: {d} float(s) had invalid parent tab, reset to global",
+            .{invalid_parent_tabs},
+        ) catch "Warning: Some floats had invalid parent tab references";
+        defer if (msg.ptr != "Warning: Some floats had invalid parent tab references".ptr) self.allocator.free(msg);
+        self.notifications.showFor(msg, 4000);
+        mux.debugLog("reattachSession: corrected {d} invalid parent_tab references", .{invalid_parent_tabs});
     }
 
     // Recalculate floating pane positions.
@@ -702,6 +1055,25 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     std.debug.print("[mux] REATTACH: tabs restored={d}, floats restored={d}\n", .{ self.tabs.items.len, self.floats.items.len });
 
+    // Check timeout after layout restoration
+    {
+        const elapsed = std.time.milliTimestamp() - reattach_start;
+        if (elapsed > 30000) {
+            mux.debugLog("reattachSession: timeout after layout restore ({d}ms > 30s), aborting", .{elapsed});
+            self.notifications.showFor("Reattach timeout: layout restoration took too long", 5000);
+            return false;
+        } else if (elapsed > 10000) {
+            const msg = std.fmt.allocPrint(
+                self.allocator,
+                "Warning: reattach slow ({d}s total, {d} tabs restored)",
+                .{ @divTrunc(elapsed, 1000), self.tabs.items.len },
+            ) catch "Warning: reattach taking longer than expected";
+            defer if (msg.ptr != "Warning: reattach taking longer than expected".ptr) self.allocator.free(msg);
+            self.notifications.showFor(msg, 3000);
+            mux.debugLog("reattachSession: slow progress warning after layout restore ({d}ms)", .{elapsed});
+        }
+    }
+
     // Signal SES that we're ready for backlog replay.
     // This triggers deferred VT reconnection to PODs, which replays their buffers.
     std.debug.print("[mux] REATTACH: calling requestBacklogReplay\n", .{});
@@ -709,6 +1081,17 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         std.debug.print("[mux] REATTACH: requestBacklogReplay FAILED: {s}\n", .{@errorName(e)});
     };
     std.debug.print("[mux] REATTACH: requestBacklogReplay done\n", .{});
+
+    // Final timeout check after backlog replay
+    {
+        const elapsed = std.time.milliTimestamp() - reattach_start;
+        mux.debugLog("reattachSession: total elapsed time: {d}ms", .{elapsed});
+        if (elapsed > 30000) {
+            mux.debugLog("reattachSession: timeout after backlog replay ({d}ms > 30s), aborting", .{elapsed});
+            self.notifications.showFor("Reattach timeout: session restored but backlog replay incomplete", 5000);
+            // Don't return false here - the session is already restored, just warn user
+        }
+    }
 
     if (self.tabs.items.len == 0) {
         std.debug.print("[mux] REATTACH: no tabs restored, returning false\n", .{});
@@ -742,6 +1125,9 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
 
             // Create a new tab with this pane.
             var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, "attached", self.pop_config.carrier.notification);
+            var tab_needs_cleanup = true;
+            defer if (tab_needs_cleanup) tab.deinit();
+
             if (self.ses_client.isConnected()) {
                 tab.layout.setSesClient(&self.ses_client);
             }
@@ -750,8 +1136,10 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             const vt_fd = self.ses_client.getVtFd() orelse return false;
 
             const pane = self.allocator.create(Pane) catch return false;
+            var pane_needs_cleanup = true;
+            defer if (pane_needs_cleanup) self.allocator.destroy(pane);
+
             pane.initWithPod(self.allocator, 0, 0, 0, self.layout_width, self.layout_height, result.pane_id, vt_fd, result.uuid) catch {
-                self.allocator.destroy(pane);
                 return false;
             };
 
@@ -773,15 +1161,19 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             // Add pane to layout manually.
             tab.layout.splits.put(0, pane) catch {
                 pane.deinit();
-                self.allocator.destroy(pane);
                 return false;
             };
+            // Pane is now owned by tab, no longer needs separate cleanup
+            pane_needs_cleanup = false;
+
             const node = self.allocator.create(LayoutNode) catch return false;
             node.* = .{ .pane = 0 };
             tab.layout.root = node;
             tab.layout.next_split_id = 1;
 
             self.tabs.append(self.allocator, tab) catch return false;
+            // Tab is now owned by tabs array, no longer needs cleanup
+            tab_needs_cleanup = false;
             self.active_tab = self.tabs.items.len - 1;
             self.renderer.invalidate();
             self.force_full_render = true;

@@ -5,6 +5,7 @@ const ipc = core.ipc;
 const state = @import("state.zig");
 const server = @import("server.zig");
 const persist = @import("persist.zig");
+const txlog = @import("txlog.zig");
 
 /// Arguments for ses commands
 pub const SesArgs = struct {
@@ -30,6 +31,68 @@ pub fn debugLogUuid(uuid: []const u8, comptime fmt: []const u8, args: anytype) v
     if (!debug_enabled) return;
     const short_uuid = if (uuid.len >= 8) uuid[0..8] else uuid;
     std.debug.print("[ses][{s}] " ++ fmt ++ "\n", .{short_uuid} ++ args);
+}
+
+/// Recover from incomplete transactions after crash.
+/// Removes detached sessions that had incomplete operations.
+fn recoverFromTransactionLog(ses_state: *state.SesState) !void {
+    const allocator = ses_state.allocator;
+
+    // Read all transaction log entries
+    var entries = ses_state.txlog.readAll(allocator) catch |e| {
+        debugLog("txlog readAll failed: {s}", .{@errorName(e)});
+        return;
+    };
+    defer {
+        for (entries.items) |*e| {
+            allocator.free(e.payload);
+        }
+        entries.deinit(allocator);
+    }
+
+    if (entries.items.len == 0) {
+        debugLog("txlog: no entries to recover", .{});
+        return;
+    }
+
+    debugLog("txlog: checking {d} entries for incomplete transactions", .{entries.items.len});
+
+    // Find incomplete transactions (start without commit)
+    var incomplete = try txlog.findIncompleteTransactions(entries.items);
+    defer incomplete.deinit(allocator);
+
+    if (incomplete.items.len == 0) {
+        debugLog("txlog: no incomplete transactions", .{});
+        // All transactions complete - truncate log
+        ses_state.txlog.truncate() catch {};
+        return;
+    }
+
+    // Handle incomplete transactions: remove detached sessions
+    debugLog("txlog: found {d} incomplete transactions, rolling back", .{incomplete.items.len});
+    for (incomplete.items) |session_id| {
+        const hex_id: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
+        debugLog("txlog: removing incomplete session {s}", .{hex_id[0..8]});
+
+        // Remove from detached sessions (best-effort cleanup)
+        ses_state.removeDetachedSession(session_id);
+
+        // Mark all panes with this session_id as orphaned
+        var pane_iter = ses_state.panes.valueIterator();
+        while (pane_iter.next()) |pane| {
+            if (pane.session_id) |sid| {
+                if (std.mem.eql(u8, &sid, &session_id)) {
+                    _ = pane.transitionState(.orphaned, "txlog recovery (incomplete transaction)");
+                    pane.session_id = null;
+                    debugLog("txlog: marked pane {s} as orphaned", .{pane.uuid[0..8]});
+                }
+            }
+        }
+    }
+
+    // Truncate log after recovery
+    ses_state.txlog.truncate() catch {};
+    debugLog("txlog: recovery complete", .{});
 }
 
 /// Entry point for ses daemon - can be called directly from unified CLI
@@ -97,6 +160,11 @@ pub fn run(args: SesArgs) !void {
     // Uses page_allocator for temporary allocations to avoid GPA issues after fork.
     // Verifies pods are still alive before restoring them.
     persist.load(allocator, &ses_state) catch {};
+
+    // Transaction log recovery: check for incomplete operations from crash.
+    recoverFromTransactionLog(&ses_state) catch |e| {
+        debugLog("transaction log recovery failed: {s}", .{@errorName(e)});
+    };
 
     // Clean up sessions with dead panes and duplicate names.
     ses_state.cleanupDetachedSessions();

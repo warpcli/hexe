@@ -1198,6 +1198,9 @@ fn handleScrollKeys(state: *State, inp: []const u8) ?usize {
     // Don't intercept scroll keys in alternate screen mode - let the app handle them
     if (p.vt.inAltScreen()) return null;
 
+    const now = std.time.milliTimestamp();
+    const acceleration_timeout_ms: i64 = 500;
+
     // PageUp: ESC [ 5 ~ or ESC [ 5 ; <mod> [: <event>] ~
     if (inp.len >= 4 and inp[2] == '5') {
         var j: usize = 3;
@@ -1208,7 +1211,18 @@ fn handleScrollKeys(state: *State, inp: []const u8) ?usize {
             if (inp[j] == '~') {
                 // Only scroll on press/repeat (not release)
                 if (event_type != 3) {
-                    p.scrollUp(5);
+                    // Update acceleration state
+                    if (state.last_scroll_key == 5 and (now - state.last_scroll_time_ms) < acceleration_timeout_ms) {
+                        state.scroll_repeat_count = @min(state.scroll_repeat_count + 1, 20);
+                    } else {
+                        state.scroll_repeat_count = 0;
+                    }
+                    state.last_scroll_key = 5;
+                    state.last_scroll_time_ms = now;
+
+                    // Calculate scroll amount with acceleration: 5 + (repeat * 3), max 65 lines
+                    const scroll_amount: u32 = @min(5 + (@as(u32, state.scroll_repeat_count) * 3), 65);
+                    p.scrollUp(scroll_amount);
                     state.needs_render = true;
                 }
                 return j + 1;
@@ -1230,7 +1244,18 @@ fn handleScrollKeys(state: *State, inp: []const u8) ?usize {
         while (j < end) : (j += 1) {
             if (inp[j] == '~') {
                 if (event_type != 3) {
-                    p.scrollDown(5);
+                    // Update acceleration state
+                    if (state.last_scroll_key == 6 and (now - state.last_scroll_time_ms) < acceleration_timeout_ms) {
+                        state.scroll_repeat_count = @min(state.scroll_repeat_count + 1, 20);
+                    } else {
+                        state.scroll_repeat_count = 0;
+                    }
+                    state.last_scroll_key = 6;
+                    state.last_scroll_time_ms = now;
+
+                    // Calculate scroll amount with acceleration
+                    const scroll_amount: u32 = @min(5 + (@as(u32, state.scroll_repeat_count) * 3), 65);
+                    p.scrollDown(scroll_amount);
                     state.needs_render = true;
                 }
                 return j + 1;

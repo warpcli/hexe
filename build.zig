@@ -114,4 +114,20 @@ pub fn build(b: *std.Build) void {
     }
     const run_step = b.step("run", "Run hexe");
     run_step.dependOn(&run_hexe.step);
+
+    // Test step for SES module error handling tests
+    const ses_test_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/ses/state_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ses_test_module.addImport("core", core_module);
+
+    const ses_tests = b.addTest(.{
+        .root_module = ses_test_module,
+    });
+
+    const run_ses_tests = b.addRunArtifact(ses_tests);
+    const test_step = b.step("test", "Run SES error handling tests");
+    test_step.dependOn(&run_ses_tests.step);
 }
