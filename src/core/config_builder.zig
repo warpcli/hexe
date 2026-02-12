@@ -214,18 +214,60 @@ pub const SesConfigBuilder = struct {
     }
 };
 
-/// Placeholder for SHP section builder
+/// SHP section builder - accumulates shell prompt configuration
 pub const ShpConfigBuilder = struct {
     allocator: std.mem.Allocator,
 
+    // Prompt segments
+    left_segments: std.ArrayList(SegmentDef),
+    right_segments: std.ArrayList(SegmentDef),
+
+    // Temporary struct for prompt segments (similar to config.Segment but for SHP)
+    const SegmentDef = struct {
+        name: []const u8,
+        priority: i64,
+        outputs: []const OutputDef,
+        command: ?[]const u8,
+        when: ?config.WhenDef,
+    };
+
+    const OutputDef = struct {
+        style: []const u8,
+        format: []const u8,
+    };
+
     pub fn init(allocator: std.mem.Allocator) !*ShpConfigBuilder {
         const self = try allocator.create(ShpConfigBuilder);
-        self.* = .{ .allocator = allocator };
+        self.* = .{
+            .allocator = allocator,
+            .left_segments = std.ArrayList(SegmentDef).init(allocator),
+            .right_segments = std.ArrayList(SegmentDef).init(allocator),
+        };
         return self;
     }
 
     pub fn deinit(self: *ShpConfigBuilder) void {
-        _ = self;
+        // Clean up segments
+        for (self.left_segments.items) |seg| {
+            self.allocator.free(seg.name);
+            if (seg.command) |cmd| self.allocator.free(cmd);
+            for (seg.outputs) |out| {
+                self.allocator.free(out.style);
+                self.allocator.free(out.format);
+            }
+            self.allocator.free(seg.outputs);
+        }
+        for (self.right_segments.items) |seg| {
+            self.allocator.free(seg.name);
+            if (seg.command) |cmd| self.allocator.free(cmd);
+            for (seg.outputs) |out| {
+                self.allocator.free(out.style);
+                self.allocator.free(out.format);
+            }
+            self.allocator.free(seg.outputs);
+        }
+        self.left_segments.deinit();
+        self.right_segments.deinit();
     }
 };
 
