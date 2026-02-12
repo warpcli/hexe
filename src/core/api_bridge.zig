@@ -488,3 +488,68 @@ pub export fn hexe_mux_float_set_defaults(L: ?*LuaState) callconv(.C) c_int {
 
     return 0;
 }
+
+/// Lua C function: hexe.mux.float.define(key, opts)
+pub export fn hexe_mux_float_define(L: ?*LuaState) callconv(.C) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    // Get key (arg 1)
+    const key_str = lua.toString(1) catch {
+        _ = lua.pushString("float.define: key must be a string");
+        lua.raiseError();
+    };
+    if (key_str.len != 1) {
+        _ = lua.pushString("float.define: key must be a single character");
+        lua.raiseError();
+    }
+    const key = key_str[0];
+
+    // Arg 2 must be a table
+    if (lua.typeOf(2) != .table) {
+        _ = lua.pushString("float.define: second argument must be a table");
+        lua.raiseError();
+    }
+
+    // Get MuxConfigBuilder
+    const mux = getMuxBuilder(lua) catch {
+        _ = lua.pushString("float.define: failed to get config builder");
+        lua.raiseError();
+    };
+
+    // Create FloatDef
+    var float_def = config.FloatDef{
+        .key = key,
+        .command = null,
+        .title = null,
+    };
+
+    // Parse command
+    _ = lua.getField(2, "command");
+    if (lua.typeOf(-1) == .string) {
+        const cmd = lua.toString(-1) catch null;
+        if (cmd) |c| {
+            float_def.command = mux.allocator.dupe(u8, c) catch null;
+        }
+    }
+    lua.pop(1);
+
+    // Parse title
+    _ = lua.getField(2, "title");
+    if (lua.typeOf(-1) == .string) {
+        const t = lua.toString(-1) catch null;
+        if (t) |title_str| {
+            float_def.title = mux.allocator.dupe(u8, title_str) catch null;
+        }
+    }
+    lua.pop(1);
+
+    // TODO: Parse size, position, padding, attributes, color, style
+
+    // Append to floats list
+    mux.floats.append(float_def) catch {
+        _ = lua.pushString("float.define: failed to append float");
+        lua.raiseError();
+    };
+
+    return 0;
+}
