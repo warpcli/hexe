@@ -292,7 +292,7 @@ pub const PopConfigBuilder = struct {
     // Widgets config
     widgets: WidgetsConfigDef,
 
-    const NotificationStyleDef = struct {
+    pub const NotificationStyleDef = struct {
         fg: ?u8 = null,
         bg: ?u8 = null,
         bold: ?bool = null,
@@ -303,7 +303,7 @@ pub const PopConfigBuilder = struct {
         duration_ms: ?u32 = null,
     };
 
-    const ConfirmStyleDef = struct {
+    pub const ConfirmStyleDef = struct {
         fg: ?u8 = null,
         bg: ?u8 = null,
         bold: ?bool = null,
@@ -313,7 +313,7 @@ pub const PopConfigBuilder = struct {
         no_label: ?[]const u8 = null,
     };
 
-    const ChooseStyleDef = struct {
+    pub const ChooseStyleDef = struct {
         fg: ?u8 = null,
         bg: ?u8 = null,
         highlight_fg: ?u8 = null,

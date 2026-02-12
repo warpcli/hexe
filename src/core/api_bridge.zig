@@ -1117,3 +1117,344 @@ pub export fn hexe_shp_prompt_add(L: ?*LuaState) callconv(.c) c_int {
 
     return 0;
 }
+
+// ============================================================================
+// Section 4: POP (Popups & Overlays) C API
+// ============================================================================
+
+/// Helper: Parse notification style from table
+fn parseNotificationStyle(lua: *Lua, idx: i32, allocator: std.mem.Allocator) config_builder.PopConfigBuilder.NotificationStyleDef {
+    var style = config_builder.PopConfigBuilder.NotificationStyleDef{};
+
+    _ = lua.getField(idx, "fg");
+    if (lua.typeOf(-1) == .number) style.fg = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "bg");
+    if (lua.typeOf(-1) == .number) style.bg = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "bold");
+    if (lua.typeOf(-1) == .boolean) style.bold = lua.toBoolean(-1);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "padding_x");
+    if (lua.typeOf(-1) == .number) style.padding_x = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "padding_y");
+    if (lua.typeOf(-1) == .number) style.padding_y = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "offset");
+    if (lua.typeOf(-1) == .number) style.offset = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "alignment");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        style.alignment = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+
+    _ = lua.getField(idx, "duration_ms");
+    if (lua.typeOf(-1) == .number) style.duration_ms = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    return style;
+}
+
+/// Lua C function: hexe.pop.notify.setup(opts)
+pub fn hexe_pop_notify_setup(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    if (lua.typeOf(1) != .table) {
+        _ = lua.pushString("notify.setup: argument must be a table");
+        lua.raiseError();
+    }
+
+    const pop = getPopBuilder(lua) catch {
+        _ = lua.pushString("notify.setup: failed to get config builder");
+        lua.raiseError();
+    };
+
+    // Parse carrier realm
+    _ = lua.getField(1, "carrier");
+    if (lua.typeOf(-1) == .table) {
+        pop.carrier_notification = parseNotificationStyle(lua, -1, pop.allocator);
+    }
+    lua.pop(1);
+
+    // Parse pane realm
+    _ = lua.getField(1, "pane");
+    if (lua.typeOf(-1) == .table) {
+        pop.pane_notification = parseNotificationStyle(lua, -1, pop.allocator);
+    }
+    lua.pop(1);
+
+    return 0;
+}
+
+/// Helper: Parse confirm style from table
+fn parseConfirmStyle(lua: *Lua, idx: i32, allocator: std.mem.Allocator) config_builder.PopConfigBuilder.ConfirmStyleDef {
+    var style = config_builder.PopConfigBuilder.ConfirmStyleDef{};
+
+    _ = lua.getField(idx, "fg");
+    if (lua.typeOf(-1) == .number) style.fg = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "bg");
+    if (lua.typeOf(-1) == .number) style.bg = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "bold");
+    if (lua.typeOf(-1) == .boolean) style.bold = lua.toBoolean(-1);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "padding_x");
+    if (lua.typeOf(-1) == .number) style.padding_x = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "padding_y");
+    if (lua.typeOf(-1) == .number) style.padding_y = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "yes_label");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        style.yes_label = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+
+    _ = lua.getField(idx, "no_label");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        style.no_label = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+
+    return style;
+}
+
+/// Lua C function: hexe.pop.confirm.setup(opts)
+pub fn hexe_pop_confirm_setup(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    if (lua.typeOf(1) != .table) {
+        _ = lua.pushString("confirm.setup: argument must be a table");
+        lua.raiseError();
+    }
+
+    const pop = getPopBuilder(lua) catch {
+        _ = lua.pushString("confirm.setup: failed to get config builder");
+        lua.raiseError();
+    };
+
+    // Parse carrier realm
+    _ = lua.getField(1, "carrier");
+    if (lua.typeOf(-1) == .table) {
+        pop.carrier_confirm = parseConfirmStyle(lua, -1, pop.allocator);
+    }
+    lua.pop(1);
+
+    // Parse pane realm
+    _ = lua.getField(1, "pane");
+    if (lua.typeOf(-1) == .table) {
+        pop.pane_confirm = parseConfirmStyle(lua, -1, pop.allocator);
+    }
+    lua.pop(1);
+
+    return 0;
+}
+
+/// Helper: Parse choose style from table
+fn parseChooseStyle(lua: *Lua, idx: i32, allocator: std.mem.Allocator) config_builder.PopConfigBuilder.ChooseStyleDef {
+    _ = allocator;
+    var style = config_builder.PopConfigBuilder.ChooseStyleDef{};
+
+    _ = lua.getField(idx, "fg");
+    if (lua.typeOf(-1) == .number) style.fg = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "bg");
+    if (lua.typeOf(-1) == .number) style.bg = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "highlight_fg");
+    if (lua.typeOf(-1) == .number) style.highlight_fg = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "highlight_bg");
+    if (lua.typeOf(-1) == .number) style.highlight_bg = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "bold");
+    if (lua.typeOf(-1) == .boolean) style.bold = lua.toBoolean(-1);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "padding_x");
+    if (lua.typeOf(-1) == .number) style.padding_x = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "padding_y");
+    if (lua.typeOf(-1) == .number) style.padding_y = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "visible_count");
+    if (lua.typeOf(-1) == .number) style.visible_count = @intCast(lua.toInteger(-1) catch 0);
+    lua.pop(1);
+
+    return style;
+}
+
+/// Lua C function: hexe.pop.choose.setup(opts)
+pub fn hexe_pop_choose_setup(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    if (lua.typeOf(1) != .table) {
+        _ = lua.pushString("choose.setup: argument must be a table");
+        lua.raiseError();
+    }
+
+    const pop = getPopBuilder(lua) catch {
+        _ = lua.pushString("choose.setup: failed to get config builder");
+        lua.raiseError();
+    };
+
+    // Parse carrier realm
+    _ = lua.getField(1, "carrier");
+    if (lua.typeOf(-1) == .table) {
+        pop.carrier_choose = parseChooseStyle(lua, -1, pop.allocator);
+    }
+    lua.pop(1);
+
+    // Parse pane realm
+    _ = lua.getField(1, "pane");
+    if (lua.typeOf(-1) == .table) {
+        pop.pane_choose = parseChooseStyle(lua, -1, pop.allocator);
+    }
+    lua.pop(1);
+
+    return 0;
+}
+
+/// Lua C function: hexe.pop.widgets.pokemon(opts)
+pub fn hexe_pop_widgets_pokemon(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    if (lua.typeOf(1) != .table) {
+        _ = lua.pushString("widgets.pokemon: argument must be a table");
+        lua.raiseError();
+    }
+
+    const pop = getPopBuilder(lua) catch {
+        _ = lua.pushString("widgets.pokemon: failed to get config builder");
+        lua.raiseError();
+    };
+
+    _ = lua.getField(1, "enabled");
+    if (lua.typeOf(-1) == .boolean) {
+        pop.widgets.pokemon_enabled = lua.toBoolean(-1);
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "position");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        pop.widgets.pokemon_position = pop.allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "shiny_chance");
+    if (lua.typeOf(-1) == .number) {
+        pop.widgets.pokemon_shiny_chance = @floatCast(lua.toNumber(-1) catch 0.01);
+    }
+    lua.pop(1);
+
+    return 0;
+}
+
+/// Lua C function: hexe.pop.widgets.keycast(opts)
+pub fn hexe_pop_widgets_keycast(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    if (lua.typeOf(1) != .table) {
+        _ = lua.pushString("widgets.keycast: argument must be a table");
+        lua.raiseError();
+    }
+
+    const pop = getPopBuilder(lua) catch {
+        _ = lua.pushString("widgets.keycast: failed to get config builder");
+        lua.raiseError();
+    };
+
+    _ = lua.getField(1, "enabled");
+    if (lua.typeOf(-1) == .boolean) {
+        pop.widgets.keycast_enabled = lua.toBoolean(-1);
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "position");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        pop.widgets.keycast_position = pop.allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "duration_ms");
+    if (lua.typeOf(-1) == .number) {
+        pop.widgets.keycast_duration_ms = lua.toInteger(-1) catch 3000;
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "max_entries");
+    if (lua.typeOf(-1) == .number) {
+        pop.widgets.keycast_max_entries = @intCast(lua.toInteger(-1) catch 5);
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "grouping_timeout_ms");
+    if (lua.typeOf(-1) == .number) {
+        pop.widgets.keycast_grouping_timeout_ms = lua.toInteger(-1) catch 500;
+    }
+    lua.pop(1);
+
+    return 0;
+}
+
+/// Lua C function: hexe.pop.widgets.digits(opts)
+pub fn hexe_pop_widgets_digits(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    if (lua.typeOf(1) != .table) {
+        _ = lua.pushString("widgets.digits: argument must be a table");
+        lua.raiseError();
+    }
+
+    const pop = getPopBuilder(lua) catch {
+        _ = lua.pushString("widgets.digits: failed to get config builder");
+        lua.raiseError();
+    };
+
+    _ = lua.getField(1, "enabled");
+    if (lua.typeOf(-1) == .boolean) {
+        pop.widgets.digits_enabled = lua.toBoolean(-1);
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "position");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        pop.widgets.digits_position = pop.allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+
+    _ = lua.getField(1, "size");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        pop.widgets.digits_size = pop.allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+
+    return 0;
+}
