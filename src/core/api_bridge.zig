@@ -135,6 +135,104 @@ pub fn parseKeyArray(lua: *Lua, table_idx: i32) ?ParsedKey {
     return null;
 }
 
+/// Parse a layout pane from Lua table
+fn parseLayoutPane(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.LayoutPaneDef {
+    var pane = config.LayoutPaneDef{};
+
+    // Parse cwd
+    _ = lua.getField(idx, "cwd");
+    if (lua.typeOf(-1) == .string) {
+        const cwd_str = lua.toString(-1) catch null;
+        if (cwd_str) |c| {
+            pane.cwd = allocator.dupe(u8, c) catch null;
+        }
+    }
+    lua.pop(1);
+
+    // Parse command
+    _ = lua.getField(idx, "command");
+    if (lua.typeOf(-1) == .string) {
+        const cmd_str = lua.toString(-1) catch null;
+        if (cmd_str) |c| {
+            pane.command = allocator.dupe(u8, c) catch null;
+        }
+    }
+    lua.pop(1);
+
+    return pane;
+}
+
+/// Parse a layout split recursively from Lua table
+fn parseLayoutSplit(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?*config.LayoutSplitDef {
+    // Check if this is a split (has array elements) or a pane
+    const array_len = lua.rawLen(idx);
+
+    if (array_len >= 2) {
+        // This is a split with children
+        // Parse dir
+        _ = lua.getField(idx, "dir");
+        const dir_str = lua.toString(-1) catch "h";
+        const dir = allocator.dupe(u8, dir_str) catch return null;
+        lua.pop(1);
+
+        // Parse ratio
+        _ = lua.getField(idx, "ratio");
+        const ratio_f64 = if (lua.typeOf(-1) == .number)
+            lua.toNumber(-1) catch 0.5
+        else
+            0.5;
+        const ratio: f32 = @floatCast(ratio_f64);
+        lua.pop(1);
+
+        // Parse first child
+        _ = lua.rawGetIndex(idx, 1);
+        const first_child = parseLayoutSplit(lua, -1, allocator) orelse {
+            lua.pop(1);
+            allocator.free(dir);
+            return null;
+        };
+        lua.pop(1);
+
+        // Parse second child
+        _ = lua.rawGetIndex(idx, 2);
+        const second_child = parseLayoutSplit(lua, -1, allocator) orelse {
+            lua.pop(1);
+            first_child.deinit(allocator);
+            allocator.destroy(first_child);
+            allocator.free(dir);
+            return null;
+        };
+        lua.pop(1);
+
+        // Create split
+        const split = allocator.create(config.LayoutSplitDef) catch {
+            first_child.deinit(allocator);
+            allocator.destroy(first_child);
+            second_child.deinit(allocator);
+            allocator.destroy(second_child);
+            allocator.free(dir);
+            return null;
+        };
+
+        split.* = .{
+            .split = .{
+                .dir = dir,
+                .ratio = ratio,
+                .first = first_child,
+                .second = second_child,
+            },
+        };
+
+        return split;
+    } else {
+        // This is a pane
+        const pane = parseLayoutPane(lua, idx, allocator) orelse return null;
+        const split = allocator.create(config.LayoutSplitDef) catch return null;
+        split.* = .{ .pane = pane };
+        return split;
+    }
+}
+
 /// Parse action string into BindAction
 /// Handles simple actions like "mux.quit", "tab.new", etc.
 fn parseSimpleAction(action_str: []const u8) ?config.Config.BindAction {
