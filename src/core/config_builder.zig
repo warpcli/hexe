@@ -271,17 +271,100 @@ pub const ShpConfigBuilder = struct {
     }
 };
 
-/// Placeholder for POP section builder
+/// POP section builder - accumulates popup/overlay configuration
 pub const PopConfigBuilder = struct {
     allocator: std.mem.Allocator,
 
+    // Notification styles (carrier = mux realm, pane = pane realm)
+    carrier_notification: ?NotificationStyleDef = null,
+    pane_notification: ?NotificationStyleDef = null,
+
+    // Dialog styles
+    carrier_confirm: ?ConfirmStyleDef = null,
+    pane_confirm: ?ConfirmStyleDef = null,
+    carrier_choose: ?ChooseStyleDef = null,
+    pane_choose: ?ChooseStyleDef = null,
+
+    // Widgets config
+    widgets: WidgetsConfigDef,
+
+    const NotificationStyleDef = struct {
+        fg: ?u8 = null,
+        bg: ?u8 = null,
+        bold: ?bool = null,
+        padding_x: ?u8 = null,
+        padding_y: ?u8 = null,
+        offset: ?u8 = null,
+        alignment: ?[]const u8 = null,
+        duration_ms: ?u32 = null,
+    };
+
+    const ConfirmStyleDef = struct {
+        fg: ?u8 = null,
+        bg: ?u8 = null,
+        bold: ?bool = null,
+        padding_x: ?u8 = null,
+        padding_y: ?u8 = null,
+        yes_label: ?[]const u8 = null,
+        no_label: ?[]const u8 = null,
+    };
+
+    const ChooseStyleDef = struct {
+        fg: ?u8 = null,
+        bg: ?u8 = null,
+        highlight_fg: ?u8 = null,
+        highlight_bg: ?u8 = null,
+        bold: ?bool = null,
+        padding_x: ?u8 = null,
+        padding_y: ?u8 = null,
+        visible_count: ?u8 = null,
+    };
+
+    const WidgetsConfigDef = struct {
+        pokemon_enabled: ?bool = null,
+        pokemon_position: ?[]const u8 = null,
+        pokemon_shiny_chance: ?f32 = null,
+
+        keycast_enabled: ?bool = null,
+        keycast_position: ?[]const u8 = null,
+        keycast_duration_ms: ?i64 = null,
+        keycast_max_entries: ?u8 = null,
+        keycast_grouping_timeout_ms: ?i64 = null,
+
+        digits_enabled: ?bool = null,
+        digits_position: ?[]const u8 = null,
+        digits_size: ?[]const u8 = null,
+    };
+
     pub fn init(allocator: std.mem.Allocator) !*PopConfigBuilder {
         const self = try allocator.create(PopConfigBuilder);
-        self.* = .{ .allocator = allocator };
+        self.* = .{
+            .allocator = allocator,
+            .widgets = .{},
+        };
         return self;
     }
 
     pub fn deinit(self: *PopConfigBuilder) void {
-        _ = self;
+        // Clean up allocated strings if any
+        if (self.carrier_notification) |*notif| {
+            if (notif.alignment) |a| self.allocator.free(a);
+        }
+        if (self.pane_notification) |*notif| {
+            if (notif.alignment) |a| self.allocator.free(a);
+        }
+        if (self.carrier_confirm) |*conf| {
+            if (conf.yes_label) |y| self.allocator.free(y);
+            if (conf.no_label) |n| self.allocator.free(n);
+        }
+        if (self.pane_confirm) |*conf| {
+            if (conf.yes_label) |y| self.allocator.free(y);
+            if (conf.no_label) |n| self.allocator.free(n);
+        }
+        // Widget strings cleanup
+        if (self.widgets.pokemon_position) |p| self.allocator.free(p);
+        if (self.widgets.keycast_position) |p| self.allocator.free(p);
+        if (self.widgets.digits_position) |p| self.allocator.free(p);
+        if (self.widgets.digits_size) |s| self.allocator.free(s);
     }
 };
