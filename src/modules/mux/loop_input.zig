@@ -1199,7 +1199,7 @@ fn handleScrollKeys(state: *State, inp: []const u8) ?usize {
     if (p.vt.inAltScreen()) return null;
 
     const now = std.time.milliTimestamp();
-    const acceleration_timeout_ms: i64 = 500;
+    const acceleration_timeout_ms: i64 = core.constants.Timing.mouse_acceleration_timeout;
 
     // PageUp: ESC [ 5 ~ or ESC [ 5 ; <mod> [: <event>] ~
     if (inp.len >= 4 and inp[2] == '5') {

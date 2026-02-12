@@ -7,7 +7,7 @@ const state = @import("state.zig");
 const ses = @import("main.zig");
 
 /// Maximum number of concurrent client connections (MUX instances).
-const MAX_CLIENTS: usize = 64;
+const MAX_CLIENTS: usize = core.constants.Limits.max_clients;
 
 /// Server that handles mux connections
 /// Note: Uses page_allocator internally to avoid GPA issues after fork/daemonization
@@ -25,6 +25,9 @@ pub const Server = struct {
     // CLI fds waiting for float result, keyed by float pane UUID.
     pending_float_cli_fds: std.AutoHashMap([32]u8, posix.fd_t),
 
+    // Resource monitoring and limits
+    resource_monitor: core.resource_limits.ResourceMonitor,
+
     pub fn init(_: std.mem.Allocator, ses_state: *state.SesState) !Server {
         // Use page_allocator for everything to avoid GPA issues after fork
         const page_alloc = std.heap.page_allocator;
@@ -32,6 +35,7 @@ pub const Server = struct {
         defer page_alloc.free(socket_path);
 
         const socket = try ipc.Server.init(page_alloc, socket_path);
+        const limits = core.resource_limits.ResourceLimits.fromEnv();
 
         return Server{
             .allocator = page_alloc,
@@ -41,6 +45,7 @@ pub const Server = struct {
             .pending_pop_requests = std.AutoHashMap(posix.fd_t, posix.fd_t).init(page_alloc),
             .binary_ctl_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
             .pending_float_cli_fds = std.AutoHashMap([32]u8, posix.fd_t).init(page_alloc),
+            .resource_monitor = core.resource_limits.ResourceMonitor.init(limits),
         };
     }
 
@@ -69,6 +74,7 @@ pub const Server = struct {
         });
 
         var last_save: i64 = std.time.milliTimestamp();
+        var last_stats_update: i64 = last_save;
 
         while (self.running) {
             // Periodic persistence (best-effort)
@@ -79,6 +85,21 @@ pub const Server = struct {
                 };
                 self.ses_state.dirty = false;
                 last_save = now_ms;
+            }
+
+            // Update resource stats every 5 seconds
+            if (now_ms - last_stats_update >= 5000) {
+                const detached_sessions = self.ses_state.detached_sessions.count();
+                const total_panes = self.ses_state.panes.count();
+                const active_connections = self.ses_state.clients.items.len;
+
+                self.resource_monitor.updateStats(
+                    active_connections,
+                    detached_sessions,
+                    total_panes,
+                    0, // Memory tracking would require more instrumentation
+                );
+                last_stats_update = now_ms;
             }
             // Remove old pod_vt fds from poll set (closed by connectPodVt).
             // Must happen BEFORE adding new fds to prevent fd-reuse duplicates.
@@ -220,13 +241,18 @@ pub const Server = struct {
     /// Dispatch a newly accepted connection based on its handshake bytes.
     /// Handshake format: [channel_type, protocol_version]
     fn dispatchNewConnection(self: *Server, conn: ipc.Connection, alloc: std.mem.Allocator, poll_fds: *std.ArrayList(posix.pollfd)) void {
-        // Reject if at max capacity to prevent resource exhaustion.
-        if (self.ses_state.clients.items.len >= MAX_CLIENTS) {
-            ses.debugLog("max clients reached ({d}), rejecting connection", .{MAX_CLIENTS});
+        // Check resource limits and rate limiting
+        if (!self.resource_monitor.allowNewConnection()) {
+            ses.debugLog("reject: connection limit or rate limit exceeded", .{});
+            // Try to send error message before closing
+            const err_msg = "server_overloaded: connection/rate limit exceeded";
+            const err_payload = wire.Error{ .msg_len = @intCast(err_msg.len) };
+            wire.writeControlWithTrail(conn.fd, .@"error", std.mem.asBytes(&err_payload), err_msg) catch {};
             var tmp = conn;
             tmp.close();
             return;
         }
+        self.resource_monitor.recordConnection();
 
         // Read versioned handshake: [channel_type, version]
         var handshake: [2]u8 = undefined;
@@ -245,19 +271,52 @@ pub const Server = struct {
             off += n;
         }
 
-        // Validate protocol version.
-        if (handshake[1] != wire.PROTOCOL_VERSION) {
-            ses.debugLog("reject: unsupported protocol version {d} (expected {d})", .{ handshake[1], wire.PROTOCOL_VERSION });
+        // Validate protocol version with negotiation.
+        const client_version = handshake[1];
+        if (!wire.isProtocolVersionSupported(client_version)) {
+            ses.debugLog("reject: unsupported protocol version {d} (supported: {d}-{d})", .{
+                client_version,
+                wire.MIN_PROTOCOL_VERSION,
+                wire.PROTOCOL_VERSION,
+            });
             // Send error message if this is a CTL channel (can receive error responses)
             if (handshake[0] == wire.SES_HANDSHAKE_MUX_CTL or handshake[0] == wire.SES_HANDSHAKE_POD_CTL) {
-                // Send version mismatch error
-                const err_msg = "protocol_version_mismatch";
+                // Send version mismatch error with version range
+                const err_msg = std.fmt.allocPrint(
+                    alloc,
+                    "protocol_version_mismatch: client={d} supported={d}-{d}",
+                    .{ client_version, wire.MIN_PROTOCOL_VERSION, wire.PROTOCOL_VERSION },
+                ) catch "protocol_version_mismatch";
+                defer if (!std.mem.eql(u8, err_msg, "protocol_version_mismatch")) alloc.free(err_msg);
+
                 const err_payload = wire.Error{ .msg_len = @intCast(err_msg.len) };
                 wire.writeControlWithTrail(conn.fd, .@"error", std.mem.asBytes(&err_payload), err_msg) catch {};
             }
             var tmp = conn;
             tmp.close();
             return;
+        }
+
+        // Log deprecation warning if client is using old version
+        if (wire.isProtocolVersionDeprecated(client_version)) {
+            ses.debugLog("warning: client using deprecated protocol version {d} (current: {d})", .{
+                client_version,
+                wire.PROTOCOL_VERSION,
+            });
+            // Send deprecation notice if this is a CTL channel
+            if (handshake[0] == wire.SES_HANDSHAKE_MUX_CTL) {
+                const warn_msg = std.fmt.allocPrint(
+                    alloc,
+                    "Protocol version {d} is deprecated. Please update to version {d}.",
+                    .{ client_version, wire.PROTOCOL_VERSION },
+                ) catch "";
+                defer if (warn_msg.len > 0) alloc.free(warn_msg);
+
+                if (warn_msg.len > 0) {
+                    const notify = wire.Notify{ .msg_len = @intCast(warn_msg.len) };
+                    wire.writeControlWithTrail(conn.fd, .notify, std.mem.asBytes(&notify), warn_msg) catch {};
+                }
+            }
         }
 
         switch (handshake[0]) {

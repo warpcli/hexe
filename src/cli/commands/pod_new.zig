@@ -87,7 +87,7 @@ pub fn runPodNew(
     defer stdout_file.close();
 
     // Read JSON handshake line with timeout.
-    const spawn_timeout_ms: i64 = 2500;
+    const spawn_timeout_ms: i64 = core.constants.Timing.pod_spawn_timeout;
     const deadline_ms = std.time.milliTimestamp() + spawn_timeout_ms;
     const stdout_fd = stdout_file.handle;
     var line_buf: [512]u8 = undefined;
@@ -121,12 +121,28 @@ pub fn runPodNew(
     // Detach the pod process (keep it running).
     // The pod was started with --foreground so it didn't daemonize, but we
     // still want `hexe pod new` to exit immediately after readiness.
-    // We just print a single JSON line for scripting.
-    var out_buf: [1024]u8 = undefined;
-    const out = try std.fmt.bufPrint(
-        &out_buf,
-        "{{\"type\":\"pod_new\",\"uuid\":\"{s}\",\"socket\":\"{s}\",\"pod_pid\":{d},\"child_pid\":{d}}}\n",
-        .{ uuid_str, pod_socket_path, pod_pid, child_pid },
+    // We print a JSON response for scripting.
+    const PodNewResponse = struct {
+        type: []const u8,
+        uuid: []const u8,
+        socket: []const u8,
+        pod_pid: i32,
+        child_pid: i32,
+    };
+
+    const response = PodNewResponse{
+        .type = "pod_new",
+        .uuid = uuid_str,
+        .socket = pod_socket_path,
+        .pod_pid = @intCast(pod_pid),
+        .child_pid = @intCast(child_pid),
+    };
+
+    const stdout = std.fs.File.stdout();
+    var buf: [4096]u8 = undefined;
+    const json_str = try std.fmt.bufPrint(&buf,
+        "{{\"type\":\"{s}\",\"uuid\":\"{s}\",\"socket\":\"{s}\",\"pod_pid\":{d},\"child_pid\":{d}}}\n",
+        .{response.type, response.uuid, response.socket, response.pod_pid, response.child_pid}
     );
-    _ = try std.fs.File.stdout().writeAll(out);
+    try stdout.writeAll(json_str);
 }

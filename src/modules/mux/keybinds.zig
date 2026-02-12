@@ -532,7 +532,7 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
         cancelTimer(state, .hold_fired, mods_eff, key);
 
         // Keep repeat_active alive (or create if first repeat event)
-        const repeat_timeout: i64 = 100; // Internal: terminal repeat event tracking
+        const repeat_timeout: i64 = core.constants.Timing.key_repeat_timeout;
         var found = false;
         for (state.key_timers.items) |*t| {
             if (t.kind == .repeat_active and t.mods == mods_eff and keyEq(t.key, key)) {

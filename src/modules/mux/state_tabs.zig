@@ -527,7 +527,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 "Warning: reattach slow ({d}s elapsed)",
                 .{@divTrunc(elapsed, 1000)},
             ) catch "Warning: reattach taking longer than expected";
-            defer if (msg.ptr != "Warning: reattach taking longer than expected".ptr) self.allocator.free(msg);
+            defer if (!std.mem.eql(u8, msg, "Warning: reattach taking longer than expected")) self.allocator.free(msg);
             self.notifications.showFor(msg, 3000);
             mux.debugLog("reattachSession: slow progress warning after JSON parse ({d}ms)", .{elapsed});
         }
@@ -699,7 +699,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             "Warning: {d}/{d} panes failed to reattach",
             .{ failed_adoptions, total_panes },
         ) catch "Warning: Some panes failed to reattach";
-        defer if (msg.ptr != "Warning: Some panes failed to reattach".ptr) self.allocator.free(msg);
+        defer if (!std.mem.eql(u8, msg, "Warning: Some panes failed to reattach")) self.allocator.free(msg);
         self.notifications.showFor(msg, 5000);
         mux.debugLog("reattachSession: notified user about {d} failed adoptions", .{failed_adoptions});
     }
@@ -717,7 +717,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 "Warning: reattach slow ({d}s elapsed, {d} panes adopted)",
                 .{ @divTrunc(elapsed, 1000), uuid_pane_map.count() },
             ) catch "Warning: reattach taking longer than expected";
-            defer if (msg.ptr != "Warning: reattach taking longer than expected".ptr) self.allocator.free(msg);
+            defer if (!std.mem.eql(u8, msg, "Warning: reattach taking longer than expected")) self.allocator.free(msg);
             self.notifications.showFor(msg, 3000);
             mux.debugLog("reattachSession: slow progress warning after adoption ({d}ms)", .{elapsed});
         }
@@ -991,7 +991,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 "Warning: {d} empty tab(s) removed (all panes died)",
                 .{removed_tabs},
             ) catch "Warning: Empty tabs were removed";
-            defer if (msg.ptr != "Warning: Empty tabs were removed".ptr) self.allocator.free(msg);
+            defer if (!std.mem.eql(u8, msg, "Warning: Empty tabs were removed")) self.allocator.free(msg);
             self.notifications.showFor(msg, 4000);
             mux.debugLog("reattachSession: removed {d} empty tabs", .{removed_tabs});
         }
@@ -1031,7 +1031,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             "Warning: {d} float(s) had invalid parent tab, reset to global",
             .{invalid_parent_tabs},
         ) catch "Warning: Some floats had invalid parent tab references";
-        defer if (msg.ptr != "Warning: Some floats had invalid parent tab references".ptr) self.allocator.free(msg);
+        defer if (!std.mem.eql(u8, msg, "Warning: Some floats had invalid parent tab references")) self.allocator.free(msg);
         self.notifications.showFor(msg, 4000);
         mux.debugLog("reattachSession: corrected {d} invalid parent_tab references", .{invalid_parent_tabs});
     }
@@ -1068,7 +1068,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 "Warning: reattach slow ({d}s total, {d} tabs restored)",
                 .{ @divTrunc(elapsed, 1000), self.tabs.items.len },
             ) catch "Warning: reattach taking longer than expected";
-            defer if (msg.ptr != "Warning: reattach taking longer than expected".ptr) self.allocator.free(msg);
+            defer if (!std.mem.eql(u8, msg, "Warning: reattach taking longer than expected")) self.allocator.free(msg);
             self.notifications.showFor(msg, 3000);
             mux.debugLog("reattachSession: slow progress warning after layout restore ({d}ms)", .{elapsed});
         }

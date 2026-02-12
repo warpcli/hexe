@@ -7,6 +7,9 @@ const ses = @import("ses");
 const pod = @import("pod");
 const shp = @import("shp");
 const cli_cmds = @import("commands/com.zig");
+// const config_validate = @import("commands/config_validate.zig"); // TODO: requires Config API updates
+// const ses_export = @import("commands/ses_export.zig"); // TODO: requires protocol extension
+const ses_stats = @import("commands/ses_stats.zig");
 
 const c = @cImport({
     @cInclude("stdlib.h");
@@ -67,6 +70,7 @@ pub fn main() !void {
     const mux_cmd = try parser.newCommand("mux", "Terminal multiplexer");
     const shp_cmd = try parser.newCommand("shp", "Shell prompt renderer");
     const pop_cmd = try parser.newCommand("pop", "Popup overlays");
+    // const config_cmd = try parser.newCommand("config", "Configuration management"); // TODO: requires Config API updates
 
     // SES subcommands
     const ses_daemon = try ses_cmd.newCommand("daemon", "Start the session daemon");
@@ -91,6 +95,15 @@ pub fn main() !void {
     const ses_clear = try ses_cmd.newCommand("clear", "Kill all detached sessions");
     const ses_clear_instance = try ses_clear.string("I", "instance", null);
     const ses_clear_force = try ses_clear.flag("f", "force", null);
+
+    // TODO: ses_export requires protocol extension (get_session_state message type)
+    // const ses_export_cmd = try ses_cmd.newCommand("export", "Export detached session to JSON");
+    // const ses_export_session = try ses_export_cmd.stringPositional(null);
+    // const ses_export_output = try ses_export_cmd.string("o", "output", null);
+    // const ses_export_instance = try ses_export_cmd.string("I", "instance", null);
+
+    const ses_stats_cmd = try ses_cmd.newCommand("stats", "Show resource usage statistics");
+    const ses_stats_instance = try ses_stats_cmd.string("I", "instance", null);
 
     // POD subcommands (mostly for ses-internal use)
     const pod_daemon = try pod_cmd.newCommand("daemon", "Start a per-pane pod daemon");
@@ -259,6 +272,9 @@ pub fn main() !void {
     const pop_choose_items = try pop_choose.string("i", "items", null);
     const pop_choose_msg = try pop_choose.stringPositional(null);
 
+    // CONFIG subcommands
+    // const config_validate_cmd = try config_cmd.newCommand("validate", "Validate configuration file"); // TODO: requires Config API updates
+
     // Check for help flag manually to avoid argonaut segfault
     var has_help = false;
     var found_ses = false;
@@ -289,6 +305,10 @@ pub fn main() !void {
     var found_exit_intent = false;
     var found_shell_event = false;
     var found_spinner = false;
+    var found_config = false;
+    var found_validate = false;
+    var found_export = false;
+    var found_stats = false;
 
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) has_help = true;
@@ -320,6 +340,10 @@ pub fn main() !void {
         if (std.mem.eql(u8, arg, "exit-intent")) found_exit_intent = true;
         if (std.mem.eql(u8, arg, "shell-event")) found_shell_event = true;
         if (std.mem.eql(u8, arg, "spinner")) found_spinner = true;
+        if (std.mem.eql(u8, arg, "config")) found_config = true;
+        if (std.mem.eql(u8, arg, "validate")) found_validate = true;
+        if (std.mem.eql(u8, arg, "export")) found_export = true;
+        if (std.mem.eql(u8, arg, "stats")) found_stats = true;
     }
 
         if (has_help) {
@@ -397,15 +421,17 @@ pub fn main() !void {
         } else if (found_pop) {
             print("Usage: hexe pop <command>\n\nPopup overlays\n\nCommands:\n  notify   Show notification\n  confirm  Yes/No dialog\n  choose   Select from options\n", .{});
         } else if (found_ses) {
-            print("Usage: hexe ses <command>\n\nSession daemon management\n\nCommands:\n  daemon  Start the session daemon\n  status  Show daemon info\n  list    List sessions and panes\n  kill    Kill a detached session\n  clear   Kill all detached sessions\n", .{});
+            print("Usage: hexe ses <command>\n\nSession daemon management\n\nCommands:\n  daemon  Start the session daemon\n  status  Show daemon info\n  list    List sessions and panes\n  kill    Kill a detached session\n  clear   Kill all detached sessions\n  stats   Show resource usage statistics\n", .{});
         } else if (found_pod) {
             print("Usage: hexe pod <command>\n\nPer-pane PTY daemon\n\nCommands:\n  daemon  Start a per-pane pod daemon\n  new     Create a standalone pod\n  list    List discoverable pods\n  send    Send input to a pod\n  attach  Attach to a pod\n  kill    Kill a pod\n  gc      Clean stale pod metadata\n", .{});
         } else if (found_mux) {
             print("Usage: hexe mux <command>\n\nTerminal multiplexer\n\nCommands:\n  new      Create new multiplexer session\n  attach   Attach to existing session\n  float    Spawn a transient float pane\n  notify   Send notification\n  send     Send keystrokes to pane\n  info     Show pane info\n  layout   Save and restore layouts\n", .{});
         } else if (found_shp) {
             print("Usage: hexe shp <command>\n\nShell prompt renderer\n\nCommands:\n  prompt       Render shell prompt\n  init         Print shell initialization script\n  exit-intent  Ask mux permission before shell exits\n  shell-event  Send shell metadata to mux\n  spinner      Render/animate a spinner\n", .{});
+        // } else if (found_config) {
+        //     print("Usage: hexe config <command>\n\nConfiguration management\n\nCommands:\n  validate  Validate configuration file syntax and structure\n", .{});
         } else {
-            print("Usage: hexe <command>\n\nHexe terminal multiplexer\n\nCommands:\n  ses  Session daemon management\n  pod  Per-pane PTY daemon (internal)\n  mux  Terminal multiplexer\n  shp  Shell prompt renderer\n  pop  Popup overlays\n", .{});
+            print("Usage: hexe <command>\n\nHexe terminal multiplexer\n\nCommands:\n  ses     Session daemon management\n  pod     Per-pane PTY daemon (internal)\n  mux     Terminal multiplexer\n  shp     Shell prompt renderer\n  pop     Popup overlays\n", .{});
         }
         return;
     }
@@ -465,6 +491,12 @@ pub fn main() !void {
         } else if (ses_clear.happened) {
             if (ses_clear_instance.*.len > 0) setInstanceFromCli(ses_clear_instance.*);
             try cli_cmds.runSesClear(allocator, ses_clear_force.*);
+        // } else if (ses_export_cmd.happened) {
+        //     if (ses_export_instance.*.len > 0) setInstanceFromCli(ses_export_instance.*);
+        //     try ses_export.run(allocator, ses_export_session.*, ses_export_output.*);
+        } else if (ses_stats_cmd.happened) {
+            if (ses_stats_instance.*.len > 0) setInstanceFromCli(ses_stats_instance.*);
+            try ses_stats.run(allocator);
         }
     } else if (pod_cmd.happened) {
         if (pod_daemon.happened) {
@@ -638,6 +670,10 @@ pub fn main() !void {
         } else if (pop_choose.happened) {
             try runPopChoose(allocator, pop_choose_uuid.*, pop_choose_timeout.*, pop_choose_items.*, pop_choose_msg.*);
         }
+    // } else if (config_cmd.happened) {
+    //     if (config_validate_cmd.happened) {
+    //         try config_validate.run();
+    //     }
     }
 }
 
@@ -647,7 +683,12 @@ pub fn main() !void {
 
 fn runSesDaemon(foreground: bool, debug: bool, log_file: []const u8) !void {
     // Call ses run() - daemon mode unless foreground flag is set
-    try ses.run(.{ .daemon = !foreground, .debug = debug, .log_file = if (log_file.len > 0) log_file else null });
+    const log: ?[]const u8 = if (log_file.len > 0) log_file else null;
+    try ses.run(.{
+        .daemon = !foreground,
+        .debug = debug,
+        .log_file = log,
+    });
 }
 
 fn runSesStatus(allocator: std.mem.Allocator) !void {

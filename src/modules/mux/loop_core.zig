@@ -32,8 +32,9 @@ pub fn runMainLoop(state: *State) !void {
     try stdout.writeAll("\x1b[?1049h\x1b[2J\x1b[3J\x1b[H\x1b[0m\x1b(B\x1b)0\x0f\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[>3u");
     defer stdout.writeAll("\x1b[<u\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[0m\x1b[?25h\x1b[?1049l") catch {};
 
-    // Build poll fds.
-    var poll_fds: [17]posix.pollfd = undefined; // stdin + up to 16 panes
+    // Build poll fds (dynamic to support unlimited panes).
+    var poll_fds: std.ArrayList(posix.pollfd) = .empty;
+    defer poll_fds.deinit(allocator);
     var buffer: [1024 * 1024]u8 = undefined; // Larger buffer for efficiency
 
     // Frame timing.
@@ -43,10 +44,10 @@ pub fn runMainLoop(state: *State) !void {
     var last_heartbeat: i64 = last_render;
     // Update status bar periodically.
     // This is also used to drive lightweight animations.
-    const status_update_interval_base: i64 = 250;
-    const status_update_interval_anim: i64 = 75;
-    const pane_sync_interval: i64 = 1000; // Sync pane info (CWD, process) every 1s
-    const heartbeat_interval: i64 = 30000; // Send ping to SES every 30s
+    const status_update_interval_base: i64 = core.constants.Timing.status_update_interval_base;
+    const status_update_interval_anim: i64 = core.constants.Timing.status_update_interval_anim;
+    const pane_sync_interval: i64 = core.constants.Timing.pane_sync_interval;
+    const heartbeat_interval: i64 = core.constants.Timing.heartbeat_interval;
 
     // Reusable lists for dead pane tracking (avoid per-iteration allocations).
     var dead_splits: std.ArrayList(u16) = .empty;
@@ -87,58 +88,60 @@ pub fn runMainLoop(state: *State) !void {
         }
 
         // Proactively check for dead floats before polling.
+        // Iterate in reverse to avoid O(n²) behavior from orderedRemove shifts.
         {
-            var fi: usize = 0;
-            while (fi < state.floats.items.len) {
-                if (!state.floats.items[fi].isAlive()) {
-                    // Check if this was the active float.
-                    const was_active = if (state.active_floating) |af| af == fi else false;
-                    const exit_code = state.floats.items[fi].getExitCode();
+            if (state.floats.items.len > 0) {
+                var fi: usize = state.floats.items.len;
+                while (fi > 0) {
+                    fi -= 1;
+                    if (!state.floats.items[fi].isAlive()) {
+                        // Check if this was the active float.
+                        const was_active = if (state.active_floating) |af| af == fi else false;
+                        const exit_code = state.floats.items[fi].getExitCode();
 
-                    const pane = state.floats.orderedRemove(fi);
+                        const pane = state.floats.orderedRemove(fi);
 
-                    // Log float pane death
-                    mux.debugLog("float pane died: uuid={s} exit_code={d} focused={}", .{ pane.uuid[0..8], exit_code, was_active });
+                        // Log float pane death
+                        mux.debugLog("float pane died: uuid={s} exit_code={d} focused={}", .{ pane.uuid[0..8], exit_code, was_active });
 
-                    // Show notification if float died with non-zero exit and wasn't focused
-                    if (!was_active and exit_code != 0) {
-                        const msg = std.fmt.allocPrint(
-                            allocator,
-                            "Background float exited with code {d}",
-                            .{exit_code},
-                        ) catch "Background float exited unexpectedly";
-                        defer if (msg.ptr != "Background float exited unexpectedly".ptr) allocator.free(msg);
-                        state.notifications.showFor(msg, 3000);
-                    }
-
-                    float_completion.handleBlockingFloatCompletion(state, pane);
-
-                    // Kill in ses (dead panes don't need to be orphaned).
-                    if (state.ses_client.isConnected()) {
-                        state.ses_client.killPane(pane.uuid) catch |e| {
-                            core.logging.logError("mux", "killPane failed for float", e);
-                        };
-                    }
-
-                    pane.deinit();
-                    state.allocator.destroy(pane);
-                    state.needs_render = true;
-                    state.force_full_render = true;
-                    state.renderer.invalidate();
-                    state.syncStateToSes();
-
-                    // Clear focus if this was the active float, sync focus to tiled pane.
-                    if (was_active) {
-                        state.active_floating = null;
-                        // Force cursor restoration - float may have hidden cursor
-                        state.cursor_needs_restore = true;
-                        if (state.currentLayout().getFocusedPane()) |tiled| {
-                            state.syncPaneFocus(tiled, null);
+                        // Show notification if float died with non-zero exit and wasn't focused
+                        if (!was_active and exit_code != 0) {
+                            const msg = std.fmt.allocPrint(
+                                allocator,
+                                "Background float exited with code {d}",
+                                .{exit_code},
+                            ) catch "Background float exited unexpectedly";
+                            defer if (!std.mem.eql(u8, msg, "Background float exited unexpectedly")) allocator.free(msg);
+                            state.notifications.showFor(msg, 3000);
                         }
+
+                        float_completion.handleBlockingFloatCompletion(state, pane);
+
+                        // Kill in ses (dead panes don't need to be orphaned).
+                        if (state.ses_client.isConnected()) {
+                            state.ses_client.killPane(pane.uuid) catch |e| {
+                                core.logging.logError("mux", "killPane failed for float", e);
+                            };
+                        }
+
+                        pane.deinit();
+                        state.allocator.destroy(pane);
+                        state.needs_render = true;
+                        state.force_full_render = true;
+                        state.renderer.invalidate();
+                        state.syncStateToSes();
+
+                        // Clear focus if this was the active float, sync focus to tiled pane.
+                        if (was_active) {
+                            state.active_floating = null;
+                            // Force cursor restoration - float may have hidden cursor
+                            state.cursor_needs_restore = true;
+                            if (state.currentLayout().getFocusedPane()) |tiled| {
+                                state.syncPaneFocus(tiled, null);
+                            }
+                        }
+                        // When iterating in reverse, removals don't affect unprocessed indices.
                     }
-                    // Don't increment fi, next item shifted into this position.
-                } else {
-                    fi += 1;
                 }
             }
             // Ensure active_floating is valid.
@@ -153,47 +156,43 @@ pub fn runMainLoop(state: *State) !void {
         }
 
         // Build poll list: stdin + all local pane PTYs.
-        var fd_count: usize = 1;
-        poll_fds[0] = .{ .fd = posix.STDIN_FILENO, .events = posix.POLL.IN, .revents = 0 };
+        poll_fds.clearRetainingCapacity();
+        try poll_fds.append(allocator, .{ .fd = posix.STDIN_FILENO, .events = posix.POLL.IN, .revents = 0 });
 
         var pane_it = state.currentLayout().splitIterator();
         while (pane_it.next()) |pane| {
             if (pane.*.hasPollableFd()) {
-                if (fd_count < poll_fds.len) {
-                    poll_fds[fd_count] = .{ .fd = pane.*.getFd(), .events = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR, .revents = 0 };
-                    fd_count += 1;
-                }
+                try poll_fds.append(allocator, .{
+                    .fd = pane.*.getFd(),
+                    .events = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR,
+                    .revents = 0,
+                });
             }
         }
 
         // Add local floats (pod floats get data via VT channel).
         for (state.floats.items) |pane| {
             if (pane.hasPollableFd()) {
-                if (fd_count < poll_fds.len) {
-                    poll_fds[fd_count] = .{ .fd = pane.getFd(), .events = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR, .revents = 0 };
-                    fd_count += 1;
-                }
+                try poll_fds.append(allocator, .{
+                    .fd = pane.getFd(),
+                    .events = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR,
+                    .revents = 0,
+                });
             }
         }
 
         // Add SES VT channel fd (multiplexed output for all pod panes).
         var ses_vt_fd_idx: ?usize = null;
         if (state.ses_client.getVtFd()) |vt_fd| {
-            if (fd_count < poll_fds.len) {
-                ses_vt_fd_idx = fd_count;
-                poll_fds[fd_count] = .{ .fd = vt_fd, .events = posix.POLL.IN, .revents = 0 };
-                fd_count += 1;
-            }
+            ses_vt_fd_idx = poll_fds.items.len;
+            try poll_fds.append(allocator, .{ .fd = vt_fd, .events = posix.POLL.IN, .revents = 0 });
         }
 
         // Add SES control channel fd (async messages: notifications, shell events).
         var ses_fd_idx: ?usize = null;
         if (state.ses_client.getCtlFd()) |ctl_fd| {
-            if (fd_count < poll_fds.len) {
-                ses_fd_idx = fd_count;
-                poll_fds[fd_count] = .{ .fd = ctl_fd, .events = posix.POLL.IN, .revents = 0 };
-                fd_count += 1;
-            }
+            ses_fd_idx = poll_fds.items.len;
+            try poll_fds.append(allocator, .{ .fd = ctl_fd, .events = posix.POLL.IN, .revents = 0 });
         }
 
 
@@ -244,7 +243,7 @@ pub fn runMainLoop(state: *State) !void {
         };
         const frame_timeout: i32 = if (!state.needs_render) 100 else if (since_render >= 16) 0 else @intCast(16 - since_render);
         const timeout: i32 = @intCast(@min(@as(i64, frame_timeout), @min(until_status, until_key_timer)));
-        _ = posix.poll(poll_fds[0..fd_count], timeout) catch continue;
+        _ = posix.poll(poll_fds.items, timeout) catch continue;
 
         // Check if status bar needs periodic update.
         const now2 = std.time.milliTimestamp();
@@ -252,7 +251,7 @@ pub fn runMainLoop(state: *State) !void {
         // Auto-scroll while selecting when the mouse is near the top/bottom.
         // This allows selecting hidden content by holding the mouse at the edge.
         if (state.mouse_selection.active and state.mouse_selection.edge_scroll != .none) {
-            const interval_ms: i64 = 30;
+            const interval_ms: i64 = core.constants.Timing.key_timer_interval;
             if (now2 - state.mouse_selection_last_autoscroll_ms >= interval_ms) {
                 state.mouse_selection_last_autoscroll_ms = now2;
                 if (state.mouse_selection.pane_uuid) |uuid| {
@@ -296,8 +295,8 @@ pub fn runMainLoop(state: *State) !void {
         pane_it = state.currentLayout().splitIterator();
         while (pane_it.next()) |pane| {
             if (!pane.*.hasPollableFd()) continue;
-            if (idx < fd_count) {
-                if (poll_fds[idx].revents & posix.POLL.IN != 0) {
+            if (idx < poll_fds.items.len) {
+                if (poll_fds.items[idx].revents & posix.POLL.IN != 0) {
                     if (pane.*.poll(&buffer)) |had_data| {
                         if (had_data) {
                             // If the viewport is scrolled, new output still changes what should be visible:
@@ -315,9 +314,9 @@ pub fn runMainLoop(state: *State) !void {
                         }
                     } else |_| {}
                 }
-                if (poll_fds[idx].revents & posix.POLL.HUP != 0) {
+                if (poll_fds.items[idx].revents & posix.POLL.HUP != 0) {
                     dead_splits.append(allocator, pane.*.id) catch {};
-                } else if (poll_fds[idx].revents & posix.POLL.ERR != 0) {
+                } else if (poll_fds.items[idx].revents & posix.POLL.ERR != 0) {
                     // ERR without HUP — verify process actually exited.
                     if (!pane.*.isAlive()) {
                         dead_splits.append(allocator, pane.*.id) catch {};
@@ -332,8 +331,8 @@ pub fn runMainLoop(state: *State) !void {
 
         for (state.floats.items, 0..) |pane, fi| {
             if (!pane.hasPollableFd()) continue;
-            if (idx < fd_count) {
-                if (poll_fds[idx].revents & posix.POLL.IN != 0) {
+            if (idx < poll_fds.items.len) {
+                if (poll_fds.items[idx].revents & posix.POLL.IN != 0) {
                     if (pane.poll(&buffer)) |had_data| {
                         if (had_data) {
                             pane.vt.invalidateRenderState();
@@ -348,9 +347,9 @@ pub fn runMainLoop(state: *State) !void {
                         }
                     } else |_| {}
                 }
-                if (poll_fds[idx].revents & posix.POLL.HUP != 0) {
+                if (poll_fds.items[idx].revents & posix.POLL.HUP != 0) {
                     dead_floating.append(allocator, fi) catch {};
-                } else if (poll_fds[idx].revents & posix.POLL.ERR != 0) {
+                } else if (poll_fds.items[idx].revents & posix.POLL.ERR != 0) {
                     // ERR without HUP — verify process actually exited.
                     if (!pane.isAlive()) {
                         dead_floating.append(allocator, fi) catch {};
@@ -362,7 +361,7 @@ pub fn runMainLoop(state: *State) !void {
 
         // Handle SES VT channel (multiplexed pod output for all pod panes).
         if (ses_vt_fd_idx) |vidx| {
-            const revents = poll_fds[vidx].revents;
+            const revents = poll_fds.items[vidx].revents;
 
             // Check for VT connection errors (HUP, ERR, NVAL).
             if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
@@ -417,7 +416,7 @@ pub fn runMainLoop(state: *State) !void {
 
         // Handle ses control messages.
         if (ses_fd_idx) |sidx| {
-            const revents = poll_fds[sidx].revents;
+            const revents = poll_fds.items[sidx].revents;
 
             // Check for connection errors (HUP, ERR, NVAL).
             if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
@@ -445,7 +444,7 @@ pub fn runMainLoop(state: *State) !void {
         }
 
         // Handle stdin.
-        if (poll_fds[0].revents & posix.POLL.IN != 0) {
+        if (poll_fds.items[0].revents & posix.POLL.IN != 0) {
             const n = posix.read(posix.STDIN_FILENO, &buffer) catch {
                 // Terminal closed unexpectedly — preserve panes for reattach.
                 state.detach_mode = true;
@@ -460,7 +459,7 @@ pub fn runMainLoop(state: *State) !void {
         }
 
         // Check for POLL.HUP/ERR on stdin (terminal closed).
-        if (poll_fds[0].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
+        if (poll_fds.items[0].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
             // Terminal closed unexpectedly — preserve panes for reattach.
             state.detach_mode = true;
             break;
@@ -534,7 +533,7 @@ pub fn runMainLoop(state: *State) !void {
                             "Background pane exited with code {d}",
                             .{exit_code},
                         ) catch "Background pane exited unexpectedly";
-                        defer if (msg.ptr != "Background pane exited unexpectedly".ptr) allocator.free(msg);
+                        defer if (!std.mem.eql(u8, msg, "Background pane exited unexpectedly")) allocator.free(msg);
                         state.notifications.showFor(msg, 3000);
                     }
 

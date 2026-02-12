@@ -26,6 +26,33 @@ const RandomdoState = struct {
 
 threadlocal var randomdo_state: ?std.AutoHashMap(usize, RandomdoState) = null;
 
+/// Clean up all threadlocal resources. Call this on MUX shutdown.
+pub fn deinitThreadlocals() void {
+    // Deinit when_bash_cache if it was initialized
+    if (when_bash_cache) |*cache| {
+        cache.deinit();
+        when_bash_cache = null;
+    }
+
+    // Deinit when_lua_cache if it was initialized
+    if (when_lua_cache) |*cache| {
+        cache.deinit();
+        when_lua_cache = null;
+    }
+
+    // Deinit when_lua_rt if it was initialized
+    if (when_lua_rt) |*rt| {
+        rt.deinit();
+        when_lua_rt = null;
+    }
+
+    // Deinit randomdo_state if it was initialized
+    if (randomdo_state) |*state| {
+        state.deinit();
+        randomdo_state = null;
+    }
+}
+
 fn getRandomdoStateMap() *std.AutoHashMap(usize, RandomdoState) {
     if (randomdo_state == null) {
         randomdo_state = std.AutoHashMap(usize, RandomdoState).init(std.heap.page_allocator);
@@ -101,6 +128,17 @@ fn queryFromContext(ctx: *const shp.Context) core.PaneQuery {
     };
 }
 
+/// Get bash condition timeout in milliseconds from environment or use default.
+/// Default is 100ms, configurable via HEXE_CONDITION_TIMEOUT.
+fn getConditionTimeout() u32 {
+    if (std.posix.getenv("HEXE_CONDITION_TIMEOUT")) |timeout_str| {
+        const timeout = std.fmt.parseInt(u32, timeout_str, 10) catch 100;
+        // Clamp to reasonable range: 10ms to 5000ms
+        return @min(@max(timeout, 10), 5000);
+    }
+    return 100; // Default: 100ms
+}
+
 fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     const now = ctx.now_ms;
     const key = whenKey(code);
@@ -117,22 +155,40 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     if (ctx.last_command) |c| env_map.put("HEXE_STATUS_LAST_CMD", c) catch {};
     if (ctx.cwd.len > 0) env_map.put("HEXE_STATUS_CWD", ctx.cwd) catch {};
 
-    const res = std.process.Child.run(.{
-        .allocator = std.heap.page_allocator,
-        .argv = &.{ "/bin/bash", "-c", code },
-        .env_map = &env_map,
-    }) catch {
+    // Spawn process with timeout support
+    var child = std.process.Child.init(&.{ "/bin/bash", "-c", code }, std.heap.page_allocator);
+    child.env_map = &env_map;
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+
+    child.spawn() catch {
         map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
         return false;
     };
-    std.heap.page_allocator.free(res.stdout);
-    std.heap.page_allocator.free(res.stderr);
-    const ok = switch (res.term) {
-        .Exited => |ec| ec == 0,
-        else => false,
-    };
-    map.put(key, .{ .last_eval_ms = now, .last_result = ok }) catch {};
-    return ok;
+
+    // Wait for process with timeout
+    const timeout_ms = getConditionTimeout();
+    const start_ms = std.time.milliTimestamp();
+    var ok = false;
+
+    while (std.time.milliTimestamp() - start_ms < timeout_ms) {
+        if (child.wait() catch null) |term| {
+            ok = switch (term) {
+                .Exited => |ec| ec == 0,
+                else => false,
+            };
+            map.put(key, .{ .last_eval_ms = now, .last_result = ok }) catch {};
+            return ok;
+        }
+        std.Thread.sleep(5 * std.time.ns_per_ms); // Sleep 5ms between checks
+    }
+
+    // Timeout - kill the process
+    _ = child.kill() catch {};
+    _ = child.wait() catch {};
+    map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
+    return false;
 }
 
 fn evalLuaWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {

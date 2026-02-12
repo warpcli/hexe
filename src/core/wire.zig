@@ -7,11 +7,25 @@ const posix = std.posix;
 
 /// Maximum payload size for control messages and VT frames (4MB).
 /// Prevents denial-of-service via oversized allocations.
-pub const MAX_PAYLOAD_LEN: usize = 4 * 1024 * 1024;
+pub const MAX_PAYLOAD_LEN: usize = @import("constants.zig").Sizes.max_payload_len;
 
-/// Protocol version. Increment when making breaking changes.
+/// Current protocol version. Increment when making breaking changes.
 /// Sent as second byte after handshake byte.
 pub const PROTOCOL_VERSION: u8 = 1;
+
+/// Minimum supported protocol version for backward compatibility.
+/// Clients with versions >= MIN_VERSION and <= PROTOCOL_VERSION are accepted.
+pub const MIN_PROTOCOL_VERSION: u8 = 1;
+
+/// Check if a client protocol version is supported.
+pub fn isProtocolVersionSupported(version: u8) bool {
+    return version >= MIN_PROTOCOL_VERSION and version <= PROTOCOL_VERSION;
+}
+
+/// Check if a client protocol version is deprecated (supported but old).
+pub fn isProtocolVersionDeprecated(version: u8) bool {
+    return version >= MIN_PROTOCOL_VERSION and version < PROTOCOL_VERSION;
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Handshake bytes — first byte sent on a new connection to identify channel type.
@@ -778,7 +792,7 @@ pub fn readExact(fd: posix.fd_t, buf: []u8) !void {
 pub fn readExactTimeout(fd: posix.fd_t, buf: []u8, timeout_ms: i32) !void {
     var off: usize = 0;
     var retries: usize = 0;
-    const MAX_RETRIES = 10; // Prevent infinite retry loops on pathological cases
+    const MAX_RETRIES = @import("constants.zig").Limits.max_wire_retries;
 
     while (off < buf.len) {
         const n = posix.read(fd, buf[off..]) catch |err| switch (err) {

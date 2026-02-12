@@ -1236,7 +1236,7 @@ pub const SesState = struct {
         var stdout_file = child.stdout orelse return error.PodNoStdout;
         defer stdout_file.close();
 
-        const spawn_timeout_ms: i64 = 2000;
+        const spawn_timeout_ms: i64 = core.constants.Timing.ses_spawn_timeout;
         const deadline_ms = std.time.milliTimestamp() + spawn_timeout_ms;
         const stdout_fd = stdout_file.handle;
 

@@ -18,7 +18,7 @@ const ICON_STAGED = "+";
 const ICON_RENAMED = "»";
 const ICON_DELETED = "✘";
 
-// Cache for git status results (keyed by cwd hash, 2s TTL)
+// Cache for git status results (keyed by cwd hash, configurable TTL)
 const GitStatusCache = struct {
     cwd_hash: u64,
     status: GitStatus,
@@ -26,6 +26,17 @@ const GitStatusCache = struct {
 };
 
 var git_status_cache: ?GitStatusCache = null;
+
+/// Get cache TTL in milliseconds from environment variable or use default.
+/// Default is 5000ms (5 seconds), configurable via HEXE_GIT_CACHE_TTL.
+fn getCacheTTL() i64 {
+    if (std.posix.getenv("HEXE_GIT_CACHE_TTL")) |ttl_str| {
+        const ttl = std.fmt.parseInt(i64, ttl_str, 10) catch 5000;
+        // Clamp to reasonable range: 500ms to 30s
+        return @min(@max(ttl, 500), 30000);
+    }
+    return 5000; // Default: 5 seconds
+}
 
 fn hashCwd(cwd: []const u8) u64 {
     var h: u64 = 5381;
@@ -46,10 +57,11 @@ pub fn render(ctx: *Context) ?[]const Segment {
     const now = std.time.milliTimestamp();
     const cwd_hash = hashCwd(cwd);
 
-    // Check cache (2s TTL)
+    // Check cache with configurable TTL
     var status = GitStatus{};
+    const cache_ttl = getCacheTTL();
     if (git_status_cache) |cached| {
-        if (cached.cwd_hash == cwd_hash and (now - cached.timestamp_ms) < 2000) {
+        if (cached.cwd_hash == cwd_hash and (now - cached.timestamp_ms) < cache_ttl) {
             status = cached.status;
         } else {
             runGitStatus(cwd, &status);
@@ -172,8 +184,11 @@ fn isGitRepo(cwd: []const u8) bool {
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
     var current: []const u8 = cwd;
 
-    while (true) {
+    // Walk up directory tree looking for .git
+    while (current.len > 0) {
         const git_path = std.fmt.bufPrint(&path_buf, "{s}/.git", .{current}) catch return false;
+
+        // Check if .git directory or file exists
         if (std.fs.cwd().access(git_path, .{})) |_| {
             return true;
         } else |_| {}
@@ -183,8 +198,10 @@ fn isGitRepo(cwd: []const u8) bool {
             return true;
         } else |_| {}
 
+        // Move up one directory level
         if (std.mem.lastIndexOfScalar(u8, current, '/')) |idx| {
             if (idx == 0) {
+                // Reached root, check /.git as final attempt
                 if (std.fs.cwd().access("/.git", .{})) |_| {
                     return true;
                 } else |_| {}
@@ -192,9 +209,12 @@ fn isGitRepo(cwd: []const u8) bool {
             }
             current = current[0..idx];
         } else {
+            // No more parent directories
             return false;
         }
     }
+
+    return false;
 }
 
 fn runGitStatus(cwd: []const u8, status: *GitStatus) void {

@@ -12,6 +12,7 @@ const SesClient = ses_client.SesClient;
 
 const State = @import("state.zig").State;
 const loop_core = @import("loop_core.zig");
+const statusbar = @import("statusbar.zig");
 
 var debug_enabled: bool = false;
 
@@ -176,7 +177,10 @@ pub fn run(mux_args: MuxArgs) !void {
 
     // Initialize state.
     var state = try State.init(allocator, size.cols, size.rows, mux_args.debug, mux_args.log_file);
-    defer state.deinit();
+    defer {
+        statusbar.deinitThreadlocals();
+        state.deinit();
+    }
 
     // Register state for signal handlers.
     global_state.store(&state, .release);
@@ -334,7 +338,9 @@ fn redirectStderr(log_file: ?[]const u8) void {
         if (path.len > 0) {
             const logfd = posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch null;
             if (logfd) |fd| {
-                posix.dup2(fd, posix.STDERR_FILENO) catch {};
+                posix.dup2(fd, posix.STDERR_FILENO) catch |err| {
+                    core.logging.logError("mux", "failed to dup2 stderr for logging", err);
+                };
                 if (fd > 2) posix.close(fd);
                 redirected = true;
             }
@@ -344,7 +350,9 @@ fn redirectStderr(log_file: ?[]const u8) void {
     if (redirected) return;
 
     const devnull = std.fs.openFileAbsolute("/dev/null", .{ .mode = .write_only }) catch return;
-    posix.dup2(devnull.handle, posix.STDERR_FILENO) catch {};
+    posix.dup2(devnull.handle, posix.STDERR_FILENO) catch |err| {
+        core.logging.logError("mux", "failed to redirect stderr to /dev/null", err);
+    };
     devnull.close();
 }
 
@@ -361,5 +369,7 @@ fn sendNotifyToParentMux(allocator: std.mem.Allocator, message: []const u8) void
     // CLI handshake + notify message.
     _ = posix.write(fd, &.{wire.SES_HANDSHAKE_CLI}) catch return;
     const notify = wire.Notify{ .msg_len = @intCast(message.len) };
-    wire.writeControlWithTrail(fd, .notify, std.mem.asBytes(&notify), message) catch {};
+    wire.writeControlWithTrail(fd, .notify, std.mem.asBytes(&notify), message) catch |err| {
+        core.logging.logError("mux", "failed to send notify message to parent", err);
+    };
 }

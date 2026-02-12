@@ -111,10 +111,29 @@ pub const CellBuffer = struct {
 
     pub fn resize(self: *CellBuffer, allocator: std.mem.Allocator, w: u16, h: u16) !void {
         if (w == self.width and h == self.height) return;
+
+        // Allocate new buffer
+        const new_size = @as(usize, w) * @as(usize, h);
+        const new_cells = try allocator.alloc(Cell, new_size);
+        @memset(new_cells, Cell{});
+
+        // Preserve overlapping content from old buffer
+        const copy_width = @min(w, self.width);
+        const copy_height = @min(h, self.height);
+
+        var y: u16 = 0;
+        while (y < copy_height) : (y += 1) {
+            const old_row_start = @as(usize, y) * @as(usize, self.width);
+            const new_row_start = @as(usize, y) * @as(usize, w);
+            const copy_len = @as(usize, copy_width);
+
+            // Copy row from old to new buffer
+            @memcpy(new_cells[new_row_start..][0..copy_len], self.cells[old_row_start..][0..copy_len]);
+        }
+
+        // Free old buffer and update to new
         allocator.free(self.cells);
-        const size = @as(usize, w) * @as(usize, h);
-        self.cells = try allocator.alloc(Cell, size);
-        @memset(self.cells, Cell{});
+        self.cells = new_cells;
         self.width = w;
         self.height = h;
     }

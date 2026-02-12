@@ -100,7 +100,9 @@ pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
         pane.getFgProcess(),
         pane.getFgPid(),
         layout_path,
-    ) catch {};
+    ) catch |err| {
+        core.logging.logError("mux", "failed IPC operation in state_sync", err);
+    };
 }
 
 pub fn unfocusAllPanes(self: anytype) void {
@@ -134,7 +136,9 @@ pub fn unfocusAllPanes(self: anytype) void {
                     null,
                     null,
                     layout_path,
-                ) catch {};
+                ) catch |err| {
+        core.logging.logError("mux", "failed IPC operation in state_sync", err);
+    };
             }
         }
     }
@@ -164,7 +168,9 @@ pub fn unfocusAllPanes(self: anytype) void {
                 null,
                 null,
                 layout_path,
-            ) catch {};
+            ) catch |err| {
+        core.logging.logError("mux", "failed IPC operation in state_sync", err);
+    };
         }
     }
 }
@@ -206,7 +212,9 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
         pane.getFgProcess(),
         pane.getFgPid(),
         layout_path,
-    ) catch {};
+    ) catch |err| {
+        core.logging.logError("mux", "failed IPC operation in state_sync", err);
+    };
 
     self.syncStateToSes();
 }
@@ -238,7 +246,9 @@ pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
         pane.getFgProcess(),
         pane.getFgPid(),
         layout_path,
-    ) catch {};
+    ) catch |err| {
+        core.logging.logError("mux", "failed IPC operation in state_sync", err);
+    };
 }
 
 pub fn refreshPaneCwd(self: anytype, pane: *Pane) ?[]const u8 {
@@ -325,7 +335,9 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
         fg_proc_local,
         if (p.getFgPid()) |pid| pid else null,
         layout_path,
-    ) catch {};
+    ) catch |err| {
+        core.logging.logError("mux", "failed IPC operation in state_sync", err);
+    };
 }
 
 pub fn resizeFloatingPanes(self: anytype) void {
