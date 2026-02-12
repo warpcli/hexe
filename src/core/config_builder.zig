@@ -104,12 +104,12 @@ pub const MuxConfigBuilder = struct {
         const self = try allocator.create(MuxConfigBuilder);
         self.* = .{
             .allocator = allocator,
-            .binds = std.ArrayList(config.Config.Bind).init(allocator),
-            .floats = std.ArrayList(config.FloatDef).init(allocator),
+            .binds = .{},
+            .floats = .{},
             .tabs_config = .{
-                .segments_left = std.ArrayList(config.Segment).init(allocator),
-                .segments_center = std.ArrayList(config.Segment).init(allocator),
-                .segments_right = std.ArrayList(config.Segment).init(allocator),
+                .segments_left = .{},
+                .segments_center = .{},
+                .segments_right = .{},
             },
             .splits_config = .{},
         };
@@ -117,11 +117,11 @@ pub const MuxConfigBuilder = struct {
     }
 
     pub fn deinit(self: *MuxConfigBuilder) void {
-        self.binds.deinit();
-        self.floats.deinit();
-        self.tabs_config.segments_left.deinit();
-        self.tabs_config.segments_center.deinit();
-        self.tabs_config.segments_right.deinit();
+        self.binds.deinit(self.allocator);
+        self.floats.deinit(self.allocator);
+        self.tabs_config.segments_left.deinit(self.allocator);
+        self.tabs_config.segments_center.deinit(self.allocator);
+        self.tabs_config.segments_right.deinit(self.allocator);
     }
 
     pub fn build(self: *MuxConfigBuilder) !config.Config {
@@ -141,7 +141,7 @@ pub const MuxConfigBuilder = struct {
 
         // Apply binds
         if (self.binds.items.len > 0) {
-            result.input.binds = try self.binds.toOwnedSlice();
+            result.input.binds = try self.binds.toOwnedSlice(self.allocator);
         }
 
         // Apply float defaults
@@ -158,13 +158,13 @@ pub const MuxConfigBuilder = struct {
         // Apply tabs config
         if (self.tabs_config.status_enabled) |v| result.tabs.status.enabled = v;
         if (self.tabs_config.segments_left.items.len > 0) {
-            result.tabs.status.left = try self.tabs_config.segments_left.toOwnedSlice();
+            result.tabs.status.left = try self.tabs_config.segments_left.toOwnedSlice(self.allocator);
         }
         if (self.tabs_config.segments_center.items.len > 0) {
-            result.tabs.status.center = try self.tabs_config.segments_center.toOwnedSlice();
+            result.tabs.status.center = try self.tabs_config.segments_center.toOwnedSlice(self.allocator);
         }
         if (self.tabs_config.segments_right.items.len > 0) {
-            result.tabs.status.right = try self.tabs_config.segments_right.toOwnedSlice();
+            result.tabs.status.right = try self.tabs_config.segments_right.toOwnedSlice(self.allocator);
         }
 
         // Apply splits config
@@ -192,7 +192,7 @@ pub const SesConfigBuilder = struct {
         const self = try allocator.create(SesConfigBuilder);
         self.* = .{
             .allocator = allocator,
-            .layouts = std.ArrayList(config.LayoutDef).init(allocator),
+            .layouts = .{},
         };
         return self;
     }
@@ -203,7 +203,7 @@ pub const SesConfigBuilder = struct {
             var l = @constCast(layout);
             l.deinit(self.allocator);
         }
-        self.layouts.deinit();
+        self.layouts.deinit(self.allocator);
     }
 
     pub fn build(self: *SesConfigBuilder) !config.SesConfig {
@@ -211,7 +211,7 @@ pub const SesConfigBuilder = struct {
 
         // Transfer layouts
         if (self.layouts.items.len > 0) {
-            result.layouts = try self.layouts.toOwnedSlice();
+            result.layouts = try self.layouts.toOwnedSlice(self.allocator);
         }
 
         return result;
@@ -227,7 +227,7 @@ pub const ShpConfigBuilder = struct {
     right_segments: std.ArrayList(SegmentDef),
 
     // Temporary struct for prompt segments (similar to config.Segment but for SHP)
-    const SegmentDef = struct {
+    pub const SegmentDef = struct {
         name: []const u8,
         priority: i64,
         outputs: []const OutputDef,
@@ -235,7 +235,7 @@ pub const ShpConfigBuilder = struct {
         when: ?config.WhenDef,
     };
 
-    const OutputDef = struct {
+    pub const OutputDef = struct {
         style: []const u8,
         format: []const u8,
     };
@@ -244,8 +244,8 @@ pub const ShpConfigBuilder = struct {
         const self = try allocator.create(ShpConfigBuilder);
         self.* = .{
             .allocator = allocator,
-            .left_segments = std.ArrayList(SegmentDef).init(allocator),
-            .right_segments = std.ArrayList(SegmentDef).init(allocator),
+            .left_segments = .{},
+            .right_segments = .{},
         };
         return self;
     }
@@ -270,8 +270,8 @@ pub const ShpConfigBuilder = struct {
             }
             self.allocator.free(seg.outputs);
         }
-        self.left_segments.deinit();
-        self.right_segments.deinit();
+        self.left_segments.deinit(self.allocator);
+        self.right_segments.deinit(self.allocator);
     }
 };
 

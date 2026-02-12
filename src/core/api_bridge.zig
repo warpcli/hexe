@@ -24,8 +24,8 @@ pub fn getConfigBuilder(lua: *Lua) ?*ConfigBuilder {
         return null;
     }
 
-    const ptr = lua.toUserdata(?*ConfigBuilder, -1) catch return null;
-    return ptr;
+    const ptr = lua.toPointer(-1) catch return null;
+    return @ptrCast(@constCast(@alignCast(ptr)));
 }
 
 /// Helper to get MuxConfigBuilder, creating it if needed
@@ -316,7 +316,7 @@ pub fn parseAction(lua: *Lua, idx: i32) ?config.Config.BindAction {
 // ===== MUX API Functions =====
 
 /// Lua C function: hexe.mux.config.set(key, value)
-pub export fn hexe_mux_config_set(L: ?*LuaState) callconv(.C) c_int {
+pub fn hexe_mux_config_set(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     // Get key (arg 1)
@@ -384,7 +384,7 @@ pub export fn hexe_mux_config_set(L: ?*LuaState) callconv(.C) c_int {
 }
 
 /// Lua C function: hexe.mux.config.setup(opts)
-pub export fn hexe_mux_config_setup(L: ?*LuaState) callconv(.C) c_int {
+pub export fn hexe_mux_config_setup(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     // Arg 1 must be a table
@@ -414,7 +414,7 @@ pub export fn hexe_mux_config_setup(L: ?*LuaState) callconv(.C) c_int {
 }
 
 /// Lua C function: hexe.mux.keymap.set(keys, action, opts)
-pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.C) c_int {
+pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     // Get MuxConfigBuilder
@@ -445,7 +445,7 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.C) c_int {
     var on: config.Config.BindWhen = .press;
     var mode: config.Config.BindMode = .act_and_consume;
     var hold_ms: ?i64 = null;
-    var when: ?config.WhenDef = null;
+    const when: ?config.WhenDef = null;
 
     if (lua.typeOf(3) == .table) {
         // Parse "on" field
@@ -493,7 +493,7 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.C) c_int {
     };
 
     // Append to binds list
-    mux.binds.append(bind) catch {
+    mux.binds.append(mux.allocator, bind) catch {
         _ = lua.pushString("keymap.set: failed to append bind");
         lua.raiseError();
     };
@@ -502,7 +502,7 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.C) c_int {
 }
 
 /// Lua C function: hexe.mux.float.set_defaults(opts)
-pub export fn hexe_mux_float_set_defaults(L: ?*LuaState) callconv(.C) c_int {
+pub export fn hexe_mux_float_set_defaults(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     // Arg 1 must be a table
@@ -588,7 +588,7 @@ pub export fn hexe_mux_float_set_defaults(L: ?*LuaState) callconv(.C) c_int {
 }
 
 /// Lua C function: hexe.mux.float.define(key, opts)
-pub export fn hexe_mux_float_define(L: ?*LuaState) callconv(.C) c_int {
+pub export fn hexe_mux_float_define(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     // Get key (arg 1)
@@ -644,7 +644,7 @@ pub export fn hexe_mux_float_define(L: ?*LuaState) callconv(.C) c_int {
     // TODO: Parse size, position, padding, attributes, color, style
 
     // Append to floats list
-    mux.floats.append(float_def) catch {
+    mux.floats.append(mux.allocator, float_def) catch {
         _ = lua.pushString("float.define: failed to append float");
         lua.raiseError();
     };
@@ -653,7 +653,7 @@ pub export fn hexe_mux_float_define(L: ?*LuaState) callconv(.C) c_int {
 }
 
 /// Lua C function: hexe.mux.tabs.add_segment(position, segment)
-pub export fn hexe_mux_tabs_add_segment(L: ?*LuaState) callconv(.C) c_int {
+pub export fn hexe_mux_tabs_add_segment(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     // Get position (arg 1)
@@ -695,17 +695,17 @@ pub export fn hexe_mux_tabs_add_segment(L: ?*LuaState) callconv(.C) c_int {
 
     // Append to appropriate list
     if (std.mem.eql(u8, position, "left")) {
-        mux.tabs_config.segments_left.append(segment) catch {
+        mux.tabs_config.segments_left.append(mux.allocator, segment) catch {
             _ = lua.pushString("tabs.add_segment: failed to append segment");
             lua.raiseError();
         };
     } else if (std.mem.eql(u8, position, "center")) {
-        mux.tabs_config.segments_center.append(segment) catch {
+        mux.tabs_config.segments_center.append(mux.allocator, segment) catch {
             _ = lua.pushString("tabs.add_segment: failed to append segment");
             lua.raiseError();
         };
     } else if (std.mem.eql(u8, position, "right")) {
-        mux.tabs_config.segments_right.append(segment) catch {
+        mux.tabs_config.segments_right.append(mux.allocator, segment) catch {
             _ = lua.pushString("tabs.add_segment: failed to append segment");
             lua.raiseError();
         };
@@ -718,7 +718,7 @@ pub export fn hexe_mux_tabs_add_segment(L: ?*LuaState) callconv(.C) c_int {
 }
 
 /// Lua C function: hexe.mux.tabs.set_status(enabled)
-pub export fn hexe_mux_tabs_set_status(L: ?*LuaState) callconv(.C) c_int {
+pub export fn hexe_mux_tabs_set_status(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     // Get enabled (arg 1)
@@ -740,7 +740,7 @@ pub export fn hexe_mux_tabs_set_status(L: ?*LuaState) callconv(.C) c_int {
 }
 
 /// Lua C function: hexe.mux.splits.setup(opts)
-pub export fn hexe_mux_splits_setup(L: ?*LuaState) callconv(.C) c_int {
+pub export fn hexe_mux_splits_setup(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     // Arg 1 must be a table
@@ -785,7 +785,7 @@ pub export fn hexe_mux_splits_setup(L: ?*LuaState) callconv(.C) c_int {
 // ===== SES API Functions =====
 
 /// Lua C function: hexe.ses.layout.define(name, opts)
-pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.C) c_int {
+pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     // Get name (arg 1)
@@ -820,7 +820,7 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.C) c_int {
     lua.pop(1);
 
     // Parse tabs array
-    var tabs = std.ArrayList(config.LayoutTabDef).init(ses.allocator);
+    var tabs = std.ArrayList(config.LayoutTabDef){};
     _ = lua.getField(2, "tabs");
     if (lua.typeOf(-1) == .table) {
         const tabs_len = lua.rawLen(-1);
@@ -853,7 +853,7 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.C) c_int {
                     .enabled = true,
                     .root = if (root) |r| r.* else null,
                 };
-                tabs.append(tab) catch {};
+                tabs.append(ses.allocator, tab) catch {};
             }
             lua.pop(1); // pop tab
         }
@@ -864,12 +864,12 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.C) c_int {
     const layout = config.LayoutDef{
         .name = name,
         .enabled = enabled,
-        .tabs = tabs.toOwnedSlice() catch &[_]config.LayoutTabDef{},
+        .tabs = tabs.toOwnedSlice(ses.allocator) catch &[_]config.LayoutTabDef{},
         .floats = &[_]config.LayoutFloatDef{}, // TODO: Parse floats
     };
 
     // Append to layouts
-    ses.layouts.append(layout) catch {
+    ses.layouts.append(ses.allocator, layout) catch {
         _ = lua.pushString("layout.define: failed to append layout");
         lua.raiseError();
     };
@@ -878,7 +878,7 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.C) c_int {
 }
 
 /// Lua C function: hexe.ses.session.setup(opts)
-pub export fn hexe_ses_session_setup(L: ?*LuaState) callconv(.C) c_int {
+pub export fn hexe_ses_session_setup(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     // Arg 1 must be a table
@@ -906,6 +906,214 @@ pub export fn hexe_ses_session_setup(L: ?*LuaState) callconv(.C) c_int {
         ses.save_on_detach = lua.toBoolean(-1);
     }
     lua.pop(1);
+
+    return 0;
+}
+
+// ============================================================================
+// Section 3: SHP (Shell Prompt) C API
+// ============================================================================
+
+/// Helper: Parse output definition from a table
+fn parseOutputDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_builder.ShpConfigBuilder.OutputDef {
+    if (lua.typeOf(idx) != .table) return null;
+
+    var style: ?[]const u8 = null;
+    var format: ?[]const u8 = null;
+
+    _ = lua.getField(idx, "style");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch return null;
+        style = allocator.dupe(u8, s) catch return null;
+    }
+    lua.pop(1);
+
+    _ = lua.getField(idx, "format");
+    if (lua.typeOf(-1) == .string) {
+        const f = lua.toString(-1) catch return null;
+        format = allocator.dupe(u8, f) catch return null;
+    }
+    lua.pop(1);
+
+    if (style == null or format == null) return null;
+
+    return config_builder.ShpConfigBuilder.OutputDef{
+        .style = style.?,
+        .format = format.?,
+    };
+}
+
+/// Helper: Parse segment definition from a table
+fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_builder.ShpConfigBuilder.SegmentDef {
+    if (lua.typeOf(idx) != .table) return null;
+
+    var name: ?[]const u8 = null;
+    var priority: i64 = 50; // default priority
+    var outputs = std.ArrayList(config_builder.ShpConfigBuilder.OutputDef){};
+    var command: ?[]const u8 = null;
+    var when: ?config.WhenDef = null;
+
+    // Parse name (required)
+    _ = lua.getField(idx, "name");
+    if (lua.typeOf(-1) == .string) {
+        const n = lua.toString(-1) catch return null;
+        name = allocator.dupe(u8, n) catch return null;
+    }
+    lua.pop(1);
+
+    if (name == null) return null;
+
+    // Parse priority (optional)
+    _ = lua.getField(idx, "priority");
+    if (lua.typeOf(-1) == .number) {
+        priority = lua.toInteger(-1) catch 50;
+    }
+    lua.pop(1);
+
+    // Parse outputs (required array)
+    _ = lua.getField(idx, "outputs");
+    if (lua.typeOf(-1) == .table) {
+        const n = lua.rawLen(-1);
+        var i: i32 = 1;
+        while (i <= n) : (i += 1) {
+            _ = lua.rawGetIndex(-1, i);
+            if (parseOutputDef(lua, -1, allocator)) |output| {
+                outputs.append(allocator, output) catch {};
+            }
+            lua.pop(1);
+        }
+    }
+    lua.pop(1);
+
+    // Parse command (optional)
+    _ = lua.getField(idx, "command");
+    if (lua.typeOf(-1) == .string) {
+        const c = lua.toString(-1) catch null;
+        if (c) |cmd| {
+            command = allocator.dupe(u8, cmd) catch null;
+        }
+    }
+    lua.pop(1);
+
+    // Parse when (optional) - simplified for now
+    _ = lua.getField(idx, "when");
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "env");
+        if (lua.typeOf(-1) == .string) {
+            const env = lua.toString(-1) catch null;
+            if (env) |e| {
+                const env_copy = allocator.dupe(u8, e) catch null;
+                if (env_copy) |ec| {
+                    when = config.WhenDef{ .env = ec };
+                }
+            }
+        }
+        lua.pop(1);
+    }
+    lua.pop(1);
+
+    return config_builder.ShpConfigBuilder.SegmentDef{
+        .name = name.?,
+        .priority = priority,
+        .outputs = outputs.toOwnedSlice(allocator) catch &[_]config_builder.ShpConfigBuilder.OutputDef{},
+        .command = command,
+        .when = when,
+    };
+}
+
+/// Lua C function: hexe.shp.prompt.left(segments)
+pub export fn hexe_shp_prompt_left(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    // Arg 1 must be a table (array of segments)
+    if (lua.typeOf(1) != .table) {
+        _ = lua.pushString("prompt.left: argument must be a table");
+        lua.raiseError();
+    }
+
+    // Get ShpConfigBuilder
+    const shp = getShpBuilder(lua) catch {
+        _ = lua.pushString("prompt.left: failed to get config builder");
+        lua.raiseError();
+    };
+
+    // Parse segments array
+    const n = lua.rawLen(1);
+    var i: i32 = 1;
+    while (i <= n) : (i += 1) {
+        _ = lua.rawGetIndex(1, i);
+        if (parseSegmentDef(lua, -1, shp.allocator)) |segment| {
+            shp.left_segments.append(shp.allocator, segment) catch {};
+        }
+        lua.pop(1);
+    }
+
+    return 0;
+}
+
+/// Lua C function: hexe.shp.prompt.right(segments)
+pub export fn hexe_shp_prompt_right(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    // Arg 1 must be a table (array of segments)
+    if (lua.typeOf(1) != .table) {
+        _ = lua.pushString("prompt.right: argument must be a table");
+        lua.raiseError();
+    }
+
+    // Get ShpConfigBuilder
+    const shp = getShpBuilder(lua) catch {
+        _ = lua.pushString("prompt.right: failed to get config builder");
+        lua.raiseError();
+    };
+
+    // Parse segments array
+    const n = lua.rawLen(1);
+    var i: i32 = 1;
+    while (i <= n) : (i += 1) {
+        _ = lua.rawGetIndex(1, i);
+        if (parseSegmentDef(lua, -1, shp.allocator)) |segment| {
+            shp.right_segments.append(shp.allocator, segment) catch {};
+        }
+        lua.pop(1);
+    }
+
+    return 0;
+}
+
+/// Lua C function: hexe.shp.prompt.add(side, segment)
+pub export fn hexe_shp_prompt_add(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    // Arg 1: side (string: "left" or "right")
+    // Arg 2: segment (table)
+    if (lua.typeOf(1) != .string or lua.typeOf(2) != .table) {
+        _ = lua.pushString("prompt.add: arguments must be (string, table)");
+        lua.raiseError();
+    }
+
+    const side = lua.toString(1) catch {
+        _ = lua.pushString("prompt.add: invalid side string");
+        lua.raiseError();
+    };
+
+    // Get ShpConfigBuilder
+    const shp = getShpBuilder(lua) catch {
+        _ = lua.pushString("prompt.add: failed to get config builder");
+        lua.raiseError();
+    };
+
+    // Parse segment
+    if (parseSegmentDef(lua, 2, shp.allocator)) |segment| {
+        if (std.mem.eql(u8, side, "left")) {
+            shp.left_segments.append(shp.allocator, segment) catch {};
+        } else if (std.mem.eql(u8, side, "right")) {
+            shp.right_segments.append(shp.allocator, segment) catch {};
+        } else {
+            _ = lua.pushString("prompt.add: side must be 'left' or 'right'");
+            lua.raiseError();
+        }
+    }
 
     return 0;
 }
