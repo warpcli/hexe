@@ -135,6 +135,86 @@ pub fn parseKeyArray(lua: *Lua, table_idx: i32) ?ParsedKey {
     return null;
 }
 
+/// Parse action string into BindAction
+/// Handles simple actions like "mux.quit", "tab.new", etc.
+fn parseSimpleAction(action_str: []const u8) ?config.Config.BindAction {
+    if (std.mem.eql(u8, action_str, "mux.quit")) return .mux_quit;
+    if (std.mem.eql(u8, action_str, "mux.detach")) return .mux_detach;
+    if (std.mem.eql(u8, action_str, "pane.disown")) return .pane_disown;
+    if (std.mem.eql(u8, action_str, "pane.adopt")) return .pane_adopt;
+    if (std.mem.eql(u8, action_str, "pane.close")) return .pane_close;
+    if (std.mem.eql(u8, action_str, "pane.select_mode")) return .pane_select_mode;
+    if (std.mem.eql(u8, action_str, "overlay.keycast_toggle")) return .keycast_toggle;
+    if (std.mem.eql(u8, action_str, "overlay.sprite_toggle")) return .sprite_toggle;
+    if (std.mem.eql(u8, action_str, "split.h")) return .split_h;
+    if (std.mem.eql(u8, action_str, "split.v")) return .split_v;
+    if (std.mem.eql(u8, action_str, "tab.new")) return .tab_new;
+    if (std.mem.eql(u8, action_str, "tab.next")) return .tab_next;
+    if (std.mem.eql(u8, action_str, "tab.prev")) return .tab_prev;
+    if (std.mem.eql(u8, action_str, "tab.close")) return .tab_close;
+    return null;
+}
+
+/// Parse action from Lua (string or table with parameters)
+pub fn parseAction(lua: *Lua, idx: i32) ?config.Config.BindAction {
+    const action_type = lua.typeOf(idx);
+
+    // Simple string action
+    if (action_type == .string) {
+        const action_str = lua.toString(idx) catch return null;
+        return parseSimpleAction(action_str);
+    }
+
+    // Table action with parameters (e.g., {type="focus.move", dir="up"})
+    if (action_type == .table) {
+        _ = lua.getField(idx, "type");
+        defer lua.pop(1);
+
+        const type_str = lua.toString(-1) catch return null;
+
+        // Parametric actions
+        if (std.mem.eql(u8, type_str, "split.resize")) {
+            _ = lua.getField(idx, "dir");
+            defer lua.pop(1);
+            const dir_str = lua.toString(-1) catch return null;
+            const dir = std.meta.stringToEnum(config.Config.BindKeyKind, dir_str) orelse return null;
+            if (dir != .up and dir != .down and dir != .left and dir != .right) return null;
+            return .{ .split_resize = dir };
+        }
+
+        if (std.mem.eql(u8, type_str, "float.toggle")) {
+            _ = lua.getField(idx, "float");
+            defer lua.pop(1);
+            const float_key = lua.toString(-1) catch return null;
+            if (float_key.len != 1) return null;
+            return .{ .float_toggle = float_key[0] };
+        }
+
+        if (std.mem.eql(u8, type_str, "float.nudge")) {
+            _ = lua.getField(idx, "dir");
+            defer lua.pop(1);
+            const dir_str = lua.toString(-1) catch return null;
+            const dir = std.meta.stringToEnum(config.Config.BindKeyKind, dir_str) orelse return null;
+            if (dir != .up and dir != .down and dir != .left and dir != .right) return null;
+            return .{ .float_nudge = dir };
+        }
+
+        if (std.mem.eql(u8, type_str, "focus.move")) {
+            _ = lua.getField(idx, "dir");
+            defer lua.pop(1);
+            const dir_str = lua.toString(-1) catch return null;
+            const dir = std.meta.stringToEnum(config.Config.BindKeyKind, dir_str) orelse return null;
+            if (dir != .up and dir != .down and dir != .left and dir != .right) return null;
+            return .{ .focus_move = dir };
+        }
+
+        // Fall back to simple action if type matches
+        return parseSimpleAction(type_str);
+    }
+
+    return null;
+}
+
 // ===== MUX API Functions =====
 
 /// Lua C function: hexe.mux.config.set(key, value)
