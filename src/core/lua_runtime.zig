@@ -8,6 +8,16 @@ const config_builder = @import("config_builder.zig");
 const ConfigBuilder = config_builder.ConfigBuilder;
 const api_bridge = @import("api_bridge.zig");
 
+// Import C API functions
+const hexe_mux_config_set = api_bridge.hexe_mux_config_set;
+const hexe_mux_config_setup = api_bridge.hexe_mux_config_setup;
+const hexe_mux_keymap_set = api_bridge.hexe_mux_keymap_set;
+const hexe_mux_float_set_defaults = api_bridge.hexe_mux_float_set_defaults;
+const hexe_mux_float_define = api_bridge.hexe_mux_float_define;
+const hexe_mux_tabs_add_segment = api_bridge.hexe_mux_tabs_add_segment;
+const hexe_mux_tabs_set_status = api_bridge.hexe_mux_tabs_set_status;
+const hexe_mux_splits_setup = api_bridge.hexe_mux_splits_setup;
+
 /// Configuration loading status
 pub const ConfigStatus = enum {
     loaded,
@@ -475,16 +485,43 @@ fn injectHexeModule(lua: *Lua) !void {
 
     // hexe.mux = { config = {}, keymap = {}, float = {}, tabs = {}, splits = {} }
     lua.createTable(0, 5);
-    lua.createTable(0, 0); // hexe.mux.config
+
+    // hexe.mux.config = { set = fn, setup = fn }
+    lua.createTable(0, 2);
+    lua.pushFunction(zlua.wrap(hexe_mux_config_set));
+    lua.setField(-2, "set");
+    lua.pushFunction(zlua.wrap(hexe_mux_config_setup));
+    lua.setField(-2, "setup");
     lua.setField(-2, "config");
-    lua.createTable(0, 0); // hexe.mux.keymap
+
+    // hexe.mux.keymap = { set = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(zlua.wrap(hexe_mux_keymap_set));
+    lua.setField(-2, "set");
     lua.setField(-2, "keymap");
-    lua.createTable(0, 0); // hexe.mux.float
+
+    // hexe.mux.float = { set_defaults = fn, define = fn }
+    lua.createTable(0, 2);
+    lua.pushFunction(zlua.wrap(hexe_mux_float_set_defaults));
+    lua.setField(-2, "set_defaults");
+    lua.pushFunction(zlua.wrap(hexe_mux_float_define));
+    lua.setField(-2, "define");
     lua.setField(-2, "float");
-    lua.createTable(0, 0); // hexe.mux.tabs
+
+    // hexe.mux.tabs = { add_segment = fn, set_status = fn }
+    lua.createTable(0, 2);
+    lua.pushFunction(zlua.wrap(hexe_mux_tabs_add_segment));
+    lua.setField(-2, "add_segment");
+    lua.pushFunction(zlua.wrap(hexe_mux_tabs_set_status));
+    lua.setField(-2, "set_status");
     lua.setField(-2, "tabs");
-    lua.createTable(0, 0); // hexe.mux.splits
+
+    // hexe.mux.splits = { setup = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(zlua.wrap(hexe_mux_splits_setup));
+    lua.setField(-2, "setup");
     lua.setField(-2, "splits");
+
     lua.setField(-2, "mux");
 
     // hexe.ses = { layout = {}, session = {} }
