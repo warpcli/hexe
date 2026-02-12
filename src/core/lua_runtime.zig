@@ -4,6 +4,9 @@ const zlua = @import("zlua");
 const Lua = zlua.Lua;
 const LuaState = zlua.LuaState;
 const LuaType = zlua.LuaType;
+const config_builder = @import("config_builder.zig");
+const ConfigBuilder = config_builder.ConfigBuilder;
+const api_bridge = @import("api_bridge.zig");
 
 /// Configuration loading status
 pub const ConfigStatus = enum {
@@ -48,6 +51,7 @@ pub const LuaRuntime = struct {
     allocator: std.mem.Allocator,
     unsafe_mode: bool,
     last_error: ?[]const u8 = null,
+    config_builder: ?ConfigBuilder = null,
 
     const Self = @This();
 
@@ -80,10 +84,15 @@ pub const LuaRuntime = struct {
         // Inject hexe module
         try injectHexeModule(lua);
 
+        // Create and store config builder
+        var builder = try ConfigBuilder.init(allocator);
+        try api_bridge.storeConfigBuilder(lua, &builder);
+
         return .{
             .lua = lua,
             .allocator = allocator,
             .unsafe_mode = unsafe,
+            .config_builder = builder,
         };
     }
 
@@ -91,7 +100,19 @@ pub const LuaRuntime = struct {
         if (self.last_error) |err| {
             self.allocator.free(err);
         }
+        if (self.config_builder) |*builder| {
+            var b = @constCast(builder);
+            b.deinit();
+        }
         self.lua.deinit();
+    }
+
+    /// Get the config builder for API functions to use
+    pub fn getBuilder(self: *Self) ?*ConfigBuilder {
+        if (self.config_builder) |*builder| {
+            return @constCast(builder);
+        }
+        return null;
     }
 
     /// Set the target section for config evaluation.
