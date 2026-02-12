@@ -107,16 +107,20 @@ pub const LuaRuntime = struct {
         // Inject hexe module
         try injectHexeModule(lua);
 
-        // Create and store config builder
-        var builder = try ConfigBuilder.init(allocator);
-        try api_bridge.storeConfigBuilder(lua, &builder);
-
-        return .{
+        // Create runtime instance first
+        var runtime = Self{
             .lua = lua,
             .allocator = allocator,
             .unsafe_mode = unsafe,
-            .config_builder = builder,
+            .config_builder = try ConfigBuilder.init(allocator),
         };
+
+        // Store pointer to builder in Lua registry (now it's stable in the struct)
+        if (runtime.config_builder) |*builder| {
+            try api_bridge.storeConfigBuilder(lua, builder);
+        }
+
+        return runtime;
     }
 
     pub fn deinit(self: *Self) void {
