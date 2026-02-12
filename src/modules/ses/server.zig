@@ -1870,6 +1870,9 @@ pub const Server = struct {
             .apply_layout => {
                 self.handleApplyLayout(fd, hdr.payload_len, &buf);
             },
+            .get_session_state => {
+                self.handleGetSessionState(fd, hdr.payload_len, &buf);
+            },
             else => {
                 self.skipBinaryPayload(fd, hdr.payload_len, &buf);
                 posix.close(fd);
@@ -2395,6 +2398,39 @@ pub const Server = struct {
 
         // Send the raw mux_state JSON back as get_layout response.
         wire.writeControl(fd, .get_layout, mux_state) catch {};
+    }
+
+    /// Handle get_session_state CLI request — return JSON state for detached session.
+    fn handleGetSessionState(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        defer posix.close(fd);
+
+        // Expect exactly 32 bytes (hex UUID)
+        if (payload_len != 32) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            self.sendBinaryError(fd, "invalid payload (expected 32-byte hex UUID)");
+            return;
+        }
+
+        var hex_uuid: [32]u8 = undefined;
+        wire.readExact(fd, &hex_uuid) catch {
+            self.sendBinaryError(fd, "read failed");
+            return;
+        };
+
+        // Convert hex UUID to binary
+        const session_id = core.uuid.hexToBin(hex_uuid) orelse {
+            self.sendBinaryError(fd, "invalid hex UUID");
+            return;
+        };
+
+        // Look up detached session
+        const detached_state = self.ses_state.detached_sessions.get(session_id) orelse {
+            self.sendBinaryError(fd, "session not found");
+            return;
+        };
+
+        // Send the mux_state_json back as session_state response
+        wire.writeControl(fd, .session_state, detached_state.mux_state_json) catch {};
     }
 
     /// Handle apply_layout CLI request — forward layout tree to MUX.

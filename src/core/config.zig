@@ -334,7 +334,36 @@ pub const LayoutFloatDef = struct {
     pub fn deinit(self: *LayoutFloatDef, allocator: std.mem.Allocator) void {
         if (self.command) |c| allocator.free(@constCast(c));
         if (self.title) |t| allocator.free(@constCast(t));
-        // TODO: style.module cleanup if needed
+        if (self.style) |*style_ptr| {
+            if (style_ptr.module) |*mod| {
+                var module = @constCast(mod);
+                // Free segment fields
+                allocator.free(@constCast(module.name));
+                if (module.outputs.len > 0) {
+                    for (module.outputs) |*out| {
+                        allocator.free(@constCast(out.style));
+                        allocator.free(@constCast(out.format));
+                    }
+                    allocator.free(module.outputs);
+                }
+                if (module.command) |cmd| allocator.free(@constCast(cmd));
+                if (module.when) |*w| {
+                    var when = @constCast(w);
+                    when.deinit(allocator);
+                }
+                if (module.spinner) |*sp| {
+                    var spinner = @constCast(sp);
+                    spinner.deinit(allocator);
+                }
+                allocator.free(@constCast(module.active_style));
+                allocator.free(@constCast(module.inactive_style));
+                allocator.free(@constCast(module.separator));
+                allocator.free(@constCast(module.separator_style));
+                allocator.free(@constCast(module.tab_title));
+                allocator.free(@constCast(module.left_arrow));
+                allocator.free(@constCast(module.right_arrow));
+            }
+        }
     }
 };
 
@@ -713,6 +742,49 @@ pub const Config = struct {
                 config.status_message = msg;
                 PARSE_ERROR = null;
             }
+        }
+
+        return config;
+    }
+
+    /// Parse config from an already-loaded Lua runtime.
+    /// Useful for validation where you want to handle Lua errors separately.
+    /// The runtime should have the config file already loaded via doFile().
+    /// local_only: if true, only parse from top-level table (not from "mux" section)
+    pub fn parseFromLua(runtime: *LuaRuntime, local_only: bool) !Config {
+        var config = Config{};
+        config._allocator = runtime.allocator;
+
+        PARSE_ERROR = null;
+
+        // If not local_only, access the "mux" section
+        if (!local_only) {
+            runtime.setHexeSection("mux");
+            if (runtime.pushTable(-1, "mux")) {
+                parseConfig(runtime, &config, runtime.allocator);
+                runtime.pop();
+            } else {
+                config.status = .@"error";
+                config.status_message = runtime.allocator.dupe(u8, "no 'mux' section in config") catch null;
+                return config;
+            }
+            runtime.pop(); // Pop global config table
+        } else {
+            // Parse directly from top-level table (for standalone config files)
+            parseConfig(runtime, &config, runtime.allocator);
+        }
+
+        if (config.status != .@"error") {
+            if (PARSE_ERROR) |msg| {
+                config.status = .@"error";
+                config.status_message = msg;
+                PARSE_ERROR = null;
+                return error.ConfigError;
+            }
+        }
+
+        if (config.status == .@"error") {
+            return error.ConfigError;
         }
 
         return config;

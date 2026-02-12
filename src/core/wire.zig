@@ -110,6 +110,7 @@ pub const MsgType = enum(u16) {
     clear_orphaned_panes = 0x0133, // CLI → SES: kill all orphaned/sticky panes
     get_layout = 0x0134, // CLI → SES: get mux state for layout save
     apply_layout = 0x0135, // CLI → SES → MUX: apply saved layout tree
+    get_session_state = 0x0136, // CLI → SES: export detached session to JSON
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,

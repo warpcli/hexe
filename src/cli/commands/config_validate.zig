@@ -34,14 +34,8 @@ pub fn run() !void {
     };
     defer runtime.deinit();
 
-    // Load config file
-    const config_z = allocator.dupeZ(u8, config_path) catch {
-        print("✗ Memory allocation failed\n", .{});
-        return error.OutOfMemory;
-    };
-    defer allocator.free(config_z);
-
-    runtime.lua.doFile(config_z) catch |err| {
+    // Load the config file
+    runtime.loadConfig(config_path) catch |err| {
         print("✗ Config validation failed: {s}\n", .{config_path});
         print("\nSyntax error in Lua config file.\n", .{});
         print("Check for:\n", .{});
@@ -49,7 +43,10 @@ pub fn run() !void {
         print("  - Unclosed brackets or braces\n", .{});
         print("  - Invalid Lua syntax\n", .{});
         print("  - Typos in configuration keys\n", .{});
-        print("\nRun with 'hexe mux' to see more detailed error messages.\n", .{});
+        print("\nError details: {}\n", .{err});
+        if (runtime.last_error) |msg| {
+            print("Lua error: {s}\n", .{msg});
+        }
         return err;
     };
 
@@ -65,20 +62,17 @@ pub fn run() !void {
         print("\nRun with 'hexe mux' to see the actual config being used.\n", .{});
         return err;
     };
-    defer config.deinit(allocator);
+    var mutable_config = config;
+    defer mutable_config.deinit();
 
     // Success!
     print("✓ Config valid: {s}\n", .{config_path});
     print("\nConfiguration loaded successfully:\n", .{});
 
     // Show some config highlights
-    print("  - Tabs enabled: {}\n", .{config.tabs.enabled});
     print("  - Status bar enabled: {}\n", .{config.tabs.status.enabled});
-    print("  - Keybindings: {} defined\n", .{config.keybindings.len});
-
-    if (config.status_segments) |segments| {
-        print("  - Status segments: {} defined\n", .{segments.len});
-    }
+    print("  - Keybindings: {} defined\n", .{config.input.binds.len});
+    print("  - Notifications enabled: {}\n", .{config.notifications.mux.duration_ms > 0});
 
     print("\n✓ All checks passed\n", .{});
 }
