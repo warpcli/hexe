@@ -20,6 +20,10 @@ const hexe_mux_splits_setup = api_bridge.hexe_mux_splits_setup;
 const hexe_ses_layout_define = api_bridge.hexe_ses_layout_define;
 const hexe_ses_session_setup = api_bridge.hexe_ses_session_setup;
 
+const hexe_shp_prompt_left = api_bridge.hexe_shp_prompt_left;
+const hexe_shp_prompt_right = api_bridge.hexe_shp_prompt_right;
+const hexe_shp_prompt_add = api_bridge.hexe_shp_prompt_add;
+
 /// Configuration loading status
 pub const ConfigStatus = enum {
     loaded,
@@ -490,37 +494,37 @@ fn injectHexeModule(lua: *Lua) !void {
 
     // hexe.mux.config = { set = fn, setup = fn }
     lua.createTable(0, 2);
-    lua.pushFunction(zlua.wrap(hexe_mux_config_set));
+    lua.pushFunction(hexe_mux_config_set);
     lua.setField(-2, "set");
-    lua.pushFunction(zlua.wrap(hexe_mux_config_setup));
+    lua.pushFunction(hexe_mux_config_setup);
     lua.setField(-2, "setup");
     lua.setField(-2, "config");
 
     // hexe.mux.keymap = { set = fn }
     lua.createTable(0, 1);
-    lua.pushFunction(zlua.wrap(hexe_mux_keymap_set));
+    lua.pushFunction(hexe_mux_keymap_set);
     lua.setField(-2, "set");
     lua.setField(-2, "keymap");
 
     // hexe.mux.float = { set_defaults = fn, define = fn }
     lua.createTable(0, 2);
-    lua.pushFunction(zlua.wrap(hexe_mux_float_set_defaults));
+    lua.pushFunction(hexe_mux_float_set_defaults);
     lua.setField(-2, "set_defaults");
-    lua.pushFunction(zlua.wrap(hexe_mux_float_define));
+    lua.pushFunction(hexe_mux_float_define);
     lua.setField(-2, "define");
     lua.setField(-2, "float");
 
     // hexe.mux.tabs = { add_segment = fn, set_status = fn }
     lua.createTable(0, 2);
-    lua.pushFunction(zlua.wrap(hexe_mux_tabs_add_segment));
+    lua.pushFunction(hexe_mux_tabs_add_segment);
     lua.setField(-2, "add_segment");
-    lua.pushFunction(zlua.wrap(hexe_mux_tabs_set_status));
+    lua.pushFunction(hexe_mux_tabs_set_status);
     lua.setField(-2, "set_status");
     lua.setField(-2, "tabs");
 
     // hexe.mux.splits = { setup = fn }
     lua.createTable(0, 1);
-    lua.pushFunction(zlua.wrap(hexe_mux_splits_setup));
+    lua.pushFunction(hexe_mux_splits_setup);
     lua.setField(-2, "setup");
     lua.setField(-2, "splits");
 
@@ -531,13 +535,13 @@ fn injectHexeModule(lua: *Lua) !void {
 
     // hexe.ses.layout = { define = fn }
     lua.createTable(0, 1);
-    lua.pushFunction(zlua.wrap(hexe_ses_layout_define));
+    lua.pushFunction(hexe_ses_layout_define);
     lua.setField(-2, "define");
     lua.setField(-2, "layout");
 
     // hexe.ses.session = { setup = fn }
     lua.createTable(0, 1);
-    lua.pushFunction(zlua.wrap(hexe_ses_session_setup));
+    lua.pushFunction(hexe_ses_session_setup);
     lua.setField(-2, "setup");
     lua.setField(-2, "session");
 
@@ -545,9 +549,18 @@ fn injectHexeModule(lua: *Lua) !void {
 
     // hexe.shp = { prompt = {}, segment = {} }
     lua.createTable(0, 2);
-    lua.createTable(0, 0); // hexe.shp.prompt
+
+    // hexe.shp.prompt = { left = fn, right = fn, add = fn }
+    lua.createTable(0, 3);
+    lua.pushFunction(hexe_shp_prompt_left);
+    lua.setField(-2, "left");
+    lua.pushFunction(hexe_shp_prompt_right);
+    lua.setField(-2, "right");
+    lua.pushFunction(hexe_shp_prompt_add);
+    lua.setField(-2, "add");
     lua.setField(-2, "prompt");
-    lua.createTable(0, 0); // hexe.shp.segment
+
+    lua.createTable(0, 0); // hexe.shp.segment (TODO: builder pattern)
     lua.setField(-2, "segment");
     lua.setField(-2, "shp");
 
