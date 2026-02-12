@@ -141,3 +141,33 @@ pub export fn hexe_mux_config_set(L: ?*LuaState) callconv(.C) c_int {
     _ = lua.pushString("config.set: value must be boolean or number");
     lua.raiseError();
 }
+
+/// Lua C function: hexe.mux.config.setup(opts)
+pub export fn hexe_mux_config_setup(L: ?*LuaState) callconv(.C) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    // Arg 1 must be a table
+    if (lua.typeOf(1) != .table) {
+        _ = lua.pushString("config.setup: argument must be a table");
+        lua.raiseError();
+    }
+
+    // Iterate table and call set for each key
+    lua.pushNil(); // First key
+    while (lua.next(1)) {
+        // Stack: table, key, value
+        // Duplicate key for next iteration (next() pops the key)
+        lua.pushValue(-2);
+
+        // Now stack: table, key, value, key
+        // Call set(key, value)
+        lua.pushValue(-2); // Push value
+        // Stack: table, key, value, key, value
+        _ = hexe_mux_config_set(L);
+
+        // Pop value (key is already popped by next())
+        lua.pop(1);
+    }
+
+    return 0;
+}
