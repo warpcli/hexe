@@ -314,3 +314,91 @@ pub export fn hexe_mux_config_setup(L: ?*LuaState) callconv(.C) c_int {
 
     return 0;
 }
+
+/// Lua C function: hexe.mux.keymap.set(keys, action, opts)
+pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.C) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    // Get MuxConfigBuilder
+    const mux = getMuxBuilder(lua) catch {
+        _ = lua.pushString("keymap.set: failed to get config builder");
+        lua.raiseError();
+    };
+
+    // Parse keys array (arg 1)
+    const parsed_key = parseKeyArray(lua, 1) orelse {
+        _ = lua.pushString("keymap.set: invalid key array");
+        lua.raiseError();
+    };
+
+    // Parse action (arg 2) - can be nil for passthrough_only mode
+    var action: config.Config.BindAction = .mux_quit; // placeholder
+    var action_found = false;
+
+    if (lua.typeOf(2) != .nil) {
+        action = parseAction(lua, 2) orelse {
+            _ = lua.pushString("keymap.set: invalid action");
+            lua.raiseError();
+        };
+        action_found = true;
+    }
+
+    // Parse opts table (arg 3, optional)
+    var on: config.Config.BindWhen = .press;
+    var mode: config.Config.BindMode = .act_and_consume;
+    var hold_ms: ?i64 = null;
+    var when: ?config.WhenDef = null;
+
+    if (lua.typeOf(3) == .table) {
+        // Parse "on" field
+        _ = lua.getField(3, "on");
+        if (lua.typeOf(-1) == .string) {
+            const on_str = lua.toString(-1) catch "press";
+            on = std.meta.stringToEnum(config.Config.BindWhen, on_str) orelse .press;
+        }
+        lua.pop(1);
+
+        // Parse "mode" field
+        _ = lua.getField(3, "mode");
+        if (lua.typeOf(-1) == .string) {
+            const mode_str = lua.toString(-1) catch "act_and_consume";
+            mode = std.meta.stringToEnum(config.Config.BindMode, mode_str) orelse .act_and_consume;
+        }
+        lua.pop(1);
+
+        // Parse "hold_ms" field
+        _ = lua.getField(3, "hold_ms");
+        if (lua.typeOf(-1) == .number) {
+            const val = lua.toNumber(-1) catch 0;
+            hold_ms = @intFromFloat(val);
+        }
+        lua.pop(1);
+
+        // TODO: Parse "when" field (complex, skip for now)
+    }
+
+    // Validate action is present unless mode is passthrough_only
+    if (!action_found and mode != .passthrough_only) {
+        _ = lua.pushString("keymap.set: action required unless mode is passthrough_only");
+        lua.raiseError();
+    }
+
+    // Create bind
+    const bind = config.Config.Bind{
+        .on = on,
+        .mods = parsed_key.mods,
+        .key = parsed_key.key,
+        .action = action,
+        .when = when,
+        .mode = mode,
+        .hold_ms = hold_ms,
+    };
+
+    // Append to binds list
+    mux.binds.append(bind) catch {
+        _ = lua.pushString("keymap.set: failed to append bind");
+        lua.raiseError();
+    };
+
+    return 0;
+}
