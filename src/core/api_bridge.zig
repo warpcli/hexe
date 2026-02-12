@@ -876,3 +876,36 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.C) c_int {
 
     return 0;
 }
+
+/// Lua C function: hexe.ses.session.setup(opts)
+pub export fn hexe_ses_session_setup(L: ?*LuaState) callconv(.C) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    // Arg 1 must be a table
+    if (lua.typeOf(1) != .table) {
+        _ = lua.pushString("session.setup: argument must be a table");
+        lua.raiseError();
+    }
+
+    // Get SesConfigBuilder
+    const ses = getSesBuilder(lua) catch {
+        _ = lua.pushString("session.setup: failed to get config builder");
+        lua.raiseError();
+    };
+
+    // Parse auto_restore
+    _ = lua.getField(1, "auto_restore");
+    if (lua.typeOf(-1) == .boolean) {
+        ses.auto_restore = lua.toBoolean(-1);
+    }
+    lua.pop(1);
+
+    // Parse save_on_detach
+    _ = lua.getField(1, "save_on_detach");
+    if (lua.typeOf(-1) == .boolean) {
+        ses.save_on_detach = lua.toBoolean(-1);
+    }
+    lua.pop(1);
+
+    return 0;
+}

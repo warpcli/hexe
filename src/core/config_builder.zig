@@ -184,6 +184,10 @@ pub const SesConfigBuilder = struct {
     // Layouts
     layouts: std.ArrayList(config.LayoutDef),
 
+    // Session config (for future use - not in current config.zig)
+    auto_restore: ?bool = null,
+    save_on_detach: ?bool = null,
+
     pub fn init(allocator: std.mem.Allocator) !*SesConfigBuilder {
         const self = try allocator.create(SesConfigBuilder);
         self.* = .{
