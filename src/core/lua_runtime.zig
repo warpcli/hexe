@@ -24,6 +24,13 @@ const hexe_shp_prompt_left = api_bridge.hexe_shp_prompt_left;
 const hexe_shp_prompt_right = api_bridge.hexe_shp_prompt_right;
 const hexe_shp_prompt_add = api_bridge.hexe_shp_prompt_add;
 
+const hexe_pop_notify_setup = api_bridge.hexe_pop_notify_setup;
+const hexe_pop_confirm_setup = api_bridge.hexe_pop_confirm_setup;
+const hexe_pop_choose_setup = api_bridge.hexe_pop_choose_setup;
+const hexe_pop_widgets_pokemon = api_bridge.hexe_pop_widgets_pokemon;
+const hexe_pop_widgets_keycast = api_bridge.hexe_pop_widgets_keycast;
+const hexe_pop_widgets_digits = api_bridge.hexe_pop_widgets_digits;
+
 /// Configuration loading status
 pub const ConfigStatus = enum {
     loaded,
@@ -566,14 +573,35 @@ fn injectHexeModule(lua: *Lua) !void {
 
     // hexe.pop = { notify = {}, confirm = {}, choose = {}, widgets = {} }
     lua.createTable(0, 4);
-    lua.createTable(0, 0); // hexe.pop.notify
+
+    // hexe.pop.notify = { setup = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(hexe_pop_notify_setup);
+    lua.setField(-2, "setup");
     lua.setField(-2, "notify");
-    lua.createTable(0, 0); // hexe.pop.confirm
+
+    // hexe.pop.confirm = { setup = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(hexe_pop_confirm_setup);
+    lua.setField(-2, "setup");
     lua.setField(-2, "confirm");
-    lua.createTable(0, 0); // hexe.pop.choose
+
+    // hexe.pop.choose = { setup = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(hexe_pop_choose_setup);
+    lua.setField(-2, "setup");
     lua.setField(-2, "choose");
-    lua.createTable(0, 0); // hexe.pop.widgets
+
+    // hexe.pop.widgets = { pokemon = fn, keycast = fn, digits = fn }
+    lua.createTable(0, 3);
+    lua.pushFunction(hexe_pop_widgets_pokemon);
+    lua.setField(-2, "pokemon");
+    lua.pushFunction(hexe_pop_widgets_keycast);
+    lua.setField(-2, "keycast");
+    lua.pushFunction(hexe_pop_widgets_digits);
+    lua.setField(-2, "digits");
     lua.setField(-2, "widgets");
+
     lua.setField(-2, "pop");
 
     // hexe.autocmd = {}
