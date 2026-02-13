@@ -673,10 +673,9 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
                 // Get optional "mode"
                 _ = lua.getField(-1, "mode");
                 var mode: config.Config.BindMode = .act_and_consume;
-                if (lua.typeOf(-1) == .number) {
-                    const mode_val = lua.toNumber(-1) catch 0;
-                    const mode_int: i32 = @intFromFloat(mode_val);
-                    mode = @enumFromInt(mode_int);
+                if (lua.typeOf(-1) == .string) {
+                    const mode_str = lua.toString(-1) catch "act_and_consume";
+                    mode = std.meta.stringToEnum(config.Config.BindMode, mode_str) orelse .act_and_consume;
                 }
                 lua.pop(1);
 
