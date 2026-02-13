@@ -35,9 +35,9 @@ pub const ConfigBuilder = struct {
             shp.deinit();
             self.allocator.destroy(shp);
         }
-        if (self.pop) |pop| {
-            pop.deinit();
-            self.allocator.destroy(pop);
+        if (self.pop) |pop_builder| {
+            pop_builder.deinit();
+            self.allocator.destroy(pop_builder);
         }
     }
 
