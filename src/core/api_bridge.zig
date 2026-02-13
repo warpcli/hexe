@@ -394,27 +394,63 @@ pub export fn hexe_mux_config_setup(L: ?*LuaState) callconv(.c) c_int {
         lua.raiseError();
     }
 
-    // Iterate table and call set for each key
+    // Get MuxConfigBuilder once
+    const mux = getMuxBuilder(lua) catch {
+        _ = lua.pushString("config.setup: failed to get config builder");
+        lua.raiseError();
+    };
+
+    // Iterate table and set values directly
     lua.pushNil(); // First key
     while (lua.next(1)) {
         // Stack: table, key, value
-        // Duplicate key for next iteration (next() pops the key)
-        lua.pushValue(-2);
+        // Check if key is a string
+        if (lua.typeOf(-2) != .string) {
+            _ = lua.pushString("config.setup: all keys must be strings");
+            lua.raiseError();
+        }
 
-        // Now stack: table, key, value, key
-        // Call set(key, value)
-        lua.pushValue(-2); // Push value
-        // Stack: table, key, value, key, value
-        _ = hexe_mux_config_set(L);
+        const key = lua.toString(-2) catch unreachable; // Already checked it's a string
+        const val_type = lua.typeOf(-1);
 
-        // Pop value (key is already popped by next())
+        // Boolean options
+        if (val_type == .boolean) {
+            const val = lua.toBoolean(-1);
+            if (std.mem.eql(u8, key, "confirm_on_exit")) {
+                mux.confirm_on_exit = val;
+            } else if (std.mem.eql(u8, key, "confirm_on_detach")) {
+                mux.confirm_on_detach = val;
+            } else if (std.mem.eql(u8, key, "confirm_on_disown")) {
+                mux.confirm_on_disown = val;
+            } else if (std.mem.eql(u8, key, "confirm_on_close")) {
+                mux.confirm_on_close = val;
+            } else if (std.mem.eql(u8, key, "winpulse_enabled")) {
+                mux.winpulse_enabled = val;
+            }
+        }
+        // Number options
+        else if (val_type == .number) {
+            const val_f64 = lua.toNumber(-1) catch 0;
+            if (std.mem.eql(u8, key, "winpulse_duration_ms")) {
+                mux.winpulse_duration_ms = @intFromFloat(val_f64);
+            } else if (std.mem.eql(u8, key, "winpulse_brighten_factor")) {
+                mux.winpulse_brighten_factor = @floatCast(val_f64);
+            } else if (std.mem.eql(u8, key, "selection_color")) {
+                mux.selection_color = @intFromFloat(val_f64);
+            }
+        }
+
+        // Pop value, keep key for next iteration
         lua.pop(1);
     }
 
     return 0;
 }
 
-/// Lua C function: hexe.mux.keymap.set(keys, action, opts)
+/// Lua C function: hexe.mux.keymap.set(bindings_array or key, action, opts)
+/// Supports two formats:
+/// 1. Array format: keymap.set({ {key={...}, action={...}}, {key={...}, action={...}} })
+/// 2. Single format: keymap.set({key...}, {action...}, opts)
 pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
@@ -424,7 +460,60 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
         lua.raiseError();
     };
 
-    // Parse keys array (arg 1)
+    // Check if arg 1 is an array of bindings (array format) or a key array (single format)
+    if (lua.typeOf(1) == .table) {
+        // Check if it's an array by getting element 1
+        _ = lua.rawGetIndex(1, 1);
+        const is_array = lua.typeOf(-1) == .table;
+        lua.pop(1);
+
+        if (is_array) {
+            // Array format: iterate and parse each binding
+            const len = lua.rawLen(1);
+            var i: i32 = 1;
+            while (i <= len) : (i += 1) {
+                _ = lua.rawGetIndex(1, i);
+                defer lua.pop(1);
+
+                // Parse this binding table
+                if (lua.typeOf(-1) != .table) continue;
+
+                // Get key array
+                _ = lua.getField(-1, "key");
+                const parsed_key = parseKeyArray(lua, -1) orelse {
+                    lua.pop(1);
+                    continue;
+                };
+                lua.pop(1);
+
+                // Get action
+                _ = lua.getField(-1, "action");
+                const action = parseAction(lua, -1) orelse {
+                    lua.pop(1);
+                    continue;
+                };
+                lua.pop(1);
+
+                // Create and append bind
+                const bind = config.Config.Bind{
+                    .on = .press,
+                    .mods = parsed_key.mods,
+                    .key = parsed_key.key,
+                    .action = action,
+                    .when = null,
+                    .mode = .act_and_consume,
+                    .hold_ms = null,
+                };
+                mux.binds.append(mux.allocator, bind) catch {
+                    _ = lua.pushString("keymap.set: failed to append binding");
+                    lua.raiseError();
+                };
+            }
+            return 0;
+        }
+    }
+
+    // Single format: parse as before
     const parsed_key = parseKeyArray(lua, 1) orelse {
         _ = lua.pushString("keymap.set: invalid key array");
         lua.raiseError();
@@ -1166,7 +1255,7 @@ fn parseNotificationStyle(lua: *Lua, idx: i32, allocator: std.mem.Allocator) con
 }
 
 /// Lua C function: hexe.pop.notify.setup(opts)
-pub fn hexe_pop_notify_setup(L: ?*LuaState) callconv(.c) c_int {
+pub export fn hexe_pop_notify_setup(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     if (lua.typeOf(1) != .table) {
@@ -1238,7 +1327,7 @@ fn parseConfirmStyle(lua: *Lua, idx: i32, allocator: std.mem.Allocator) config_b
 }
 
 /// Lua C function: hexe.pop.confirm.setup(opts)
-pub fn hexe_pop_confirm_setup(L: ?*LuaState) callconv(.c) c_int {
+pub export fn hexe_pop_confirm_setup(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     if (lua.typeOf(1) != .table) {
@@ -1309,7 +1398,7 @@ fn parseChooseStyle(lua: *Lua, idx: i32, allocator: std.mem.Allocator) config_bu
 }
 
 /// Lua C function: hexe.pop.choose.setup(opts)
-pub fn hexe_pop_choose_setup(L: ?*LuaState) callconv(.c) c_int {
+pub export fn hexe_pop_choose_setup(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     if (lua.typeOf(1) != .table) {
@@ -1340,7 +1429,7 @@ pub fn hexe_pop_choose_setup(L: ?*LuaState) callconv(.c) c_int {
 }
 
 /// Lua C function: hexe.pop.widgets.pokemon(opts)
-pub fn hexe_pop_widgets_pokemon(L: ?*LuaState) callconv(.c) c_int {
+pub export fn hexe_pop_widgets_pokemon(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     if (lua.typeOf(1) != .table) {
@@ -1376,7 +1465,7 @@ pub fn hexe_pop_widgets_pokemon(L: ?*LuaState) callconv(.c) c_int {
 }
 
 /// Lua C function: hexe.pop.widgets.keycast(opts)
-pub fn hexe_pop_widgets_keycast(L: ?*LuaState) callconv(.c) c_int {
+pub export fn hexe_pop_widgets_keycast(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     if (lua.typeOf(1) != .table) {
@@ -1424,7 +1513,7 @@ pub fn hexe_pop_widgets_keycast(L: ?*LuaState) callconv(.c) c_int {
 }
 
 /// Lua C function: hexe.pop.widgets.digits(opts)
-pub fn hexe_pop_widgets_digits(L: ?*LuaState) callconv(.c) c_int {
+pub export fn hexe_pop_widgets_digits(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
     if (lua.typeOf(1) != .table) {

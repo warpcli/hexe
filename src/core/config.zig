@@ -642,26 +642,36 @@ pub const Config = struct {
     _allocator: ?std.mem.Allocator = null,
 
     pub fn load(allocator: std.mem.Allocator) Config {
+        std.debug.print("DEBUG Config.load: STARTING\n", .{});
         var config = Config{};
         config._allocator = allocator;
 
         PARSE_ERROR = null;
 
-        const path = lua_runtime.getConfigPath(allocator, "init.lua") catch return config;
+        const path = lua_runtime.getConfigPath(allocator, "init.lua") catch {
+            std.debug.print("DEBUG Config.load: getConfigPath FAILED\n", .{});
+            return config;
+        };
         defer allocator.free(path);
 
         var runtime = LuaRuntime.init(allocator) catch {
+            std.debug.print("DEBUG Config.load: LuaRuntime.init FAILED\n", .{});
             config.status = .@"error";
             config.status_message = allocator.dupe(u8, "failed to initialize Lua") catch null;
             return config;
         };
         defer runtime.deinit();
+        std.debug.print("DEBUG Config.load: LuaRuntime initialized, loading config from: {s}\n", .{path});
 
         // Let a single config.lua avoid building other sections.
         runtime.setHexeSection("mux");
 
         // Load global config
         runtime.loadConfig(path) catch |err| {
+            std.debug.print("DEBUG Config.load: loadConfig FAILED with error: {}\n", .{err});
+            if (runtime.last_error) |msg| {
+                std.debug.print("DEBUG Config.load: Lua error message: {s}\n", .{msg});
+            }
             switch (err) {
                 error.FileNotFound => {
                     config.status = .missing;
@@ -675,14 +685,19 @@ pub const Config = struct {
             }
             return config;
         };
+        std.debug.print("DEBUG Config.load: loadConfig SUCCESS\n", .{});
 
         // Build config from ConfigBuilder (new API)
         if (runtime.getBuilder()) |builder| {
             if (builder.mux) |mux_builder| {
                 log.debug("building mux config from ConfigBuilder", .{});
+                std.debug.print("DEBUG Config.load: BEFORE build - mux_builder.tabs_config.segments_left.items.len={}\n", .{mux_builder.tabs_config.segments_left.items.len});
                 config = mux_builder.build() catch config;
+                std.debug.print("DEBUG Config.load: AFTER build - config.tabs.status.left.len={} left.ptr={*}\n", .{config.tabs.status.left.len, config.tabs.status.left.ptr});
                 config._allocator = allocator;
             }
+        } else {
+            std.debug.print("DEBUG Config.load: NO BUILDER FOUND\n", .{});
         }
 
         // Pop config return value (if any) from stack

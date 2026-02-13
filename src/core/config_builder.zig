@@ -128,6 +128,118 @@ pub const MuxConfigBuilder = struct {
         self.tabs_config.segments_right.deinit(self.allocator);
     }
 
+    /// Helper: Deep copy a Bind to prevent use-after-free
+    fn duplicateBind(bind: config.Config.Bind, allocator: std.mem.Allocator) !config.Config.Bind {
+        var result = bind;
+
+        // Deep copy when condition if present
+        if (bind.when) |w| {
+            result.when = try duplicateWhenDef(w, allocator);
+        }
+
+        return result;
+    }
+
+    /// Helper: Deep copy a FloatStyle to prevent use-after-free
+    fn duplicateFloatStyle(style: config.FloatStyle, allocator: std.mem.Allocator) !config.FloatStyle {
+        var result = style;
+
+        // Deep copy module segment if present
+        if (style.module) |mod| {
+            result.module = try duplicateSegment(mod, allocator);
+        }
+
+        return result;
+    }
+
+    /// Helper: Deep copy a WhenDef to prevent use-after-free
+    fn duplicateWhenDef(when: config.WhenDef, allocator: std.mem.Allocator) !config.WhenDef {
+        var result: config.WhenDef = .{};
+
+        // Duplicate bash/lua/env strings
+        if (when.bash) |s| result.bash = try allocator.dupe(u8, s);
+        if (when.lua) |s| result.lua = try allocator.dupe(u8, s);
+        if (when.env) |s| result.env = try allocator.dupe(u8, s);
+        if (when.env_not) |s| result.env_not = try allocator.dupe(u8, s);
+
+        // Duplicate 'all' array of strings
+        if (when.all) |all_arr| {
+            var new_all = try allocator.alloc([]const u8, all_arr.len);
+            for (all_arr, 0..) |s, i| {
+                new_all[i] = try allocator.dupe(u8, s);
+            }
+            result.all = new_all;
+        }
+
+        // Duplicate 'any' array of WhenDef (recursive)
+        if (when.any) |any_arr| {
+            var new_any = try allocator.alloc(config.WhenDef, any_arr.len);
+            for (any_arr, 0..) |w, i| {
+                new_any[i] = try duplicateWhenDef(w, allocator);
+            }
+            result.any = new_any;
+        }
+
+        return result;
+    }
+
+    /// Helper: Deep copy a SpinnerDef to prevent use-after-free
+    fn duplicateSpinnerDef(spinner: config.SpinnerDef, allocator: std.mem.Allocator) !config.SpinnerDef {
+        var result = spinner;
+
+        // Duplicate kind string
+        result.kind = try allocator.dupe(u8, spinner.kind);
+
+        // Duplicate colors array
+        if (spinner.colors.len > 0) {
+            result.colors = try allocator.dupe(u8, spinner.colors);
+        }
+
+        return result;
+    }
+
+    /// Helper: Duplicate a segment's strings to prevent use-after-free
+    fn duplicateSegment(segment: config.Segment, allocator: std.mem.Allocator) !config.Segment {
+        var result = segment;
+
+        // Duplicate string fields
+        result.name = try allocator.dupe(u8, segment.name);
+        if (segment.command) |cmd| {
+            result.command = try allocator.dupe(u8, cmd);
+        }
+        result.active_style = try allocator.dupe(u8, segment.active_style);
+        result.inactive_style = try allocator.dupe(u8, segment.inactive_style);
+        result.separator = try allocator.dupe(u8, segment.separator);
+        result.separator_style = try allocator.dupe(u8, segment.separator_style);
+        result.tab_title = try allocator.dupe(u8, segment.tab_title);
+        result.left_arrow = try allocator.dupe(u8, segment.left_arrow);
+        result.right_arrow = try allocator.dupe(u8, segment.right_arrow);
+
+        // Duplicate outputs array
+        if (segment.outputs.len > 0) {
+            var outputs = try allocator.alloc(config.OutputDef, segment.outputs.len);
+            for (segment.outputs, 0..) |out, i| {
+                outputs[i] = .{
+                    .style = try allocator.dupe(u8, out.style),
+                    .format = try allocator.dupe(u8, out.format),
+                };
+            }
+            result.outputs = outputs;
+        }
+
+        // Deep copy when condition
+        if (segment.when) |w| {
+            result.when = try duplicateWhenDef(w, allocator);
+        }
+
+        // Deep copy spinner
+        if (segment.spinner) |s| {
+            result.spinner = try duplicateSpinnerDef(s, allocator);
+        }
+
+        return result;
+    }
+
     pub fn build(self: *MuxConfigBuilder) !config.Config {
         var result = config.Config{};
         result._allocator = self.allocator;
@@ -143,9 +255,13 @@ pub const MuxConfigBuilder = struct {
         if (self.selection_color) |v| result.selection_color = v;
         if (self.mouse_selection_override_mods) |v| result.mouse.selection_override_mods = v;
 
-        // Apply binds
+        // Apply binds (deep copy to prevent use-after-free)
         if (self.binds.items.len > 0) {
-            result.input.binds = try self.binds.toOwnedSlice(self.allocator);
+            var binds = try self.allocator.alloc(config.Config.Bind, self.binds.items.len);
+            for (self.binds.items, 0..) |bind, i| {
+                binds[i] = try duplicateBind(bind, self.allocator);
+            }
+            result.input.binds = binds;
         }
 
         // Apply float defaults
@@ -155,20 +271,32 @@ pub const MuxConfigBuilder = struct {
             if (defaults.padding_x) |v| result.float_padding_x = v;
             if (defaults.padding_y) |v| result.float_padding_y = v;
             if (defaults.color) |v| result.float_color = v;
-            if (defaults.style) |v| result.float_style_default = v;
+            if (defaults.style) |s| result.float_style_default = try duplicateFloatStyle(s, self.allocator);
             if (defaults.attributes) |v| result.float_default_attributes = v;
         }
 
-        // Apply tabs config
+        // Apply tabs config - duplicate segments to prevent use-after-free
         if (self.tabs_config.status_enabled) |v| result.tabs.status.enabled = v;
         if (self.tabs_config.segments_left.items.len > 0) {
-            result.tabs.status.left = try self.tabs_config.segments_left.toOwnedSlice(self.allocator);
+            var left = try self.allocator.alloc(config.Segment, self.tabs_config.segments_left.items.len);
+            for (self.tabs_config.segments_left.items, 0..) |seg, i| {
+                left[i] = try duplicateSegment(seg, self.allocator);
+            }
+            result.tabs.status.left = left;
         }
         if (self.tabs_config.segments_center.items.len > 0) {
-            result.tabs.status.center = try self.tabs_config.segments_center.toOwnedSlice(self.allocator);
+            var center = try self.allocator.alloc(config.Segment, self.tabs_config.segments_center.items.len);
+            for (self.tabs_config.segments_center.items, 0..) |seg, i| {
+                center[i] = try duplicateSegment(seg, self.allocator);
+            }
+            result.tabs.status.center = center;
         }
         if (self.tabs_config.segments_right.items.len > 0) {
-            result.tabs.status.right = try self.tabs_config.segments_right.toOwnedSlice(self.allocator);
+            var right = try self.allocator.alloc(config.Segment, self.tabs_config.segments_right.items.len);
+            for (self.tabs_config.segments_right.items, 0..) |seg, i| {
+                right[i] = try duplicateSegment(seg, self.allocator);
+            }
+            result.tabs.status.right = right;
         }
 
         // Apply splits config
