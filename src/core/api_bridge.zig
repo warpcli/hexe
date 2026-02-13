@@ -657,13 +657,33 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
                 };
                 lua.pop(1);
 
-                // Get action
+                // Get optional action
                 _ = lua.getField(-1, "action");
-                const action = parseAction(lua, -1) orelse {
-                    lua.pop(1);
-                    continue;
-                };
+                var action: config.Config.BindAction = .mux_quit; // placeholder
+                var action_found = false;
+                if (lua.typeOf(-1) != .nil) {
+                    action = parseAction(lua, -1) orelse {
+                        lua.pop(1);
+                        continue;
+                    };
+                    action_found = true;
+                }
                 lua.pop(1);
+
+                // Get optional "mode"
+                _ = lua.getField(-1, "mode");
+                var mode: config.Config.BindMode = .act_and_consume;
+                if (lua.typeOf(-1) == .number) {
+                    const mode_val = lua.toNumber(-1) catch 0;
+                    const mode_int: i32 = @intFromFloat(mode_val);
+                    mode = @enumFromInt(mode_int);
+                }
+                lua.pop(1);
+
+                // Validate action is present unless mode is passthrough_only
+                if (!action_found and mode != .passthrough_only) {
+                    continue; // Skip this binding
+                }
 
                 // Get optional "when" condition
                 _ = lua.getField(-1, "when");
@@ -677,7 +697,7 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
                     .key = parsed_key.key,
                     .action = action,
                     .when = when,
-                    .mode = .act_and_consume,
+                    .mode = mode,
                     .hold_ms = null,
                 };
                 mux.binds.append(mux.allocator, bind) catch {
