@@ -447,6 +447,177 @@ pub export fn hexe_mux_config_setup(L: ?*LuaState) callconv(.c) c_int {
     return 0;
 }
 
+/// Parse a "when" condition from a Lua value at the given index.
+/// Supports:
+/// - String: converted to { all = { string } }
+/// - Table: parsed as WhenDef with all, any, bash, lua, env, env_not fields
+fn parseWhen(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.WhenDef {
+    const ty = lua.typeOf(idx);
+
+    // String shorthand: when = "token" → { all = { "token" } }
+    if (ty == .string) {
+        const s = lua.toString(idx) catch return null;
+        const dup = allocator.dupe(u8, s) catch return null;
+        const arr = allocator.alloc([]const u8, 1) catch {
+            allocator.free(dup);
+            return null;
+        };
+        arr[0] = dup;
+        return .{ .all = arr };
+    }
+
+    if (ty != .table) return null;
+
+    var when: config.WhenDef = .{};
+
+    // Parse bash script condition
+    _ = lua.getField(idx, "bash");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch null;
+        if (s) |str| {
+            when.bash = allocator.dupe(u8, str) catch null;
+        }
+    }
+    lua.pop(1);
+
+    // Parse lua script condition
+    _ = lua.getField(idx, "lua");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch null;
+        if (s) |str| {
+            when.lua = allocator.dupe(u8, str) catch null;
+        }
+    }
+    lua.pop(1);
+
+    // Parse env var check
+    _ = lua.getField(idx, "env");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch null;
+        if (s) |str| {
+            when.env = allocator.dupe(u8, str) catch null;
+        }
+    }
+    lua.pop(1);
+
+    // Parse env_not var check
+    _ = lua.getField(idx, "env_not");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch null;
+        if (s) |str| {
+            when.env_not = allocator.dupe(u8, str) catch null;
+        }
+    }
+    lua.pop(1);
+
+    // Parse 'all' array (AND of tokens)
+    _ = lua.getField(idx, "all");
+    if (lua.typeOf(-1) == .table) {
+        when.all = parseWhenTokenArray(lua, -1, allocator);
+    }
+    lua.pop(1);
+
+    // Parse 'any' array (OR of conditions)
+    _ = lua.getField(idx, "any");
+    if (lua.typeOf(-1) == .table) {
+        when.any = parseWhenAnyArray(lua, -1, allocator);
+    }
+    lua.pop(1);
+
+    // If nothing was set, return null
+    if (when.all == null and when.any == null and
+        when.bash == null and when.lua == null and
+        when.env == null and when.env_not == null) {
+        return null;
+    }
+
+    return when;
+}
+
+/// Parse an array of string tokens for 'all' clause
+fn parseWhenTokenArray(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?[][]const u8 {
+    const len = lua.rawLen(idx);
+    if (len == 0) return null;
+
+    var list = std.ArrayList([]const u8).empty;
+
+    var i: i32 = 1;
+    while (i <= len) : (i += 1) {
+        _ = lua.rawGetIndex(idx, i);
+        if (lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch {
+                lua.pop(1);
+                continue;
+            };
+            const dup = allocator.dupe(u8, s) catch {
+                lua.pop(1);
+                continue;
+            };
+            list.append(allocator, dup) catch {
+                allocator.free(dup);
+                lua.pop(1);
+                continue;
+            };
+        }
+        lua.pop(1);
+    }
+
+    if (list.items.len == 0) return null;
+    return list.toOwnedSlice(allocator) catch null;
+}
+
+/// Parse an array of when expressions for 'any' clause (OR)
+fn parseWhenAnyArray(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?[]const config.WhenDef {
+    const len = lua.rawLen(idx);
+    if (len == 0) return null;
+
+    var list = std.ArrayList(config.WhenDef).empty;
+
+    var i: i32 = 1;
+    while (i <= len) : (i += 1) {
+        _ = lua.rawGetIndex(idx, i);
+        const elem_ty = lua.typeOf(-1);
+
+        if (elem_ty == .string) {
+            // String element: wrap in single-token all
+            const s = lua.toString(-1) catch {
+                lua.pop(1);
+                continue;
+            };
+            const dup = allocator.dupe(u8, s) catch {
+                lua.pop(1);
+                continue;
+            };
+            const arr = allocator.alloc([]const u8, 1) catch {
+                allocator.free(dup);
+                lua.pop(1);
+                continue;
+            };
+            arr[0] = dup;
+            list.append(allocator, .{ .all = arr }) catch {
+                allocator.free(dup);
+                allocator.free(arr);
+                lua.pop(1);
+                continue;
+            };
+        } else if (elem_ty == .table) {
+            // Table element: parse recursively
+            if (parseWhen(lua, -1, allocator)) |w| {
+                list.append(allocator, w) catch {
+                    var mw = w;
+                    @constCast(&mw).deinit(allocator);
+                    lua.pop(1);
+                    continue;
+                };
+            }
+        }
+        lua.pop(1);
+    }
+
+    if (list.items.len == 0) return null;
+    return list.toOwnedSlice(allocator) catch null;
+}
+
 /// Lua C function: hexe.mux.keymap.set(bindings_array or key, action, opts)
 /// Supports two formats:
 /// 1. Array format: keymap.set({ {key={...}, action={...}}, {key={...}, action={...}} })
@@ -494,13 +665,18 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
                 };
                 lua.pop(1);
 
+                // Get optional "when" condition
+                _ = lua.getField(-1, "when");
+                const when = if (lua.typeOf(-1) != .nil) parseWhen(lua, -1, mux.allocator) else null;
+                lua.pop(1);
+
                 // Create and append bind
                 const bind = config.Config.Bind{
                     .on = .press,
                     .mods = parsed_key.mods,
                     .key = parsed_key.key,
                     .action = action,
-                    .when = null,
+                    .when = when,
                     .mode = .act_and_consume,
                     .hold_ms = null,
                 };
@@ -535,7 +711,7 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
     var on: config.Config.BindWhen = .press;
     var mode: config.Config.BindMode = .act_and_consume;
     var hold_ms: ?i64 = null;
-    const when: ?config.WhenDef = null;
+    var when: ?config.WhenDef = null;
 
     if (lua.typeOf(3) == .table) {
         // Parse "on" field
@@ -562,7 +738,12 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
         }
         lua.pop(1);
 
-        // TODO: Parse "when" field (complex, skip for now)
+        // Parse "when" field
+        _ = lua.getField(3, "when");
+        if (lua.typeOf(-1) != .nil) {
+            when = parseWhen(lua, -1, mux.allocator);
+        }
+        lua.pop(1);
     }
 
     // Validate action is present unless mode is passthrough_only
