@@ -417,7 +417,7 @@ pub const SesConfig = struct {
         runtime.setHexeSection("ses");
 
         // Load global config
-        const config_path = lua_runtime.getConfigPath(allocator, "config.lua") catch return config;
+        const config_path = lua_runtime.getConfigPath(allocator, "init.lua") catch return config;
         defer allocator.free(config_path);
 
         runtime.loadConfig(config_path) catch return config;
@@ -647,7 +647,7 @@ pub const Config = struct {
 
         PARSE_ERROR = null;
 
-        const path = lua_runtime.getConfigPath(allocator, "config.lua") catch return config;
+        const path = lua_runtime.getConfigPath(allocator, "init.lua") catch return config;
         defer allocator.free(path);
 
         var runtime = LuaRuntime.init(allocator) catch {
@@ -676,16 +676,16 @@ pub const Config = struct {
             return config;
         };
 
-        // Access the "mux" section of the global config table
-        if (runtime.pushTable(-1, "mux")) {
-            log.debug("parsing mux section from global config", .{});
-            parseConfig(&runtime, &config, allocator);
-            runtime.pop();
-        } else {
-            config.status_message = allocator.dupe(u8, "no 'mux' section in config") catch null;
+        // Build config from ConfigBuilder (new API)
+        if (runtime.getBuilder()) |builder| {
+            if (builder.mux) |mux_builder| {
+                log.debug("building mux config from ConfigBuilder", .{});
+                config = mux_builder.build() catch config;
+                config._allocator = allocator;
+            }
         }
 
-        // Pop global config table
+        // Pop config return value (if any) from stack
         runtime.pop();
 
         // Try to load local .hexe.lua from current directory

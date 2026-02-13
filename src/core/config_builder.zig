@@ -15,6 +15,10 @@ pub const ConfigBuilder = struct {
     pub fn init(allocator: std.mem.Allocator) !ConfigBuilder {
         return ConfigBuilder{
             .allocator = allocator,
+            .mux = null,
+            .ses = null,
+            .shp = null,
+            .pop = null,
         };
     }
 

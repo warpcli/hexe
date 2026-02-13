@@ -25,7 +25,8 @@ pub fn getConfigBuilder(lua: *Lua) ?*ConfigBuilder {
     }
 
     const ptr = lua.toPointer(-1) catch return null;
-    return @ptrCast(@constCast(@alignCast(ptr)));
+    const addr = @intFromPtr(ptr);
+    return @ptrFromInt(addr);
 }
 
 /// Helper to get MuxConfigBuilder, creating it if needed

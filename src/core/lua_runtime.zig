@@ -74,7 +74,7 @@ pub const LuaRuntime = struct {
     allocator: std.mem.Allocator,
     unsafe_mode: bool,
     last_error: ?[]const u8 = null,
-    config_builder: ?ConfigBuilder = null,
+    config_builder: ?*ConfigBuilder = null,
 
     const Self = @This();
 
@@ -107,18 +107,20 @@ pub const LuaRuntime = struct {
         // Inject hexe module
         try injectHexeModule(lua);
 
-        // Create runtime instance first
-        var runtime = Self{
+        // Heap-allocate ConfigBuilder so pointer remains stable
+        const builder = try allocator.create(ConfigBuilder);
+        builder.* = try ConfigBuilder.init(allocator);
+
+        // Store pointer to builder in Lua registry (now it's heap-allocated and stable)
+        try api_bridge.storeConfigBuilder(lua, builder);
+
+        // Create runtime instance
+        const runtime = Self{
             .lua = lua,
             .allocator = allocator,
             .unsafe_mode = unsafe,
-            .config_builder = try ConfigBuilder.init(allocator),
+            .config_builder = builder,
         };
-
-        // Store pointer to builder in Lua registry (now it's stable in the struct)
-        if (runtime.config_builder) |*builder| {
-            try api_bridge.storeConfigBuilder(lua, builder);
-        }
 
         return runtime;
     }
@@ -127,19 +129,16 @@ pub const LuaRuntime = struct {
         if (self.last_error) |err| {
             self.allocator.free(err);
         }
-        if (self.config_builder) |*builder| {
-            var b = @constCast(builder);
-            b.deinit();
+        if (self.config_builder) |builder| {
+            builder.deinit();
+            self.allocator.destroy(builder);
         }
         self.lua.deinit();
     }
 
     /// Get the config builder for API functions to use
     pub fn getBuilder(self: *Self) ?*ConfigBuilder {
-        if (self.config_builder) |*builder| {
-            return @constCast(builder);
-        }
-        return null;
+        return self.config_builder;
     }
 
     /// Set the target section for config evaluation.
@@ -184,12 +183,9 @@ pub const LuaRuntime = struct {
             return error.LuaError;
         };
 
-        // Check that the result is a table
-        if (self.lua.typeOf(-1) != .table) {
-            self.last_error = try self.allocator.dupe(u8, "config must return a table");
-            self.lua.pop(1);
-            return error.InvalidReturn;
-        }
+        // New API: config may or may not return a value
+        // (old table-based API returned a table, new dynamic API returns nil)
+        // We accept any return value for backward compatibility
     }
 
     fn getErrorMessage(self: *Self) []const u8 {
