@@ -77,6 +77,9 @@ pub fn getPopBuilder(lua: *Lua) !*config_builder.PopConfigBuilder {
 
 /// Parse a key string into BindKey
 fn parseKeyString(key_str: []const u8) ?config.Config.BindKey {
+    // Debug: print what we're parsing
+    std.debug.print("DEBUG parseKeyString: key_str='{s}' len={}\n", .{key_str, key_str.len});
+
     if (key_str.len == 1) return .{ .char = key_str[0] };
     if (std.mem.eql(u8, key_str, "space")) return .space;
     if (std.mem.eql(u8, key_str, "up")) return .up;
@@ -130,7 +133,9 @@ pub fn parseKeyArray(lua: *Lua, table_idx: i32) ?ParsedKey {
     }
 
     if (key) |k| {
-        return ParsedKey{ .mods = mods, .key = k };
+        const result = ParsedKey{ .mods = mods, .key = k };
+        std.debug.print("DEBUG parseKeyArray returning: mods={} key={s}\n", .{result.mods, @tagName(@as(config.Config.BindKeyKind, result.key))});
+        return result;
     }
 
     return null;
@@ -267,15 +272,22 @@ pub fn parseAction(lua: *Lua, idx: i32) ?config.Config.BindAction {
     // Table action with parameters (e.g., {type="focus.move", dir="up"})
     if (action_type == .table) {
         _ = lua.getField(idx, "type");
-        defer lua.pop(1);
-
-        const type_str = lua.toString(-1) catch return null;
+        const type_str = lua.toString(-1) catch {
+            lua.pop(1);
+            std.debug.print("DEBUG parseAction: failed to get 'type' field\n", .{});
+            return null;
+        };
+        lua.pop(1); // Pop type immediately after using it!
+        std.debug.print("DEBUG parseAction: type_str='{s}'\n", .{type_str});
 
         // Parametric actions
         if (std.mem.eql(u8, type_str, "split.resize")) {
             _ = lua.getField(idx, "dir");
-            defer lua.pop(1);
-            const dir_str = lua.toString(-1) catch return null;
+            const dir_str = lua.toString(-1) catch {
+                lua.pop(1);
+                return null;
+            };
+            lua.pop(1);
             const dir = std.meta.stringToEnum(config.Config.BindKeyKind, dir_str) orelse return null;
             if (dir != .up and dir != .down and dir != .left and dir != .right) return null;
             return .{ .split_resize = dir };
@@ -283,27 +295,55 @@ pub fn parseAction(lua: *Lua, idx: i32) ?config.Config.BindAction {
 
         if (std.mem.eql(u8, type_str, "float.toggle")) {
             _ = lua.getField(idx, "float");
-            defer lua.pop(1);
-            const float_key = lua.toString(-1) catch return null;
+            const float_key = lua.toString(-1) catch {
+                lua.pop(1);
+                return null;
+            };
+            lua.pop(1);
             if (float_key.len != 1) return null;
             return .{ .float_toggle = float_key[0] };
         }
 
         if (std.mem.eql(u8, type_str, "float.nudge")) {
             _ = lua.getField(idx, "dir");
-            defer lua.pop(1);
-            const dir_str = lua.toString(-1) catch return null;
+            const dir_str = lua.toString(-1) catch {
+                lua.pop(1);
+                return null;
+            };
+            lua.pop(1);
             const dir = std.meta.stringToEnum(config.Config.BindKeyKind, dir_str) orelse return null;
             if (dir != .up and dir != .down and dir != .left and dir != .right) return null;
             return .{ .float_nudge = dir };
         }
 
         if (std.mem.eql(u8, type_str, "focus.move")) {
+            // Check what we can get from the table
+            _ = lua.getField(idx, "type");
+            const has_type = lua.typeOf(-1) != .nil;
+            lua.pop(1);
+
             _ = lua.getField(idx, "dir");
-            defer lua.pop(1);
-            const dir_str = lua.toString(-1) catch return null;
-            const dir = std.meta.stringToEnum(config.Config.BindKeyKind, dir_str) orelse return null;
-            if (dir != .up and dir != .down and dir != .left and dir != .right) return null;
+            const has_dir = lua.typeOf(-1) != .nil;
+            const dir_type = lua.typeOf(-1);
+            std.debug.print("DEBUG focus.move action: has_type={} has_dir={} dir_type={s} idx={}\n", .{has_type, has_dir, @tagName(dir_type), idx});
+            const dir_str = lua.toString(-1) catch {
+                std.debug.print("DEBUG parseAction focus.move: failed to get dir string (type was {s})\n", .{@tagName(dir_type)});
+                lua.pop(1); // Pop "dir" value before returning
+                return null;
+            };
+            std.debug.print("DEBUG parseAction focus.move: dir_str='{s}'\n", .{dir_str});
+            const dir = std.meta.stringToEnum(config.Config.BindKeyKind, dir_str) orelse {
+                std.debug.print("DEBUG parseAction focus.move: stringToEnum failed for '{s}'\n", .{dir_str});
+                lua.pop(1); // Pop "dir" value before returning
+                return null;
+            };
+            std.debug.print("DEBUG parseAction focus.move: dir={s}\n", .{@tagName(dir)});
+            if (dir != .up and dir != .down and dir != .left and dir != .right) {
+                std.debug.print("DEBUG parseAction focus.move: invalid direction {s}\n", .{@tagName(dir)});
+                lua.pop(1);
+                return null;
+            }
+            lua.pop(1); // Pop the "dir" value before returning
             return .{ .focus_move = dir };
         }
 
@@ -624,12 +664,14 @@ fn parseWhenAnyArray(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?[]const
 /// 2. Single format: keymap.set({key...}, {action...}, opts)
 pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
+    std.debug.print("DEBUG hexe_mux_keymap_set CALLED\n", .{});
 
     // Get MuxConfigBuilder
     const mux = getMuxBuilder(lua) catch {
         _ = lua.pushString("keymap.set: failed to get config builder");
         lua.raiseError();
     };
+    std.debug.print("DEBUG hexe_mux_keymap_set: got MuxConfigBuilder, current binds.len={}\n", .{mux.binds.items.len});
 
     // Check if arg 1 is an array of bindings (array format) or a key array (single format)
     if (lua.typeOf(1) == .table) {
@@ -641,17 +683,22 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
         if (is_array) {
             // Array format: iterate and parse each binding
             const len = lua.rawLen(1);
+            std.debug.print("DEBUG keymap.set: parsing {} bindings from array\n", .{len});
             var i: i32 = 1;
             while (i <= len) : (i += 1) {
                 _ = lua.rawGetIndex(1, i);
                 defer lua.pop(1);
 
                 // Parse this binding table
-                if (lua.typeOf(-1) != .table) continue;
+                if (lua.typeOf(-1) != .table) {
+                    std.debug.print("  bind[{}]: SKIP - not a table\n", .{i});
+                    continue;
+                }
 
                 // Get key array
                 _ = lua.getField(-1, "key");
                 const parsed_key = parseKeyArray(lua, -1) orelse {
+                    std.debug.print("  bind[{}]: SKIP - invalid key array\n", .{i});
                     lua.pop(1);
                     continue;
                 };
@@ -663,6 +710,7 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
                 var action_found = false;
                 if (lua.typeOf(-1) != .nil) {
                     action = parseAction(lua, -1) orelse {
+                        std.debug.print("  bind[{}]: SKIP - invalid action\n", .{i});
                         lua.pop(1);
                         continue;
                     };
@@ -681,6 +729,7 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
 
                 // Validate action is present unless mode is passthrough_only
                 if (!action_found and mode != .passthrough_only) {
+                    std.debug.print("  bind[{}]: SKIP - no action and mode != passthrough_only\n", .{i});
                     continue; // Skip this binding
                 }
 
@@ -689,16 +738,38 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
                 const when = if (lua.typeOf(-1) != .nil) parseWhen(lua, -1, mux.allocator) else null;
                 lua.pop(1);
 
+                // Parse "on" field
+                _ = lua.getField(-1, "on");
+                var on: config.Config.BindWhen = .press;
+                if (lua.typeOf(-1) == .string) {
+                    const on_str = lua.toString(-1) catch "press";
+                    on = std.meta.stringToEnum(config.Config.BindWhen, on_str) orelse .press;
+                }
+                lua.pop(1);
+
+                // Parse "hold_ms" field
+                _ = lua.getField(-1, "hold_ms");
+                var hold_ms: ?i64 = null;
+                if (lua.typeOf(-1) == .number) {
+                    const val = lua.toNumber(-1) catch 0;
+                    hold_ms = @intFromFloat(val);
+                }
+                lua.pop(1);
+
                 // Create and append bind
                 const bind = config.Config.Bind{
-                    .on = .press,
+                    .on = on,
                     .mods = parsed_key.mods,
                     .key = parsed_key.key,
                     .action = action,
                     .when = when,
                     .mode = mode,
-                    .hold_ms = null,
+                    .hold_ms = hold_ms,
                 };
+
+                // Debug: check what we're appending
+                std.debug.print("DEBUG appending bind[{}]: mods={} key={s} action_found={}\n", .{i, bind.mods, @tagName(@as(config.Config.BindKeyKind, bind.key)), action_found});
+
                 mux.binds.append(mux.allocator, bind) catch {
                     _ = lua.pushString("keymap.set: failed to append binding");
                     lua.raiseError();
@@ -872,7 +943,89 @@ pub export fn hexe_mux_float_set_defaults(L: ?*LuaState) callconv(.c) c_int {
     }
     lua.pop(1);
 
-    // TODO: Parse attributes, style (more complex, skip for now)
+    // Parse attributes table
+    _ = lua.getField(1, "attributes");
+    if (lua.typeOf(-1) == .table) {
+        if (mux.float_defaults) |*defaults| {
+            // Initialize attributes if not set
+            if (defaults.attributes == null) {
+                defaults.attributes = config.FloatAttributes{};
+            }
+
+            _ = lua.getField(-1, "exclusive");
+            if (lua.typeOf(-1) == .boolean) {
+                defaults.attributes.?.exclusive = lua.toBoolean(-1);
+            }
+            lua.pop(1);
+
+            _ = lua.getField(-1, "sticky");
+            if (lua.typeOf(-1) == .boolean) {
+                defaults.attributes.?.sticky = lua.toBoolean(-1);
+            }
+            lua.pop(1);
+
+            _ = lua.getField(-1, "global");
+            if (lua.typeOf(-1) == .boolean) {
+                defaults.attributes.?.global = lua.toBoolean(-1);
+            }
+            lua.pop(1);
+
+            _ = lua.getField(-1, "destroy");
+            if (lua.typeOf(-1) == .boolean) {
+                defaults.attributes.?.destroy = lua.toBoolean(-1);
+            }
+            lua.pop(1);
+
+            _ = lua.getField(-1, "per_cwd");
+            if (lua.typeOf(-1) == .boolean) {
+                defaults.attributes.?.per_cwd = lua.toBoolean(-1);
+            }
+            lua.pop(1);
+
+            _ = lua.getField(-1, "navigatable");
+            if (lua.typeOf(-1) == .boolean) {
+                defaults.attributes.?.navigatable = lua.toBoolean(-1);
+            }
+            lua.pop(1);
+
+            _ = lua.getField(-1, "isolated");
+            if (lua.typeOf(-1) == .boolean) {
+                defaults.attributes.?.isolated = lua.toBoolean(-1);
+            }
+            lua.pop(1);
+        }
+    }
+    lua.pop(1);
+
+    // Parse style table
+    _ = lua.getField(1, "style");
+    if (lua.typeOf(-1) == .table) {
+        if (mux.float_defaults) |*defaults| {
+            // Initialize style if not set
+            if (defaults.style == null) {
+                defaults.style = config.FloatStyle{};
+            }
+
+            // Parse title segment
+            _ = lua.getField(-1, "title");
+            if (lua.typeOf(-1) == .table) {
+                // Parse position
+                _ = lua.getField(-1, "position");
+                if (lua.typeOf(-1) == .string) {
+                    const pos_str = lua.toString(-1) catch "";
+                    defaults.style.?.position = std.meta.stringToEnum(config.FloatStylePosition, pos_str);
+                }
+                lua.pop(1);
+
+                // Parse full Segment structure
+                if (parseSegment(lua, -1, mux.allocator)) |segment| {
+                    defaults.style.?.module = segment;
+                }
+            }
+            lua.pop(1); // pop title table
+        }
+    }
+    lua.pop(1); // pop style table
 
     return 0;
 }
@@ -880,6 +1033,7 @@ pub export fn hexe_mux_float_set_defaults(L: ?*LuaState) callconv(.c) c_int {
 /// Lua C function: hexe.mux.float.define(key, opts)
 pub export fn hexe_mux_float_define(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
+    std.debug.print("DEBUG hexe_mux_float_define CALLED\n", .{});
 
     // Get key (arg 1)
     const key_str = lua.toString(1) catch {
@@ -891,6 +1045,7 @@ pub export fn hexe_mux_float_define(L: ?*LuaState) callconv(.c) c_int {
         lua.raiseError();
     }
     const key = key_str[0];
+    std.debug.print("DEBUG float.define: key='{}' (0x{x})\n", .{key, key});
 
     // Arg 2 must be a table
     if (lua.typeOf(2) != .table) {
@@ -964,23 +1119,10 @@ pub export fn hexe_mux_tabs_add_segment(L: ?*LuaState) callconv(.c) c_int {
         lua.raiseError();
     };
 
-    // Parse segment fields
-    _ = lua.getField(2, "name");
-    const name = lua.toString(-1) catch {
-        _ = lua.pushString("tabs.add_segment: segment must have a 'name' field");
+    // Parse full segment
+    const segment = parseSegment(lua, 2, mux.allocator) orelse {
+        _ = lua.pushString("tabs.add_segment: failed to parse segment");
         lua.raiseError();
-    };
-    const name_copy = mux.allocator.dupe(u8, name) catch {
-        _ = lua.pushString("tabs.add_segment: failed to allocate name");
-        lua.raiseError();
-    };
-    lua.pop(1);
-
-    // Create basic segment (simplified for now)
-    const segment = config.Segment{
-        .name = name_copy,
-        .priority = 50, // default
-        // TODO: Parse outputs, command, when, etc.
     };
 
     // Append to appropriate list
@@ -1067,28 +1209,431 @@ pub export fn hexe_mux_splits_setup(L: ?*LuaState) callconv(.c) c_int {
     }
     lua.pop(1);
 
-    // TODO: Parse separator_v, separator_h, style (Unicode parsing needed)
+    // Parse separator_v
+    _ = lua.getField(1, "separator_v");
+    if (lua.typeOf(-1) == .string) {
+        const sep_str = lua.toString(-1) catch "";
+        if (sep_str.len > 0) {
+            const codepoint = std.unicode.utf8Decode(sep_str[0..@min(sep_str.len, 4)]) catch mux.splits_config.separator_v;
+            mux.splits_config.separator_v = codepoint;
+        }
+    }
+    lua.pop(1);
+
+    // Parse separator_h
+    _ = lua.getField(1, "separator_h");
+    if (lua.typeOf(-1) == .string) {
+        const sep_str = lua.toString(-1) catch "";
+        if (sep_str.len > 0) {
+            const codepoint = std.unicode.utf8Decode(sep_str[0..@min(sep_str.len, 4)]) catch mux.splits_config.separator_h;
+            mux.splits_config.separator_h = codepoint;
+        }
+    }
+    lua.pop(1);
+
+    // TODO: Parse style (SplitStyle with junction characters)
 
     return 0;
 }
 
 // ===== SES API Functions =====
 
-/// Lua C function: hexe.ses.layout.define(name, opts)
-pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
-    const lua: *Lua = @ptrCast(L);
+/// Parse a Segment from a Lua table at idx
+fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segment {
+    if (lua.typeOf(idx) != .table) return null;
 
-    // Get name (arg 1)
-    const name_str = lua.toString(1) catch {
-        _ = lua.pushString("layout.define: name must be a string");
-        lua.raiseError();
+    // Get name (required)
+    _ = lua.getField(idx, "name");
+    const name_str = lua.toString(-1) catch {
+        lua.pop(1);
+        return null;
+    };
+    const name = allocator.dupe(u8, name_str) catch {
+        lua.pop(1);
+        return null;
+    };
+    lua.pop(1);
+
+    var segment = config.Segment{
+        .name = name,
     };
 
-    // Arg 2 must be a table
-    if (lua.typeOf(2) != .table) {
-        _ = lua.pushString("layout.define: second argument must be a table");
+    // Parse priority
+    _ = lua.getField(idx, "priority");
+    if (lua.typeOf(-1) == .number) {
+        const p = lua.toNumber(-1) catch 50;
+        segment.priority = @intFromFloat(p);
+    }
+    lua.pop(1);
+
+    // Parse outputs array
+    _ = lua.getField(idx, "outputs");
+    if (lua.typeOf(-1) == .table) {
+        const outputs_len = lua.rawLen(-1);
+        var outputs_list = std.ArrayList(config.OutputDef).empty;
+
+        var i: i32 = 1;
+        while (i <= outputs_len) : (i += 1) {
+            _ = lua.rawGetIndex(-1, i);
+            if (lua.typeOf(-1) == .table) {
+                var output = config.OutputDef{};
+
+                _ = lua.getField(-1, "style");
+                if (lua.typeOf(-1) == .string) {
+                    const style_str = lua.toString(-1) catch "";
+                    output.style = allocator.dupe(u8, style_str) catch "";
+                }
+                lua.pop(1);
+
+                _ = lua.getField(-1, "format");
+                if (lua.typeOf(-1) == .string) {
+                    const format_str = lua.toString(-1) catch "$output";
+                    output.format = allocator.dupe(u8, format_str) catch "$output";
+                }
+                lua.pop(1);
+
+                outputs_list.append(allocator, output) catch {};
+            }
+            lua.pop(1); // pop output table
+        }
+
+        segment.outputs = outputs_list.toOwnedSlice(allocator) catch &[_]config.OutputDef{};
+    }
+    lua.pop(1); // pop outputs array
+
+    // Parse command
+    _ = lua.getField(idx, "command");
+    if (lua.typeOf(-1) == .string) {
+        const cmd = lua.toString(-1) catch {
+            lua.pop(1);
+            return segment;
+        };
+        segment.command = allocator.dupe(u8, cmd) catch null;
+    }
+    lua.pop(1);
+
+    // Parse when
+    _ = lua.getField(idx, "when");
+    if (lua.typeOf(-1) != .nil) {
+        segment.when = parseWhen(lua, -1, allocator);
+    }
+    lua.pop(1);
+
+    return segment;
+}
+
+/// Parse a LayoutFloatDef from a Lua table at idx
+fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.LayoutFloatDef {
+    std.debug.print("DEBUG parseLayoutFloat called, idx={}\n", .{idx});
+    if (lua.typeOf(idx) != .table) {
+        std.debug.print("DEBUG parseLayoutFloat: not a table\n", .{});
+        return null;
+    }
+
+    // Get key (required)
+    _ = lua.getField(idx, "key");
+    const key_str = lua.toString(-1) catch {
+        std.debug.print("DEBUG parseLayoutFloat: failed to get key string\n", .{});
+        lua.pop(1);
+        return null;
+    };
+    if (key_str.len != 1) {
+        std.debug.print("DEBUG parseLayoutFloat: key length != 1\n", .{});
+        lua.pop(1);
+        return null;
+    }
+    const key = key_str[0];
+    std.debug.print("DEBUG parseLayoutFloat: key='{}' (0x{x})\n", .{key, key});
+    lua.pop(1);
+
+    // Create float with defaults
+    var float_def = config.LayoutFloatDef{
+        .key = key,
+    };
+
+    // Parse enabled
+    _ = lua.getField(idx, "enabled");
+    if (lua.typeOf(-1) == .boolean) {
+        float_def.enabled = lua.toBoolean(-1);
+    }
+    lua.pop(1);
+
+    // Parse command
+    _ = lua.getField(idx, "command");
+    if (lua.typeOf(-1) == .string) {
+        const cmd = lua.toString(-1) catch {
+            lua.pop(1);
+            return null;
+        };
+        float_def.command = allocator.dupe(u8, cmd) catch null;
+    }
+    lua.pop(1);
+
+    // Parse title
+    _ = lua.getField(idx, "title");
+    if (lua.typeOf(-1) == .string) {
+        const title = lua.toString(-1) catch {
+            lua.pop(1);
+            return null;
+        };
+        float_def.title = allocator.dupe(u8, title) catch null;
+        std.debug.print("DEBUG parseLayoutFloat: title='{s}'\n", .{title});
+    }
+    lua.pop(1);
+
+    // Parse attributes table
+    _ = lua.getField(idx, "attributes");
+    if (lua.typeOf(-1) == .table) {
+        float_def.has_custom_attributes = true;
+
+        _ = lua.getField(-1, "per_cwd");
+        if (lua.typeOf(-1) == .boolean) {
+            float_def.attributes.per_cwd = lua.toBoolean(-1);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "global");
+        if (lua.typeOf(-1) == .boolean) {
+            float_def.attributes.global = lua.toBoolean(-1);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "exclusive");
+        if (lua.typeOf(-1) == .boolean) {
+            float_def.attributes.exclusive = lua.toBoolean(-1);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "sticky");
+        if (lua.typeOf(-1) == .boolean) {
+            float_def.attributes.sticky = lua.toBoolean(-1);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "destroy");
+        if (lua.typeOf(-1) == .boolean) {
+            float_def.attributes.destroy = lua.toBoolean(-1);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "navigatable");
+        if (lua.typeOf(-1) == .boolean) {
+            float_def.attributes.navigatable = lua.toBoolean(-1);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "isolated");
+        if (lua.typeOf(-1) == .boolean) {
+            float_def.attributes.isolated = lua.toBoolean(-1);
+        }
+        lua.pop(1);
+    }
+    lua.pop(1); // pop attributes table
+
+    // Parse size table
+    _ = lua.getField(idx, "size");
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "width");
+        if (lua.typeOf(-1) == .number) {
+            const w = lua.toNumber(-1) catch 0;
+            float_def.width_percent = @intFromFloat(w);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "height");
+        if (lua.typeOf(-1) == .number) {
+            const h = lua.toNumber(-1) catch 0;
+            float_def.height_percent = @intFromFloat(h);
+        }
+        lua.pop(1);
+    }
+    lua.pop(1); // pop size table
+
+    // Parse position table
+    _ = lua.getField(idx, "position");
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "x");
+        if (lua.typeOf(-1) == .number) {
+            const x = lua.toNumber(-1) catch 0;
+            float_def.pos_x = @intFromFloat(x);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "y");
+        if (lua.typeOf(-1) == .number) {
+            const y = lua.toNumber(-1) catch 0;
+            float_def.pos_y = @intFromFloat(y);
+        }
+        lua.pop(1);
+    }
+    lua.pop(1); // pop position table
+
+    // Parse padding table
+    _ = lua.getField(idx, "padding");
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "x");
+        if (lua.typeOf(-1) == .number) {
+            const x = lua.toNumber(-1) catch 0;
+            float_def.padding_x = @intFromFloat(x);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "y");
+        if (lua.typeOf(-1) == .number) {
+            const y = lua.toNumber(-1) catch 0;
+            float_def.padding_y = @intFromFloat(y);
+        }
+        lua.pop(1);
+    }
+    lua.pop(1); // pop padding table
+
+    // Parse color table
+    _ = lua.getField(idx, "color");
+    if (lua.typeOf(-1) == .table) {
+        var color = config.BorderColor{};
+
+        _ = lua.getField(-1, "active");
+        if (lua.typeOf(-1) == .number) {
+            const a = lua.toNumber(-1) catch 1;
+            color.active = @intFromFloat(a);
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "passive");
+        if (lua.typeOf(-1) == .number) {
+            const p = lua.toNumber(-1) catch 237;
+            color.passive = @intFromFloat(p);
+        }
+        lua.pop(1);
+
+        float_def.color = color;
+    }
+    lua.pop(1); // pop color table
+
+    // Parse style table
+    _ = lua.getField(idx, "style");
+    if (lua.typeOf(-1) == .table) {
+        var style = config.FloatStyle{};
+
+        // Parse shadow.color
+        _ = lua.getField(-1, "shadow");
+        if (lua.typeOf(-1) == .table) {
+            _ = lua.getField(-1, "color");
+            if (lua.typeOf(-1) == .number) {
+                const c = lua.toNumber(-1) catch 0;
+                style.shadow_color = @intFromFloat(c);
+            }
+            lua.pop(1); // pop color
+        }
+        lua.pop(1); // pop shadow table
+
+        // Parse border.chars
+        _ = lua.getField(-1, "border");
+        if (lua.typeOf(-1) == .table) {
+            _ = lua.getField(-1, "chars");
+            if (lua.typeOf(-1) == .table) {
+                // Helper to parse a single char field
+                const parseChar = struct {
+                    fn parse(l: *Lua, default: u21) u21 {
+                        const s = l.toString(-1) catch return default;
+                        if (s.len == 0) return default;
+                        const codepoint = std.unicode.utf8Decode(s[0..@min(s.len, 4)]) catch return default;
+                        return codepoint;
+                    }
+                }.parse;
+
+                _ = lua.getField(-1, "top_left");
+                if (lua.typeOf(-1) == .string) style.top_left = parseChar(lua, style.top_left);
+                lua.pop(1);
+
+                _ = lua.getField(-1, "top_right");
+                if (lua.typeOf(-1) == .string) style.top_right = parseChar(lua, style.top_right);
+                lua.pop(1);
+
+                _ = lua.getField(-1, "bottom_left");
+                if (lua.typeOf(-1) == .string) style.bottom_left = parseChar(lua, style.bottom_left);
+                lua.pop(1);
+
+                _ = lua.getField(-1, "bottom_right");
+                if (lua.typeOf(-1) == .string) style.bottom_right = parseChar(lua, style.bottom_right);
+                lua.pop(1);
+
+                _ = lua.getField(-1, "horizontal");
+                if (lua.typeOf(-1) == .string) style.horizontal = parseChar(lua, style.horizontal);
+                lua.pop(1);
+
+                _ = lua.getField(-1, "vertical");
+                if (lua.typeOf(-1) == .string) style.vertical = parseChar(lua, style.vertical);
+                lua.pop(1);
+
+                _ = lua.getField(-1, "cross");
+                if (lua.typeOf(-1) == .string) style.cross = parseChar(lua, style.cross);
+                lua.pop(1);
+
+                _ = lua.getField(-1, "top_t");
+                if (lua.typeOf(-1) == .string) style.top_t = parseChar(lua, style.top_t);
+                lua.pop(1);
+
+                _ = lua.getField(-1, "bottom_t");
+                if (lua.typeOf(-1) == .string) style.bottom_t = parseChar(lua, style.bottom_t);
+                lua.pop(1);
+
+                _ = lua.getField(-1, "left_t");
+                if (lua.typeOf(-1) == .string) style.left_t = parseChar(lua, style.left_t);
+                lua.pop(1);
+
+                _ = lua.getField(-1, "right_t");
+                if (lua.typeOf(-1) == .string) style.right_t = parseChar(lua, style.right_t);
+                lua.pop(1);
+            }
+            lua.pop(1); // pop chars table
+        }
+        lua.pop(1); // pop border table
+
+        // Parse title module (simplified - full Segment parsing would be complex)
+        _ = lua.getField(-1, "title");
+        if (lua.typeOf(-1) == .table) {
+            // Parse position
+            _ = lua.getField(-1, "position");
+            if (lua.typeOf(-1) == .string) {
+                const pos_str = lua.toString(-1) catch "";
+                style.position = std.meta.stringToEnum(config.FloatStylePosition, pos_str);
+            }
+            lua.pop(1); // pop position
+
+            // Parse full Segment structure
+            if (parseSegment(lua, -1, allocator)) |segment| {
+                style.module = segment;
+            }
+        }
+        lua.pop(1); // pop title table
+
+        float_def.style = style;
+    }
+    lua.pop(1); // pop style table
+
+    return float_def;
+}
+
+/// Lua C function: hexe.ses.layout.define(opts)
+pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+    std.debug.print("DEBUG hexe_ses_layout_define CALLED\n", .{});
+
+    // Arg 1 must be a table
+    if (lua.typeOf(1) != .table) {
+        _ = lua.pushString("layout.define: argument must be a table");
         lua.raiseError();
     }
+
+    // Get name from table
+    _ = lua.getField(1, "name");
+    const name_str = lua.toString(-1) catch {
+        lua.pop(1);
+        _ = lua.pushString("layout.define: layout must have a 'name' field");
+        lua.raiseError();
+    };
+    lua.pop(1);
 
     // Get SesConfigBuilder
     const ses = getSesBuilder(lua) catch {
@@ -1102,7 +1647,7 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
     };
 
     // Parse enabled
-    _ = lua.getField(2, "enabled");
+    _ = lua.getField(1, "enabled");
     const enabled = if (lua.typeOf(-1) == .boolean)
         lua.toBoolean(-1)
     else
@@ -1111,7 +1656,7 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
 
     // Parse tabs array
     var tabs = std.ArrayList(config.LayoutTabDef){};
-    _ = lua.getField(2, "tabs");
+    _ = lua.getField(1, "tabs");
     if (lua.typeOf(-1) == .table) {
         const tabs_len = lua.rawLen(-1);
         var i: i32 = 1;
@@ -1150,12 +1695,28 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
     }
     lua.pop(1); // pop tabs array
 
+    // Parse floats array
+    var floats = std.ArrayList(config.LayoutFloatDef).empty;
+    _ = lua.getField(1, "floats");
+    if (lua.typeOf(-1) == .table) {
+        const floats_len = lua.rawLen(-1);
+        var i: i32 = 1;
+        while (i <= floats_len) : (i += 1) {
+            _ = lua.rawGetIndex(-1, i);
+            if (parseLayoutFloat(lua, -1, ses.allocator)) |float_def| {
+                floats.append(ses.allocator, float_def) catch {};
+            }
+            lua.pop(1); // pop float table
+        }
+    }
+    lua.pop(1); // pop floats array
+
     // Create layout
     const layout = config.LayoutDef{
         .name = name,
         .enabled = enabled,
         .tabs = tabs.toOwnedSlice(ses.allocator) catch &[_]config.LayoutTabDef{},
-        .floats = &[_]config.LayoutFloatDef{}, // TODO: Parse floats
+        .floats = floats.toOwnedSlice(ses.allocator) catch &[_]config.LayoutFloatDef{},
     };
 
     // Append to layouts
