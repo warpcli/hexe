@@ -187,6 +187,8 @@ pub const FloatDef = struct {
     color: ?BorderColor = null,
     // Border style and optional module
     style: ?FloatStyle = null,
+    // Per-float isolation config (null = use global isolation)
+    isolation: ?IsolationConfig = null,
 };
 
 /// Border color config (active/passive)
@@ -330,6 +332,7 @@ pub const LayoutFloatDef = struct {
     padding_y: ?u8 = null,
     color: ?BorderColor = null,
     style: ?FloatStyle = null,
+    isolation: ?IsolationConfig = null,
 
     pub fn deinit(self: *LayoutFloatDef, allocator: std.mem.Allocator) void {
         if (self.command) |c| allocator.free(@constCast(c));
@@ -364,6 +367,10 @@ pub const LayoutFloatDef = struct {
                 allocator.free(@constCast(module.right_arrow));
             }
         }
+        if (self.isolation) |*iso| {
+            var isolation = @constCast(iso);
+            isolation.deinit(allocator);
+        }
     }
 };
 
@@ -394,10 +401,31 @@ pub const LayoutDef = struct {
 };
 
 /// Ses configuration
+/// POD isolation configuration (voidbox settings)
+pub const IsolationConfig = struct {
+    /// Isolation profile: none, minimal, default, balanced, full
+    profile: []const u8 = "default",
+    /// Memory limit (e.g., "1G", "512M")
+    memory: ?[]const u8 = null,
+    /// CPU quota (e.g., "50000 100000")
+    cpu: ?[]const u8 = null,
+    /// Maximum PIDs
+    pids: ?[]const u8 = null,
+
+    pub fn deinit(self: *IsolationConfig, allocator: std.mem.Allocator) void {
+        allocator.free(self.profile);
+        if (self.memory) |m| allocator.free(@constCast(m));
+        if (self.cpu) |c| allocator.free(@constCast(c));
+        if (self.pids) |p| allocator.free(@constCast(p));
+    }
+};
+
 pub const SesConfig = struct {
     layouts: []LayoutDef = &[_]LayoutDef{},
+    isolation: IsolationConfig = .{},
 
     pub fn deinit(self: *SesConfig, allocator: std.mem.Allocator) void {
+        self.isolation.deinit(allocator);
         for (self.layouts) |*layout| {
             var l = @constCast(layout);
             l.deinit(allocator);

@@ -343,6 +343,12 @@ pub const SesConfigBuilder = struct {
     auto_restore: ?bool = null,
     save_on_detach: ?bool = null,
 
+    // Isolation config (voidbox)
+    isolation_profile: ?[]const u8 = null,
+    isolation_memory: ?[]const u8 = null,
+    isolation_cpu: ?[]const u8 = null,
+    isolation_pids: ?[]const u8 = null,
+
     pub fn init(allocator: std.mem.Allocator) !*SesConfigBuilder {
         const self = try allocator.create(SesConfigBuilder);
         self.* = .{
@@ -359,6 +365,12 @@ pub const SesConfigBuilder = struct {
             l.deinit(self.allocator);
         }
         self.layouts.deinit(self.allocator);
+
+        // Clean up isolation strings
+        if (self.isolation_profile) |p| self.allocator.free(p);
+        if (self.isolation_memory) |m| self.allocator.free(m);
+        if (self.isolation_cpu) |c| self.allocator.free(c);
+        if (self.isolation_pids) |p| self.allocator.free(p);
     }
 
     pub fn build(self: *SesConfigBuilder) !config.SesConfig {
@@ -368,6 +380,17 @@ pub const SesConfigBuilder = struct {
         if (self.layouts.items.len > 0) {
             result.layouts = try self.layouts.toOwnedSlice(self.allocator);
         }
+
+        // Build isolation config
+        result.isolation = .{
+            .profile = if (self.isolation_profile) |p|
+                try self.allocator.dupe(u8, p)
+            else
+                try self.allocator.dupe(u8, "default"),
+            .memory = if (self.isolation_memory) |m| try self.allocator.dupe(u8, m) else null,
+            .cpu = if (self.isolation_cpu) |c| try self.allocator.dupe(u8, c) else null,
+            .pids = if (self.isolation_pids) |p| try self.allocator.dupe(u8, p) else null,
+        };
 
         return result;
     }

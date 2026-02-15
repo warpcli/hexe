@@ -6,6 +6,11 @@ const config_builder = @import("config_builder.zig");
 const ConfigBuilder = config_builder.ConfigBuilder;
 const config = @import("config.zig");
 
+// Import C standard library functions
+const c = @cImport({
+    @cInclude("stdlib.h");
+});
+
 /// Registry key for storing ConfigBuilder pointer
 const BUILDER_REGISTRY_KEY = "_hexe_config_builder";
 
@@ -149,8 +154,8 @@ fn parseLayoutPane(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.La
     _ = lua.getField(idx, "cwd");
     if (lua.typeOf(-1) == .string) {
         const cwd_str = lua.toString(-1) catch null;
-        if (cwd_str) |c| {
-            pane.cwd = allocator.dupe(u8, c) catch null;
+        if (cwd_str) |cwd_val| {
+            pane.cwd = allocator.dupe(u8, cwd_val) catch null;
         }
     }
     lua.pop(1);
@@ -159,8 +164,8 @@ fn parseLayoutPane(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.La
     _ = lua.getField(idx, "command");
     if (lua.typeOf(-1) == .string) {
         const cmd_str = lua.toString(-1) catch null;
-        if (cmd_str) |c| {
-            pane.command = allocator.dupe(u8, c) catch null;
+        if (cmd_str) |cmd_val| {
+            pane.command = allocator.dupe(u8, cmd_val) catch null;
         }
     }
     lua.pop(1);
@@ -1070,8 +1075,8 @@ pub export fn hexe_mux_float_define(L: ?*LuaState) callconv(.c) c_int {
     _ = lua.getField(2, "command");
     if (lua.typeOf(-1) == .string) {
         const cmd = lua.toString(-1) catch null;
-        if (cmd) |c| {
-            float_def.command = mux.allocator.dupe(u8, c) catch null;
+        if (cmd) |cmd_val| {
+            float_def.command = mux.allocator.dupe(u8, cmd_val) catch null;
         }
     }
     lua.pop(1);
@@ -1520,8 +1525,8 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         if (lua.typeOf(-1) == .table) {
             _ = lua.getField(-1, "color");
             if (lua.typeOf(-1) == .number) {
-                const c = lua.toNumber(-1) catch 0;
-                style.shadow_color = @intFromFloat(c);
+                const color_num = lua.toNumber(-1) catch 0;
+                style.shadow_color = @intFromFloat(color_num);
             }
             lua.pop(1); // pop color
         }
@@ -1611,6 +1616,65 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         float_def.style = style;
     }
     lua.pop(1); // pop style table
+
+    // Parse isolation table
+    _ = lua.getField(idx, "isolation");
+    if (lua.typeOf(-1) == .table) {
+        var isolation = config.IsolationConfig{
+            .profile = allocator.dupe(u8, "default") catch return null,
+        };
+
+        // Parse profile
+        _ = lua.getField(-1, "profile");
+        if (lua.typeOf(-1) == .string) {
+            const profile_str = lua.toString(-1) catch "";
+            if (profile_str.len > 0) {
+                allocator.free(isolation.profile);
+                isolation.profile = allocator.dupe(u8, profile_str) catch return null;
+            }
+        }
+        lua.pop(1);
+
+        // Parse memory
+        _ = lua.getField(-1, "memory");
+        if (lua.typeOf(-1) == .string) {
+            const mem_str = lua.toString(-1) catch null;
+            if (mem_str) |m| {
+                isolation.memory = allocator.dupe(u8, m) catch null;
+            }
+        }
+        lua.pop(1);
+
+        // Parse cpu
+        _ = lua.getField(-1, "cpu");
+        if (lua.typeOf(-1) == .string) {
+            const cpu_str = lua.toString(-1) catch null;
+            if (cpu_str) |cpu_val| {
+                isolation.cpu = allocator.dupe(u8, cpu_val) catch null;
+            }
+        }
+        lua.pop(1);
+
+        // Parse pids (can be string or number)
+        _ = lua.getField(-1, "pids");
+        if (lua.typeOf(-1) == .string) {
+            const pids_str = lua.toString(-1) catch null;
+            if (pids_str) |p| {
+                isolation.pids = allocator.dupe(u8, p) catch null;
+            }
+        } else if (lua.typeOf(-1) == .number) {
+            const pids_num = lua.toNumber(-1) catch 0;
+            var buf: [32]u8 = undefined;
+            const pids_str = std.fmt.bufPrint(&buf, "{d}", .{@as(i64, @intFromFloat(pids_num))}) catch "";
+            if (pids_str.len > 0) {
+                isolation.pids = allocator.dupe(u8, pids_str) catch null;
+            }
+        }
+        lua.pop(1);
+
+        float_def.isolation = isolation;
+    }
+    lua.pop(1); // pop isolation table
 
     return float_def;
 }
@@ -1729,6 +1793,106 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
 }
 
 /// Lua C function: hexe.ses.session.setup(opts)
+/// hexe.ses.isolation.set({ profile = "balanced", memory = "1G", ... })
+/// Configure POD isolation settings (voidbox)
+pub export fn hexe_ses_isolation_set(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    // Get SesConfigBuilder
+    const ses = getSesBuilder(lua) catch {
+        _ = lua.pushString("isolation.set: failed to get config builder");
+        lua.raiseError();
+    };
+
+    // Arg 1 must be a table
+    if (lua.typeOf(1) != .table) {
+        _ = lua.pushString("isolation.set: argument must be a table");
+        lua.raiseError();
+    }
+
+    // Parse profile
+    _ = lua.getField(1, "profile");
+    if (lua.typeOf(-1) == .string) {
+        const profile_str = lua.toString(-1) catch "default";
+        const profile = ses.allocator.dupe(u8, profile_str) catch {
+            lua.pop(1);
+            _ = lua.pushString("isolation.set: failed to allocate profile");
+            lua.raiseError();
+        };
+        if (ses.isolation_profile) |old| ses.allocator.free(old);
+        ses.isolation_profile = profile;
+
+        // NOTE: Don't set env vars globally - only apply isolation per-float
+        // Environment variables will be set only when spawning PODs with explicit isolation config
+    }
+    lua.pop(1);
+
+    // Parse memory limit
+    _ = lua.getField(1, "memory");
+    if (lua.typeOf(-1) == .string) {
+        const mem_str = lua.toString(-1) catch null;
+        if (mem_str) |m| {
+            const memory = ses.allocator.dupe(u8, m) catch {
+                lua.pop(1);
+                _ = lua.pushString("isolation.set: failed to allocate memory");
+                lua.raiseError();
+            };
+            if (ses.isolation_memory) |old| ses.allocator.free(old);
+            ses.isolation_memory = memory;
+        }
+    }
+    lua.pop(1);
+
+    // Parse CPU limit
+    _ = lua.getField(1, "cpu");
+    if (lua.typeOf(-1) == .string) {
+        const cpu_str = lua.toString(-1) catch null;
+        if (cpu_str) |cpu_val| {
+            const cpu = ses.allocator.dupe(u8, cpu_val) catch {
+                lua.pop(1);
+                _ = lua.pushString("isolation.set: failed to allocate cpu");
+                lua.raiseError();
+            };
+            if (ses.isolation_cpu) |old| ses.allocator.free(old);
+            ses.isolation_cpu = cpu;
+        }
+    }
+    lua.pop(1);
+
+    // Parse PIDs limit
+    _ = lua.getField(1, "pids");
+    if (lua.typeOf(-1) == .string) {
+        const pids_str = lua.toString(-1) catch null;
+        if (pids_str) |p| {
+            const pids = ses.allocator.dupe(u8, p) catch {
+                lua.pop(1);
+                _ = lua.pushString("isolation.set: failed to allocate pids");
+                lua.raiseError();
+            };
+            if (ses.isolation_pids) |old| ses.allocator.free(old);
+            ses.isolation_pids = pids;
+        }
+    } else if (lua.typeOf(-1) == .number) {
+        const pids_num = lua.toNumber(-1) catch 0;
+        var buf: [32]u8 = undefined;
+        const pids_str = std.fmt.bufPrint(&buf, "{d}", .{@as(i64, @intFromFloat(pids_num))}) catch {
+            lua.pop(1);
+            _ = lua.pushString("isolation.set: failed to format pids");
+            lua.raiseError();
+        };
+        const pids = ses.allocator.dupe(u8, pids_str) catch {
+            lua.pop(1);
+            _ = lua.pushString("isolation.set: failed to allocate pids");
+            lua.raiseError();
+        };
+        if (ses.isolation_pids) |old| ses.allocator.free(old);
+        ses.isolation_pids = pids;
+    }
+    lua.pop(1);
+
+    return 0;
+}
+
 pub export fn hexe_ses_session_setup(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 
@@ -1839,8 +2003,8 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     // Parse command (optional)
     _ = lua.getField(idx, "command");
     if (lua.typeOf(-1) == .string) {
-        const c = lua.toString(-1) catch null;
-        if (c) |cmd| {
+        const cmd_str = lua.toString(-1) catch null;
+        if (cmd_str) |cmd| {
             command = allocator.dupe(u8, cmd) catch null;
         }
     }

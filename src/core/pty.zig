@@ -7,7 +7,7 @@ const c = @cImport({
     @cInclude("sys/ioctl.h");
 });
 
-const isolation = @import("isolation.zig");
+const isolation_voidbox = @import("isolation_voidbox.zig");
 
 // External declaration for environ (modified by setenv)
 extern var environ: [*:null]?[*:0]u8;
@@ -46,7 +46,12 @@ pub const Pty = struct {
         var master_fd: c_int = 0;
         var slave_fd: c_int = 0;
 
-        const isolate = isolation.enabledFor(extra_env);
+        // Parse voidbox configuration from environment
+        const voidbox_config = isolation_voidbox.configFromEnv(std.heap.c_allocator, shell, cwd) catch |err| {
+            std.debug.print("[pty] Failed to parse voidbox config: {}\n", .{err});
+            return error.VoidboxConfigFailed;
+        };
+        defer std.heap.c_allocator.free(voidbox_config.cmd);
 
         // Get current terminal size to pass to the new PTY
         var ws: c.winsize = undefined;
@@ -92,9 +97,11 @@ pub const Pty = struct {
             }
             // If cwd is null, we inherit the parent process's CWD
 
-            if (isolate) {
-                isolation.applyChildIsolation(cwd);
-            }
+            // Apply voidbox isolation (namespaces, mounts)
+            isolation_voidbox.applyChildIsolation(&voidbox_config, cwd) catch |err| {
+                std.debug.print("[pty-child] Voidbox isolation failed: {}\n", .{err});
+                // Continue without isolation rather than failing completely
+            };
 
             // Build environment: inherit parent env + BOX=1 + TERM override + extra
             const envp = buildEnv(extra_env) catch posix.exit(1);
@@ -118,14 +125,25 @@ pub const Pty = struct {
 
         _ = posix.close(@intCast(slave_fd));
 
-        if (isolate) {
-            isolation.applyChildCgroup(extra_env, pid);
-        }
+        // Apply voidbox cgroups (resource limits) in parent
+        const pane_uuid = findPaneUuid(extra_env);
+        isolation_voidbox.applyParentCgroups(std.heap.c_allocator, &voidbox_config, pid, pane_uuid) catch |err| {
+            std.debug.print("[pty] Voidbox cgroups failed: {}\n", .{err});
+            // Continue without cgroups rather than failing
+        };
 
         return Pty{
             .master_fd = @intCast(master_fd),
             .child_pid = pid,
         };
+    }
+
+    fn findPaneUuid(extra_env: ?[]const [2][]const u8) ?[]const u8 {
+        const extras = extra_env orelse return null;
+        for (extras) |kv| {
+            if (std.mem.eql(u8, kv[0], "HEXE_PANE_UUID")) return kv[1];
+        }
+        return null;
     }
 
     fn buildEnv(extra_env: ?[]const [2][]const u8) ![*:null]const ?[*:0]const u8 {

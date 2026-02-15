@@ -1193,7 +1193,8 @@ pub const SesState = struct {
 
         const instance_env = posix.getenv("HEXE_INSTANCE");
         const test_only_env = posix.getenv("HEXE_TEST_ONLY");
-        const needs_runtime_env = (instance_env != null and instance_env.?.len > 0) or (test_only_env != null and test_only_env.?.len > 0);
+        const needs_runtime_env = (instance_env != null and instance_env.?.len > 0) or
+                                  (test_only_env != null and test_only_env.?.len > 0);
 
         if (env != null or extra_env != null or needs_runtime_env) {
             var env_map = if (env == null)
@@ -1225,6 +1226,9 @@ pub const SesState = struct {
             if (test_only_env) |v| {
                 if (v.len > 0) try env_map.put("HEXE_TEST_ONLY", v);
             }
+
+            // NOTE: Per-float isolation env vars should be passed via extra_env parameter
+            // when spawning PODs for floats with custom isolation config
 
             env_map_storage = env_map;
             child.env_map = &env_map_storage.?;

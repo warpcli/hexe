@@ -1,181 +1,262 @@
 # Voidbox Integration
 
-Hexa integrates [voidbox](https://github.com/bresilla/voidbox) (v0.0.3) for process sandboxing and isolation.
+Hexa includes [voidbox](https://github.com/bresilla/voidbox) (v0.0.3) as a dependency for future sandboxing capabilities.
 
-## Overview
+## Current Status
 
-Voidbox provides Linux namespace/cgroup/filesystem isolation for running contained processes. In Hexa, it's available to:
+✅ **Available**: Voidbox is built and available as a module import
+✅ **Accessible**: POD and SES modules can import and use voidbox
+⚠️ **Not Integrated**: POD pane isolation currently uses Hexa's built-in isolation system
+🔮 **Future**: Full voidbox integration planned for comprehensive sandboxing
 
-- **POD module** - Isolate PTY processes per-pane
-- **SES module** - Manage sandboxed sessions
+## Current POD Isolation
 
-## Availability
+Hexa POD currently provides built-in isolation via `src/core/isolation.zig`:
 
-The `voidbox` module is imported in:
-- `src/modules/pod/` - Access via `const voidbox = @import("voidbox");`
-- `src/modules/ses/` - Access via `const voidbox = @import("voidbox");`
+### Features
+- **Landlock** - Filesystem access control (default)
+- **User namespaces** - UID/GID mapping (optional)
+- **Mount namespaces** - Isolated /tmp (optional)
+- **Cgroups v2** - Resource limits (CPU, memory, PIDs)
 
-## Quick Start
+### Configuration
 
-### 1. Launch Isolated Shell
+```bash
+# Enable Landlock filesystem isolation
+export HEXE_POD_ISOLATE=1
 
-```zig
-const voidbox = @import("voidbox");
+# Enable user + mount namespaces
+export HEXE_POD_ISOLATE_USERNS=1
 
-var config = voidbox.default_shell_config();
-config.isolation.user = true;
-config.isolation.pid = true;
+# Set resource limits
+export HEXE_CGROUP_PIDS_MAX=512
+export HEXE_CGROUP_MEM_MAX=1G
+export HEXE_CGROUP_CPU_MAX="50000 100000"  # 50% CPU
 
-const outcome = try voidbox.launch_shell(allocator, &config);
+# Start hexe with isolation
+hexe mux
 ```
 
-### 2. Launch Custom Command
+## Manual Voidbox Usage
+
+While not integrated into POD spawning yet, you can use voidbox directly in Zig code:
+
+###  Basic Example
 
 ```zig
-var jail = voidbox.JailConfig{
-    .allocator = allocator,
-    .rootfs = "/",
-    .command = "/bin/bash",
-    .args = &[_][]const u8{ "-c", "echo hello" },
+const std = @import("std");
+const voidbox = @import("voidbox");
+
+pub fn runIsolated(allocator: std.mem.Allocator) !void {
+    const config = voidbox.JailConfig{
+        .name = "my-jail",
+        .rootfs_path = "/",
+        .cmd = &[_][]const u8{ "/bin/sh", "-c", "echo hello" },
+        .isolation = .{
+            .user = true,
+            .pid = true,
+            .mount = true,
+            .net = false,
+            .uts = false,
+            .ipc = false,
+            .cgroup = false,
+        },
+        .resources = .{
+            .mem = "512M",
+            .pids = "100",
+            .cpu = null,
+        },
+        .security = .{
+            .no_new_privs = true,
+            .cap_drop = "",
+            .cap_add = "",
+        },
+    };
+
+    // Validate config
+    try voidbox.validate(&config, allocator);
+
+    // Spawn jail
+    const session = try voidbox.spawn(&config, allocator);
+    defer voidbox.cleanup_session(&session, allocator);
+
+    // Wait for completion
+    const outcome = try voidbox.wait(&session, allocator);
+    std.debug.print("Exit code: {}\n", .{outcome.exit_code});
+}
+```
+
+### Advanced: Custom Jail
+
+```zig
+const config = voidbox.JailConfig{
+    .name = "secure-shell",
+    .rootfs_path = "/custom/rootfs",  // Chroot to custom root
+    .cmd = &[_][]const u8{ "/bin/bash" },
+
     .isolation = .{
         .user = true,
         .pid = true,
-        .mount = false,
-        .net = false,
+        .mount = true,
+        .net = true,   // Isolated network
+        .uts = true,   // Isolated hostname
+        .ipc = true,   // Isolated IPC
+        .cgroup = true,
+    },
+
+    .resources = .{
+        .mem = "1G",
+        .pids = "500",
+        .cpu = "100000",  // CPU quota
+    },
+
+    .security = .{
+        .no_new_privs = true,
+        .seccomp_mode = .strict,  // Enable seccomp
+        .cap_drop = "ALL",        // Drop all capabilities
+        .cap_add = "NET_BIND_SERVICE",  // Keep only specific caps
+    },
+
+    .fs_actions = &[_]voidbox.FsAction{
+        .{ .bind_mount = .{ .source = "/dev", .target = "/dev" } },
+        .{ .tmpfs = .{ .target = "/tmp", .size = "64M" } },
     },
 };
-
-try voidbox.validate(&jail);
-const outcome = try voidbox.launch(allocator, &jail);
 ```
 
-### 3. Spawn Non-Blocking
+## Future Integration Plans
 
-```zig
-var config = voidbox.default_shell_config();
-try voidbox.with_profile(&config, .default);
-
-const session = try voidbox.spawn(allocator, &config);
-// Do other work...
-const outcome = try voidbox.wait(&session);
+### Phase 1: Optional Voidbox POD Spawning
+```bash
+# Enable voidbox for POD isolation (planned)
+export HEXE_POD_VOIDBOX=1
+export HEXE_POD_VOIDBOX_PROFILE=balanced  # none, minimal, balanced, full
 ```
 
-## Integration Profiles
-
-Voidbox provides preset isolation profiles:
-
-- **`.minimal`** - Basic isolation (user namespace only)
-- **`.default`** - Balanced isolation (user + pid + mount)
-- **`.full_isolation`** - Maximum isolation (all namespaces)
-
-```zig
-try voidbox.with_profile(&config, .full_isolation);
+### Phase 2: Per-Pane Isolation Policies
+```lua
+-- In init.lua (planned API)
+hexe.ses.layout.define({
+  floats = {
+    {
+      key = "1",
+      command = "/usr/bin/firefox",
+      isolation = {
+        profile = "full",  -- Complete isolation
+        resources = { memory = "2G", pids = 1000 },
+        network = "isolated",  -- Private network namespace
+      },
+    },
+  },
+})
 ```
 
-## Configuration Options
+### Phase 3: Rootfs/Container Support
+```lua
+-- Use custom rootfs (planned)
+hexe.ses.layout.define({
+  floats = {
+    {
+      key = "c",
+      command = "/bin/bash",
+      isolation = {
+        rootfs = "/containers/ubuntu-22.04",
+        filesystem = {
+          bind_mounts = {
+            { source = "$HOME/code", target = "/workspace" },
+          },
+        },
+      },
+    },
+  },
+})
+```
 
-### Isolation Options
+## Use Cases
 
+### 1. **Untrusted Code Execution**
+Spawn a pane with full isolation for running untrusted scripts:
+```bash
+HEXE_POD_ISOLATE=1 HEXE_POD_ISOLATE_USERNS=1 hexe mux
+# Then run untrusted code in a pane
+```
+
+### 2. **Resource-Limited Builds**
+Prevent builds from consuming all system resources:
+```bash
+export HEXE_CGROUP_MEM_MAX=4G
+export HEXE_CGROUP_CPU_MAX="200000 100000"  # 2 cores max
+hexe mux
+```
+
+### 3. **Development Containers**
+(Future) Each pane as an isolated container with custom rootfs.
+
+## Development Guide
+
+Want to integrate voidbox further? Here's where to start:
+
+### Files to Modify
+- `src/core/isolation.zig` - Current isolation implementation
+- `src/core/pty.zig` - PTY spawning (line 733 in pod/main.zig)
+- `src/modules/pod/main.zig` - POD initialization
+
+### Integration Pattern
 ```zig
-.isolation = .{
-    .user = true,    // User namespace
-    .pid = true,     // PID namespace
-    .mount = true,   // Mount namespace
-    .net = true,     // Network namespace
-    .uts = true,     // UTS namespace (hostname)
-    .ipc = true,     // IPC namespace
-    .cgroup = true,  // Cgroup namespace
+// In src/modules/pod/main.zig
+
+const voidbox = @import("voidbox");
+
+// Check if voidbox isolation is requested
+const use_voidbox = posix.getenv("HEXE_POD_VOIDBOX") != null;
+
+if (use_voidbox) {
+    // Option 1: Spawn with voidbox, attach PTY after
+    // Challenge: voidbox controls spawn, hard to inject PTY
+
+    // Option 2: Manual namespace setup inspired by voidbox
+    // Use voidbox config structures but do spawn ourselves
+
+    // Option 3: Extend core.Pty to support voidbox config
+    // Clean separation of concerns
 }
 ```
 
-### Resource Limits
+### API Compatibility Note
+
+Voidbox 0.0.3 API differs from initial assumptions:
 
 ```zig
-.resources = .{
-    .memory_limit_mb = 512,   // Max RAM
-    .pids_limit = 100,        // Max processes
-    .cpu_shares = 1024,       // CPU weight
+// Actual voidbox API:
+voidbox.JailConfig{
+    .name = "jail-name",
+    .rootfs_path = "/",
+    .cmd = &[_][]const u8{ "/bin/sh" },  // Array, not single string
+    .resources = .{ .mem = "512M" },     // String format
 }
-```
 
-### Security Options
-
-```zig
-.security = .{
-    .drop_all_caps = true,
-    .keep_caps = &[_]u32{ CAP_NET_BIND_SERVICE },
-    .seccomp_profile = null,
-}
-```
-
-## Host Compatibility Check
-
-Before using voidbox features, check host capabilities:
-
-```zig
-const report = try voidbox.check_host(allocator);
-if (!report.user_ns_available) {
-    return error.UserNamespacesNotSupported;
-}
-```
-
-## Use Cases in Hexa
-
-### POD: Sandboxed Panes
-
-```zig
-// In pod/main.zig
-pub fn spawnSandboxedPane(allocator: std.mem.Allocator, command: []const u8) !void {
-    const voidbox = @import("voidbox");
-
-    var config = voidbox.default_shell_config();
-    config.command = command;
-    config.isolation.user = true;
-    config.isolation.pid = true;
-    config.resources.memory_limit_mb = 1024;
-
-    const session = try voidbox.spawn(allocator, &config);
-    // Wire session to PTY...
-}
-```
-
-### SES: Isolated Sessions
-
-```zig
-// In ses/state.zig
-pub fn createIsolatedSession(allocator: std.mem.Allocator) !void {
-    const voidbox = @import("voidbox");
-
-    var config = voidbox.default_shell_config();
-    try voidbox.with_profile(&config, .default);
-
-    // Launch session daemon in isolated environment
-    const outcome = try voidbox.launch_shell(allocator, &config);
+// NOT:
+voidbox.JailConfig{
+    .allocator = allocator,  // ❌ Doesn't exist
+    .command = "/bin/sh",    // ❌ Wrong field name
 }
 ```
 
 ## Build Configuration
 
 Voidbox is configured in:
-- **build.zig.zon** - Git dependency on tag `0.0.3`
-- **build.zig** - Module imports for POD and SES
+- **build.zig.zon** - Git dependency `git+https://github.com/bresilla/voidbox#0.0.3`
+- **build.zig** - Module imports for POD, SES, and CORE
 
-To update version:
+To verify voidbox is available:
 ```bash
-zig fetch --save git+https://github.com/bresilla/voidbox#<new-version>
+zig build
+# Should compile without errors
 ```
-
-## Examples
-
-See `/doc/code/hexa/examples/voidbox_integration.zig` for complete examples.
-
-## Requirements
-
-- **Linux host** - voidbox requires Linux kernel namespaces
-- **Zig 0.15.x** - Compatible with Hexa's Zig version
-- **Kernel features** - User namespaces, PID namespaces (check with `check_host()`)
 
 ## References
 
 - [Voidbox GitHub](https://github.com/bresilla/voidbox)
-- [Voidbox API Documentation](https://github.com/bresilla/voidbox/blob/0.0.3/README.md)
+- [Voidbox Tag 0.0.3](https://github.com/bresilla/voidbox/tree/0.0.3)
+- [Current Hexa Isolation](../src/core/isolation.zig)
+- [Integration Examples](../examples/voidbox_integration.zig)

@@ -42,6 +42,9 @@ pub fn build(b: *std.Build) void {
         const zlua_mod = dep.module("zlua");
         core_module.addImport("zlua", zlua_mod);
     }
+    if (voidbox_mod) |vb| {
+        core_module.addImport("voidbox", vb);
+    }
 
     // Create shp module (shell prompt/status bar segments)
     const shp_module = b.createModule(.{
