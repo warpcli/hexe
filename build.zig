@@ -22,6 +22,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Get voidbox dependency for sandboxing
+    const voidbox_mod = if (b.lazyDependency("voidbox", .{
+        .target = target,
+        .optimize = optimize,
+    })) |voidbox_dep| voidbox_dep.module("voidbox") else null;
+
     // Create core module
     const core_module = b.createModule(.{
         .root_source_file = b.path("src/core/mod.zig"),
@@ -75,6 +81,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     ses_module.addImport("core", core_module);
+    if (voidbox_mod) |vb| {
+        ses_module.addImport("voidbox", vb);
+    }
 
     // Create pod module (per-pane PTY + scrollback; launched via `hexe pod daemon`)
     const pod_module = b.createModule(.{
@@ -84,6 +93,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     pod_module.addImport("core", core_module);
+    if (voidbox_mod) |vb| {
+        pod_module.addImport("voidbox", vb);
+    }
 
     // Build unified hexe CLI executable
     const cli_root = b.createModule(.{

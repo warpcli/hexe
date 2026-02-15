@@ -22,6 +22,10 @@
             .url = "git+https://github.com/natecraddock/ziglua#0.6.0",
             .hash = "zlua-0.1.0-hGRpCww-BQCx3cX6zbKWfTgOx6B7Peo4P17RK2hm7-xV",
         },
+        .voidbox = .{
+            .url = "git+https://github.com/bresilla/voidbox?ref=0.0.3#57a1c33fc6b1e761908d1180720802801073d851",
+            .hash = "voidbox-0.0.3-fHvjRVpCBABa2VNrm3roFzpP7hivY14FEcEWPDUEnENi",
+        },
     },
     .fingerprint = 0x4c99ab0b473f252d,
 }
