@@ -6,6 +6,7 @@ const LuaRuntime = core.LuaRuntime;
 const segment = core.segments;
 const segments_mod = core.segments;
 const Style = core.style.Style;
+const config_builder = core.config_builder;
 
 const bash_init = @import("shell/bash.zig");
 const zsh_init = @import("shell/zsh.zig");
@@ -351,6 +352,42 @@ fn evalPromptWhenClause(allocator: std.mem.Allocator, lua_rt: *?LuaRuntime, ctx:
     return true;
 }
 
+fn convertSegments(segments: []const config_builder.ShpConfigBuilder.SegmentDef, allocator: std.mem.Allocator) []const ModuleDef {
+    // Allocate directly instead of using ArrayList
+    var modules = allocator.alloc(ModuleDef, segments.len) catch return &[_]ModuleDef{};
+    for (segments, 0..) |seg, i| {
+        // Duplicate name since ConfigBuilder will be freed
+        const name_copy = allocator.dupe(u8, seg.name) catch seg.name;
+
+        // Duplicate command if present
+        const command_copy = if (seg.command) |cmd| allocator.dupe(u8, cmd) catch null else null;
+
+        // Convert outputs - duplicate strings since ConfigBuilder will be freed
+        const outputs = blk: {
+            if (seg.outputs.len == 0) break :blk &[_]OutputDef{};
+            var out_array = allocator.alloc(OutputDef, seg.outputs.len) catch break :blk &[_]OutputDef{};
+            for (seg.outputs, 0..) |out, j| {
+                const style_copy = allocator.dupe(u8, out.style) catch out.style;
+                const format_copy = allocator.dupe(u8, out.format) catch out.format;
+                out_array[j] = OutputDef{
+                    .style = style_copy,
+                    .format = format_copy,
+                };
+            }
+            break :blk out_array;
+        };
+
+        modules[i] = ModuleDef{
+            .name = name_copy,
+            .priority = seg.priority,
+            .outputs = outputs,
+            .command = command_copy,
+            .when = seg.when,
+        };
+    }
+    return modules;
+}
+
 fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
     var config = ShpConfig{
         .left = &[_]ModuleDef{},
@@ -358,7 +395,7 @@ fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
         .has_config = false,
     };
 
-    const path = lua_runtime.getConfigPath(allocator, "config.lua") catch return config;
+    const path = lua_runtime.getConfigPath(allocator, "init.lua") catch return config;
     defer allocator.free(path);
 
     var runtime = LuaRuntime.init(allocator) catch {
@@ -389,20 +426,16 @@ fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
         return config;
     };
 
-    // Access the "shp" section of the global config table
-    if (runtime.pushTable(-1, "shp")) {
-        config.has_config = true;
-
-        // Parse prompt.left and prompt.right from global config
-        if (runtime.pushTable(-1, "prompt")) {
-            config.left = parseModules(&runtime, allocator, "left");
-            config.right = parseModules(&runtime, allocator, "right");
-            runtime.pop();
+    // Build config from ConfigBuilder (new API)
+    if (runtime.getBuilder()) |builder| {
+        if (builder.shp) |shp_builder| {
+            config.has_config = true;
+            config.left = convertSegments(shp_builder.left_segments.items, allocator);
+            config.right = convertSegments(shp_builder.right_segments.items, allocator);
         }
-        runtime.pop();
     }
 
-    // Pop global config table
+    // Pop config return value (if any) from stack
     runtime.pop();
 
     // Try to load local .hexe.lua from current directory

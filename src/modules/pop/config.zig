@@ -72,7 +72,7 @@ pub const PopConfig = struct {
         var config = PopConfig{};
         config._allocator = allocator;
 
-        const path = lua_runtime.getConfigPath(allocator, "config.lua") catch return config;
+        const path = lua_runtime.getConfigPath(allocator, "init.lua") catch return config;
         defer allocator.free(path);
 
         var runtime = LuaRuntime.init(allocator) catch {
@@ -101,13 +101,97 @@ pub const PopConfig = struct {
             return config;
         };
 
-        // Access the "pop" section of the global config table
-        if (runtime.pushTable(-1, "pop")) {
-            parsePopConfig(&runtime, &config, allocator);
-            runtime.pop();
+        // Use ConfigBuilder API approach
+        if (runtime.getBuilder()) |builder| {
+            if (builder.pop) |pop_builder| {
+                // Build carrier notification config
+                if (pop_builder.carrier_notification) |notif| {
+                    if (notif.fg) |v| config.carrier.notification.fg = v;
+                    if (notif.bg) |v| config.carrier.notification.bg = v;
+                    if (notif.bold) |v| config.carrier.notification.bold = v;
+                    if (notif.padding_x) |v| config.carrier.notification.padding_x = v;
+                    if (notif.padding_y) |v| config.carrier.notification.padding_y = v;
+                    if (notif.offset) |v| config.carrier.notification.offset = v;
+                    if (notif.duration_ms) |v| config.carrier.notification.duration_ms = v;
+                    if (notif.alignment) |a| config.carrier.notification.alignment = a;
+                }
+
+                // Build pane notification config
+                if (pop_builder.pane_notification) |notif| {
+                    if (notif.fg) |v| config.pane.notification.fg = v;
+                    if (notif.bg) |v| config.pane.notification.bg = v;
+                    if (notif.bold) |v| config.pane.notification.bold = v;
+                    if (notif.padding_x) |v| config.pane.notification.padding_x = v;
+                    if (notif.padding_y) |v| config.pane.notification.padding_y = v;
+                    if (notif.offset) |v| config.pane.notification.offset = v;
+                    if (notif.duration_ms) |v| config.pane.notification.duration_ms = v;
+                    if (notif.alignment) |a| config.pane.notification.alignment = a;
+                }
+
+                // Build carrier confirm config
+                if (pop_builder.carrier_confirm) |conf| {
+                    if (conf.fg) |v| config.carrier.confirm.fg = v;
+                    if (conf.bg) |v| config.carrier.confirm.bg = v;
+                    if (conf.bold) |v| config.carrier.confirm.bold = v;
+                    if (conf.padding_x) |v| config.carrier.confirm.padding_x = v;
+                    if (conf.padding_y) |v| config.carrier.confirm.padding_y = v;
+                    if (conf.yes_label) |y| config.carrier.confirm.yes_label = y;
+                    if (conf.no_label) |n| config.carrier.confirm.no_label = n;
+                }
+
+                // Build pane confirm config
+                if (pop_builder.pane_confirm) |conf| {
+                    if (conf.fg) |v| config.pane.confirm.fg = v;
+                    if (conf.bg) |v| config.pane.confirm.bg = v;
+                    if (conf.bold) |v| config.pane.confirm.bold = v;
+                    if (conf.padding_x) |v| config.pane.confirm.padding_x = v;
+                    if (conf.padding_y) |v| config.pane.confirm.padding_y = v;
+                    if (conf.yes_label) |y| config.pane.confirm.yes_label = y;
+                    if (conf.no_label) |n| config.pane.confirm.no_label = n;
+                }
+
+                // Build carrier choose config
+                if (pop_builder.carrier_choose) |ch| {
+                    if (ch.fg) |v| config.carrier.choose.fg = v;
+                    if (ch.bg) |v| config.carrier.choose.bg = v;
+                    if (ch.highlight_fg) |v| config.carrier.choose.highlight_fg = v;
+                    if (ch.highlight_bg) |v| config.carrier.choose.highlight_bg = v;
+                    if (ch.bold) |v| config.carrier.choose.bold = v;
+                    if (ch.padding_x) |v| config.carrier.choose.padding_x = v;
+                    if (ch.padding_y) |v| config.carrier.choose.padding_y = v;
+                    if (ch.visible_count) |v| config.carrier.choose.visible_count = v;
+                }
+
+                // Build pane choose config
+                if (pop_builder.pane_choose) |ch| {
+                    if (ch.fg) |v| config.pane.choose.fg = v;
+                    if (ch.bg) |v| config.pane.choose.bg = v;
+                    if (ch.highlight_fg) |v| config.pane.choose.highlight_fg = v;
+                    if (ch.highlight_bg) |v| config.pane.choose.highlight_bg = v;
+                    if (ch.bold) |v| config.pane.choose.bold = v;
+                    if (ch.padding_x) |v| config.pane.choose.padding_x = v;
+                    if (ch.padding_y) |v| config.pane.choose.padding_y = v;
+                    if (ch.visible_count) |v| config.pane.choose.visible_count = v;
+                }
+
+                // Build widgets config
+                if (pop_builder.widgets.pokemon_enabled) |v| config.widgets.pokemon.enabled = v;
+                if (pop_builder.widgets.pokemon_position) |p| config.widgets.pokemon.position = parsePosition(p);
+                if (pop_builder.widgets.pokemon_shiny_chance) |f| config.widgets.pokemon.shiny_chance = f;
+                if (pop_builder.widgets.keycast_enabled) |v| config.widgets.keycast.enabled = v;
+                if (pop_builder.widgets.keycast_position) |p| config.widgets.keycast.position = parsePosition(p);
+                if (pop_builder.widgets.keycast_duration_ms) |t| config.widgets.keycast.duration_ms = t;
+                if (pop_builder.widgets.keycast_max_entries) |m| config.widgets.keycast.max_entries = m;
+                if (pop_builder.widgets.keycast_grouping_timeout_ms) |g| config.widgets.keycast.grouping_timeout_ms = g;
+                if (pop_builder.widgets.digits_enabled) |v| config.widgets.digits.enabled = v;
+                if (pop_builder.widgets.digits_position) |p| config.widgets.digits.position = parsePosition(p);
+                if (pop_builder.widgets.digits_size) |s| config.widgets.digits.size = parseDigitSize(s);
+
+                config._allocator = allocator;
+            }
         }
 
-        // Pop global config table
+        // Pop config return value (if any) from stack
         runtime.pop();
 
         // Try to load local .hexe.lua from current directory
@@ -126,13 +210,95 @@ pub const PopConfig = struct {
             return config;
         };
 
-        // Access the "pop" section of local config and merge
-        if (runtime.pushTable(-1, "pop")) {
-            parsePopConfig(&runtime, &config, allocator);
-            runtime.pop();
+        // Use ConfigBuilder API approach for local config (merge/overwrite)
+        if (runtime.getBuilder()) |builder| {
+            if (builder.pop) |pop_builder| {
+                // Build carrier notification config
+                if (pop_builder.carrier_notification) |notif| {
+                    if (notif.fg) |v| config.carrier.notification.fg = v;
+                    if (notif.bg) |v| config.carrier.notification.bg = v;
+                    if (notif.bold) |v| config.carrier.notification.bold = v;
+                    if (notif.padding_x) |v| config.carrier.notification.padding_x = v;
+                    if (notif.padding_y) |v| config.carrier.notification.padding_y = v;
+                    if (notif.offset) |v| config.carrier.notification.offset = v;
+                    if (notif.duration_ms) |v| config.carrier.notification.duration_ms = v;
+                    if (notif.alignment) |a| config.carrier.notification.alignment = a;
+                }
+
+                // Build pane notification config
+                if (pop_builder.pane_notification) |notif| {
+                    if (notif.fg) |v| config.pane.notification.fg = v;
+                    if (notif.bg) |v| config.pane.notification.bg = v;
+                    if (notif.bold) |v| config.pane.notification.bold = v;
+                    if (notif.padding_x) |v| config.pane.notification.padding_x = v;
+                    if (notif.padding_y) |v| config.pane.notification.padding_y = v;
+                    if (notif.offset) |v| config.pane.notification.offset = v;
+                    if (notif.duration_ms) |v| config.pane.notification.duration_ms = v;
+                    if (notif.alignment) |a| config.pane.notification.alignment = a;
+                }
+
+                // Build carrier confirm config
+                if (pop_builder.carrier_confirm) |conf| {
+                    if (conf.fg) |v| config.carrier.confirm.fg = v;
+                    if (conf.bg) |v| config.carrier.confirm.bg = v;
+                    if (conf.bold) |v| config.carrier.confirm.bold = v;
+                    if (conf.padding_x) |v| config.carrier.confirm.padding_x = v;
+                    if (conf.padding_y) |v| config.carrier.confirm.padding_y = v;
+                    if (conf.yes_label) |y| config.carrier.confirm.yes_label = y;
+                    if (conf.no_label) |n| config.carrier.confirm.no_label = n;
+                }
+
+                // Build pane confirm config
+                if (pop_builder.pane_confirm) |conf| {
+                    if (conf.fg) |v| config.pane.confirm.fg = v;
+                    if (conf.bg) |v| config.pane.confirm.bg = v;
+                    if (conf.bold) |v| config.pane.confirm.bold = v;
+                    if (conf.padding_x) |v| config.pane.confirm.padding_x = v;
+                    if (conf.padding_y) |v| config.pane.confirm.padding_y = v;
+                    if (conf.yes_label) |y| config.pane.confirm.yes_label = y;
+                    if (conf.no_label) |n| config.pane.confirm.no_label = n;
+                }
+
+                // Build carrier choose config
+                if (pop_builder.carrier_choose) |ch| {
+                    if (ch.fg) |v| config.carrier.choose.fg = v;
+                    if (ch.bg) |v| config.carrier.choose.bg = v;
+                    if (ch.highlight_fg) |v| config.carrier.choose.highlight_fg = v;
+                    if (ch.highlight_bg) |v| config.carrier.choose.highlight_bg = v;
+                    if (ch.bold) |v| config.carrier.choose.bold = v;
+                    if (ch.padding_x) |v| config.carrier.choose.padding_x = v;
+                    if (ch.padding_y) |v| config.carrier.choose.padding_y = v;
+                    if (ch.visible_count) |v| config.carrier.choose.visible_count = v;
+                }
+
+                // Build pane choose config
+                if (pop_builder.pane_choose) |ch| {
+                    if (ch.fg) |v| config.pane.choose.fg = v;
+                    if (ch.bg) |v| config.pane.choose.bg = v;
+                    if (ch.highlight_fg) |v| config.pane.choose.highlight_fg = v;
+                    if (ch.highlight_bg) |v| config.pane.choose.highlight_bg = v;
+                    if (ch.bold) |v| config.pane.choose.bold = v;
+                    if (ch.padding_x) |v| config.pane.choose.padding_x = v;
+                    if (ch.padding_y) |v| config.pane.choose.padding_y = v;
+                    if (ch.visible_count) |v| config.pane.choose.visible_count = v;
+                }
+
+                // Build widgets config
+                if (pop_builder.widgets.pokemon_enabled) |v| config.widgets.pokemon.enabled = v;
+                if (pop_builder.widgets.pokemon_position) |p| config.widgets.pokemon.position = parsePosition(p);
+                if (pop_builder.widgets.pokemon_shiny_chance) |f| config.widgets.pokemon.shiny_chance = f;
+                if (pop_builder.widgets.keycast_enabled) |v| config.widgets.keycast.enabled = v;
+                if (pop_builder.widgets.keycast_position) |p| config.widgets.keycast.position = parsePosition(p);
+                if (pop_builder.widgets.keycast_duration_ms) |t| config.widgets.keycast.duration_ms = t;
+                if (pop_builder.widgets.keycast_max_entries) |m| config.widgets.keycast.max_entries = m;
+                if (pop_builder.widgets.keycast_grouping_timeout_ms) |g| config.widgets.keycast.grouping_timeout_ms = g;
+                if (pop_builder.widgets.digits_enabled) |v| config.widgets.digits.enabled = v;
+                if (pop_builder.widgets.digits_position) |p| config.widgets.digits.position = parsePosition(p);
+                if (pop_builder.widgets.digits_size) |s| config.widgets.digits.size = parseDigitSize(s);
+            }
         }
 
-        // Pop local config table
+        // Pop config return value (if any) from stack
         runtime.pop();
 
         return config;
@@ -143,100 +309,6 @@ pub const PopConfig = struct {
         _ = self;
     }
 };
-
-fn parsePopConfig(runtime: *LuaRuntime, config: *PopConfig, allocator: std.mem.Allocator) void {
-    // Parse carrier section
-    if (runtime.pushTable(-1, "carrier")) {
-        parseCarrierConfig(runtime, &config.carrier, allocator);
-        runtime.pop();
-    }
-
-    // Parse pane section
-    if (runtime.pushTable(-1, "pane")) {
-        parsePaneConfig(runtime, &config.pane, allocator);
-        runtime.pop();
-    }
-
-    // Parse widgets section
-    if (runtime.pushTable(-1, "widgets")) {
-        parseWidgetsConfig(runtime, &config.widgets);
-        runtime.pop();
-    }
-}
-
-fn parseCarrierConfig(runtime: *LuaRuntime, carrier: *CarrierConfig, allocator: std.mem.Allocator) void {
-    if (runtime.pushTable(-1, "notification")) {
-        parseNotificationStyle(runtime, &carrier.notification, allocator);
-        runtime.pop();
-    }
-    if (runtime.pushTable(-1, "confirm")) {
-        parseConfirmStyle(runtime, &carrier.confirm, allocator);
-        runtime.pop();
-    }
-    if (runtime.pushTable(-1, "choose")) {
-        parseChooseStyle(runtime, &carrier.choose);
-        runtime.pop();
-    }
-}
-
-fn parsePaneConfig(runtime: *LuaRuntime, pane: *PaneConfig, allocator: std.mem.Allocator) void {
-    if (runtime.pushTable(-1, "notification")) {
-        parseNotificationStyle(runtime, &pane.notification, allocator);
-        runtime.pop();
-    }
-    if (runtime.pushTable(-1, "confirm")) {
-        parseConfirmStyle(runtime, &pane.confirm, allocator);
-        runtime.pop();
-    }
-    if (runtime.pushTable(-1, "choose")) {
-        parseChooseStyle(runtime, &pane.choose);
-        runtime.pop();
-    }
-}
-
-fn parseWidgetsConfig(runtime: *LuaRuntime, widgets_config: *widgets.WidgetsConfig) void {
-    // Parse pokemon widget config
-    if (runtime.pushTable(-1, "pokemon")) {
-        if (runtime.getBool(-1, "enabled")) |v| widgets_config.pokemon.enabled = v;
-        if (runtime.getString(-1, "position")) |pos_str| {
-            widgets_config.pokemon.position = parsePosition(pos_str);
-        }
-        if (runtime.getNumber(-1, "shiny_chance")) |v| {
-            widgets_config.pokemon.shiny_chance = @floatCast(v);
-        }
-        runtime.pop();
-    }
-
-    // Parse keycast widget config
-    if (runtime.pushTable(-1, "keycast")) {
-        if (runtime.getBool(-1, "enabled")) |v| widgets_config.keycast.enabled = v;
-        if (runtime.getString(-1, "position")) |pos_str| {
-            widgets_config.keycast.position = parsePosition(pos_str);
-        }
-        if (runtime.getInt(i64, -1, "duration_ms")) |v| {
-            widgets_config.keycast.duration_ms = v;
-        }
-        if (runtime.getInt(u8, -1, "max_entries")) |v| {
-            widgets_config.keycast.max_entries = v;
-        }
-        if (runtime.getInt(i64, -1, "grouping_timeout_ms")) |v| {
-            widgets_config.keycast.grouping_timeout_ms = v;
-        }
-        runtime.pop();
-    }
-
-    // Parse digits widget config
-    if (runtime.pushTable(-1, "digits")) {
-        if (runtime.getBool(-1, "enabled")) |v| widgets_config.digits.enabled = v;
-        if (runtime.getString(-1, "position")) |pos_str| {
-            widgets_config.digits.position = parsePosition(pos_str);
-        }
-        if (runtime.getString(-1, "size")) |size_str| {
-            widgets_config.digits.size = parseDigitSize(size_str);
-        }
-        runtime.pop();
-    }
-}
 
 fn parsePosition(pos_str: []const u8) widgets.Position {
     if (std.mem.eql(u8, pos_str, "topleft")) return .topleft;
@@ -254,35 +326,3 @@ fn parseDigitSize(size_str: []const u8) widgets.digits.Size {
     return .small; // default
 }
 
-fn parseNotificationStyle(runtime: *LuaRuntime, style: *NotificationStyle, allocator: std.mem.Allocator) void {
-    style.fg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "fg", 0, 255, style.fg);
-    style.bg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "bg", 0, 255, style.bg);
-    if (runtime.getBool(-1, "bold")) |v| style.bold = v;
-    style.padding_x = lua_runtime.parseConstrainedInt(runtime, u8, -1, "padding_x", 0, 10, style.padding_x);
-    style.padding_y = lua_runtime.parseConstrainedInt(runtime, u8, -1, "padding_y", 0, 10, style.padding_y);
-    style.offset = lua_runtime.parseConstrainedInt(runtime, u8, -1, "offset", 0, 20, style.offset);
-    if (runtime.getStringAlloc(-1, "alignment")) |v| style.alignment = v else _ = allocator;
-    style.duration_ms = lua_runtime.parseConstrainedInt(runtime, u32, -1, "duration_ms", 100, 60000, style.duration_ms);
-}
-
-fn parseConfirmStyle(runtime: *LuaRuntime, style: *ConfirmStyle, allocator: std.mem.Allocator) void {
-    style.fg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "fg", 0, 255, style.fg);
-    style.bg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "bg", 0, 255, style.bg);
-    if (runtime.getBool(-1, "bold")) |v| style.bold = v;
-    style.padding_x = lua_runtime.parseConstrainedInt(runtime, u8, -1, "padding_x", 0, 10, style.padding_x);
-    style.padding_y = lua_runtime.parseConstrainedInt(runtime, u8, -1, "padding_y", 0, 10, style.padding_y);
-    if (runtime.getStringAlloc(-1, "yes_label")) |v| style.yes_label = v;
-    if (runtime.getStringAlloc(-1, "no_label")) |v| style.no_label = v;
-    _ = allocator;
-}
-
-fn parseChooseStyle(runtime: *LuaRuntime, style: *ChooseStyle) void {
-    style.fg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "fg", 0, 255, style.fg);
-    style.bg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "bg", 0, 255, style.bg);
-    style.highlight_fg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "highlight_fg", 0, 255, style.highlight_fg);
-    style.highlight_bg = lua_runtime.parseConstrainedInt(runtime, u8, -1, "highlight_bg", 0, 255, style.highlight_bg);
-    if (runtime.getBool(-1, "bold")) |v| style.bold = v;
-    style.padding_x = lua_runtime.parseConstrainedInt(runtime, u8, -1, "padding_x", 0, 10, style.padding_x);
-    style.padding_y = lua_runtime.parseConstrainedInt(runtime, u8, -1, "padding_y", 0, 10, style.padding_y);
-    style.visible_count = lua_runtime.parseConstrainedInt(runtime, u8, -1, "visible_count", 1, 50, style.visible_count);
-}

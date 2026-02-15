@@ -525,10 +525,12 @@ pub fn draw(
     const right_budget = width -| (center_start +| center_width);
 
     // Collect left modules with widths
+    std.debug.print("DEBUG: cfg.left.len={} cfg.left.ptr={*}\n", .{cfg.left.len, cfg.left.ptr});
     const ModuleInfo = struct { mod: *const core.Segment, width: u16, visible: bool };
     var left_modules: [24]ModuleInfo = undefined;
     var left_count: usize = 0;
     for (cfg.left) |*mod| {
+        std.debug.print("DEBUG: Processing segment {}: name.ptr={*} name.len={}\n", .{left_count, mod.name.ptr, mod.name.len});
         if (left_count < 24) {
             left_modules[left_count] = .{
                 .mod = mod,
@@ -538,10 +540,18 @@ pub fn draw(
             left_count += 1;
         }
     }
+    std.debug.print("DEBUG: Final left_count={}\n", .{left_count});
 
     // Sort left by priority and mark visible
     var left_order: [24]usize = undefined;
     for (0..left_count) |i| left_order[i] = i;
+
+    // Debug: check bounds
+    if (left_count > 24) {
+        std.debug.print("ERROR: left_count={} exceeds array size 24, cfg.left.len={}\n", .{left_count, cfg.left.len});
+        @panic("left_count out of bounds");
+    }
+
     for (1..left_count) |i| {
         const key = left_order[i];
         var j: usize = i;
