@@ -417,18 +417,19 @@ pub const SesConfig = struct {
         runtime.setHexeSection("ses");
 
         // Load global config
-        const config_path = lua_runtime.getConfigPath(allocator, "config.lua") catch return config;
+        const config_path = lua_runtime.getConfigPath(allocator, "init.lua") catch return config;
         defer allocator.free(config_path);
 
         runtime.loadConfig(config_path) catch return config;
 
-        // Access the "ses" section of global config
-        if (runtime.pushTable(-1, "ses")) {
-            parseSesConfig(&runtime, &config, allocator);
-            runtime.pop();
+        // Use ConfigBuilder API approach
+        if (runtime.getBuilder()) |builder| {
+            if (builder.ses) |ses_builder| {
+                config = ses_builder.build() catch config;
+            }
         }
 
-        // Pop global config table
+        // Pop config return value (if any) from stack
         runtime.pop();
 
         // Try to load local .hexe.lua from current directory
@@ -447,13 +448,14 @@ pub const SesConfig = struct {
             return config;
         };
 
-        // Access the "ses" section of local config and merge
-        if (runtime.pushTable(-1, "ses")) {
-            parseSesConfig(&runtime, &config, allocator);
-            runtime.pop();
+        // Use ConfigBuilder API approach for local config (merge/overwrite)
+        if (runtime.getBuilder()) |builder| {
+            if (builder.ses) |ses_builder| {
+                config = ses_builder.build() catch config;
+            }
         }
 
-        // Pop local config table
+        // Pop config return value (if any) from stack
         runtime.pop();
 
         return config;
@@ -642,26 +644,36 @@ pub const Config = struct {
     _allocator: ?std.mem.Allocator = null,
 
     pub fn load(allocator: std.mem.Allocator) Config {
+        std.debug.print("DEBUG Config.load: STARTING\n", .{});
         var config = Config{};
         config._allocator = allocator;
 
         PARSE_ERROR = null;
 
-        const path = lua_runtime.getConfigPath(allocator, "config.lua") catch return config;
+        const path = lua_runtime.getConfigPath(allocator, "init.lua") catch {
+            std.debug.print("DEBUG Config.load: getConfigPath FAILED\n", .{});
+            return config;
+        };
         defer allocator.free(path);
 
         var runtime = LuaRuntime.init(allocator) catch {
+            std.debug.print("DEBUG Config.load: LuaRuntime.init FAILED\n", .{});
             config.status = .@"error";
             config.status_message = allocator.dupe(u8, "failed to initialize Lua") catch null;
             return config;
         };
         defer runtime.deinit();
+        std.debug.print("DEBUG Config.load: LuaRuntime initialized, loading config from: {s}\n", .{path});
 
         // Let a single config.lua avoid building other sections.
         runtime.setHexeSection("mux");
 
         // Load global config
         runtime.loadConfig(path) catch |err| {
+            std.debug.print("DEBUG Config.load: loadConfig FAILED with error: {}\n", .{err});
+            if (runtime.last_error) |msg| {
+                std.debug.print("DEBUG Config.load: Lua error message: {s}\n", .{msg});
+            }
             switch (err) {
                 error.FileNotFound => {
                     config.status = .missing;
@@ -675,17 +687,22 @@ pub const Config = struct {
             }
             return config;
         };
+        std.debug.print("DEBUG Config.load: loadConfig SUCCESS\n", .{});
 
-        // Access the "mux" section of the global config table
-        if (runtime.pushTable(-1, "mux")) {
-            log.debug("parsing mux section from global config", .{});
-            parseConfig(&runtime, &config, allocator);
-            runtime.pop();
+        // Build config from ConfigBuilder (new API)
+        if (runtime.getBuilder()) |builder| {
+            if (builder.mux) |mux_builder| {
+                log.debug("building mux config from ConfigBuilder", .{});
+                std.debug.print("DEBUG Config.load: BEFORE build - mux_builder.tabs_config.segments_left.items.len={}\n", .{mux_builder.tabs_config.segments_left.items.len});
+                config = mux_builder.build() catch config;
+                std.debug.print("DEBUG Config.load: AFTER build - config.tabs.status.left.len={} left.ptr={*}\n", .{config.tabs.status.left.len, config.tabs.status.left.ptr});
+                config._allocator = allocator;
+            }
         } else {
-            config.status_message = allocator.dupe(u8, "no 'mux' section in config") catch null;
+            std.debug.print("DEBUG Config.load: NO BUILDER FOUND\n", .{});
         }
 
-        // Pop global config table
+        // Pop config return value (if any) from stack
         runtime.pop();
 
         // Try to load local .hexe.lua from current directory
@@ -1609,259 +1626,3 @@ fn constrainPercent(val: u8, min: u8, max: u8) u8 {
     return val;
 }
 
-// ===== Ses config parsing =====
-
-fn parseSesConfig(runtime: *LuaRuntime, config: *SesConfig, allocator: std.mem.Allocator) void {
-    // Parse layouts array
-    if (runtime.pushTable(-1, "layouts")) {
-        config.layouts = parseLayouts(runtime, allocator);
-        runtime.pop();
-    }
-}
-
-fn parseLayouts(runtime: *LuaRuntime, allocator: std.mem.Allocator) []LayoutDef {
-    var layout_list = std.ArrayList(LayoutDef).empty;
-
-    const len = runtime.getArrayLen(-1);
-    for (1..len + 1) |i| {
-        if (!runtime.pushArrayElement(-1, i)) continue;
-        defer runtime.pop();
-
-        const layout_name = runtime.getString(-1, "name") orelse continue;
-        const name = allocator.dupe(u8, layout_name) catch continue;
-
-        const enabled = runtime.getBool(-1, "enabled") orelse false;
-
-        // Parse tabs array
-        var tabs: []LayoutTabDef = &[_]LayoutTabDef{};
-        if (runtime.pushTable(-1, "tabs")) {
-            tabs = parseLayoutTabs(runtime, allocator);
-            runtime.pop();
-        }
-
-        // Parse floats array
-        var floats: []LayoutFloatDef = &[_]LayoutFloatDef{};
-        if (runtime.pushTable(-1, "floats")) {
-            floats = parseLayoutFloats(runtime, allocator);
-            runtime.pop();
-        }
-
-        layout_list.append(allocator, .{
-            .name = name,
-            .enabled = enabled,
-            .tabs = tabs,
-            .floats = floats,
-        }) catch {
-            allocator.free(name);
-            continue;
-        };
-    }
-
-    return layout_list.toOwnedSlice(allocator) catch &[_]LayoutDef{};
-}
-
-fn parseLayoutTabs(runtime: *LuaRuntime, allocator: std.mem.Allocator) []LayoutTabDef {
-    var tab_list = std.ArrayList(LayoutTabDef).empty;
-
-    const len = runtime.getArrayLen(-1);
-    for (1..len + 1) |i| {
-        if (!runtime.pushArrayElement(-1, i)) continue;
-        defer runtime.pop();
-
-        const tab_name = runtime.getString(-1, "name") orelse continue;
-        const name = allocator.dupe(u8, tab_name) catch continue;
-
-        const enabled = runtime.getBool(-1, "enabled") orelse true;
-
-        // Parse root split if present
-        var root: ?LayoutSplitDef = null;
-        if (runtime.pushTable(-1, "root")) {
-            root = parseLayoutSplit(runtime, allocator);
-            runtime.pop();
-        }
-
-        tab_list.append(allocator, .{
-            .name = name,
-            .enabled = enabled,
-            .root = root,
-        }) catch {
-            allocator.free(name);
-            continue;
-        };
-    }
-
-    return tab_list.toOwnedSlice(allocator) catch &[_]LayoutTabDef{};
-}
-
-fn parseLayoutFloats(runtime: *LuaRuntime, allocator: std.mem.Allocator) []LayoutFloatDef {
-    var float_list = std.ArrayList(LayoutFloatDef).empty;
-
-    const len = runtime.getArrayLen(-1);
-    for (1..len + 1) |i| {
-        if (!runtime.pushArrayElement(-1, i)) continue;
-        defer runtime.pop();
-
-        const key_str = runtime.getString(-1, "key") orelse continue;
-        if (key_str.len == 0) continue;
-        const key = key_str[0];
-
-        const enabled = runtime.getBool(-1, "enabled") orelse true;
-        const command = runtime.getStringAlloc(-1, "command");
-        const title = runtime.getStringAlloc(-1, "title");
-
-        // Parse attributes
-        var attrs = FloatAttributes{};
-        var has_custom_attrs = false;
-        if (runtime.pushTable(-1, "attributes")) {
-            has_custom_attrs = true;
-            if (runtime.getBool(-1, "exclusive")) |v| attrs.exclusive = v;
-            if (runtime.getBool(-1, "per_cwd")) |v| attrs.per_cwd = v;
-            if (runtime.getBool(-1, "sticky")) |v| attrs.sticky = v;
-            if (runtime.getBool(-1, "global")) |v| attrs.global = v;
-            if (runtime.getBool(-1, "destroy")) |v| attrs.destroy = v;
-            if (runtime.getBool(-1, "isolated")) |v| attrs.isolated = v;
-            if (runtime.getBool(-1, "navigatable")) |v| attrs.navigatable = v;
-            runtime.pop();
-        }
-
-        // Parse size, position, padding, color, style (same as mux float parsing)
-        var width: ?u8 = null;
-        var height: ?u8 = null;
-        var pos_x: ?u8 = null;
-        var pos_y: ?u8 = null;
-        var pad_x: ?u8 = null;
-        var pad_y: ?u8 = null;
-        var color: ?BorderColor = null;
-        var style: ?FloatStyle = null;
-
-        if (runtime.pushTable(-1, "size")) {
-            if (runtime.getInt(u8, -1, "width")) |v| width = constrainPercent(v, 10, 100);
-            if (runtime.getInt(u8, -1, "height")) |v| height = constrainPercent(v, 10, 100);
-            runtime.pop();
-        }
-
-        if (runtime.pushTable(-1, "position")) {
-            if (runtime.getInt(u8, -1, "x")) |v| pos_x = constrainPercent(v, 0, 100);
-            if (runtime.getInt(u8, -1, "y")) |v| pos_y = constrainPercent(v, 0, 100);
-            runtime.pop();
-        }
-
-        if (runtime.pushTable(-1, "padding")) {
-            if (runtime.getInt(u8, -1, "x")) |v| pad_x = constrainPercent(v, 0, 10);
-            if (runtime.getInt(u8, -1, "y")) |v| pad_y = constrainPercent(v, 0, 10);
-            runtime.pop();
-        }
-
-        if (runtime.pushTable(-1, "color")) {
-            var c = BorderColor{};
-            if (runtime.getInt(u8, -1, "active")) |v| c.active = v;
-            if (runtime.getInt(u8, -1, "passive")) |v| c.passive = v;
-            color = c;
-            runtime.pop();
-        }
-
-        if (runtime.pushTable(-1, "style")) {
-            style = parseFloatStyle(runtime, allocator);
-            runtime.pop();
-        }
-
-        float_list.append(allocator, .{
-            .enabled = enabled,
-            .key = key,
-            .command = command,
-            .title = title,
-            .attributes = attrs,
-            .has_custom_attributes = has_custom_attrs,
-            .width_percent = width,
-            .height_percent = height,
-            .pos_x = pos_x,
-            .pos_y = pos_y,
-            .padding_x = pad_x,
-            .padding_y = pad_y,
-            .color = color,
-            .style = style,
-        }) catch continue;
-    }
-
-    return float_list.toOwnedSlice(allocator) catch &[_]LayoutFloatDef{};
-}
-
-fn parseLayoutSplit(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?LayoutSplitDef {
-    // Check if this is a split (has array elements) or a pane
-    const array_len = runtime.getArrayLen(-1);
-
-    if (array_len >= 2) {
-        // This is a split with children
-        const dir_str = runtime.getString(-1, "dir") orelse "h";
-        const dir = allocator.dupe(u8, dir_str) catch return null;
-
-        const ratio_f64 = runtime.getNumber(-1, "ratio") orelse 0.5;
-        const ratio: f32 = @floatCast(ratio_f64);
-
-        // Parse first child
-        if (!runtime.pushArrayElement(-1, 1)) {
-            allocator.free(dir);
-            return null;
-        }
-        const first_child = parseLayoutSplit(runtime, allocator) orelse {
-            runtime.pop();
-            allocator.free(dir);
-            return null;
-        };
-        runtime.pop();
-
-        const first = allocator.create(LayoutSplitDef) catch {
-            allocator.free(dir);
-            var fc = first_child;
-            fc.deinit(allocator);
-            return null;
-        };
-        first.* = first_child;
-
-        // Parse second child
-        if (!runtime.pushArrayElement(-1, 2)) {
-            allocator.free(dir);
-            first.deinit(allocator);
-            allocator.destroy(first);
-            return null;
-        }
-        const second_child = parseLayoutSplit(runtime, allocator) orelse {
-            runtime.pop();
-            allocator.free(dir);
-            first.deinit(allocator);
-            allocator.destroy(first);
-            return null;
-        };
-        runtime.pop();
-
-        const second = allocator.create(LayoutSplitDef) catch {
-            allocator.free(dir);
-            first.deinit(allocator);
-            allocator.destroy(first);
-            var sc = second_child;
-            sc.deinit(allocator);
-            return null;
-        };
-        second.* = second_child;
-
-        return LayoutSplitDef{
-            .split = .{
-                .dir = dir,
-                .ratio = ratio,
-                .first = first,
-                .second = second,
-            },
-        };
-    } else {
-        // This is a pane
-        const cwd = runtime.getStringAlloc(-1, "cwd");
-        const command = runtime.getStringAlloc(-1, "command");
-
-        return LayoutSplitDef{
-            .pane = .{
-                .cwd = cwd,
-                .command = command,
-            },
-        };
-    }
-}

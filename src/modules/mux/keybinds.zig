@@ -228,11 +228,50 @@ fn findBestBind(state: *State, mods: u8, key: BindKey, on: BindWhen, allow_only_
     var best: ?core.Config.Bind = null;
     var best_score: u8 = 0;
 
-    for (cfg.input.binds) |b| {
-        if (b.on != on) continue;
-        if (b.mods != mods) continue;
-        if (!keyEq(b.key, key)) continue;
-        if (!matchesWhen(b.when, query)) continue;
+    // Debug: log what we're looking for
+    const is_debug_key = (mods == 3 and @as(BindKeyKind, key) == .up) or
+                         (mods == 3 and key == .char and key.char == '1');
+    if (is_debug_key) {
+        std.debug.print("DEBUG findBestBind: looking for mods={} key={s} on={s}, total_binds={}\n",
+            .{mods, @tagName(@as(BindKeyKind, key)), @tagName(on), cfg.input.binds.len});
+    }
+
+    for (cfg.input.binds, 0..) |b, idx| {
+        // Debug arrow key bindings and '1' key
+        if (is_debug_key) {
+            std.debug.print("  checking bind[{}]: on={s}(want {s}) mods={}(want {}) key={s}\n",
+                .{idx, @tagName(b.on), @tagName(on), b.mods, mods, @tagName(@as(BindKeyKind, b.key))});
+        }
+
+        if (b.on != on) {
+            if (is_debug_key) {
+                std.debug.print("    SKIP: on mismatch\n", .{});
+            }
+            continue;
+        }
+        if (b.mods != mods) {
+            if (is_debug_key) {
+                std.debug.print("    SKIP: mods mismatch\n", .{});
+            }
+            continue;
+        }
+        if (!keyEq(b.key, key)) {
+            if (is_debug_key) {
+                std.debug.print("    SKIP: key mismatch\n", .{});
+            }
+            continue;
+        }
+        const when_match = matchesWhen(b.when, query);
+        if (!when_match) {
+            if (is_debug_key) {
+                std.debug.print("    SKIP: when mismatch (has_when={})\n", .{b.when != null});
+            }
+            continue;
+        }
+
+        if (is_debug_key) {
+            std.debug.print("    MATCH! score will be calculated\n", .{});
+        }
 
         if (allow_only_tabs) {
             if (b.action != .tab_next and b.action != .tab_prev) continue;
@@ -242,9 +281,19 @@ fn findBestBind(state: *State, mods: u8, key: BindKey, on: BindWhen, allow_only_
         if (b.when != null) score += 2; // Conditional binds are more specific.
         if (b.hold_ms != null) score += 1;
 
-        if (best == null or score > best_score or score == best_score) {
+        if (best == null or score > best_score) {
             best = b;
             best_score = score;
+        }
+    }
+
+    // Debug: log result
+    if (is_debug_key) {
+        if (best) |b| {
+            std.debug.print("DEBUG findBestBind: FOUND binding, score={}, action={s}\n",
+                .{best_score, @tagName(b.action)});
+        } else {
+            std.debug.print("DEBUG findBestBind: NO binding found\n", .{});
         }
     }
 
@@ -929,11 +978,14 @@ fn dispatchAction(state: *State, action: BindAction) bool {
             return true;
         },
         .float_toggle => |fk| {
+            std.debug.print("DEBUG dispatchAction: float_toggle key='{}' (0x{x})\n", .{fk, fk});
             if (state.getLayoutFloatByKey(fk)) |float_def| {
+                std.debug.print("DEBUG dispatchAction: found float_def, toggling\n", .{});
                 actions.toggleNamedFloat(state, float_def);
                 state.needs_render = true;
                 return true;
             }
+            std.debug.print("DEBUG dispatchAction: float NOT FOUND for key='{}'\n", .{fk});
             return false;
         },
         .float_nudge => |dir_kind| {

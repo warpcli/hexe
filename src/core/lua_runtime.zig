@@ -4,6 +4,32 @@ const zlua = @import("zlua");
 const Lua = zlua.Lua;
 const LuaState = zlua.LuaState;
 const LuaType = zlua.LuaType;
+const config_builder = @import("config_builder.zig");
+const ConfigBuilder = config_builder.ConfigBuilder;
+const api_bridge = @import("api_bridge.zig");
+
+// Import C API functions
+const hexe_mux_config_set = api_bridge.hexe_mux_config_set;
+const hexe_mux_config_setup = api_bridge.hexe_mux_config_setup;
+const hexe_mux_keymap_set = api_bridge.hexe_mux_keymap_set;
+const hexe_mux_float_set_defaults = api_bridge.hexe_mux_float_set_defaults;
+const hexe_mux_float_define = api_bridge.hexe_mux_float_define;
+const hexe_mux_tabs_add_segment = api_bridge.hexe_mux_tabs_add_segment;
+const hexe_mux_tabs_set_status = api_bridge.hexe_mux_tabs_set_status;
+const hexe_mux_splits_setup = api_bridge.hexe_mux_splits_setup;
+const hexe_ses_layout_define = api_bridge.hexe_ses_layout_define;
+const hexe_ses_session_setup = api_bridge.hexe_ses_session_setup;
+
+const hexe_shp_prompt_left = api_bridge.hexe_shp_prompt_left;
+const hexe_shp_prompt_right = api_bridge.hexe_shp_prompt_right;
+const hexe_shp_prompt_add = api_bridge.hexe_shp_prompt_add;
+
+const hexe_pop_notify_setup = api_bridge.hexe_pop_notify_setup;
+const hexe_pop_confirm_setup = api_bridge.hexe_pop_confirm_setup;
+const hexe_pop_choose_setup = api_bridge.hexe_pop_choose_setup;
+const hexe_pop_widgets_pokemon = api_bridge.hexe_pop_widgets_pokemon;
+const hexe_pop_widgets_keycast = api_bridge.hexe_pop_widgets_keycast;
+const hexe_pop_widgets_digits = api_bridge.hexe_pop_widgets_digits;
 
 /// Configuration loading status
 pub const ConfigStatus = enum {
@@ -48,6 +74,7 @@ pub const LuaRuntime = struct {
     allocator: std.mem.Allocator,
     unsafe_mode: bool,
     last_error: ?[]const u8 = null,
+    config_builder: ?*ConfigBuilder = null,
 
     const Self = @This();
 
@@ -80,18 +107,38 @@ pub const LuaRuntime = struct {
         // Inject hexe module
         try injectHexeModule(lua);
 
-        return .{
+        // Heap-allocate ConfigBuilder so pointer remains stable
+        const builder = try allocator.create(ConfigBuilder);
+        builder.* = try ConfigBuilder.init(allocator);
+
+        // Store pointer to builder in Lua registry (now it's heap-allocated and stable)
+        try api_bridge.storeConfigBuilder(lua, builder);
+
+        // Create runtime instance
+        const runtime = Self{
             .lua = lua,
             .allocator = allocator,
             .unsafe_mode = unsafe,
+            .config_builder = builder,
         };
+
+        return runtime;
     }
 
     pub fn deinit(self: *Self) void {
         if (self.last_error) |err| {
             self.allocator.free(err);
         }
+        if (self.config_builder) |builder| {
+            builder.deinit();
+            self.allocator.destroy(builder);
+        }
         self.lua.deinit();
+    }
+
+    /// Get the config builder for API functions to use
+    pub fn getBuilder(self: *Self) ?*ConfigBuilder {
+        return self.config_builder;
     }
 
     /// Set the target section for config evaluation.
@@ -136,12 +183,9 @@ pub const LuaRuntime = struct {
             return error.LuaError;
         };
 
-        // Check that the result is a table
-        if (self.lua.typeOf(-1) != .table) {
-            self.last_error = try self.allocator.dupe(u8, "config must return a table");
-            self.lua.pop(1);
-            return error.InvalidReturn;
-        }
+        // New API: config may or may not return a value
+        // (old table-based API returned a table, new dynamic API returns nil)
+        // We accept any return value for backward compatibility
     }
 
     fn getErrorMessage(self: *Self) []const u8 {
@@ -451,6 +495,126 @@ fn injectHexeModule(lua: *Lua) !void {
     _ = lua.pushString("]");
     lua.setField(-2, "rbracket");
     lua.setField(-2, "key");
+
+    // hexe.mux = { config = {}, keymap = {}, float = {}, tabs = {}, splits = {} }
+    lua.createTable(0, 5);
+
+    // hexe.mux.config = { set = fn, setup = fn }
+    lua.createTable(0, 2);
+    lua.pushFunction(hexe_mux_config_set);
+    lua.setField(-2, "set");
+    lua.pushFunction(hexe_mux_config_setup);
+    lua.setField(-2, "setup");
+    lua.setField(-2, "config");
+
+    // hexe.mux.keymap = { set = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(hexe_mux_keymap_set);
+    lua.setField(-2, "set");
+    lua.setField(-2, "keymap");
+
+    // hexe.mux.float = { set_defaults = fn, define = fn }
+    lua.createTable(0, 2);
+    lua.pushFunction(hexe_mux_float_set_defaults);
+    lua.setField(-2, "set_defaults");
+    lua.pushFunction(hexe_mux_float_define);
+    lua.setField(-2, "define");
+    lua.setField(-2, "float");
+
+    // hexe.mux.tabs = { add_segment = fn, set_status = fn }
+    lua.createTable(0, 2);
+    lua.pushFunction(hexe_mux_tabs_add_segment);
+    lua.setField(-2, "add_segment");
+    lua.pushFunction(hexe_mux_tabs_set_status);
+    lua.setField(-2, "set_status");
+    lua.setField(-2, "tabs");
+
+    // hexe.mux.splits = { setup = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(hexe_mux_splits_setup);
+    lua.setField(-2, "setup");
+    lua.setField(-2, "splits");
+
+    lua.setField(-2, "mux");
+
+    // hexe.ses = { layout = {}, session = {} }
+    lua.createTable(0, 2);
+
+    // hexe.ses.layout = { define = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(hexe_ses_layout_define);
+    lua.setField(-2, "define");
+    lua.setField(-2, "layout");
+
+    // hexe.ses.session = { setup = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(hexe_ses_session_setup);
+    lua.setField(-2, "setup");
+    lua.setField(-2, "session");
+
+    lua.setField(-2, "ses");
+
+    // hexe.shp = { prompt = {}, segment = {} }
+    lua.createTable(0, 2);
+
+    // hexe.shp.prompt = { left = fn, right = fn, add = fn }
+    lua.createTable(0, 3);
+    lua.pushFunction(hexe_shp_prompt_left);
+    lua.setField(-2, "left");
+    lua.pushFunction(hexe_shp_prompt_right);
+    lua.setField(-2, "right");
+    lua.pushFunction(hexe_shp_prompt_add);
+    lua.setField(-2, "add");
+    lua.setField(-2, "prompt");
+
+    lua.createTable(0, 0); // hexe.shp.segment (TODO: builder pattern)
+    lua.setField(-2, "segment");
+    lua.setField(-2, "shp");
+
+    // hexe.pop = { notify = {}, confirm = {}, choose = {}, widgets = {} }
+    lua.createTable(0, 4);
+
+    // hexe.pop.notify = { setup = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(hexe_pop_notify_setup);
+    lua.setField(-2, "setup");
+    lua.setField(-2, "notify");
+
+    // hexe.pop.confirm = { setup = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(hexe_pop_confirm_setup);
+    lua.setField(-2, "setup");
+    lua.setField(-2, "confirm");
+
+    // hexe.pop.choose = { setup = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(hexe_pop_choose_setup);
+    lua.setField(-2, "setup");
+    lua.setField(-2, "choose");
+
+    // hexe.pop.widgets = { pokemon = fn, keycast = fn, digits = fn }
+    lua.createTable(0, 3);
+    lua.pushFunction(hexe_pop_widgets_pokemon);
+    lua.setField(-2, "pokemon");
+    lua.pushFunction(hexe_pop_widgets_keycast);
+    lua.setField(-2, "keycast");
+    lua.pushFunction(hexe_pop_widgets_digits);
+    lua.setField(-2, "digits");
+    lua.setField(-2, "widgets");
+
+    lua.setField(-2, "pop");
+
+    // hexe.autocmd = {}
+    lua.createTable(0, 0);
+    lua.setField(-2, "autocmd");
+
+    // hexe.api = {}
+    lua.createTable(0, 0);
+    lua.setField(-2, "api");
+
+    // hexe.plugin = {}
+    lua.createTable(0, 0);
+    lua.setField(-2, "plugin");
 
     // hx.version
     _ = lua.pushString("0.1.0");

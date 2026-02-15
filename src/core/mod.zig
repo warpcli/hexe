@@ -11,6 +11,7 @@ pub const segments = @import("segments/mod.zig");
 pub const pod_protocol = @import("pod_protocol.zig");
 pub const pod_meta = @import("pod_meta.zig");
 pub const lua_runtime = @import("lua_runtime.zig");
+pub const config_builder = @import("config_builder.zig");
 pub const uuid = @import("uuid.zig");
 pub const logging = @import("logging.zig");
 pub const strings = @import("strings.zig");
