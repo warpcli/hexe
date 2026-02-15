@@ -522,7 +522,33 @@ pub fn createAdhocFloatWithSize(
     extra_env: ?[]const []const u8,
     use_pod: bool,
     size: FloatSize,
+    isolation_profile: ?[]const u8,
 ) ![32]u8 {
+    // Build extra_env with isolation if specified
+    var isolation_env_list: std.ArrayList([]const u8) = .empty;
+    defer isolation_env_list.deinit(state.allocator);
+
+    var final_extra_env = extra_env;
+    if (isolation_profile) |profile| {
+        // Add isolation profile env var
+        const profile_env = try std.fmt.allocPrint(state.allocator, "HEXE_VOIDBOX_PROFILE={s}", .{profile});
+        try isolation_env_list.append(state.allocator, profile_env);
+
+        // Append original extra_env items
+        if (extra_env) |items| {
+            for (items) |item| {
+                try isolation_env_list.append(state.allocator, item);
+            }
+        }
+
+        final_extra_env = try isolation_env_list.toOwnedSlice(state.allocator);
+    }
+    defer if (isolation_profile != null and final_extra_env != null) {
+        // Free the profile env string we allocated
+        if (final_extra_env.?.len > 0) state.allocator.free(final_extra_env.?[0]);
+        state.allocator.free(final_extra_env.?);
+    };
+
     const pane = try state.allocator.create(Pane);
     errdefer state.allocator.destroy(pane);
 
@@ -558,11 +584,11 @@ pub fn createAdhocFloatWithSize(
     const id: u16 = @intCast(100 + state.floats.items.len);
 
     if (use_pod and state.ses_client.isConnected()) {
-        if (state.ses_client.createPane(command, cwd, null, null, env, extra_env)) |result| {
+        if (state.ses_client.createPane(command, cwd, null, null, env, final_extra_env)) |result| {
             if (state.ses_client.getVtFd()) |vt_fd| {
                 try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
             } else {
-                const merged_env = mergeEnvLines(state.allocator, env, extra_env) catch null;
+                const merged_env = mergeEnvLines(state.allocator, env, final_extra_env) catch null;
                 defer if (merged_env) |slice| state.allocator.free(slice);
                 try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, command, cwd, merged_env);
             }

@@ -14,6 +14,7 @@ pub fn runMuxFloat(
     pass_env: bool,
     extra_env: []const u8,
     isolated: bool,
+    isolation_profile: []const u8,
     size: []const u8,
     focus: bool,
     exit_key: []const u8,
@@ -130,6 +131,7 @@ pub fn runMuxFloat(
         .cwd_len = @intCast(cwd.len),
         .result_path_len = @intCast(actual_result_path.len),
         .exit_key_len = @intCast(@min(exit_key.len, 255)),
+        .isolation_profile_len = @intCast(@min(isolation_profile.len, 255)),
         .env_count = @intCast(env_list.items.len),
         .size_width = size_width,
         .size_height = size_height,
@@ -138,7 +140,7 @@ pub fn runMuxFloat(
         .source_session_id = source_session_id,
     };
 
-    // Build trailing data: cmd + title + cwd + result_path + exit_key + env entries (each: u16 len + bytes).
+    // Build trailing data: cmd + title + cwd + result_path + exit_key + isolation_profile + env entries (each: u16 len + bytes).
     var trail: std.ArrayList(u8) = .empty;
     defer trail.deinit(allocator);
     var tw = trail.writer(allocator);
@@ -147,6 +149,7 @@ pub fn runMuxFloat(
     try tw.writeAll(cwd);
     try tw.writeAll(actual_result_path);
     try tw.writeAll(exit_key);
+    try tw.writeAll(isolation_profile);
     for (env_list.items) |entry| {
         const entry_len: u16 = @intCast(entry.len);
         try tw.writeAll(std.mem.asBytes(&entry_len));

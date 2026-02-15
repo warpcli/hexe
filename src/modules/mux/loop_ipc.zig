@@ -527,6 +527,12 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         offset += fr.exit_key_len;
     }
 
+    var isolation_profile_slice: []const u8 = "";
+    if (fr.isolation_profile_len > 0 and offset + fr.isolation_profile_len <= trail_len) {
+        isolation_profile_slice = buffer[offset .. offset + fr.isolation_profile_len];
+        offset += fr.isolation_profile_len;
+    }
+
     // Parse env entries.
     var env_list: std.ArrayList([]const u8) = .empty;
     defer env_list.deinit(state.allocator);
@@ -609,7 +615,8 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         .dim_background = focus,
         .exit_key = if (exit_key_slice.len > 0) exit_key_slice else null,
     };
-    const new_uuid = actions.createAdhocFloatWithSize(state, command, title, spawn_cwd, env_items, extra_items, use_pod, float_size) catch {
+    const isolation_profile: ?[]const u8 = if (isolation_profile_slice.len > 0) isolation_profile_slice else null;
+    const new_uuid = actions.createAdhocFloatWithSize(state, command, title, spawn_cwd, env_items, extra_items, use_pod, float_size, isolation_profile) catch {
         // Spawn failed — if wait_for_exit, send error result so CLI doesn't hang.
         if (wait_for_exit) {
             const ctl_fd = state.ses_client.getCtlFd() orelse return;

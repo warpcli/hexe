@@ -388,6 +388,7 @@ pub const FloatRequest = extern struct {
     cwd_len: u16 align(1),
     result_path_len: u16 align(1),
     exit_key_len: u8 align(1), // length of exit key string (e.g., "Esc", "q")
+    isolation_profile_len: u8 align(1), // length of isolation profile string (e.g., "sandbox", "full")
     env_count: u16 align(1),
     // Size parameters (0 = use default)
     size_width: u16 align(1), // width percentage (0 = default)
