@@ -864,7 +864,7 @@ pub const Server = struct {
             wire.readExact(fd, buf[0..trail_len]) catch return;
         }
 
-        ses.debugLog("create_pane: shell_len={d} cwd_len={d} sticky_key={d}", .{ cp.shell_len, cp.cwd_len, cp.sticky_key });
+        ses.debugLog("create_pane: shell_len={d} cwd_len={d} sticky_key={d} isolation_profile_len={d}", .{ cp.shell_len, cp.cwd_len, cp.sticky_key, cp.isolation_profile_len });
 
         var offset: usize = 0;
         const shell = if (cp.shell_len > 0 and offset + cp.shell_len <= trail_len) blk: {
@@ -884,6 +884,11 @@ pub const Server = struct {
             offset += cp.sticky_pwd_len;
             break :blk p;
         } else null;
+        const isolation_profile: ?[]const u8 = if (cp.isolation_profile_len > 0 and offset + cp.isolation_profile_len <= trail_len) blk: {
+            const p = buf[offset .. offset + cp.isolation_profile_len];
+            offset += cp.isolation_profile_len;
+            break :blk p;
+        } else null;
         const sticky_key: ?u8 = if (cp.sticky_key != 0) cp.sticky_key else null;
 
         const client_id = self.findClientForCtlFd(fd) orelse blk: {
@@ -894,7 +899,7 @@ pub const Server = struct {
             break :blk cid;
         };
 
-        const pane = self.ses_state.createPane(client_id, shell, cwd, sticky_pwd, sticky_key, null, null) catch {
+        const pane = self.ses_state.createPane(client_id, shell, cwd, sticky_pwd, sticky_key, null, isolation_profile) catch {
             self.sendBinaryError(fd, "create_failed");
             return;
         };

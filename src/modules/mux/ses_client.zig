@@ -261,22 +261,24 @@ pub const SesClient = struct {
         sticky_pwd: ?[]const u8,
         sticky_key: ?u8,
         _: ?[]const []const u8, // env (unused in binary protocol — pod inherits)
-        _: ?[]const []const u8, // extra_env (unused)
+        isolation_profile: ?[]const u8,
     ) !struct { uuid: [32]u8, pane_id: u16, pid: posix.pid_t } {
         const fd = self.ctl_fd orelse return error.NotConnected;
 
         const shell_bytes = shell orelse "";
         const cwd_bytes = cwd orelse "";
         const sticky_pwd_bytes = sticky_pwd orelse "";
+        const isolation_profile_bytes = isolation_profile orelse "";
 
         var msg: wire.CreatePane = .{
             .shell_len = @intCast(shell_bytes.len),
             .cwd_len = @intCast(cwd_bytes.len),
             .sticky_key = sticky_key orelse 0,
             .sticky_pwd_len = @intCast(sticky_pwd_bytes.len),
+            .isolation_profile_len = @intCast(isolation_profile_bytes.len),
         };
-        const trails: []const []const u8 = &.{ shell_bytes, cwd_bytes, sticky_pwd_bytes };
-        mux.debugLog("createPane: shell={s} cwd={s}", .{ shell_bytes, cwd_bytes });
+        const trails: []const []const u8 = &.{ shell_bytes, cwd_bytes, sticky_pwd_bytes, isolation_profile_bytes };
+        mux.debugLog("createPane: shell={s} cwd={s} isolation={s}", .{ shell_bytes, cwd_bytes, isolation_profile_bytes });
         try wire.writeControlMsg(fd, .create_pane, std.mem.asBytes(&msg), trails);
 
         // Read response.

@@ -172,6 +172,7 @@ pub const CreatePane = extern struct {
     cwd_len: u16 align(1),
     sticky_key: u8 align(1),
     sticky_pwd_len: u16 align(1),
+    isolation_profile_len: u8 align(1),
 };
 
 /// PaneCreated (response to CreatePane).

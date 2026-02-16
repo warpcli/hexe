@@ -5,6 +5,22 @@ const core = @import("core");
 const State = @import("state.zig").State;
 const keybinds = @import("keybinds.zig");
 
+fn focusedPaneInAltScreen(state: *State) bool {
+    if (state.active_floating) |idx| {
+        const fpane = state.floats.items[idx];
+        const can_interact = if (fpane.parent_tab) |parent| parent == state.active_tab else true;
+        if (fpane.isVisibleOnTab(state.active_tab) and can_interact) {
+            return fpane.vt.inAltScreen();
+        }
+    }
+
+    if (state.currentLayout().getFocusedPane()) |pane| {
+        return pane.vt.inAltScreen();
+    }
+
+    return false;
+}
+
 pub const CsiUEvent = struct {
     consumed: usize,
     mods: u8,
@@ -155,6 +171,7 @@ pub fn translateToLegacy(out: *[8]u8, ev: CsiUEvent) ?usize {
 
 pub fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
     const ESC: u8 = 0x1b;
+    const use_application_arrows = focusedPaneInAltScreen(state);
 
     var scratch: [8192]u8 = undefined;
     var n: usize = 0;
@@ -169,6 +186,19 @@ pub fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
 
     var i: usize = 0;
     while (i < bytes.len) {
+        // In alternate screen mode, map plain CSI arrows to SS3 arrows
+        // (application cursor mode) for better ncurses compatibility.
+        if (use_application_arrows and i + 2 < bytes.len and bytes[i] == ESC and bytes[i + 1] == '[') {
+            const dir = bytes[i + 2];
+            if (dir == 'A' or dir == 'B' or dir == 'C' or dir == 'D') {
+                flush(state, &scratch, &n);
+                const app_arrow = [3]u8{ ESC, 'O', dir };
+                keybinds.forwardInputToFocusedPane(state, &app_arrow);
+                i += 3;
+                continue;
+            }
+        }
+
         if (bytes[i] == ESC and i + 1 < bytes.len and bytes[i + 1] == '[') {
             if (parse(bytes[i..])) |ev| {
                 // Drop release, translate others.
@@ -202,8 +232,8 @@ pub fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
                         if (event_type != 3) {
                             // Strip event type and forward as traditional sequence
                             // Convert ESC[5;1:3~ to ESC[5~, or ESC[5~ as-is
-                            const colon_pos = std.mem.indexOf(u8, bytes[i..j+1], ":");
-                            const semi_pos = std.mem.indexOf(u8, bytes[i..j+1], ";");
+                            const colon_pos = std.mem.indexOf(u8, bytes[i .. j + 1], ":");
+                            const semi_pos = std.mem.indexOf(u8, bytes[i .. j + 1], ";");
 
                             if (colon_pos != null or semi_pos != null) {
                                 // Has modifiers/event type - strip them, keep just keycode~
@@ -217,7 +247,7 @@ pub fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
                             } else {
                                 // Plain sequence, no modifiers - forward as-is
                                 flush(state, &scratch, &n);
-                                keybinds.forwardInputToFocusedPane(state, bytes[i..j+1]);
+                                keybinds.forwardInputToFocusedPane(state, bytes[i .. j + 1]);
                             }
                         }
                         i = j + 1;

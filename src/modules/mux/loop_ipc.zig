@@ -601,8 +601,11 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
 
     const env_items: ?[]const []const u8 = if (env_list.items.len > 0) env_list.items else null;
     const extra_items: ?[]const []const u8 = if (extra_env_list.items.len > 0) extra_env_list.items else null;
-    const use_pod = (!wait_for_exit) or isolated;
+    const isolation_profile: ?[]const u8 = if (isolation_profile_slice.len > 0) isolation_profile_slice else null;
+    const use_pod = (!wait_for_exit) or isolated or (isolation_profile != null);
     const title: ?[]const u8 = if (title_slice.len > 0) title_slice else null;
+
+    mux.debugLog("handleFloatRequest: wait_for_exit={} isolation_profile={s} use_pod={}", .{ wait_for_exit, isolation_profile orelse "", use_pod });
 
     const command = state.allocator.dupe(u8, cmd) catch return;
     defer state.allocator.free(command);
@@ -615,7 +618,6 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         .dim_background = focus,
         .exit_key = if (exit_key_slice.len > 0) exit_key_slice else null,
     };
-    const isolation_profile: ?[]const u8 = if (isolation_profile_slice.len > 0) isolation_profile_slice else null;
     const new_uuid = actions.createAdhocFloatWithSize(state, command, title, spawn_cwd, env_items, extra_items, use_pod, float_size, isolation_profile) catch {
         // Spawn failed — if wait_for_exit, send error result so CLI doesn't hang.
         if (wait_for_exit) {

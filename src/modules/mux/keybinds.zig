@@ -61,6 +61,22 @@ pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
     var out: [16]u8 = undefined;
     var n: usize = 0;
 
+    const use_application_arrows = blk: {
+        if (state.active_floating) |idx| {
+            const fpane = state.floats.items[idx];
+            const can_interact = if (fpane.parent_tab) |parent| parent == state.active_tab else true;
+            if (fpane.isVisibleOnTab(state.active_tab) and can_interact) {
+                break :blk fpane.vt.inAltScreen();
+            }
+        }
+
+        if (state.currentLayout().getFocusedPane()) |pane| {
+            break :blk pane.vt.inAltScreen();
+        }
+
+        break :blk false;
+    };
+
     switch (@as(BindKeyKind, key)) {
         .space => {
             if ((mods & 2) != 0) { // Ctrl+Space = NUL
@@ -100,7 +116,9 @@ pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
             }
         },
         .up, .down, .left, .right => {
-            // Arrow keys: ESC [ A/B/C/D (no mods) or ESC [ 1 ; <mod> A/B/C/D (with mods)
+            // Arrow keys:
+            // - Alternate screen + no modifiers: ESC O A/B/C/D (application cursor mode)
+            // - Otherwise: ESC [ A/B/C/D (no mods) or ESC [ 1 ; <mod> A/B/C/D (with mods)
             const dir_char: u8 = switch (@as(BindKeyKind, key)) {
                 .up => 'A',
                 .down => 'B',
@@ -111,28 +129,36 @@ pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
 
             out[n] = 0x1b;
             n += 1;
-            out[n] = '[';
-            n += 1;
 
-            if (mods != 0) {
-                // Convert our mods to CSI modifier parameter:
-                // CSI mod = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0)
-                // Our encoding: alt=1, ctrl=2, shift=4
-                var csi_mod: u8 = 1;
-                if ((mods & 4) != 0) csi_mod |= 1; // shift
-                if ((mods & 1) != 0) csi_mod |= 2; // alt
-                if ((mods & 2) != 0) csi_mod |= 4; // ctrl
+            if (mods == 0 and use_application_arrows) {
+                out[n] = 'O';
+                n += 1;
+                out[n] = dir_char;
+                n += 1;
+            } else {
+                out[n] = '[';
+                n += 1;
 
-                out[n] = '1';
-                n += 1;
-                out[n] = ';';
-                n += 1;
-                out[n] = '0' + csi_mod;
+                if (mods != 0) {
+                    // Convert our mods to CSI modifier parameter:
+                    // CSI mod = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0)
+                    // Our encoding: alt=1, ctrl=2, shift=4
+                    var csi_mod: u8 = 1;
+                    if ((mods & 4) != 0) csi_mod |= 1; // shift
+                    if ((mods & 1) != 0) csi_mod |= 2; // alt
+                    if ((mods & 2) != 0) csi_mod |= 4; // ctrl
+
+                    out[n] = '1';
+                    n += 1;
+                    out[n] = ';';
+                    n += 1;
+                    out[n] = '0' + csi_mod;
+                    n += 1;
+                }
+
+                out[n] = dir_char;
                 n += 1;
             }
-
-            out[n] = dir_char;
-            n += 1;
         },
     }
 
@@ -230,17 +256,15 @@ fn findBestBind(state: *State, mods: u8, key: BindKey, on: BindWhen, allow_only_
 
     // Debug: log what we're looking for
     const is_debug_key = (mods == 3 and @as(BindKeyKind, key) == .up) or
-                         (mods == 3 and key == .char and key.char == '1');
+        (mods == 3 and key == .char and key.char == '1');
     if (is_debug_key) {
-        std.debug.print("DEBUG findBestBind: looking for mods={} key={s} on={s}, total_binds={}\n",
-            .{mods, @tagName(@as(BindKeyKind, key)), @tagName(on), cfg.input.binds.len});
+        std.debug.print("DEBUG findBestBind: looking for mods={} key={s} on={s}, total_binds={}\n", .{ mods, @tagName(@as(BindKeyKind, key)), @tagName(on), cfg.input.binds.len });
     }
 
     for (cfg.input.binds, 0..) |b, idx| {
         // Debug arrow key bindings and '1' key
         if (is_debug_key) {
-            std.debug.print("  checking bind[{}]: on={s}(want {s}) mods={}(want {}) key={s}\n",
-                .{idx, @tagName(b.on), @tagName(on), b.mods, mods, @tagName(@as(BindKeyKind, b.key))});
+            std.debug.print("  checking bind[{}]: on={s}(want {s}) mods={}(want {}) key={s}\n", .{ idx, @tagName(b.on), @tagName(on), b.mods, mods, @tagName(@as(BindKeyKind, b.key)) });
         }
 
         if (b.on != on) {
@@ -290,8 +314,7 @@ fn findBestBind(state: *State, mods: u8, key: BindKey, on: BindWhen, allow_only_
     // Debug: log result
     if (is_debug_key) {
         if (best) |b| {
-            std.debug.print("DEBUG findBestBind: FOUND binding, score={}, action={s}\n",
-                .{best_score, @tagName(b.action)});
+            std.debug.print("DEBUG findBestBind: FOUND binding, score={}, action={s}\n", .{ best_score, @tagName(b.action) });
         } else {
             std.debug.print("DEBUG findBestBind: NO binding found\n", .{});
         }
@@ -978,7 +1001,7 @@ fn dispatchAction(state: *State, action: BindAction) bool {
             return true;
         },
         .float_toggle => |fk| {
-            std.debug.print("DEBUG dispatchAction: float_toggle key='{}' (0x{x})\n", .{fk, fk});
+            std.debug.print("DEBUG dispatchAction: float_toggle key='{}' (0x{x})\n", .{ fk, fk });
             if (state.getLayoutFloatByKey(fk)) |float_def| {
                 std.debug.print("DEBUG dispatchAction: found float_def, toggling\n", .{});
                 actions.toggleNamedFloat(state, float_def);

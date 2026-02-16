@@ -1042,7 +1042,7 @@ pub const SesState = struct {
         sticky_pwd: ?[]const u8,
         sticky_key: ?u8,
         env: ?[]const []const u8,
-        extra_env: ?[]const []const u8,
+        isolation_profile: ?[]const u8,
     ) !*Pane {
         const uuid = ipc.generateUuid();
         const base_name = ipc.generatePaneName();
@@ -1052,7 +1052,7 @@ pub const SesState = struct {
         const pod_socket_path = try ipc.getPodSocketPath(self.allocator, &uuid);
         errdefer self.allocator.free(pod_socket_path);
 
-        const spawn = try self.spawnPod(uuid, name, pod_socket_path, shell, cwd, env, extra_env);
+        const spawn = try self.spawnPod(uuid, name, pod_socket_path, shell, cwd, env, isolation_profile);
 
         // Copy sticky_pwd if provided
         const owned_pwd: ?[]const u8 = if (sticky_pwd) |pwd|
@@ -1136,7 +1136,7 @@ pub const SesState = struct {
         shell: []const u8,
         cwd: ?[]const u8,
         env: ?[]const []const u8,
-        extra_env: ?[]const []const u8,
+        isolation_profile: ?[]const u8,
     ) !struct { pod_pid: posix.pid_t, child_pid: posix.pid_t } {
         var args_list: std.ArrayList([]const u8) = .empty;
         defer args_list.deinit(self.allocator);
@@ -1194,23 +1194,16 @@ pub const SesState = struct {
         const instance_env = posix.getenv("HEXE_INSTANCE");
         const test_only_env = posix.getenv("HEXE_TEST_ONLY");
         const needs_runtime_env = (instance_env != null and instance_env.?.len > 0) or
-                                  (test_only_env != null and test_only_env.?.len > 0);
+                                  (test_only_env != null and test_only_env.?.len > 0) or
+                                  (isolation_profile != null and isolation_profile.?.len > 0);
 
-        if (env != null or extra_env != null or needs_runtime_env) {
+        if (env != null or needs_runtime_env) {
             var env_map = if (env == null)
                 try std.process.getEnvMap(self.allocator)
             else
                 std.process.EnvMap.init(self.allocator);
 
             if (env) |vars| {
-                for (vars) |entry| {
-                    const sep = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
-                    if (sep == 0 or sep + 1 > entry.len) continue;
-                    try env_map.put(entry[0..sep], entry[sep + 1 ..]);
-                }
-            }
-
-            if (extra_env) |vars| {
                 for (vars) |entry| {
                     const sep = std.mem.indexOfScalar(u8, entry, '=') orelse continue;
                     if (sep == 0 or sep + 1 > entry.len) continue;
@@ -1227,8 +1220,15 @@ pub const SesState = struct {
                 if (v.len > 0) try env_map.put("HEXE_TEST_ONLY", v);
             }
 
-            // NOTE: Per-float isolation env vars should be passed via extra_env parameter
-            // when spawning PODs for floats with custom isolation config
+            // Add isolation profile if specified
+            if (isolation_profile) |profile| {
+                if (profile.len > 0) {
+                    ses.debugLog("spawnPod: setting HEXE_VOIDBOX_PROFILE={s}", .{profile});
+                    try env_map.put("HEXE_VOIDBOX_PROFILE", profile);
+                }
+            } else {
+                ses.debugLog("spawnPod: isolation_profile is null", .{});
+            }
 
             env_map_storage = env_map;
             child.env_map = &env_map_storage.?;
