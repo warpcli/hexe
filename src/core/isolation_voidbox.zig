@@ -95,6 +95,9 @@ pub fn configFromEnv(allocator: std.mem.Allocator, shell: []const u8, cwd: ?[]co
     const cmd = try allocator.alloc([]const u8, 1);
     cmd[0] = shell;
 
+    // Build filesystem actions based on profile
+    const fs_actions = try buildFsActions(allocator, profile);
+
     const config = voidbox.JailConfig{
         .name = "hexe-pod",
         .rootfs_path = "/",
@@ -107,9 +110,58 @@ pub fn configFromEnv(allocator: std.mem.Allocator, shell: []const u8, cwd: ?[]co
             .cap_add = "",
             .seccomp_mode = .disabled,
         },
+        .fs_actions = fs_actions,
     };
 
     return config;
+}
+
+/// Build filesystem actions based on isolation profile
+fn buildFsActions(allocator: std.mem.Allocator, profile: []const u8) ![]const voidbox.FsAction {
+    var actions: std.ArrayList(voidbox.FsAction) = .empty;
+    errdefer actions.deinit(allocator);
+
+    if (std.mem.eql(u8, profile, "none")) {
+        // No filesystem isolation
+        return try actions.toOwnedSlice(allocator);
+    }
+
+    if (std.mem.eql(u8, profile, "minimal")) {
+        // Only private /tmp
+        try actions.append(allocator, .{ .tmpfs = .{ .dest = "/tmp" } });
+        return try actions.toOwnedSlice(allocator);
+    }
+
+    // For default, balanced, sandbox, full: bind mount essential directories
+    const bind_essential = std.mem.eql(u8, profile, "default") or
+                          std.mem.eql(u8, profile, "balanced") or
+                          std.mem.eql(u8, profile, "sandbox") or
+                          std.mem.eql(u8, profile, "full");
+
+    if (bind_essential) {
+        // Always bind these system directories (read-only for safety)
+        try actions.append(allocator, .{ .ro_bind = .{ .src = "/bin", .dest = "/bin" } });
+        try actions.append(allocator, .{ .ro_bind = .{ .src = "/usr", .dest = "/usr" } });
+        try actions.append(allocator, .{ .ro_bind = .{ .src = "/lib", .dest = "/lib" } });
+        try actions.append(allocator, .{ .ro_bind = .{ .src = "/lib64", .dest = "/lib64" } });
+
+        // For all profiles except "full", also bind package directories
+        if (!std.mem.eql(u8, profile, "full")) {
+            try actions.append(allocator, .{ .ro_bind = .{ .src = "/nix", .dest = "/nix" } });
+            try actions.append(allocator, .{ .ro_bind = .{ .src = "/pkg", .dest = "/pkg" } });
+            try actions.append(allocator, .{ .ro_bind = .{ .src = "/opt", .dest = "/opt" } });
+
+            // Bind user's home directory (read-write so they can work)
+            if (posix.getenv("HOME")) |home| {
+                try actions.append(allocator, .{ .bind = .{ .src = home, .dest = home } });
+            }
+        }
+
+        // Private /tmp for all
+        try actions.append(allocator, .{ .tmpfs = .{ .dest = "/tmp" } });
+    }
+
+    return try actions.toOwnedSlice(allocator);
 }
 
 /// Apply voidbox isolation in child process (after PTY setup, before exec)
