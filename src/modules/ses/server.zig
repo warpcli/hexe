@@ -16,6 +16,11 @@ const CtlWatcher = struct {
     completion: xev.Completion = .{},
 };
 
+const PendingCtlClose = struct {
+    fd: posix.fd_t,
+    watcher: ?*CtlWatcher,
+};
+
 const VtDirection = enum {
     pod_to_mux,
     mux_to_pod,
@@ -26,6 +31,11 @@ const VtWatcher = struct {
     fd: posix.fd_t,
     direction: VtDirection,
     completion: xev.Completion = .{},
+};
+
+const PendingVtClose = struct {
+    fd: posix.fd_t,
+    watcher: ?*VtWatcher,
 };
 
 /// Server that handles mux connections
@@ -40,9 +50,9 @@ pub const Server = struct {
     // Track which fds use binary control protocol (MUX_CTL and POD_CTL connections).
     binary_ctl_fds: std.AutoHashMap(posix.fd_t, void),
     ctl_watchers: std.AutoHashMap(posix.fd_t, *CtlWatcher),
-    pending_ctl_close_fds: std.ArrayList(posix.fd_t),
+    pending_ctl_close_fds: std.ArrayList(PendingCtlClose),
     vt_watchers: std.AutoHashMap(posix.fd_t, *VtWatcher),
-    pending_vt_close_fds: std.ArrayList(posix.fd_t),
+    pending_vt_close_fds: std.ArrayList(PendingVtClose),
     loop_ptr: ?*xev.Loop = null,
     // CLI fd waiting for exit_intent response.
     pending_exit_intent_cli_fd: ?posix.fd_t = null,
@@ -136,13 +146,13 @@ pub const Server = struct {
     }
 
     fn processPendingCtlCloses(self: *Server) void {
-        for (self.pending_ctl_close_fds.items) |fd| {
-            _ = self.binary_ctl_fds.remove(fd);
-            self.disarmCtlWatcher(fd);
+        for (self.pending_ctl_close_fds.items) |pending| {
+            if (!self.disarmCtlWatcherMatching(pending.fd, pending.watcher)) continue;
+            _ = self.binary_ctl_fds.remove(pending.fd);
 
             var client_id: ?usize = null;
             for (self.ses_state.clients.items) |client| {
-                if (client.fd == fd or client.mux_ctl_fd == fd) {
+                if (client.fd == pending.fd or client.mux_ctl_fd == pending.fd) {
                     client_id = client.id;
                     break;
                 }
@@ -153,12 +163,12 @@ pub const Server = struct {
                 closed_by_client_remove = true;
             }
 
-            if (self.pending_pop_requests.fetchRemove(fd)) |kv| {
+            if (self.pending_pop_requests.fetchRemove(pending.fd)) |kv| {
                 posix.close(kv.value);
             }
 
             if (!closed_by_client_remove) {
-                posix.close(fd);
+                posix.close(pending.fd);
             }
         }
         self.pending_ctl_close_fds.clearRetainingCapacity();
@@ -178,32 +188,33 @@ pub const Server = struct {
     }
 
     fn processPendingVtCloses(self: *Server) void {
-        for (self.pending_vt_close_fds.items) |fd| {
-            if (self.ses_state.pod_vt_to_pane_id.contains(fd)) {
-                self.removePodVtFd(fd);
-            }
-            if (self.isMuxVtFd(fd)) {
-                self.removeMuxVtFd(fd);
-            }
-            self.disarmVtWatcher(fd);
+        for (self.pending_vt_close_fds.items) |pending| {
+            if (!self.disarmVtWatcherMatching(pending.fd, pending.watcher)) continue;
 
-            posix.close(fd);
+            if (self.ses_state.pod_vt_to_pane_id.contains(pending.fd)) {
+                self.removePodVtFd(pending.fd);
+            }
+            if (self.isMuxVtFd(pending.fd)) {
+                self.removeMuxVtFd(pending.fd);
+            }
+
+            posix.close(pending.fd);
         }
         self.pending_vt_close_fds.clearRetainingCapacity();
     }
 
-    fn queueCtlClose(self: *Server, fd: posix.fd_t) void {
+    fn queueCtlClose(self: *Server, fd: posix.fd_t, watcher: ?*CtlWatcher) void {
         for (self.pending_ctl_close_fds.items) |existing| {
-            if (existing == fd) return;
+            if (existing.fd == fd) return;
         }
-        self.pending_ctl_close_fds.append(self.allocator, fd) catch {};
+        self.pending_ctl_close_fds.append(self.allocator, .{ .fd = fd, .watcher = watcher }) catch {};
     }
 
-    fn queueVtClose(self: *Server, fd: posix.fd_t) void {
+    fn queueVtClose(self: *Server, fd: posix.fd_t, watcher: ?*VtWatcher) void {
         for (self.pending_vt_close_fds.items) |existing| {
-            if (existing == fd) return;
+            if (existing.fd == fd) return;
         }
-        self.pending_vt_close_fds.append(self.allocator, fd) catch {};
+        self.pending_vt_close_fds.append(self.allocator, .{ .fd = fd, .watcher = watcher }) catch {};
     }
 
     fn processPendingWatcherUpdates(self: *Server) void {
@@ -243,6 +254,15 @@ pub const Server = struct {
         }
     }
 
+    fn disarmCtlWatcherMatching(self: *Server, fd: posix.fd_t, expected: ?*CtlWatcher) bool {
+        if (expected) |watcher| {
+            const current = self.ctl_watchers.get(fd) orelse return false;
+            if (current != watcher) return false;
+        }
+        self.disarmCtlWatcher(fd);
+        return true;
+    }
+
     fn armVtWatcher(self: *Server, fd: posix.fd_t, direction: VtDirection) void {
         if (self.loop_ptr == null) return;
         if (self.vt_watchers.contains(fd)) return;
@@ -262,6 +282,15 @@ pub const Server = struct {
         if (self.vt_watchers.fetchRemove(fd)) |kv| {
             self.allocator.destroy(kv.value);
         }
+    }
+
+    fn disarmVtWatcherMatching(self: *Server, fd: posix.fd_t, expected: ?*VtWatcher) bool {
+        if (expected) |watcher| {
+            const current = self.vt_watchers.get(fd) orelse return false;
+            if (current != watcher) return false;
+        }
+        self.disarmVtWatcher(fd);
+        return true;
     }
 
     const AcceptContext = struct {
@@ -302,12 +331,12 @@ pub const Server = struct {
         const watch = ctx orelse return .disarm;
         const server: *Server = @ptrCast(@alignCast(watch.srv));
         _ = result catch {
-            server.queueCtlClose(watch.fd);
+            server.queueCtlClose(watch.fd, watch);
             return .disarm;
         };
 
         if (!server.handleBinaryCtlMessage(watch.fd)) {
-            server.queueCtlClose(watch.fd);
+            server.queueCtlClose(watch.fd, watch);
             return .disarm;
         }
 
@@ -324,7 +353,7 @@ pub const Server = struct {
         const watch = ctx orelse return .disarm;
         const server: *Server = @ptrCast(@alignCast(watch.srv));
         _ = result catch {
-            server.queueVtClose(watch.fd);
+            server.queueVtClose(watch.fd, watch);
             return .disarm;
         };
 
@@ -333,7 +362,7 @@ pub const Server = struct {
             .mux_to_pod => server.routeMuxToPod(watch.fd),
         };
         if (!ok) {
-            server.queueVtClose(watch.fd);
+            server.queueVtClose(watch.fd, watch);
             return .disarm;
         }
 
@@ -492,7 +521,7 @@ pub const Server = struct {
                     if (client.session_id) |csid| {
                         if (std.mem.eql(u8, &csid, &session_id)) {
                             if (client.mux_vt_fd) |old| {
-                                self.queueVtClose(old);
+                                self.queueVtClose(old, null);
                             }
                             client.mux_vt_fd = conn.fd;
                             ses.debugLog("MUX VT: assigned fd={d} to client_id={d}", .{ conn.fd, client.id });
@@ -527,7 +556,7 @@ pub const Server = struct {
                 // Store fd in the pane's pod_ctl_fd.
                 if (self.ses_state.panes.getPtr(uuid_hex)) |pane| {
                     if (pane.pod_ctl_fd) |old_fd| {
-                        self.queueCtlClose(old_fd);
+                        self.queueCtlClose(old_fd, null);
                     }
                     pane.pod_ctl_fd = conn.fd;
                     self.binary_ctl_fds.put(conn.fd, {}) catch {};
