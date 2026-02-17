@@ -13,7 +13,7 @@ const SERIALIZE_VERSION: u32 = 1;
 pub fn serializeState(self: anytype) ![]const u8 {
     var buf: std.ArrayList(u8) = .empty;
     errdefer buf.deinit(self.allocator);
-    const writer = buf.writer(self.allocator);
+    var writer = buf.writer(self.allocator);
 
     try writer.writeAll("{");
 
@@ -22,8 +22,11 @@ pub fn serializeState(self: anytype) ![]const u8 {
     try writer.print("\"timestamp\":{d},", .{std.time.timestamp()});
 
     // Mux UUID and session name (persistent identity).
-    try writer.print("\"uuid\":\"{s}\",", .{self.uuid});
-    try writer.print("\"session_name\":\"{s}\",", .{self.session_name});
+    try writer.writeAll("\"uuid\":");
+    try writeJsonString(writer, self.uuid[0..]);
+    try writer.writeAll(",\"session_name\":");
+    try writeJsonString(writer, self.session_name);
+    try writer.writeAll(",");
     try writer.print("\"tab_counter\":{d},", .{self.tab_counter});
 
     // Active tab/float.
@@ -39,8 +42,11 @@ pub fn serializeState(self: anytype) ![]const u8 {
     for (self.tabs.items, 0..) |*tab, ti| {
         if (ti > 0) try writer.writeAll(",");
         try writer.writeAll("{");
-        try writer.print("\"uuid\":\"{s}\",", .{tab.uuid});
-        try writer.print("\"name\":\"{s}\",", .{tab.name});
+        try writer.writeAll("\"uuid\":");
+        try writeJsonString(writer, tab.uuid[0..]);
+        try writer.writeAll(",\"name\":");
+        try writeJsonString(writer, tab.name);
+        try writer.writeAll(",");
         try writer.print("\"focused_split_id\":{d},", .{tab.layout.focused_split_id});
         try writer.print("\"next_split_id\":{d},", .{tab.layout.next_split_id});
 
@@ -114,7 +120,9 @@ pub fn serializePane(self: anytype, writer: anytype, pane: *Pane) !void {
     _ = self;
     try writer.writeAll("{");
     try writer.print("\"id\":{d},", .{pane.id});
-    try writer.print("\"uuid\":\"{s}\",", .{pane.uuid});
+    try writer.writeAll("\"uuid\":");
+    try writeJsonString(writer, pane.uuid[0..]);
+    try writer.writeAll(",");
     try writer.print("\"x\":{d},\"y\":{d},\"width\":{d},\"height\":{d},", .{ pane.x, pane.y, pane.width, pane.height });
     try writer.print("\"focused\":{},", .{pane.focused});
     try writer.print("\"floating\":{},", .{pane.floating});
@@ -131,22 +139,27 @@ pub fn serializePane(self: anytype, writer: anytype, pane: *Pane) !void {
         try writer.print(",\"parent_tab\":{d}", .{pt});
     }
     if (pane.pwd_dir) |pwd| {
-        try writer.print(",\"pwd_dir\":\"{s}\"", .{pwd});
+        try writer.writeAll(",\"pwd_dir\":");
+        try writeJsonString(writer, pwd);
     }
     try writer.writeAll("}");
+}
+
+fn writeJsonString(writer: anytype, value: []const u8) !void {
+    try writer.print("{f}", .{std.json.fmt(value, .{})});
 }
 
 pub fn deserializeLayoutNode(self: anytype, obj: std.json.ObjectMap) error{ OutOfMemory, InvalidNode }!*LayoutNode {
     const node = try self.allocator.create(LayoutNode);
     errdefer self.allocator.destroy(node);
 
-    const node_type = (obj.get("type") orelse return error.InvalidNode).string;
+    const node_type = stringField(obj, "type") orelse return error.InvalidNode;
 
     if (std.mem.eql(u8, node_type, "pane")) {
         const id: u16 = @intCast((obj.get("id") orelse return error.InvalidNode).integer);
         node.* = .{ .pane = id };
     } else if (std.mem.eql(u8, node_type, "split")) {
-        const dir_str = (obj.get("dir") orelse return error.InvalidNode).string;
+        const dir_str = stringField(obj, "dir") orelse return error.InvalidNode;
         const dir: SplitDir = if (std.mem.eql(u8, dir_str, "horizontal")) .horizontal else .vertical;
         const ratio_val = obj.get("ratio") orelse return error.InvalidNode;
         const ratio: f32 = switch (ratio_val) {
@@ -154,8 +167,8 @@ pub fn deserializeLayoutNode(self: anytype, obj: std.json.ObjectMap) error{ OutO
             .integer => @floatFromInt(ratio_val.integer),
             else => return error.InvalidNode,
         };
-        const first_obj = (obj.get("first") orelse return error.InvalidNode).object;
-        const second_obj = (obj.get("second") orelse return error.InvalidNode).object;
+        const first_obj = objectField(obj, "first") orelse return error.InvalidNode;
+        const second_obj = objectField(obj, "second") orelse return error.InvalidNode;
 
         const first = try self.deserializeLayoutNode(first_obj);
         errdefer self.allocator.destroy(first);
@@ -172,4 +185,20 @@ pub fn deserializeLayoutNode(self: anytype, obj: std.json.ObjectMap) error{ OutO
     }
 
     return node;
+}
+
+fn stringField(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
+    const value = obj.get(key) orelse return null;
+    return switch (value) {
+        .string => |s| s,
+        else => null,
+    };
+}
+
+fn objectField(obj: std.json.ObjectMap, key: []const u8) ?std.json.ObjectMap {
+    const value = obj.get(key) orelse return null;
+    return switch (value) {
+        .object => |o| o,
+        else => null,
+    };
 }
