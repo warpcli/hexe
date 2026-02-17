@@ -5,6 +5,7 @@ const ipc = core.ipc;
 const wire = core.wire;
 const state = @import("state.zig");
 const ses = @import("main.zig");
+const poll_registry = @import("poll_registry.zig");
 
 /// Maximum number of concurrent client connections (MUX instances).
 const MAX_CLIENTS: usize = core.constants.Limits.max_clients;
@@ -101,34 +102,19 @@ pub const Server = struct {
                 );
                 last_stats_update = now_ms;
             }
-            // Remove old pod_vt fds from poll set (closed by connectPodVt).
-            // Must happen BEFORE adding new fds to prevent fd-reuse duplicates.
-            for (self.ses_state.pending_remove_poll_fds.items) |old_fd| {
-                var j: usize = 1;
-                while (j < poll_fds.items.len) {
-                    if (poll_fds.items[j].fd == old_fd) {
-                        _ = poll_fds.orderedRemove(j);
-                        break;
-                    }
-                    j += 1;
-                }
-            }
+            // Remove stale pod_vt fds and add new ones for routing.
+            // This is the first extraction step for xev migration so fd-set
+            // reconciliation can later be replaced by completion ownership.
+            poll_registry.reconcile(
+                page_alloc,
+                &poll_fds,
+                self.ses_state.pending_remove_poll_fds.items,
+                self.ses_state.pending_poll_fds.items,
+            );
             self.ses_state.pending_remove_poll_fds.clearRetainingCapacity();
-
-            // Add any newly created pod_vt fds to the poll set.
-            for (self.ses_state.pending_poll_fds.items) |new_fd| {
-                poll_fds.append(page_alloc, .{
-                    .fd = new_fd,
-                    .events = posix.POLL.IN,
-                    .revents = 0,
-                }) catch {};
-            }
             self.ses_state.pending_poll_fds.clearRetainingCapacity();
 
-            // Reset revents
-            for (poll_fds.items) |*pfd| {
-                pfd.revents = 0;
-            }
+            poll_registry.resetRevents(&poll_fds);
 
             // Poll with timeout for cleanup + persistence tasks
             const ready = posix.poll(poll_fds.items, 1000) catch |err| {
