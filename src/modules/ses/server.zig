@@ -11,6 +11,12 @@ const xev = @import("xev").Dynamic;
 /// Maximum number of concurrent client connections (MUX instances).
 const MAX_CLIENTS: usize = core.constants.Limits.max_clients;
 
+const CtlWatcher = struct {
+    srv: *anyopaque,
+    fd: posix.fd_t,
+    completion: xev.Completion = .{},
+};
+
 /// Server that handles mux connections
 /// Note: Uses page_allocator internally to avoid GPA issues after fork/daemonization
 pub const Server = struct {
@@ -22,6 +28,9 @@ pub const Server = struct {
     pending_pop_requests: std.AutoHashMap(posix.fd_t, posix.fd_t),
     // Track which fds use binary control protocol (MUX_CTL and POD_CTL connections).
     binary_ctl_fds: std.AutoHashMap(posix.fd_t, void),
+    ctl_watchers: std.AutoHashMap(posix.fd_t, *CtlWatcher),
+    pending_ctl_close_fds: std.ArrayList(posix.fd_t),
+    loop_ptr: ?*xev.Loop = null,
     // CLI fd waiting for exit_intent response.
     pending_exit_intent_cli_fd: ?posix.fd_t = null,
     // CLI fds waiting for float result, keyed by float pane UUID.
@@ -46,6 +55,8 @@ pub const Server = struct {
             .running = true,
             .pending_pop_requests = std.AutoHashMap(posix.fd_t, posix.fd_t).init(page_alloc),
             .binary_ctl_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
+            .ctl_watchers = std.AutoHashMap(posix.fd_t, *CtlWatcher).init(page_alloc),
+            .pending_ctl_close_fds = .empty,
             .pending_float_cli_fds = std.AutoHashMap([32]u8, posix.fd_t).init(page_alloc),
             .resource_monitor = core.resource_limits.ResourceMonitor.init(limits),
         };
@@ -57,6 +68,12 @@ pub const Server = struct {
         while (float_it.next()) |entry| posix.close(entry.value_ptr.*);
         self.pending_float_cli_fds.deinit();
         self.pending_pop_requests.deinit();
+        var watch_it = self.ctl_watchers.iterator();
+        while (watch_it.next()) |entry| {
+            self.allocator.destroy(entry.value_ptr.*);
+        }
+        self.ctl_watchers.deinit();
+        self.pending_ctl_close_fds.deinit(self.allocator);
         self.binary_ctl_fds.deinit();
         self.socket.deinit();
     }
@@ -66,6 +83,8 @@ pub const Server = struct {
         try xev.detect();
         var loop = try xev.Loop.init(.{});
         defer loop.deinit();
+        self.loop_ptr = &loop;
+        defer self.loop_ptr = null;
 
         // Use page_allocator for poll_fds to avoid GPA issues after fork
         const page_alloc = std.heap.page_allocator;
@@ -109,6 +128,11 @@ pub const Server = struct {
                 self.ses_state.pending_remove_poll_fds.items,
                 self.ses_state.pending_poll_fds.items,
             );
+            for (self.ses_state.pending_remove_poll_fds.items) |fd| {
+                if (self.binary_ctl_fds.contains(fd)) {
+                    self.disarmCtlWatcher(fd);
+                }
+            }
             self.ses_state.pending_remove_poll_fds.clearRetainingCapacity();
             self.ses_state.pending_poll_fds.clearRetainingCapacity();
 
@@ -123,6 +147,7 @@ pub const Server = struct {
             // Progress xev watchers every cycle so server accept is not gated
             // on poll readiness from unrelated fds.
             try loop.run(.no_wait);
+            self.processPendingCtlCloses(&poll_fds);
 
             if (ready == 0) continue;
 
@@ -149,6 +174,7 @@ pub const Server = struct {
                             self.removeMuxVtFd(pfd.fd);
                         } else {
                             _ = self.binary_ctl_fds.remove(pfd.fd);
+                            self.disarmCtlWatcher(pfd.fd);
                             var client_id: ?usize = null;
                             for (self.ses_state.clients.items) |client| {
                                 if (client.fd == pfd.fd or client.mux_ctl_fd == pfd.fd) {
@@ -185,21 +211,7 @@ pub const Server = struct {
                                 continue;
                             }
                         } else if (self.binary_ctl_fds.contains(pfd.fd)) {
-                            // Binary control message (MUX CTL or POD CTL).
-                            if (!self.handleBinaryCtlMessage(pfd.fd)) {
-                                _ = self.binary_ctl_fds.remove(pfd.fd);
-                                var client_id2: ?usize = null;
-                                for (self.ses_state.clients.items) |client| {
-                                    if (client.fd == pfd.fd or client.mux_ctl_fd == pfd.fd) {
-                                        client_id2 = client.id;
-                                        break;
-                                    }
-                                }
-                                if (client_id2) |cid| self.ses_state.removeClient(cid);
-                                posix.close(pfd.fd);
-                                _ = poll_fds.orderedRemove(i);
-                                continue;
-                            }
+                            // Binary control IO is handled by xev watcher.
                         } else {
                             // Unknown fd — close and remove.
                             posix.close(pfd.fd);
@@ -211,6 +223,66 @@ pub const Server = struct {
 
                 i += 1;
             }
+        }
+    }
+
+    fn processPendingCtlCloses(self: *Server, poll_fds: *std.ArrayList(posix.pollfd)) void {
+        for (self.pending_ctl_close_fds.items) |fd| {
+            _ = self.binary_ctl_fds.remove(fd);
+            self.disarmCtlWatcher(fd);
+
+            var client_id: ?usize = null;
+            for (self.ses_state.clients.items) |client| {
+                if (client.fd == fd or client.mux_ctl_fd == fd) {
+                    client_id = client.id;
+                    break;
+                }
+            }
+            if (client_id) |cid| self.ses_state.removeClient(cid);
+
+            if (self.pending_pop_requests.fetchRemove(fd)) |kv| {
+                posix.close(kv.value);
+            }
+
+            var i: usize = 1;
+            while (i < poll_fds.items.len) {
+                if (poll_fds.items[i].fd == fd) {
+                    _ = poll_fds.orderedRemove(i);
+                    break;
+                }
+                i += 1;
+            }
+
+            posix.close(fd);
+        }
+        self.pending_ctl_close_fds.clearRetainingCapacity();
+    }
+
+    fn queueCtlClose(self: *Server, fd: posix.fd_t) void {
+        for (self.pending_ctl_close_fds.items) |existing| {
+            if (existing == fd) return;
+        }
+        self.pending_ctl_close_fds.append(self.allocator, fd) catch {};
+    }
+
+    fn armCtlWatcher(self: *Server, fd: posix.fd_t) void {
+        if (self.loop_ptr == null) return;
+        if (self.ctl_watchers.contains(fd)) return;
+
+        const node = self.allocator.create(CtlWatcher) catch return;
+        node.* = .{ .srv = @ptrCast(self), .fd = fd };
+        self.ctl_watchers.put(fd, node) catch {
+            self.allocator.destroy(node);
+            return;
+        };
+
+        const watcher = xev.File.initFd(fd);
+        watcher.poll(self.loop_ptr.?, &node.completion, .read, CtlWatcher, node, ctlWatcherCallback);
+    }
+
+    fn disarmCtlWatcher(self: *Server, fd: posix.fd_t) void {
+        if (self.ctl_watchers.fetchRemove(fd)) |kv| {
+            self.allocator.destroy(kv.value);
         }
     }
 
@@ -239,6 +311,28 @@ pub const Server = struct {
 
         while (accept_ctx.server.socket.tryAccept() catch null) |conn| {
             accept_ctx.server.dispatchNewConnection(conn, accept_ctx.allocator, accept_ctx.poll_fds);
+        }
+
+        return .rearm;
+    }
+
+    fn ctlWatcherCallback(
+        ctx: ?*CtlWatcher,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        _: xev.File,
+        result: xev.PollError!xev.PollEvent,
+    ) xev.CallbackAction {
+        const watch = ctx orelse return .disarm;
+        const server: *Server = @ptrCast(@alignCast(watch.srv));
+        _ = result catch {
+            server.queueCtlClose(watch.fd);
+            return .disarm;
+        };
+
+        if (!server.handleBinaryCtlMessage(watch.fd)) {
+            server.queueCtlClose(watch.fd);
+            return .disarm;
         }
 
         return .rearm;
@@ -372,12 +466,14 @@ pub const Server = struct {
                 // MUX binary control channel.
                 ses.debugLog("accept: MUX ctl channel fd={d}", .{conn.fd});
                 self.binary_ctl_fds.put(conn.fd, {}) catch {};
+                self.armCtlWatcher(conn.fd);
                 poll_fds.append(alloc, .{
                     .fd = conn.fd,
                     .events = posix.POLL.IN,
                     .revents = 0,
                 }) catch {
                     _ = self.binary_ctl_fds.remove(conn.fd);
+                    self.disarmCtlWatcher(conn.fd);
                     var tmp = conn;
                     tmp.close();
                 };
@@ -450,11 +546,13 @@ pub const Server = struct {
                 if (self.ses_state.panes.getPtr(uuid_hex)) |pane| {
                     if (pane.pod_ctl_fd) |old_fd| {
                         _ = self.binary_ctl_fds.remove(old_fd);
+                        self.disarmCtlWatcher(old_fd);
                         self.ses_state.pending_remove_poll_fds.append(self.ses_state.allocator, old_fd) catch {};
                         posix.close(old_fd);
                     }
                     pane.pod_ctl_fd = conn.fd;
                     self.binary_ctl_fds.put(conn.fd, {}) catch {};
+                    self.armCtlWatcher(conn.fd);
                     // Add to poll set for reading control messages.
                     poll_fds.append(alloc, .{
                         .fd = conn.fd,
