@@ -588,6 +588,9 @@ const Pod = struct {
 
         const server_watcher = xev.File.initFd(self.server.getFd());
         var server_completion: xev.Completion = .{};
+        var timer_completion: xev.Completion = .{};
+        var ticker = try xev.Timer.init();
+        defer ticker.deinit();
 
         var poll_fds: [3]posix.pollfd = undefined;
         var buf = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
@@ -598,22 +601,13 @@ const Pod = struct {
         var accept_ctx = AcceptContext{ .pod = self, .backlog_tmp = backlog_tmp };
         server_watcher.poll(&loop, &server_completion, .read, AcceptContext, &accept_ctx, acceptCallback);
 
-        var last_meta_ms: i64 = 0;
+        var timer_ctx = TimerContext{
+            .pod = self,
+            .opts = opts,
+        };
+        ticker.run(&loop, &timer_completion, 100, TimerContext, &timer_ctx, timerCallback);
 
         while (true) {
-            // Phase 2: POD is source of truth; periodically push metadata to SES.
-            self.uplink.tick(self.pty.child_pid);
-
-            // Periodically refresh sidecar meta so PID/cwd changes are reflected.
-            if (opts.write_meta) {
-                const now_ms: i64 = std.time.milliTimestamp();
-                if (now_ms - last_meta_ms >= 1000) {
-                    // CWD: if we see OSC 7, prefer it; otherwise keep initial cwd.
-                    const live_cwd = self.lastOsc7Cwd();
-                    writePodMetaSidecar(self.allocator, self.uuid[0..], opts.name, live_cwd, opts.labels, @intCast(c.getpid()), self.pty.child_pid, opts.created_at) catch {};
-                    last_meta_ms = now_ms;
-                }
-            }
             // Exit if the child shell/process exited.
             if (self.pty.pollStatus() != null) break;
 
@@ -631,7 +625,7 @@ const Pod = struct {
             // client (optional)
             poll_fds[2] = .{ .fd = if (self.client) |client_conn| client_conn.fd else -1, .events = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR, .revents = 0 };
 
-            _ = posix.poll(&poll_fds, 1000) catch |err| {
+            _ = posix.poll(&poll_fds, 100) catch |err| {
                 if (err == error.Interrupted) continue;
                 return err;
             };
@@ -726,6 +720,12 @@ const Pod = struct {
         backlog_tmp: []u8,
     };
 
+    const TimerContext = struct {
+        pod: *Pod,
+        opts: RunOptions,
+        last_meta_ms: i64 = 0,
+    };
+
     fn acceptCallback(
         ctx: ?*AcceptContext,
         _: *xev.Loop,
@@ -738,6 +738,38 @@ const Pod = struct {
 
         while (accept_ctx.pod.server.tryAccept() catch null) |conn| {
             accept_ctx.pod.handleAcceptedConnection(conn, accept_ctx.backlog_tmp);
+        }
+
+        return .rearm;
+    }
+
+    fn timerCallback(
+        ctx: ?*TimerContext,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        result: xev.Timer.RunError!void,
+    ) xev.CallbackAction {
+        const timer_ctx = ctx orelse return .disarm;
+        _ = result catch return .rearm;
+
+        timer_ctx.pod.uplink.tick(timer_ctx.pod.pty.child_pid);
+
+        if (timer_ctx.opts.write_meta) {
+            const now_ms: i64 = std.time.milliTimestamp();
+            if (now_ms - timer_ctx.last_meta_ms >= 1000) {
+                const live_cwd = timer_ctx.pod.lastOsc7Cwd();
+                writePodMetaSidecar(
+                    timer_ctx.pod.allocator,
+                    timer_ctx.pod.uuid[0..],
+                    timer_ctx.opts.name,
+                    live_cwd,
+                    timer_ctx.opts.labels,
+                    @intCast(c.getpid()),
+                    timer_ctx.pod.pty.child_pid,
+                    timer_ctx.opts.created_at,
+                ) catch {};
+                timer_ctx.last_meta_ms = now_ms;
+            }
         }
 
         return .rearm;
