@@ -36,6 +36,7 @@ pub const FocusContext = enum { split, float };
 const state_tabs = @import("state_tabs.zig");
 const state_serialize = @import("state_serialize.zig");
 const state_sync = @import("state_sync.zig");
+const state_pulse = @import("state_pulse.zig");
 const mouse_selection = @import("mouse_selection.zig");
 
 pub const TabFocusKind = enum { split, float };
@@ -601,89 +602,12 @@ pub const State = struct {
 
     /// Start winpulse animation for the currently focused pane
     pub fn startPulse(self: *State) void {
-        if (!self.config.winpulse_enabled) return;
-
-        const PaneInfo = struct {
-            uuid: [32]u8,
-            x: u16,
-            y: u16,
-            width: u16,
-            height: u16,
-        };
-
-        // Get focused pane UUID and bounds
-        const pane_info: ?PaneInfo = blk: {
-            if (self.active_floating) |idx| {
-                if (idx < self.floats.items.len) {
-                    const pane = self.floats.items[idx];
-                    break :blk PaneInfo{
-                        .uuid = pane.uuid,
-                        .x = pane.x,
-                        .y = pane.y,
-                        .width = pane.width,
-                        .height = pane.height,
-                    };
-                }
-            }
-            if (self.currentLayout().getFocusedPane()) |pane| {
-                break :blk PaneInfo{
-                    .uuid = pane.uuid,
-                    .x = pane.x,
-                    .y = pane.y,
-                    .width = pane.width,
-                    .height = pane.height,
-                };
-            }
-            break :blk null;
-        };
-
-        if (pane_info) |info| {
-            // Clean up any previous pulse first
-            self.stopPulse();
-
-            // Now set up the new pulse
-            self.pulse_start_ms = std.time.milliTimestamp();
-            self.pulse_pane_uuid = info.uuid;
-            self.pulse_pane_bounds = PaneBounds{
-                .x = info.x,
-                .y = info.y,
-                .width = info.width,
-                .height = info.height,
-            };
-
-            // Save original colors
-            const size = @as(usize, info.width) * @as(usize, info.height);
-            const saved = self.allocator.alloc(winpulse_mod.SavedCell, size) catch {
-                return;
-            };
-
-            var idx: usize = 0;
-            var row: u16 = 0;
-            while (row < info.height) : (row += 1) {
-                var col: u16 = 0;
-                while (col < info.width) : (col += 1) {
-                    const cell = self.renderer.next.getConst(info.x + col, info.y + row);
-                    saved[idx] = winpulse_mod.SavedCell{
-                        .fg = cell.fg,
-                        .bg = cell.bg,
-                    };
-                    idx += 1;
-                }
-            }
-            self.pulse_saved_colors = saved;
-            self.needs_render = true;
-        }
+        return state_pulse.startPulse(self);
     }
 
     /// Stop winpulse animation and restore original colors
     pub fn stopPulse(self: *State) void {
-        if (self.pulse_saved_colors) |saved| {
-            self.allocator.free(saved);
-            self.pulse_saved_colors = null;
-        }
-        self.pulse_start_ms = 0;
-        self.pulse_pane_uuid = null;
-        self.pulse_pane_bounds = null;
+        return state_pulse.stopPulse(self);
     }
 
     pub fn refreshPaneCwd(self: *State, pane: *Pane) ?[]const u8 {
