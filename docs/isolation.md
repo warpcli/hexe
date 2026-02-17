@@ -8,7 +8,9 @@ Hexe uses **voidbox** for Linux sandboxing with three types of isolation:
 
 1. **Process Isolation** - Namespaces (user, PID, mount, network, UTS, IPC)
 2. **Resource Isolation** - Cgroups (CPU, memory, process limits)
-3. **Filesystem Isolation** - Bind mounts, overlays, private /tmp
+3. **Filesystem Isolation** - Chroot-style bind mounts with private /tmp
+
+Filesystem isolation works by creating a **chroot-style environment** using bind mounts inside a mount namespace. Instead of the traditional `chroot()` syscall, voidbox selectively bind-mounts only the directories each profile needs into a fresh mount namespace — giving you a restricted root filesystem view without the security pitfalls of classic chroot.
 
 ## Isolation Profiles
 
@@ -31,56 +33,44 @@ Hexe uses **voidbox** for Linux sandboxing with three types of isolation:
 - ✅ User namespace (different UID/GID mapping)
 
 **Filesystem:**
-- ✅ Private `/tmp` (isolated from other panes)
+- ❌ No filesystem isolation (no bind mounts, no private /tmp)
 
 **Use case**: Basic privilege separation, semi-trusted tools
 
 **What you'll see:**
 ```bash
-ls /tmp          # Your private /tmp
-touch /tmp/test  # Won't appear in other panes
+whoami           # Different UID mapping
+ls /             # Full filesystem (no restrictions)
 ```
 
 ---
 
-### `default`
-**Standard isolation** - Process visibility control.
+### `default` / `balanced`
+**Process + mount isolation** - Chroot-style filesystem with separate mount table.
+
+> `default` and `balanced` are equivalent profiles.
 
 **Process:**
 - ✅ User namespace
 - ✅ PID namespace (can't see other processes)
+- ✅ Mount namespace (separate mount table)
 
-**Filesystem:**
-- ✅ Private `/tmp`
-- ✅ Bind mounts: `/bin`, `/usr`, `/lib`, `/lib64`, `/nix`, `/pkg`, `/opt`
-- ✅ Your `/home/<user>` directory (read-write)
+**Filesystem (chroot-style bind mounts):**
+- ✅ Private `/tmp` (tmpfs)
+- ✅ Read-only: `/bin`, `/usr`, `/lib`, `/lib64`, `/etc`
+- ✅ Read-only: `/nix`, `/pkg`, `/opt`, `/run/current-system` (package managers)
+- ✅ Read-write: Your `/home/<user>` directory
+- ✅ Fresh `/proc`, `/dev`
 
-**Use case**: Running tools that shouldn't see other processes
+**Use case**: Isolated environment for development/testing
 
 **What you'll see:**
 ```bash
 ps aux           # Only shows processes in this pane!
 ls /home         # Only your user directory
-ls /             # System dirs + your home + tmp
+ls /             # Only: bin, usr, lib, etc, nix, pkg, opt, home/<you>, tmp
+mount            # Separate mount table (mounts don't leak to host)
 ```
-
----
-
-### `balanced`
-**Process + mount isolation** - Separate filesystem view.
-
-**Process:**
-- ✅ User namespace
-- ✅ PID namespace
-- ✅ Mount namespace (separate mount table)
-
-**Filesystem:**
-- ✅ Private `/tmp`
-- ✅ Bind mounts: `/bin`, `/usr`, `/lib`, `/lib64`, `/nix`, `/pkg`, `/opt`
-- ✅ Your `/home/<user>` directory (read-write)
-- ✅ Separate mount table (mounts don't leak to host)
-
-**Use case**: Isolated environment for development/testing
 
 ---
 
@@ -92,13 +82,19 @@ ls /             # System dirs + your home + tmp
 - ✅ PID namespace
 - ✅ Mount namespace
 - ❌ Network namespace (network allowed!)
-- ✅ UTS namespace (isolated hostname)
+- ✅ UTS namespace (hostname set to `hexe`)
 - ✅ IPC namespace (isolated shared memory)
 
-**Filesystem:**
-- ✅ Private `/tmp`
-- ✅ Bind mounts: `/bin`, `/usr`, `/lib`, `/lib64`, `/nix`, `/pkg`, `/opt`
-- ✅ Your `/home/<user>` directory (read-write)
+**Security:**
+- ✅ `no_new_privs` (can't escalate privileges)
+- ✅ Capabilities dropped
+
+**Filesystem (chroot-style bind mounts):**
+- ✅ Private `/tmp` (tmpfs)
+- ✅ Read-only: `/bin`, `/usr`, `/lib`, `/lib64`, `/etc`
+- ✅ Read-only: `/nix`, `/pkg`, `/opt`, `/run/current-system` (package managers)
+- ✅ Read-write: Your `/home/<user>` directory
+- ✅ Fresh `/proc`, `/dev`
 
 **Resources** (if configured):
 - ✅ Memory limit (e.g., 512M)
@@ -111,30 +107,34 @@ ls /             # System dirs + your home + tmp
 ```bash
 ps aux                # Only this pane's processes
 curl example.com      # Network works!
-ls /                  # Only: bin, usr, lib, nix, pkg, opt, home/<you>, tmp
+ls /                  # Only: bin, usr, lib, etc, nix, pkg, opt, home/<you>, tmp
 touch /tmp/test       # Private tmp
-hostname              # Different hostname
+hostname              # "hexe" (isolated hostname)
 ```
 
 ---
 
 ### `full`
-**Maximum isolation** - Minimal access, no network.
+**Maximum isolation** - Restricted access, no network.
 
 **Process:**
 - ✅ User namespace
 - ✅ PID namespace
 - ✅ Mount namespace
 - ✅ **Network namespace (NO NETWORK!)**
-- ✅ UTS namespace
+- ✅ UTS namespace (hostname set to `hexe`)
 - ✅ IPC namespace
-- ✅ Cgroup namespace
 
-**Filesystem:**
-- ✅ Private `/tmp`
-- ✅ Bind mounts: `/bin`, `/usr`, `/lib`, `/lib64` **ONLY**
-- ❌ NO `/nix`, `/pkg`, `/opt`
-- ❌ NO `/home`
+**Security:**
+- ✅ `no_new_privs` (can't escalate privileges)
+- ✅ Capabilities dropped
+
+**Filesystem (chroot-style bind mounts):**
+- ✅ Private `/tmp` (tmpfs)
+- ✅ Read-only: `/bin`, `/usr`, `/lib`, `/lib64`, `/etc`
+- ❌ NO `/nix`, `/pkg`, `/opt`, `/run/current-system`
+- ✅ Read-write: Your `/home/<user>` directory
+- ✅ Fresh `/proc`, `/dev`
 
 **Resources** (if configured):
 - ✅ Memory limit
@@ -147,8 +147,7 @@ hostname              # Different hostname
 ```bash
 ps aux                # Only this pane's processes
 ping 8.8.8.8          # Network unreachable!
-ls /                  # Only: bin, usr, lib, lib64, tmp
-ls /home              # No such directory
+ls /                  # Only: bin, usr, lib, lib64, etc, home/<you>, tmp
 curl example.com      # Fails - no network
 ```
 
@@ -199,10 +198,10 @@ hx.ses.layout.define({
 ```
 
 **Isolation fields:**
-- `profile`: Profile name (none, minimal, default, balanced, sandbox, full)
-- `memory`: Memory limit (e.g., "1G", "512M", "256M")
-- `cpu`: CPU quota as "period max" (e.g., "100000 100000" = 1 core, "50000 100000" = 0.5 cores)
-- `pids`: Maximum number of processes (e.g., 100, 1000)
+- `profile`: Profile name (`none`, `minimal`, `default`/`balanced`, `sandbox`, `full`)
+- `memory`: Memory limit (e.g., "1G", "512M", "256M") — sandbox/full only
+- `cpu`: CPU quota as "period max" (e.g., "100000 100000" = 1 core, "50000 100000" = 0.5 cores) — sandbox/full only
+- `pids`: Maximum number of processes (e.g., 100, 1000) — sandbox/full only
 
 ---
 
@@ -264,29 +263,37 @@ isolation = {
 
 ## Filesystem Isolation Details
 
+Profiles with mount namespace (`default`/`balanced`, `sandbox`, `full`) use **chroot-style bind mounts** to construct a restricted root filesystem. Only explicitly listed directories are visible inside the isolated pane.
+
 ### Bind Mounts (Read-only vs Read-write)
 
 **Read-only mounts** (safe, can't modify):
-- `/bin`, `/usr`, `/lib`, `/lib64` - System binaries
-- `/nix`, `/pkg`, `/opt` - Package managers (not in `full`)
+- `/bin`, `/usr`, `/lib`, `/lib64`, `/etc` - System binaries and configuration
+- `/nix`, `/pkg`, `/opt`, `/run/current-system` - Package managers (not in `full`)
 
 **Read-write mounts** (you can modify):
-- `/home/<youruser>` - Your home directory (not in `full`)
-- `/tmp` - Private tmpfs (always isolated)
+- `/home/<youruser>` - Your home directory
+
+**Fresh mounts** (generated per-pane):
+- `/tmp` - Private tmpfs
+- `/proc` - Namespace-filtered process list
+- `/dev` - Filtered device nodes
+
+> **Note**: `minimal` has NO filesystem isolation — it only creates a user namespace.
 
 ### What's Hidden?
 
-In isolation modes, these are **not visible**:
+In chroot-style isolation, only bind-mounted paths exist. These are **not visible**:
 
 - `/root` - Root home directory
 - `/home/<otheruser>` - Other users' home directories
-- `/proc` - Only shows your processes (PID namespace)
-- `/sys` - System information (filtered)
-- `/dev` - Some devices hidden
+- `/sys` - System information
+- `/var`, `/srv`, `/mnt` - Other system directories
+- `/proc` shows only your processes (PID namespace)
 
 ### Private /tmp
 
-Every isolated pane gets its own `/tmp`:
+Every isolated pane (except `minimal`) gets its own `/tmp` via tmpfs:
 
 ```bash
 # Pane 1:
@@ -317,15 +324,15 @@ ps aux        # Only sees npm processes
 ### Example 2: Running Untrusted Code
 
 ```bash
-# Full isolation - no network, minimal filesystem
+# Full isolation - no network, restricted filesystem
 hexe mux float --command "python3 /tmp/untrusted.py" \
   --isolation=full
 
 # The script:
-# - Can't see your /home
 # - Can't access network
 # - Can't see other processes
-# - Limited to 512M RAM (if configured)
+# - Can't see /nix, /pkg, /opt
+# - Limited to configured RAM (if set)
 # - Can't fork bomb (PID limit)
 ```
 
@@ -355,9 +362,10 @@ Press `Ctrl+Alt+B` to open isolated build environment.
 ### What Isolation Provides
 
 ✅ **Process containment** - Can't see/kill other processes
-✅ **Resource limits** - Can't exhaust system memory/CPU
-✅ **Filesystem restriction** - Can't access other users' data
+✅ **Resource limits** - Can't exhaust system memory/CPU (sandbox/full)
+✅ **Chroot-style filesystem** - Only bind-mounted paths are visible
 ✅ **Network isolation** (full profile) - Can't make network connections
+✅ **Privilege restriction** - `no_new_privs` prevents privilege escalation
 
 ### What Isolation Does NOT Provide
 
@@ -390,11 +398,11 @@ sudo sysctl -w kernel.unprivileged_userns_clone=1
 
 ### Can't See My Files
 
-**Issue**: `/home` is empty in isolated shell.
+**Issue**: Files outside `/home` are not accessible.
 
-**Cause**: Using `full` profile which doesn't mount `/home`.
+**Cause**: Chroot-style bind mounts only expose specific directories. Paths like `/var`, `/srv`, `/mnt` are not mounted.
 
-**Fix**: Use `sandbox`, `balanced`, or `default` profile instead.
+**Fix**: Use `none` or `minimal` profile for full filesystem access, or add custom bind mounts.
 
 ### Network Not Working
 
@@ -436,7 +444,7 @@ Future enhancement: Custom network namespaces with virtual interfaces for contro
 |---------|---------------|---------------|
 | **Startup Time** | <10ms | ~100-500ms |
 | **Overhead** | Minimal | Container runtime |
-| **Filesystem** | Bind mounts | Image layers |
+| **Filesystem** | Chroot-style bind mounts | Image layers |
 | **Process Isolation** | PID namespace | Full container |
 | **Network** | Optional | Virtual networks |
 | **Use Case** | Fast task isolation | Full application containers |
