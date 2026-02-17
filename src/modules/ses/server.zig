@@ -130,11 +130,15 @@ pub const Server = struct {
 
             poll_registry.resetRevents(&poll_fds);
 
-            // Poll with timeout for cleanup + persistence tasks
-            const ready = posix.poll(poll_fds.items, 1000) catch |err| {
+            // Poll with short timeout; periodic tasks are time-gated above.
+            const ready = posix.poll(poll_fds.items, 100) catch |err| {
                 if (err == error.Interrupted) continue;
                 return err;
             };
+
+            // Progress xev watchers every cycle so server accept is not gated
+            // on poll readiness from unrelated fds.
+            try loop.run(.no_wait);
 
             if (ready == 0) {
                 // Timeout - do periodic cleanup
@@ -142,8 +146,6 @@ pub const Server = struct {
                 self.ses_state.cleanupExpiredDetachedSessions();
                 continue;
             }
-
-            try loop.run(.no_wait);
 
             // Check client sockets
             var i: usize = 1;
