@@ -3,6 +3,7 @@ const posix = std.posix;
 const core = @import("core");
 const wire = core.wire;
 const pod_protocol = core.pod_protocol;
+const xev = @import("xev").Dynamic;
 
 const terminal = @import("terminal.zig");
 
@@ -20,6 +21,10 @@ const keybinds = @import("keybinds.zig");
 
 pub fn runMainLoop(state: *State) !void {
     const allocator = state.allocator;
+
+    try xev.detect();
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
 
     // Enter raw mode.
     const orig_termios = try terminal.enableRawMode(posix.STDIN_FILENO);
@@ -57,6 +62,8 @@ pub fn runMainLoop(state: *State) !void {
 
     // Main loop.
     while (state.running) {
+        try loop.run(.no_wait);
+
         // Clear skip flag from previous iteration.
         state.skip_dead_check = false;
 
@@ -194,7 +201,6 @@ pub fn runMainLoop(state: *State) !void {
             ses_fd_idx = poll_fds.items.len;
             try poll_fds.append(allocator, .{ .fd = ctl_fd, .events = posix.POLL.IN, .revents = 0 });
         }
-
 
         // Calculate poll timeout - wait for next frame, status update, or input.
         const now = std.time.milliTimestamp();
