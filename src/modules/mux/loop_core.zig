@@ -290,9 +290,6 @@ pub fn runMainLoop(state: *State) !void {
     try stdout.writeAll("\x1b[?1049h\x1b[2J\x1b[3J\x1b[H\x1b[0m\x1b(B\x1b)0\x0f\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h\x1b[?2004h\x1b[>3u");
     defer stdout.writeAll("\x1b[<u\x1b[?2004l\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[0m\x1b[?25h\x1b[?1049l") catch {};
 
-    // Build poll fds (dynamic to support unlimited panes).
-    var poll_fds: std.ArrayList(posix.pollfd) = .empty;
-    defer poll_fds.deinit(allocator);
     var buffer: [1024 * 1024]u8 = undefined; // Larger buffer for efficiency
     var ses_vt_buffer: [1024 * 1024]u8 = undefined;
     var ses_ctl_buffer: [1024 * 1024]u8 = undefined;
@@ -363,7 +360,6 @@ pub fn runMainLoop(state: *State) !void {
 
     // Main loop.
     while (state.running) {
-        try loop.run(.no_wait);
         ensureSesVtWatcherArmed(state, &ses_vt_watcher, &ses_vt_buffer);
         ensureSesCtlWatcherArmed(state, &ses_ctl_watcher, &ses_ctl_buffer);
         ensureStdinWatcherArmed(state, &stdin_watcher, &stdin_buffer);
@@ -460,6 +456,9 @@ pub fn runMainLoop(state: *State) !void {
                 allocator.destroy(kv.value);
             }
         }
+
+        try loop.run(.once);
+        if (!state.running) break;
 
         // Clear skip flag from previous iteration.
         state.skip_dead_check = false;
@@ -559,13 +558,7 @@ pub fn runMainLoop(state: *State) !void {
             }
         }
 
-        // Build poll list for local pane PTYs.
-        poll_fds.clearRetainingCapacity();
-
-        // Calculate poll timeout - wait for next frame, status update, or input.
-        const now = std.time.milliTimestamp();
-        const since_render = now - last_render;
-        const since_status = now - last_status_update;
+        const now2 = std.time.milliTimestamp();
         const want_anim = blk: {
             const uuid = state.getCurrentFocusedUuid() orelse break :blk false;
 
@@ -600,19 +593,6 @@ pub fn runMainLoop(state: *State) !void {
             break :blk true;
         };
         const status_update_interval: i64 = if (want_anim) status_update_interval_anim else status_update_interval_base;
-        const until_status: i64 = @max(0, status_update_interval - since_status);
-        const until_key_timer: i64 = blk: {
-            if (state.nextKeyTimerDeadlineMs(now)) |deadline| {
-                break :blk @max(0, deadline - now);
-            }
-            break :blk std.math.maxInt(i64);
-        };
-        const frame_timeout: i32 = if (!state.needs_render) 100 else if (since_render >= 16) 0 else @intCast(16 - since_render);
-        const timeout: i32 = @intCast(@min(@as(i64, frame_timeout), @min(until_status, until_key_timer)));
-        _ = posix.poll(poll_fds.items, timeout) catch continue;
-
-        // Check if status bar needs periodic update.
-        const now2 = std.time.milliTimestamp();
 
         // Auto-scroll while selecting when the mouse is near the top/bottom.
         // This allows selecting hidden content by holding the mouse at the edge.
