@@ -89,6 +89,19 @@ const StdinWatcher = struct {
     armed: bool = false,
 };
 
+const LocalPaneSlot = struct {
+    state: *State,
+    fd: posix.fd_t,
+    buffer: []u8,
+    pending_dead_splits: *std.ArrayList(u16),
+    pending_remove_fds: *std.ArrayList(posix.fd_t),
+};
+
+const LocalPaneWatcher = struct {
+    completion: xev.Completion = .{},
+    slot: LocalPaneSlot,
+};
+
 fn ensureSesVtWatcherArmed(state: *State, watcher: *SesVtWatcher, buffer: []u8) void {
     if (watcher.watched_fd != null) return;
     const vt_fd = state.ses_client.getVtFd() orelse return;
@@ -270,6 +283,72 @@ fn stdinCallback(
     return .rearm;
 }
 
+fn queueFd(list: *std.ArrayList(posix.fd_t), fd: posix.fd_t, allocator: std.mem.Allocator) void {
+    for (list.items) |v| {
+        if (v == fd) return;
+    }
+    list.append(allocator, fd) catch {};
+}
+
+fn fdListContains(fds: []const posix.fd_t, fd: posix.fd_t) bool {
+    for (fds) |v| {
+        if (v == fd) return true;
+    }
+    return false;
+}
+
+fn findLocalSplitPaneByFd(state: *State, fd: posix.fd_t) ?*Pane {
+    var pane_it = state.currentLayout().splitIterator();
+    while (pane_it.next()) |pane| {
+        if (pane.*.hasPollableFd() and pane.*.getFd() == fd) return pane.*;
+    }
+    return null;
+}
+
+fn localPaneCallback(
+    ctx: ?*LocalPaneSlot,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    _: xev.File,
+    result: xev.PollError!xev.PollEvent,
+) xev.CallbackAction {
+    const slot = ctx orelse return .disarm;
+    _ = result catch {
+        if (findLocalSplitPaneByFd(slot.state, slot.fd)) |pane| {
+            slot.pending_dead_splits.append(slot.state.allocator, pane.id) catch {};
+        }
+        queueFd(slot.pending_remove_fds, slot.fd, slot.state.allocator);
+        return .disarm;
+    };
+
+    const pane = findLocalSplitPaneByFd(slot.state, slot.fd) orelse {
+        queueFd(slot.pending_remove_fds, slot.fd, slot.state.allocator);
+        return .disarm;
+    };
+
+    if (pane.poll(slot.buffer)) |had_data| {
+        if (had_data) {
+            pane.vt.invalidateRenderState();
+            slot.state.needs_render = true;
+        }
+        if (pane.takeOscExpectResponse()) {
+            slot.state.osc_reply_target_uuid = pane.uuid;
+        }
+        if (pane.did_clear) {
+            slot.state.force_full_render = true;
+            slot.state.renderer.invalidate();
+        }
+    } else |_| {}
+
+    if (!pane.isAlive()) {
+        slot.pending_dead_splits.append(slot.state.allocator, pane.id) catch {};
+        queueFd(slot.pending_remove_fds, slot.fd, slot.state.allocator);
+        return .disarm;
+    }
+
+    return .rearm;
+}
+
 pub fn runMainLoop(state: *State) !void {
     const allocator = state.allocator;
 
@@ -301,6 +380,22 @@ pub fn runMainLoop(state: *State) !void {
     var ses_vt_watcher: SesVtWatcher = .{ .loop = &loop };
     var ses_ctl_watcher: SesCtlWatcher = .{ .loop = &loop };
     var stdin_watcher: StdinWatcher = .{ .loop = &loop };
+    var local_pane_watchers: std.AutoHashMap(posix.fd_t, *LocalPaneWatcher) = std.AutoHashMap(posix.fd_t, *LocalPaneWatcher).init(allocator);
+    defer {
+        var it = local_pane_watchers.iterator();
+        while (it.next()) |entry| {
+            allocator.destroy(entry.value_ptr.*);
+        }
+        local_pane_watchers.deinit();
+    }
+    var pending_local_pane_remove_fds: std.ArrayList(posix.fd_t) = .empty;
+    defer pending_local_pane_remove_fds.deinit(allocator);
+    var pending_dead_splits: std.ArrayList(u16) = .empty;
+    defer pending_dead_splits.deinit(allocator);
+    var current_local_split_fds: std.ArrayList(posix.fd_t) = .empty;
+    defer current_local_split_fds.deinit(allocator);
+    var stale_local_split_fds: std.ArrayList(posix.fd_t) = .empty;
+    defer stale_local_split_fds.deinit(allocator);
 
     // Frame timing.
     var last_render: i64 = std.time.milliTimestamp();
@@ -334,6 +429,53 @@ pub fn runMainLoop(state: *State) !void {
         ensureSesVtWatcherArmed(state, &ses_vt_watcher, &ses_vt_buffer);
         ensureSesCtlWatcherArmed(state, &ses_ctl_watcher, &ses_ctl_buffer);
         ensureStdinWatcherArmed(state, &stdin_watcher, &stdin_buffer);
+
+        for (pending_local_pane_remove_fds.items) |fd| {
+            if (local_pane_watchers.fetchRemove(fd)) |kv| {
+                allocator.destroy(kv.value);
+            }
+        }
+        pending_local_pane_remove_fds.clearRetainingCapacity();
+
+        current_local_split_fds.clearRetainingCapacity();
+        var local_it = state.currentLayout().splitIterator();
+        while (local_it.next()) |pane| {
+            if (!pane.*.hasPollableFd()) continue;
+            const fd = pane.*.getFd();
+            current_local_split_fds.append(allocator, fd) catch continue;
+            if (!local_pane_watchers.contains(fd)) {
+                const node = allocator.create(LocalPaneWatcher) catch continue;
+                node.* = .{
+                    .slot = .{
+                        .state = state,
+                        .fd = fd,
+                        .buffer = &buffer,
+                        .pending_dead_splits = &pending_dead_splits,
+                        .pending_remove_fds = &pending_local_pane_remove_fds,
+                    },
+                };
+                local_pane_watchers.put(fd, node) catch {
+                    allocator.destroy(node);
+                    continue;
+                };
+                const file = xev.File.initFd(fd);
+                file.poll(&loop, &node.completion, .read, LocalPaneSlot, &node.slot, localPaneCallback);
+            }
+        }
+
+        stale_local_split_fds.clearRetainingCapacity();
+        var watch_it = local_pane_watchers.iterator();
+        while (watch_it.next()) |entry| {
+            const fd = entry.key_ptr.*;
+            if (!fdListContains(current_local_split_fds.items, fd)) {
+                stale_local_split_fds.append(allocator, fd) catch {};
+            }
+        }
+        for (stale_local_split_fds.items) |fd| {
+            if (local_pane_watchers.fetchRemove(fd)) |kv| {
+                allocator.destroy(kv.value);
+            }
+        }
 
         // Clear skip flag from previous iteration.
         state.skip_dead_check = false;
@@ -436,17 +578,6 @@ pub fn runMainLoop(state: *State) !void {
         // Build poll list for local pane PTYs.
         poll_fds.clearRetainingCapacity();
 
-        var pane_it = state.currentLayout().splitIterator();
-        while (pane_it.next()) |pane| {
-            if (pane.*.hasPollableFd()) {
-                try poll_fds.append(allocator, .{
-                    .fd = pane.*.getFd(),
-                    .events = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR,
-                    .revents = 0,
-                });
-            }
-        }
-
         // Add local floats (pod floats get data via VT channel).
         for (state.floats.items) |pane| {
             if (pane.hasPollableFd()) {
@@ -536,45 +667,14 @@ pub fn runMainLoop(state: *State) !void {
             last_status_update = now2;
         }
 
-        // Handle PTY output.
-        // NOTE: we do this before handling stdin/actions that can mutate the
-        // layout, so pollfd indices remain consistent with the pane iteration.
-        var idx: usize = 0;
         dead_splits.clearRetainingCapacity();
-
-        pane_it = state.currentLayout().splitIterator();
-        while (pane_it.next()) |pane| {
-            if (!pane.*.hasPollableFd()) continue;
-            if (idx < poll_fds.items.len) {
-                if (poll_fds.items[idx].revents & posix.POLL.IN != 0) {
-                    if (pane.*.poll(&buffer)) |had_data| {
-                        if (had_data) {
-                            // If the viewport is scrolled, new output still changes what should be visible:
-                            // lines may be pushed into/out of scrollback, even if the top line stays anchored.
-                            // Force the render snapshot to refresh so the contents don't "freeze".
-                            pane.*.vt.invalidateRenderState();
-                            state.needs_render = true;
-                        }
-                        if (pane.*.takeOscExpectResponse()) {
-                            state.osc_reply_target_uuid = pane.*.uuid;
-                        }
-                        if (pane.*.did_clear) {
-                            state.force_full_render = true;
-                            state.renderer.invalidate();
-                        }
-                    } else |_| {}
-                }
-                if (poll_fds.items[idx].revents & posix.POLL.HUP != 0) {
-                    dead_splits.append(allocator, pane.*.id) catch {};
-                } else if (poll_fds.items[idx].revents & posix.POLL.ERR != 0) {
-                    // ERR without HUP — verify process actually exited.
-                    if (!pane.*.isAlive()) {
-                        dead_splits.append(allocator, pane.*.id) catch {};
-                    }
-                }
-                idx += 1;
-            }
+        for (pending_dead_splits.items) |dead_id| {
+            dead_splits.append(allocator, dead_id) catch {};
         }
+        pending_dead_splits.clearRetainingCapacity();
+
+        // Handle PTY output for floating local panes.
+        var idx: usize = 0;
 
         // Handle floating pane output.
         dead_floating.clearRetainingCapacity();
