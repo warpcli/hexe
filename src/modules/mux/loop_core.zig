@@ -19,12 +19,44 @@ const loop_render = @import("loop_render.zig");
 const float_completion = @import("float_completion.zig");
 const keybinds = @import("keybinds.zig");
 
+const LoopTimerContext = struct {
+    state: *State,
+    last_pane_sync: i64,
+    last_heartbeat: i64,
+    pane_sync_interval: i64,
+    heartbeat_interval: i64,
+};
+
+fn loopTimerCallback(
+    ctx: ?*LoopTimerContext,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    result: xev.Timer.RunError!void,
+) xev.CallbackAction {
+    const timer_ctx = ctx orelse return .disarm;
+    _ = result catch return .rearm;
+
+    const now = std.time.milliTimestamp();
+    if (now - timer_ctx.last_pane_sync >= timer_ctx.pane_sync_interval) {
+        timer_ctx.last_pane_sync = now;
+        timer_ctx.state.syncFocusedPaneInfo();
+    }
+    if (now - timer_ctx.last_heartbeat >= timer_ctx.heartbeat_interval) {
+        timer_ctx.last_heartbeat = now;
+        _ = timer_ctx.state.ses_client.sendPing();
+    }
+
+    return .rearm;
+}
+
 pub fn runMainLoop(state: *State) !void {
     const allocator = state.allocator;
 
     try xev.detect();
     var loop = try xev.Loop.init(.{});
     defer loop.deinit();
+    var loop_timer = try xev.Timer.init();
+    defer loop_timer.deinit();
 
     // Enter raw mode.
     const orig_termios = try terminal.enableRawMode(posix.STDIN_FILENO);
@@ -45,14 +77,22 @@ pub fn runMainLoop(state: *State) !void {
     // Frame timing.
     var last_render: i64 = std.time.milliTimestamp();
     var last_status_update: i64 = last_render;
-    var last_pane_sync: i64 = last_render;
-    var last_heartbeat: i64 = last_render;
     // Update status bar periodically.
     // This is also used to drive lightweight animations.
     const status_update_interval_base: i64 = core.constants.Timing.status_update_interval_base;
     const status_update_interval_anim: i64 = core.constants.Timing.status_update_interval_anim;
     const pane_sync_interval: i64 = core.constants.Timing.pane_sync_interval;
     const heartbeat_interval: i64 = core.constants.Timing.heartbeat_interval;
+
+    var timer_ctx = LoopTimerContext{
+        .state = state,
+        .last_pane_sync = last_render,
+        .last_heartbeat = last_render,
+        .pane_sync_interval = pane_sync_interval,
+        .heartbeat_interval = heartbeat_interval,
+    };
+    var timer_completion: xev.Completion = .{};
+    loop_timer.run(&loop, &timer_completion, 100, LoopTimerContext, &timer_ctx, loopTimerCallback);
 
     // Reusable lists for dead pane tracking (avoid per-iteration allocations).
     var dead_splits: std.ArrayList(u16) = .empty;
@@ -278,18 +318,6 @@ pub fn runMainLoop(state: *State) !void {
         if (now2 - last_status_update >= status_update_interval) {
             state.needs_render = true;
             last_status_update = now2;
-        }
-
-        // Periodic sync of pane info (CWD, fg_process) to ses.
-        if (now2 - last_pane_sync >= pane_sync_interval) {
-            last_pane_sync = now2;
-            state.syncFocusedPaneInfo();
-        }
-
-        // Periodic heartbeat to SES to detect dead connections.
-        if (now2 - last_heartbeat >= heartbeat_interval) {
-            last_heartbeat = now2;
-            _ = state.ses_client.sendPing();
         }
 
         // Handle PTY output.
