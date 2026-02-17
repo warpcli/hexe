@@ -264,7 +264,7 @@ fn formatKeycastInput(inp: []const u8, buf: *[32]u8) struct { consumed: usize, t
 /// Ghostty detects password input based on termios state (echo disabled).
 fn isFocusedPaneInPasswordMode(state: *State) bool {
     const pane = if (state.active_floating) |idx|
-        state.floats.items[idx]
+        if (idx < state.floats.items.len) state.floats.items[idx] else return false
     else
         state.currentLayout().getFocusedPane() orelse return false;
 
@@ -309,11 +309,8 @@ fn recordKeycastInput(state: *State, inp: []const u8) void {
         var buf: [32]u8 = undefined;
         const result = formatKeycastInput(inp[i..], &buf);
         if (result.text.len > 0) {
-            std.debug.print("[keycast] recording: '{s}' (bytes: {any})\n", .{ result.text, inp[i..@min(i + result.consumed, inp.len)] });
             state.overlays.recordKeypress(result.text);
             state.needs_render = true;
-        } else if (result.consumed > 0) {
-            std.debug.print("[keycast] skipped: consumed={} bytes={any}\n", .{ result.consumed, inp[i..@min(i + result.consumed, inp.len)] });
         }
         if (result.consumed == 0) break;
         i += result.consumed;
@@ -542,7 +539,6 @@ fn mergeStdinTail(state: *State, input_bytes: []const u8) struct { merged: []con
     state.stdin_tail_len = 0;
     return .{ .merged = tmp, .owned = tmp };
 }
-
 
 fn stashIncompleteEscapeTail(state: *State, inp: []const u8) []const u8 {
     const ESC: u8 = 0x1b;

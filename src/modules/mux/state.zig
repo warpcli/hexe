@@ -76,7 +76,6 @@ pub const PaneBounds = struct {
 };
 
 pub const State = struct {
-
     /// Get float definition by key from active layout
     pub fn getLayoutFloatByKey(self: *const State, key: u8) ?*const core.LayoutFloatDef {
         for (self.active_layout_floats) |*f| {
@@ -602,7 +601,6 @@ pub const State = struct {
 
     /// Start winpulse animation for the currently focused pane
     pub fn startPulse(self: *State) void {
-        std.debug.print("startPulse called, enabled={}\n", .{self.config.winpulse_enabled});
         if (!self.config.winpulse_enabled) return;
 
         const PaneInfo = struct {
@@ -618,7 +616,6 @@ pub const State = struct {
             if (self.active_floating) |idx| {
                 if (idx < self.floats.items.len) {
                     const pane = self.floats.items[idx];
-                    std.debug.print("Found float pane: {}x{} at {},{}\n", .{ pane.width, pane.height, pane.x, pane.y });
                     break :blk PaneInfo{
                         .uuid = pane.uuid,
                         .x = pane.x,
@@ -629,7 +626,6 @@ pub const State = struct {
                 }
             }
             if (self.currentLayout().getFocusedPane()) |pane| {
-                std.debug.print("Found split pane: {}x{} at {},{}\n", .{ pane.width, pane.height, pane.x, pane.y });
                 break :blk PaneInfo{
                     .uuid = pane.uuid,
                     .x = pane.x,
@@ -638,13 +634,10 @@ pub const State = struct {
                     .height = pane.height,
                 };
             }
-            std.debug.print("No pane found!\n", .{});
             break :blk null;
         };
 
         if (pane_info) |info| {
-            std.debug.print("Setting pulse: bounds={}x{} at {},{}\n", .{ info.width, info.height, info.x, info.y });
-
             // Clean up any previous pulse first
             self.stopPulse();
 
@@ -660,12 +653,9 @@ pub const State = struct {
 
             // Save original colors
             const size = @as(usize, info.width) * @as(usize, info.height);
-            std.debug.print("Allocating {} cells\n", .{size});
             const saved = self.allocator.alloc(winpulse_mod.SavedCell, size) catch {
-                std.debug.print("Allocation failed!\n", .{});
                 return;
             };
-            std.debug.print("Allocation succeeded\n", .{});
 
             var idx: usize = 0;
             var row: u16 = 0;
@@ -682,9 +672,6 @@ pub const State = struct {
             }
             self.pulse_saved_colors = saved;
             self.needs_render = true;
-            std.debug.print("Pulse fully initialized! start_ms={}\n", .{self.pulse_start_ms});
-        } else {
-            std.debug.print("pane_info was null!\n", .{});
         }
     }
 

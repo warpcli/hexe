@@ -24,16 +24,6 @@ var global_state: std.atomic.Value(?*State) = std.atomic.Value(?*State).init(nul
 fn sighupHandler(_: c_int) callconv(.c) void {
     if (global_state.load(.acquire)) |state| {
         state.detach_mode = true;
-
-        // If reattach is in progress, give it time to complete (up to 5 seconds)
-        if (state.reattach_in_progress.load(.acquire)) {
-            var i: usize = 0;
-            while (i < 50 and state.reattach_in_progress.load(.acquire)) : (i += 1) {
-                // Sleep 100ms between checks (total max 5 seconds)
-                std.Thread.sleep(100 * std.time.ns_per_ms);
-            }
-        }
-
         state.running = false;
     }
 }
@@ -110,7 +100,7 @@ pub fn run(mux_args: MuxArgs) !void {
         var tabs: [32]ses_client.OrphanedPaneInfo = undefined;
         const count = ses.listOrphanedPanes(&tabs) catch 0;
         if (count > 0) {
-            std.debug.print("Orphaned tabs (disowned):\n", .{});
+            std.debug.print("Orphaned panes (disowned):\n", .{});
             for (tabs[0..count]) |p| {
                 std.debug.print("  [{s}] pid={d}\n", .{ p.uuid[0..8], p.pid });
             }
@@ -267,17 +257,14 @@ pub fn run(mux_args: MuxArgs) !void {
     // Handle --attach: try session first, then orphaned pane.
     if (mux_args.attach) |uuid_prefix| {
         debugLog("attach: trying to reattach with prefix={s}", .{uuid_prefix});
-        std.debug.print("[mux] ATTACH: starting reattach for '{s}'\n", .{uuid_prefix});
         if (state.reattachSession(uuid_prefix)) {
             debugLog("attach: reattachSession succeeded", .{});
-            std.debug.print("[mux] ATTACH: reattachSession returned TRUE, tabs={d}\n", .{state.tabs.items.len});
             state.notifications.show("Session reattached");
             // Reattach may change state.uuid — update env for subsequent panes.
             @memcpy(session_id_z[0..32], &state.uuid);
             _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
         } else if (state.attachOrphanedPane(uuid_prefix)) {
             debugLog("attach: attachOrphanedPane succeeded", .{});
-            std.debug.print("[mux] ATTACH: reattachSession FALSE, attachOrphanedPane TRUE\n", .{});
             state.notifications.show("Attached to orphaned pane");
         } else {
             // Session/pane not found - EXIT with error, don't create new session
@@ -292,11 +279,9 @@ pub fn run(mux_args: MuxArgs) !void {
     }
 
     // Auto-adopt sticky panes from ses for this directory.
-    std.debug.print("[mux] ATTACH: calling adoptStickyPanes\n", .{});
     state.adoptStickyPanes();
 
     // Continue with main loop.
-    std.debug.print("[mux] ATTACH: entering main loop\n", .{});
     try loop_core.runMainLoop(&state);
 }
 

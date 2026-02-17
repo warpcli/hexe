@@ -154,7 +154,7 @@ pub fn performDetach(state: *State) void {
         return;
     };
     // Print session_id (our UUID) so user can reattach.
-    std.debug.print("\nSession detached: {s}\nReattach with: hexe-mux --attach {s}\n", .{ state.uuid, state.uuid[0..8] });
+    std.debug.print("\nSession detached: {s}\nReattach with: hexe mux attach {s}\n", .{ state.uuid, state.uuid[0..8] });
     state.running = false;
 }
 

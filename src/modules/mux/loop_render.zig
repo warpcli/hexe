@@ -14,21 +14,17 @@ const overlay_render = @import("overlay_render.zig");
 /// Apply winpulse brightness effect to a pane area
 fn applyPulseEffect(state: *State) void {
     if (!state.config.winpulse_enabled) {
-        std.debug.print("Winpulse disabled\n", .{});
         return;
     }
     if (state.pulse_start_ms == 0) {
-        std.debug.print("No active pulse\n", .{});
         return;
     }
     const bounds = state.pulse_pane_bounds orelse {
-        std.debug.print("No pulse bounds\n", .{});
         return;
     };
 
     const now_ms = std.time.milliTimestamp();
     const elapsed_ms = now_ms - state.pulse_start_ms;
-    std.debug.print("Pulse active: elapsed={}ms, duration={}ms\n", .{ elapsed_ms, state.config.winpulse_duration_ms });
     if (elapsed_ms >= state.config.winpulse_duration_ms) {
         // Animation finished - restore colors
         restorePulseColors(state);
