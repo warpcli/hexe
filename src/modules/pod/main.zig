@@ -429,8 +429,7 @@ const Pod = struct {
         var ticker = try xev.Timer.init();
         defer ticker.deinit();
 
-        var poll_fds: [1]posix.pollfd = undefined;
-        var buf = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
+        const buf = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
         defer self.allocator.free(buf);
         const backlog_tmp = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
         defer self.allocator.free(backlog_tmp);
@@ -438,6 +437,14 @@ const Pod = struct {
         var should_stop = false;
         var callback_error: ?anyerror = null;
         var pty_armed = false;
+        var client_completions: [4]xev.Completion = .{ .{}, .{}, .{}, .{} };
+        var client_slots: [4]ClientSlot = .{
+            .{ .parent = undefined, .fd = -1 },
+            .{ .parent = undefined, .fd = -1 },
+            .{ .parent = undefined, .fd = -1 },
+            .{ .parent = undefined, .fd = -1 },
+        };
+        var client_next_slot: usize = 0;
 
         var pty_ctx = PtyContext{
             .pod = self,
@@ -450,10 +457,21 @@ const Pod = struct {
             .armed = &pty_armed,
         };
 
+        var client_ctx = ClientContext{
+            .pod = self,
+            .io_buf = buf,
+            .loop = &loop,
+            .callback_error = &callback_error,
+            .completions = &client_completions,
+            .slots = &client_slots,
+            .next_slot = &client_next_slot,
+        };
+
         var accept_ctx = AcceptContext{
             .pod = self,
             .backlog_tmp = backlog_tmp,
             .pty_ctx = &pty_ctx,
+            .client_ctx = &client_ctx,
         };
         server_watcher.poll(&loop, &server_completion, .read, AcceptContext, &accept_ctx, acceptCallback);
         armPtyWatcher(&pty_ctx);
@@ -471,40 +489,10 @@ const Pod = struct {
             if (should_stop) break;
             if (callback_error) |err| return err;
 
-            // client (optional)
-            poll_fds[0] = .{ .fd = if (self.client) |client_conn| client_conn.fd else -1, .events = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR, .revents = 0 };
-
-            _ = posix.poll(&poll_fds, 100) catch |err| {
-                if (err == error.Interrupted) continue;
-                return err;
-            };
-
-            try loop.run(.no_wait);
+            try loop.run(.once);
 
             if (should_stop) break;
             if (callback_error) |err| return err;
-
-            // Client input.
-            // IMPORTANT: handle HUP/ERR first and ensure we never deref a client
-            // after it has been closed in the same poll cycle.
-            if (self.client != null and poll_fds[0].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) != 0) {
-                if (poll_fds[0].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
-                    self.client.?.close();
-                    self.client = null;
-                } else if (poll_fds[0].revents & posix.POLL.IN != 0) {
-                    const n = posix.read(self.client.?.fd, buf) catch |err| switch (err) {
-                        error.WouldBlock => 0,
-                        else => return err,
-                    };
-                    if (n == 0) {
-                        self.client.?.close();
-                        self.client = null;
-                    } else {
-                        const slice = buf[0..n];
-                        self.reader.feed(slice, @ptrCast(self), podFrameCallback);
-                    }
-                }
-            }
         }
     }
 
@@ -512,6 +500,7 @@ const Pod = struct {
         pod: *Pod,
         backlog_tmp: []u8,
         pty_ctx: *PtyContext,
+        client_ctx: *ClientContext,
     };
 
     const PtyContext = struct {
@@ -523,6 +512,21 @@ const Pod = struct {
         should_stop: *bool,
         callback_error: *?anyerror,
         armed: *bool,
+    };
+
+    const ClientSlot = struct {
+        parent: *ClientContext,
+        fd: posix.fd_t,
+    };
+
+    const ClientContext = struct {
+        pod: *Pod,
+        io_buf: []u8,
+        loop: *xev.Loop,
+        callback_error: *?anyerror,
+        completions: *[4]xev.Completion,
+        slots: *[4]ClientSlot,
+        next_slot: *usize,
     };
 
     const TimerContext = struct {
@@ -543,12 +547,58 @@ const Pod = struct {
 
         while (accept_ctx.pod.server.tryAccept() catch null) |conn| {
             accept_ctx.pod.handleAcceptedConnection(conn, accept_ctx.backlog_tmp);
+            if (accept_ctx.pod.client) |client| {
+                armClientWatcher(accept_ctx.client_ctx, client.fd);
+            }
             if (accept_ctx.pod.client != null and accept_ctx.pod.pty_paused) {
                 accept_ctx.pod.pty_paused = false;
                 armPtyWatcher(accept_ctx.pty_ctx);
             }
         }
 
+        return .rearm;
+    }
+
+    fn armClientWatcher(ctx: *ClientContext, client_fd: posix.fd_t) void {
+        const slot = ctx.next_slot.* % ctx.completions.len;
+        ctx.next_slot.* += 1;
+
+        ctx.slots[slot] = .{ .parent = ctx, .fd = client_fd };
+        const watcher = xev.File.initFd(client_fd);
+        const completion = &ctx.completions[slot];
+        completion.* = .{};
+        watcher.poll(ctx.loop, completion, .read, ClientSlot, &ctx.slots[slot], clientCallback);
+    }
+
+    fn clientCallback(
+        ctx: ?*ClientSlot,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        _: xev.File,
+        result: xev.PollError!xev.PollEvent,
+    ) xev.CallbackAction {
+        const slot = ctx orelse return .disarm;
+        const client_ctx = slot.parent;
+        _ = result catch return .disarm;
+
+        const current = client_ctx.pod.client orelse return .disarm;
+        if (current.fd != slot.fd) return .disarm;
+
+        const n = posix.read(slot.fd, client_ctx.io_buf) catch |err| switch (err) {
+            error.WouldBlock => 0,
+            else => {
+                client_ctx.callback_error.* = err;
+                return .disarm;
+            },
+        };
+
+        if (n == 0) {
+            if (client_ctx.pod.client) |*conn| conn.close();
+            client_ctx.pod.client = null;
+            return .disarm;
+        }
+
+        client_ctx.pod.reader.feed(client_ctx.io_buf[0..n], @ptrCast(client_ctx.pod), podFrameCallback);
         return .rearm;
     }
 
