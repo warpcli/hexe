@@ -74,12 +74,23 @@ pub const Server = struct {
 
         const server_watcher = xev.File.initFd(self.socket.getFd());
         var server_completion: xev.Completion = .{};
+        var timer_completion: xev.Completion = .{};
+        var ticker = try xev.Timer.init();
+        defer ticker.deinit();
         var accept_ctx = AcceptContext{
             .server = self,
             .allocator = page_alloc,
             .poll_fds = &poll_fds,
         };
         server_watcher.poll(&loop, &server_completion, .read, AcceptContext, &accept_ctx, acceptCallback);
+
+        var periodic_ctx = PeriodicContext{
+            .server = self,
+            .last_save = std.time.milliTimestamp(),
+            .last_stats_update = std.time.milliTimestamp(),
+            .last_cleanup = std.time.milliTimestamp(),
+        };
+        ticker.run(&loop, &timer_completion, 100, PeriodicContext, &periodic_ctx, periodicCallback);
 
         // Add server socket
         try poll_fds.append(page_alloc, .{
@@ -88,34 +99,7 @@ pub const Server = struct {
             .revents = 0,
         });
 
-        var last_save: i64 = std.time.milliTimestamp();
-        var last_stats_update: i64 = last_save;
-
         while (self.running) {
-            // Periodic persistence (best-effort)
-            const now_ms = std.time.milliTimestamp();
-            if (self.ses_state.dirty and now_ms - last_save >= 1000) {
-                @import("persist.zig").save(self.allocator, self.ses_state) catch |e| {
-                    core.logging.logError("ses", "persist.save failed", e);
-                };
-                self.ses_state.dirty = false;
-                last_save = now_ms;
-            }
-
-            // Update resource stats every 5 seconds
-            if (now_ms - last_stats_update >= 5000) {
-                const detached_sessions = self.ses_state.detached_sessions.count();
-                const total_panes = self.ses_state.panes.count();
-                const active_connections = self.ses_state.clients.items.len;
-
-                self.resource_monitor.updateStats(
-                    active_connections,
-                    detached_sessions,
-                    total_panes,
-                    0, // Memory tracking would require more instrumentation
-                );
-                last_stats_update = now_ms;
-            }
             // Remove stale pod_vt fds and add new ones for routing.
             // This is the first extraction step for xev migration so fd-set
             // reconciliation can later be replaced by completion ownership.
@@ -140,12 +124,7 @@ pub const Server = struct {
             // on poll readiness from unrelated fds.
             try loop.run(.no_wait);
 
-            if (ready == 0) {
-                // Timeout - do periodic cleanup
-                self.ses_state.cleanupOrphanedPanes();
-                self.ses_state.cleanupExpiredDetachedSessions();
-                continue;
-            }
+            if (ready == 0) continue;
 
             // Check client sockets
             var i: usize = 1;
@@ -241,6 +220,13 @@ pub const Server = struct {
         poll_fds: *std.ArrayList(posix.pollfd),
     };
 
+    const PeriodicContext = struct {
+        server: *Server,
+        last_save: i64,
+        last_stats_update: i64,
+        last_cleanup: i64,
+    };
+
     fn acceptCallback(
         ctx: ?*AcceptContext,
         _: *xev.Loop,
@@ -253,6 +239,48 @@ pub const Server = struct {
 
         while (accept_ctx.server.socket.tryAccept() catch null) |conn| {
             accept_ctx.server.dispatchNewConnection(conn, accept_ctx.allocator, accept_ctx.poll_fds);
+        }
+
+        return .rearm;
+    }
+
+    fn periodicCallback(
+        ctx: ?*PeriodicContext,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        result: xev.Timer.RunError!void,
+    ) xev.CallbackAction {
+        const periodic = ctx orelse return .disarm;
+        _ = result catch return .rearm;
+
+        const now_ms = std.time.milliTimestamp();
+
+        if (periodic.server.ses_state.dirty and now_ms - periodic.last_save >= 1000) {
+            @import("persist.zig").save(periodic.server.allocator, periodic.server.ses_state) catch |e| {
+                core.logging.logError("ses", "persist.save failed", e);
+            };
+            periodic.server.ses_state.dirty = false;
+            periodic.last_save = now_ms;
+        }
+
+        if (now_ms - periodic.last_stats_update >= 5000) {
+            const detached_sessions = periodic.server.ses_state.detached_sessions.count();
+            const total_panes = periodic.server.ses_state.panes.count();
+            const active_connections = periodic.server.ses_state.clients.items.len;
+
+            periodic.server.resource_monitor.updateStats(
+                active_connections,
+                detached_sessions,
+                total_panes,
+                0,
+            );
+            periodic.last_stats_update = now_ms;
+        }
+
+        if (now_ms - periodic.last_cleanup >= 1000) {
+            periodic.server.ses_state.cleanupOrphanedPanes();
+            periodic.server.ses_state.cleanupExpiredDetachedSessions();
+            periodic.last_cleanup = now_ms;
         }
 
         return .rearm;
