@@ -147,15 +147,34 @@ pub const Server = struct {
                     break;
                 }
             }
-            if (client_id) |cid| self.ses_state.removeClient(cid);
+            var closed_by_client_remove = false;
+            if (client_id) |cid| {
+                self.removeClientWithWatcherCleanup(cid);
+                closed_by_client_remove = true;
+            }
 
             if (self.pending_pop_requests.fetchRemove(fd)) |kv| {
                 posix.close(kv.value);
             }
 
-            posix.close(fd);
+            if (!closed_by_client_remove) {
+                posix.close(fd);
+            }
         }
         self.pending_ctl_close_fds.clearRetainingCapacity();
+    }
+
+    fn removeClientWithWatcherCleanup(self: *Server, client_id: usize) void {
+        if (self.ses_state.getClient(client_id)) |client| {
+            if (client.mux_ctl_fd) |ctl_fd| {
+                _ = self.binary_ctl_fds.remove(ctl_fd);
+                self.disarmCtlWatcher(ctl_fd);
+            }
+            if (client.mux_vt_fd) |vt_fd| {
+                self.disarmVtWatcher(vt_fd);
+            }
+        }
+        self.ses_state.removeClient(client_id);
     }
 
     fn processPendingVtCloses(self: *Server) void {
