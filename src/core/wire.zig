@@ -822,6 +822,11 @@ pub fn waitReadableTimeout(fd: posix.fd_t, timeout_ms: i32) !void {
 pub fn waitWritableTimeout(fd: posix.fd_t, timeout_ms: i32) !void {
     _ = fd;
     if (timeout_ms <= 0) return error.Timeout;
+    try waitDelayTimeout(timeout_ms);
+}
+
+fn waitDelayTimeout(timeout_ms: i32) !void {
+    if (timeout_ms <= 0) return error.Timeout;
 
     try xev.detect();
     var loop = try xev.Loop.init(.{});
@@ -860,12 +865,15 @@ pub fn writeAll(fd: posix.fd_t, data: []const u8) !void {
 }
 
 pub fn writeAllTimeout(fd: posix.fd_t, data: []const u8, timeout_ms: i32) !void {
+    const deadline_ms = std.time.milliTimestamp() + timeout_ms;
     var off: usize = 0;
     while (off < data.len) {
         const n = posix.write(fd, data[off..]) catch |err| switch (err) {
             error.WouldBlock => {
-                // Wait for fd to become writable with timeout
-                waitWritableTimeout(fd, timeout_ms) catch |wait_err| return wait_err;
+                const remaining_ms = deadline_ms - std.time.milliTimestamp();
+                if (remaining_ms <= 0) return error.Timeout;
+                const backoff_ms: i32 = @intCast(@min(remaining_ms, 10));
+                waitWritableTimeout(fd, backoff_ms) catch |wait_err| return wait_err;
                 continue;
             },
             else => return err,
