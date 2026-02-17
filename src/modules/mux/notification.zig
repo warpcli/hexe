@@ -69,33 +69,20 @@ pub const NotificationManager = struct {
 
     /// Initialize with config
     pub fn initWithConfig(allocator: std.mem.Allocator, cfg: anytype) NotificationManager {
+        return initWithStyleConfig(allocator, cfg);
+    }
+
+    /// Initialize with pop.NotificationStyle config
+    pub fn initWithPopConfig(allocator: std.mem.Allocator, cfg: anytype) NotificationManager {
+        return initWithStyleConfig(allocator, cfg);
+    }
+
+    fn initWithStyleConfig(allocator: std.mem.Allocator, cfg: anytype) NotificationManager {
         return .{
             .allocator = allocator,
             .current = null,
             .queue = .empty,
             .default_style = Style.fromConfig(cfg),
-            .default_duration_ms = @intCast(cfg.duration_ms),
-        };
-    }
-
-    /// Initialize with pop.NotificationStyle config
-    pub fn initWithPopConfig(allocator: std.mem.Allocator, cfg: anytype) NotificationManager {
-        // Parse align from string
-        const align_val: Align = if (std.mem.eql(u8, cfg.alignment, "left")) .left else if (std.mem.eql(u8, cfg.alignment, "right")) .right else .center;
-
-        return .{
-            .allocator = allocator,
-            .current = null,
-            .queue = .empty,
-            .default_style = .{
-                .fg = .{ .palette = cfg.fg },
-                .bg = .{ .palette = cfg.bg },
-                .bold = cfg.bold,
-                .padding_x = cfg.padding_x,
-                .padding_y = cfg.padding_y,
-                .offset = cfg.offset,
-                .alignment = align_val,
-            },
             .default_duration_ms = @intCast(cfg.duration_ms),
         };
     }

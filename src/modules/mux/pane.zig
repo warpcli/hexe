@@ -661,17 +661,7 @@ pub const Pane = struct {
     /// Configure notifications from pop.NotificationStyle config
     pub fn configureNotificationsFromPop(self: *Pane, cfg: anytype) void {
         if (self.notifications_initialized) {
-            const align_val: notification.Align = if (std.mem.eql(u8, cfg.alignment, "left")) .left else if (std.mem.eql(u8, cfg.alignment, "right")) .right else .center;
-
-            self.notifications.default_style = .{
-                .fg = .{ .palette = cfg.fg },
-                .bg = .{ .palette = cfg.bg },
-                .bold = cfg.bold,
-                .padding_x = cfg.padding_x,
-                .padding_y = cfg.padding_y,
-                .offset = cfg.offset,
-                .alignment = align_val,
-            };
+            self.notifications.default_style = notification.Style.fromConfig(cfg);
             self.notifications.default_duration_ms = @intCast(cfg.duration_ms);
         }
     }
