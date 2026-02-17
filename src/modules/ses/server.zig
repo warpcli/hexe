@@ -17,6 +17,18 @@ const CtlWatcher = struct {
     completion: xev.Completion = .{},
 };
 
+const VtDirection = enum {
+    pod_to_mux,
+    mux_to_pod,
+};
+
+const VtWatcher = struct {
+    srv: *anyopaque,
+    fd: posix.fd_t,
+    direction: VtDirection,
+    completion: xev.Completion = .{},
+};
+
 /// Server that handles mux connections
 /// Note: Uses page_allocator internally to avoid GPA issues after fork/daemonization
 pub const Server = struct {
@@ -30,6 +42,8 @@ pub const Server = struct {
     binary_ctl_fds: std.AutoHashMap(posix.fd_t, void),
     ctl_watchers: std.AutoHashMap(posix.fd_t, *CtlWatcher),
     pending_ctl_close_fds: std.ArrayList(posix.fd_t),
+    vt_watchers: std.AutoHashMap(posix.fd_t, *VtWatcher),
+    pending_vt_close_fds: std.ArrayList(posix.fd_t),
     loop_ptr: ?*xev.Loop = null,
     // CLI fd waiting for exit_intent response.
     pending_exit_intent_cli_fd: ?posix.fd_t = null,
@@ -57,6 +71,8 @@ pub const Server = struct {
             .binary_ctl_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
             .ctl_watchers = std.AutoHashMap(posix.fd_t, *CtlWatcher).init(page_alloc),
             .pending_ctl_close_fds = .empty,
+            .vt_watchers = std.AutoHashMap(posix.fd_t, *VtWatcher).init(page_alloc),
+            .pending_vt_close_fds = .empty,
             .pending_float_cli_fds = std.AutoHashMap([32]u8, posix.fd_t).init(page_alloc),
             .resource_monitor = core.resource_limits.ResourceMonitor.init(limits),
         };
@@ -74,6 +90,14 @@ pub const Server = struct {
         }
         self.ctl_watchers.deinit();
         self.pending_ctl_close_fds.deinit(self.allocator);
+
+        var vt_it = self.vt_watchers.iterator();
+        while (vt_it.next()) |entry| {
+            self.allocator.destroy(entry.value_ptr.*);
+        }
+        self.vt_watchers.deinit();
+        self.pending_vt_close_fds.deinit(self.allocator);
+
         self.binary_ctl_fds.deinit();
         self.socket.deinit();
     }
@@ -128,10 +152,14 @@ pub const Server = struct {
                 self.ses_state.pending_remove_poll_fds.items,
                 self.ses_state.pending_poll_fds.items,
             );
+            for (self.ses_state.pending_poll_fds.items) |fd| {
+                self.armVtWatcher(fd, .pod_to_mux);
+            }
             for (self.ses_state.pending_remove_poll_fds.items) |fd| {
                 if (self.binary_ctl_fds.contains(fd)) {
                     self.disarmCtlWatcher(fd);
                 }
+                self.disarmVtWatcher(fd);
             }
             self.ses_state.pending_remove_poll_fds.clearRetainingCapacity();
             self.ses_state.pending_poll_fds.clearRetainingCapacity();
@@ -148,6 +176,7 @@ pub const Server = struct {
             // on poll readiness from unrelated fds.
             try loop.run(.no_wait);
             self.processPendingCtlCloses(&poll_fds);
+            self.processPendingVtCloses(&poll_fds);
 
             if (ready == 0) continue;
 
@@ -170,8 +199,10 @@ pub const Server = struct {
                     if (pfd.revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
                         if (is_pod_vt) {
                             self.removePodVtFd(pfd.fd);
+                            self.disarmVtWatcher(pfd.fd);
                         } else if (is_mux_vt) {
                             self.removeMuxVtFd(pfd.fd);
+                            self.disarmVtWatcher(pfd.fd);
                         } else {
                             _ = self.binary_ctl_fds.remove(pfd.fd);
                             self.disarmCtlWatcher(pfd.fd);
@@ -195,21 +226,9 @@ pub const Server = struct {
 
                     if (pfd.revents & posix.POLL.IN != 0) {
                         if (is_pod_vt) {
-                            // POD → MUX VT routing.
-                            if (!self.routePodToMux(pfd.fd)) {
-                                self.removePodVtFd(pfd.fd);
-                                posix.close(pfd.fd);
-                                _ = poll_fds.orderedRemove(i);
-                                continue;
-                            }
+                            // POD VT routing is handled by xev watcher.
                         } else if (is_mux_vt) {
-                            // MUX → POD VT routing.
-                            if (!self.routeMuxToPod(pfd.fd)) {
-                                self.removeMuxVtFd(pfd.fd);
-                                posix.close(pfd.fd);
-                                _ = poll_fds.orderedRemove(i);
-                                continue;
-                            }
+                            // MUX VT routing is handled by xev watcher.
                         } else if (self.binary_ctl_fds.contains(pfd.fd)) {
                             // Binary control IO is handled by xev watcher.
                         } else {
@@ -258,11 +277,42 @@ pub const Server = struct {
         self.pending_ctl_close_fds.clearRetainingCapacity();
     }
 
+    fn processPendingVtCloses(self: *Server, poll_fds: *std.ArrayList(posix.pollfd)) void {
+        for (self.pending_vt_close_fds.items) |fd| {
+            if (self.ses_state.pod_vt_to_pane_id.contains(fd)) {
+                self.removePodVtFd(fd);
+            }
+            if (self.isMuxVtFd(fd)) {
+                self.removeMuxVtFd(fd);
+            }
+            self.disarmVtWatcher(fd);
+
+            var i: usize = 1;
+            while (i < poll_fds.items.len) {
+                if (poll_fds.items[i].fd == fd) {
+                    _ = poll_fds.orderedRemove(i);
+                    break;
+                }
+                i += 1;
+            }
+
+            posix.close(fd);
+        }
+        self.pending_vt_close_fds.clearRetainingCapacity();
+    }
+
     fn queueCtlClose(self: *Server, fd: posix.fd_t) void {
         for (self.pending_ctl_close_fds.items) |existing| {
             if (existing == fd) return;
         }
         self.pending_ctl_close_fds.append(self.allocator, fd) catch {};
+    }
+
+    fn queueVtClose(self: *Server, fd: posix.fd_t) void {
+        for (self.pending_vt_close_fds.items) |existing| {
+            if (existing == fd) return;
+        }
+        self.pending_vt_close_fds.append(self.allocator, fd) catch {};
     }
 
     fn armCtlWatcher(self: *Server, fd: posix.fd_t) void {
@@ -282,6 +332,27 @@ pub const Server = struct {
 
     fn disarmCtlWatcher(self: *Server, fd: posix.fd_t) void {
         if (self.ctl_watchers.fetchRemove(fd)) |kv| {
+            self.allocator.destroy(kv.value);
+        }
+    }
+
+    fn armVtWatcher(self: *Server, fd: posix.fd_t, direction: VtDirection) void {
+        if (self.loop_ptr == null) return;
+        if (self.vt_watchers.contains(fd)) return;
+
+        const node = self.allocator.create(VtWatcher) catch return;
+        node.* = .{ .srv = @ptrCast(self), .fd = fd, .direction = direction };
+        self.vt_watchers.put(fd, node) catch {
+            self.allocator.destroy(node);
+            return;
+        };
+
+        const watcher = xev.File.initFd(fd);
+        watcher.poll(self.loop_ptr.?, &node.completion, .read, VtWatcher, node, vtWatcherCallback);
+    }
+
+    fn disarmVtWatcher(self: *Server, fd: posix.fd_t) void {
+        if (self.vt_watchers.fetchRemove(fd)) |kv| {
             self.allocator.destroy(kv.value);
         }
     }
@@ -332,6 +403,32 @@ pub const Server = struct {
 
         if (!server.handleBinaryCtlMessage(watch.fd)) {
             server.queueCtlClose(watch.fd);
+            return .disarm;
+        }
+
+        return .rearm;
+    }
+
+    fn vtWatcherCallback(
+        ctx: ?*VtWatcher,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        _: xev.File,
+        result: xev.PollError!xev.PollEvent,
+    ) xev.CallbackAction {
+        const watch = ctx orelse return .disarm;
+        const server: *Server = @ptrCast(@alignCast(watch.srv));
+        _ = result catch {
+            server.queueVtClose(watch.fd);
+            return .disarm;
+        };
+
+        const ok = switch (watch.direction) {
+            .pod_to_mux => server.routePodToMux(watch.fd),
+            .mux_to_pod => server.routeMuxToPod(watch.fd),
+        };
+        if (!ok) {
+            server.queueVtClose(watch.fd);
             return .disarm;
         }
 
@@ -525,7 +622,9 @@ pub const Server = struct {
                 }) catch {
                     var tmp = conn;
                     tmp.close();
+                    return;
                 };
+                self.armVtWatcher(conn.fd, .mux_to_pod);
             },
             wire.SES_HANDSHAKE_CLI => {
                 // CLI tool request (focus_move, exit_intent, float).
