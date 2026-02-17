@@ -77,6 +77,18 @@ const SesCtlWatcher = struct {
     watched_fd: ?posix.fd_t = null,
 };
 
+const StdinSlot = struct {
+    state: *State,
+    buffer: []u8,
+};
+
+const StdinWatcher = struct {
+    loop: *xev.Loop,
+    completion: xev.Completion = .{},
+    slot: StdinSlot = undefined,
+    armed: bool = false,
+};
+
 fn ensureSesVtWatcherArmed(state: *State, watcher: *SesVtWatcher, buffer: []u8) void {
     if (watcher.watched_fd != null) return;
     const vt_fd = state.ses_client.getVtFd() orelse return;
@@ -220,6 +232,44 @@ fn sesCtlCallback(
     return .rearm;
 }
 
+fn ensureStdinWatcherArmed(state: *State, watcher: *StdinWatcher, buffer: []u8) void {
+    if (watcher.armed) return;
+    watcher.slot = .{ .state = state, .buffer = buffer };
+    const file = xev.File.initFd(posix.STDIN_FILENO);
+    watcher.completion = .{};
+    file.poll(watcher.loop, &watcher.completion, .read, StdinSlot, &watcher.slot, stdinCallback);
+    watcher.armed = true;
+}
+
+fn stdinCallback(
+    ctx: ?*StdinSlot,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    _: xev.File,
+    result: xev.PollError!xev.PollEvent,
+) xev.CallbackAction {
+    const slot = ctx orelse return .disarm;
+    _ = result catch {
+        slot.state.detach_mode = true;
+        slot.state.running = false;
+        return .disarm;
+    };
+
+    const n = posix.read(posix.STDIN_FILENO, slot.buffer) catch {
+        slot.state.detach_mode = true;
+        slot.state.running = false;
+        return .disarm;
+    };
+    if (n == 0) {
+        slot.state.detach_mode = true;
+        slot.state.running = false;
+        return .disarm;
+    }
+
+    loop_input.handleInput(slot.state, slot.buffer[0..n]);
+    return .rearm;
+}
+
 pub fn runMainLoop(state: *State) !void {
     const allocator = state.allocator;
 
@@ -246,9 +296,11 @@ pub fn runMainLoop(state: *State) !void {
     var buffer: [1024 * 1024]u8 = undefined; // Larger buffer for efficiency
     var ses_vt_buffer: [1024 * 1024]u8 = undefined;
     var ses_ctl_buffer: [1024 * 1024]u8 = undefined;
+    var stdin_buffer: [64 * 1024]u8 = undefined;
 
     var ses_vt_watcher: SesVtWatcher = .{ .loop = &loop };
     var ses_ctl_watcher: SesCtlWatcher = .{ .loop = &loop };
+    var stdin_watcher: StdinWatcher = .{ .loop = &loop };
 
     // Frame timing.
     var last_render: i64 = std.time.milliTimestamp();
@@ -281,6 +333,7 @@ pub fn runMainLoop(state: *State) !void {
         try loop.run(.no_wait);
         ensureSesVtWatcherArmed(state, &ses_vt_watcher, &ses_vt_buffer);
         ensureSesCtlWatcherArmed(state, &ses_ctl_watcher, &ses_ctl_buffer);
+        ensureStdinWatcherArmed(state, &stdin_watcher, &stdin_buffer);
 
         // Clear skip flag from previous iteration.
         state.skip_dead_check = false;
@@ -380,9 +433,8 @@ pub fn runMainLoop(state: *State) !void {
             }
         }
 
-        // Build poll list: stdin + all local pane PTYs.
+        // Build poll list for local pane PTYs.
         poll_fds.clearRetainingCapacity();
-        try poll_fds.append(allocator, .{ .fd = posix.STDIN_FILENO, .events = posix.POLL.IN, .revents = 0 });
 
         var pane_it = state.currentLayout().splitIterator();
         while (pane_it.next()) |pane| {
@@ -487,7 +539,7 @@ pub fn runMainLoop(state: *State) !void {
         // Handle PTY output.
         // NOTE: we do this before handling stdin/actions that can mutate the
         // layout, so pollfd indices remain consistent with the pane iteration.
-        var idx: usize = 1;
+        var idx: usize = 0;
         dead_splits.clearRetainingCapacity();
 
         pane_it = state.currentLayout().splitIterator();
@@ -565,28 +617,6 @@ pub fn runMainLoop(state: *State) !void {
                     dead_splits.append(allocator, pane.*.id) catch {};
                 }
             }
-        }
-
-        // Handle stdin.
-        if (poll_fds.items[0].revents & posix.POLL.IN != 0) {
-            const n = posix.read(posix.STDIN_FILENO, &buffer) catch {
-                // Terminal closed unexpectedly — preserve panes for reattach.
-                state.detach_mode = true;
-                break;
-            };
-            if (n == 0) {
-                // EOF on stdin — terminal closed. Preserve panes for reattach.
-                state.detach_mode = true;
-                break;
-            }
-            loop_input.handleInput(state, buffer[0..n]);
-        }
-
-        // Check for POLL.HUP/ERR on stdin (terminal closed).
-        if (poll_fds.items[0].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
-            // Terminal closed unexpectedly — preserve panes for reattach.
-            state.detach_mode = true;
-            break;
         }
 
         // Remove dead floats (in reverse order to preserve indices).
