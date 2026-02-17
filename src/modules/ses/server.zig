@@ -6,6 +6,7 @@ const wire = core.wire;
 const state = @import("state.zig");
 const ses = @import("main.zig");
 const poll_registry = @import("poll_registry.zig");
+const xev = @import("xev").Dynamic;
 
 /// Maximum number of concurrent client connections (MUX instances).
 const MAX_CLIENTS: usize = core.constants.Limits.max_clients;
@@ -62,10 +63,23 @@ pub const Server = struct {
 
     /// Main server loop - handles connections and messages
     pub fn run(self: *Server) !void {
+        try xev.detect();
+        var loop = try xev.Loop.init(.{});
+        defer loop.deinit();
+
         // Use page_allocator for poll_fds to avoid GPA issues after fork
         const page_alloc = std.heap.page_allocator;
         var poll_fds: std.ArrayList(posix.pollfd) = .empty;
         defer poll_fds.deinit(page_alloc);
+
+        const server_watcher = xev.File.initFd(self.socket.getFd());
+        var server_completion: xev.Completion = .{};
+        var accept_ctx = AcceptContext{
+            .server = self,
+            .allocator = page_alloc,
+            .poll_fds = &poll_fds,
+        };
+        server_watcher.poll(&loop, &server_completion, .read, AcceptContext, &accept_ctx, acceptCallback);
 
         // Add server socket
         try poll_fds.append(page_alloc, .{
@@ -129,12 +143,7 @@ pub const Server = struct {
                 continue;
             }
 
-            // Check server socket for new connections
-            if (poll_fds.items[0].revents & posix.POLL.IN != 0) {
-                if (self.socket.tryAccept() catch null) |conn| {
-                    self.dispatchNewConnection(conn, page_alloc, &poll_fds);
-                }
-            }
+            try loop.run(.no_wait);
 
             // Check client sockets
             var i: usize = 1;
@@ -222,6 +231,29 @@ pub const Server = struct {
                 i += 1;
             }
         }
+    }
+
+    const AcceptContext = struct {
+        server: *Server,
+        allocator: std.mem.Allocator,
+        poll_fds: *std.ArrayList(posix.pollfd),
+    };
+
+    fn acceptCallback(
+        ctx: ?*AcceptContext,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        _: xev.File,
+        result: xev.PollError!xev.PollEvent,
+    ) xev.CallbackAction {
+        const accept_ctx = ctx orelse return .disarm;
+        _ = result catch return .rearm;
+
+        while (accept_ctx.server.socket.tryAccept() catch null) |conn| {
+            accept_ctx.server.dispatchNewConnection(conn, accept_ctx.allocator, accept_ctx.poll_fds);
+        }
+
+        return .rearm;
     }
 
     /// Dispatch a newly accepted connection based on its handshake bytes.

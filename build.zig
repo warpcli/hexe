@@ -90,6 +90,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     ses_module.addImport("core", core_module);
+    if (xev_mod) |xev| {
+        ses_module.addImport("xev", xev);
+    }
     if (voidbox_mod) |vb| {
         ses_module.addImport("voidbox", vb);
     }
