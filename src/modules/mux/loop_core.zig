@@ -306,7 +306,7 @@ pub fn runMainLoop(state: *State) !void {
         }
         local_pane_watchers.deinit();
     }
-    var pending_local_pane_remove_fds: std.ArrayList(posix.fd_t) = .empty;
+    var pending_local_pane_remove_fds: std.ArrayList(loop_local_watchers.PendingLocalRemove) = .empty;
     defer pending_local_pane_remove_fds.deinit(allocator);
     var pending_dead_splits: std.ArrayList(u16) = .empty;
     defer pending_dead_splits.deinit(allocator);
@@ -323,7 +323,7 @@ pub fn runMainLoop(state: *State) !void {
         }
         float_pane_watchers.deinit();
     }
-    var pending_float_remove_fds: std.ArrayList(posix.fd_t) = .empty;
+    var pending_float_remove_fds: std.ArrayList(loop_local_watchers.PendingFloatRemove) = .empty;
     defer pending_float_remove_fds.deinit(allocator);
     var pending_dead_float_uuids: std.ArrayList([32]u8) = .empty;
     defer pending_dead_float_uuids.deinit(allocator);
@@ -331,6 +331,8 @@ pub fn runMainLoop(state: *State) !void {
     defer current_float_fds.deinit(allocator);
     var stale_float_fds: std.ArrayList(posix.fd_t) = .empty;
     defer stale_float_fds.deinit(allocator);
+    var next_local_generation: u64 = 1;
+    var next_float_generation: u64 = 1;
 
     // Frame timing.
     var last_render: i64 = std.time.milliTimestamp();
@@ -364,9 +366,13 @@ pub fn runMainLoop(state: *State) !void {
         ensureSesCtlWatcherArmed(state, &ses_ctl_watcher, &ses_ctl_buffer);
         ensureStdinWatcherArmed(state, &stdin_watcher, &stdin_buffer);
 
-        for (pending_local_pane_remove_fds.items) |fd| {
-            if (local_pane_watchers.fetchRemove(fd)) |kv| {
-                allocator.destroy(kv.value);
+        for (pending_local_pane_remove_fds.items) |pending| {
+            if (local_pane_watchers.get(pending.fd)) |node| {
+                if (node.slot.generation == pending.generation) {
+                    if (local_pane_watchers.fetchRemove(pending.fd)) |kv| {
+                        allocator.destroy(kv.value);
+                    }
+                }
             }
         }
         pending_local_pane_remove_fds.clearRetainingCapacity();
@@ -383,11 +389,13 @@ pub fn runMainLoop(state: *State) !void {
                     .slot = .{
                         .state = state,
                         .fd = fd,
+                        .generation = next_local_generation,
                         .buffer = &buffer,
                         .pending_dead_splits = &pending_dead_splits,
                         .pending_remove_fds = &pending_local_pane_remove_fds,
                     },
                 };
+                next_local_generation += 1;
                 local_pane_watchers.put(fd, node) catch {
                     allocator.destroy(node);
                     continue;
@@ -411,9 +419,13 @@ pub fn runMainLoop(state: *State) !void {
             }
         }
 
-        for (pending_float_remove_fds.items) |fd| {
-            if (float_pane_watchers.fetchRemove(fd)) |kv| {
-                allocator.destroy(kv.value);
+        for (pending_float_remove_fds.items) |pending| {
+            if (float_pane_watchers.get(pending.fd)) |node| {
+                if (node.slot.generation == pending.generation) {
+                    if (float_pane_watchers.fetchRemove(pending.fd)) |kv| {
+                        allocator.destroy(kv.value);
+                    }
+                }
             }
         }
         pending_float_remove_fds.clearRetainingCapacity();
@@ -429,11 +441,13 @@ pub fn runMainLoop(state: *State) !void {
                     .slot = .{
                         .state = state,
                         .fd = fd,
+                        .generation = next_float_generation,
                         .buffer = &buffer,
                         .pending_dead_float_uuids = &pending_dead_float_uuids,
                         .pending_remove_fds = &pending_float_remove_fds,
                     },
                 };
+                next_float_generation += 1;
                 float_pane_watchers.put(fd, node) catch {
                     allocator.destroy(node);
                     continue;

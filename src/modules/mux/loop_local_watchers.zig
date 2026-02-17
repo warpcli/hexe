@@ -8,9 +8,10 @@ const Pane = @import("pane.zig").Pane;
 pub const LocalPaneSlot = struct {
     state: *State,
     fd: posix.fd_t,
+    generation: u64,
     buffer: []u8,
     pending_dead_splits: *std.ArrayList(u16),
-    pending_remove_fds: *std.ArrayList(posix.fd_t),
+    pending_remove_fds: *std.ArrayList(PendingLocalRemove),
 };
 
 pub const LocalPaneWatcher = struct {
@@ -21,9 +22,10 @@ pub const LocalPaneWatcher = struct {
 pub const FloatPaneSlot = struct {
     state: *State,
     fd: posix.fd_t,
+    generation: u64,
     buffer: []u8,
     pending_dead_float_uuids: *std.ArrayList([32]u8),
-    pending_remove_fds: *std.ArrayList(posix.fd_t),
+    pending_remove_fds: *std.ArrayList(PendingFloatRemove),
 };
 
 pub const FloatPaneWatcher = struct {
@@ -31,11 +33,28 @@ pub const FloatPaneWatcher = struct {
     slot: FloatPaneSlot,
 };
 
-pub fn queueFd(list: *std.ArrayList(posix.fd_t), fd: posix.fd_t, allocator: std.mem.Allocator) void {
+pub const PendingLocalRemove = struct {
+    fd: posix.fd_t,
+    generation: u64,
+};
+
+pub const PendingFloatRemove = struct {
+    fd: posix.fd_t,
+    generation: u64,
+};
+
+pub fn queueLocalRemove(list: *std.ArrayList(PendingLocalRemove), fd: posix.fd_t, generation: u64, allocator: std.mem.Allocator) void {
     for (list.items) |v| {
-        if (v == fd) return;
+        if (v.fd == fd and v.generation == generation) return;
     }
-    list.append(allocator, fd) catch {};
+    list.append(allocator, .{ .fd = fd, .generation = generation }) catch {};
+}
+
+pub fn queueFloatRemove(list: *std.ArrayList(PendingFloatRemove), fd: posix.fd_t, generation: u64, allocator: std.mem.Allocator) void {
+    for (list.items) |v| {
+        if (v.fd == fd and v.generation == generation) return;
+    }
+    list.append(allocator, .{ .fd = fd, .generation = generation }) catch {};
 }
 
 pub fn fdListContains(fds: []const posix.fd_t, fd: posix.fd_t) bool {
@@ -70,14 +89,14 @@ pub fn localPaneCallback(
     const slot = ctx orelse return .disarm;
     _ = result catch {
         if (findLocalSplitPaneByFd(slot.state, slot.fd)) |pane| {
-            slot.pending_dead_splits.append(slot.state.allocator, pane.id) catch {};
+            queueDeadSplitId(slot.pending_dead_splits, pane.id, slot.state.allocator);
         }
-        queueFd(slot.pending_remove_fds, slot.fd, slot.state.allocator);
+        queueLocalRemove(slot.pending_remove_fds, slot.fd, slot.generation, slot.state.allocator);
         return .disarm;
     };
 
     const pane = findLocalSplitPaneByFd(slot.state, slot.fd) orelse {
-        queueFd(slot.pending_remove_fds, slot.fd, slot.state.allocator);
+        queueLocalRemove(slot.pending_remove_fds, slot.fd, slot.generation, slot.state.allocator);
         return .disarm;
     };
 
@@ -96,8 +115,8 @@ pub fn localPaneCallback(
     } else |_| {}
 
     if (!pane.isAlive()) {
-        slot.pending_dead_splits.append(slot.state.allocator, pane.id) catch {};
-        queueFd(slot.pending_remove_fds, slot.fd, slot.state.allocator);
+        queueDeadSplitId(slot.pending_dead_splits, pane.id, slot.state.allocator);
+        queueLocalRemove(slot.pending_remove_fds, slot.fd, slot.generation, slot.state.allocator);
         return .disarm;
     }
 
@@ -109,6 +128,13 @@ fn queueDeadFloatUuid(list: *std.ArrayList([32]u8), uuid: [32]u8, allocator: std
         if (std.mem.eql(u8, &existing, &uuid)) return;
     }
     list.append(allocator, uuid) catch {};
+}
+
+fn queueDeadSplitId(list: *std.ArrayList(u16), pane_id: u16, allocator: std.mem.Allocator) void {
+    for (list.items) |existing| {
+        if (existing == pane_id) return;
+    }
+    list.append(allocator, pane_id) catch {};
 }
 
 pub fn floatPaneCallback(
@@ -123,12 +149,12 @@ pub fn floatPaneCallback(
         if (findFloatByFd(slot.state, slot.fd)) |pane| {
             queueDeadFloatUuid(slot.pending_dead_float_uuids, pane.uuid, slot.state.allocator);
         }
-        queueFd(slot.pending_remove_fds, slot.fd, slot.state.allocator);
+        queueFloatRemove(slot.pending_remove_fds, slot.fd, slot.generation, slot.state.allocator);
         return .disarm;
     };
 
     const pane = findFloatByFd(slot.state, slot.fd) orelse {
-        queueFd(slot.pending_remove_fds, slot.fd, slot.state.allocator);
+        queueFloatRemove(slot.pending_remove_fds, slot.fd, slot.generation, slot.state.allocator);
         return .disarm;
     };
 
@@ -148,7 +174,7 @@ pub fn floatPaneCallback(
 
     if (!pane.isAlive()) {
         queueDeadFloatUuid(slot.pending_dead_float_uuids, pane.uuid, slot.state.allocator);
-        queueFd(slot.pending_remove_fds, slot.fd, slot.state.allocator);
+        queueFloatRemove(slot.pending_remove_fds, slot.fd, slot.generation, slot.state.allocator);
         return .disarm;
     }
 
