@@ -49,6 +49,177 @@ fn loopTimerCallback(
     return .rearm;
 }
 
+const SesVtSlot = struct {
+    state: *State,
+    fd: posix.fd_t,
+    buffer: []u8,
+    watched_fd: *?posix.fd_t,
+};
+
+const SesVtWatcher = struct {
+    loop: *xev.Loop,
+    completion: xev.Completion = .{},
+    slot: SesVtSlot = undefined,
+    watched_fd: ?posix.fd_t = null,
+};
+
+const SesCtlSlot = struct {
+    state: *State,
+    fd: posix.fd_t,
+    buffer: []u8,
+    watched_fd: *?posix.fd_t,
+};
+
+const SesCtlWatcher = struct {
+    loop: *xev.Loop,
+    completion: xev.Completion = .{},
+    slot: SesCtlSlot = undefined,
+    watched_fd: ?posix.fd_t = null,
+};
+
+fn ensureSesVtWatcherArmed(state: *State, watcher: *SesVtWatcher, buffer: []u8) void {
+    if (watcher.watched_fd != null) return;
+    const vt_fd = state.ses_client.getVtFd() orelse return;
+
+    watcher.watched_fd = vt_fd;
+    watcher.slot = .{ .state = state, .fd = vt_fd, .buffer = buffer, .watched_fd = &watcher.watched_fd };
+    const file = xev.File.initFd(vt_fd);
+    watcher.completion = .{};
+    file.poll(watcher.loop, &watcher.completion, .read, SesVtSlot, &watcher.slot, sesVtCallback);
+}
+
+fn ensureSesCtlWatcherArmed(state: *State, watcher: *SesCtlWatcher, buffer: []u8) void {
+    if (watcher.watched_fd != null) return;
+    const ctl_fd = state.ses_client.getCtlFd() orelse return;
+
+    watcher.watched_fd = ctl_fd;
+    watcher.slot = .{ .state = state, .fd = ctl_fd, .buffer = buffer, .watched_fd = &watcher.watched_fd };
+    const file = xev.File.initFd(ctl_fd);
+    watcher.completion = .{};
+    file.poll(watcher.loop, &watcher.completion, .read, SesCtlSlot, &watcher.slot, sesCtlCallback);
+}
+
+fn sesVtCallback(
+    ctx: ?*SesVtSlot,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    _: xev.File,
+    result: xev.PollError!xev.PollEvent,
+) xev.CallbackAction {
+    const slot = ctx orelse return .disarm;
+    _ = result catch {
+        if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+        if (slot.state.ses_client.vt_fd) |vt_fd| {
+            if (vt_fd == slot.fd) {
+                posix.close(vt_fd);
+                slot.state.ses_client.vt_fd = null;
+                slot.state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
+            }
+        }
+        return .disarm;
+    };
+
+    const vt_fd = slot.state.ses_client.getVtFd() orelse {
+        if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+        return .disarm;
+    };
+    if (vt_fd != slot.fd) {
+        if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+        return .disarm;
+    }
+
+    var vt_frames: usize = 0;
+    while (vt_frames < 64) : (vt_frames += 1) {
+        const hdr = wire.tryReadMuxVtHeader(vt_fd) catch |err| switch (err) {
+            error.WouldBlock => break,
+            else => {
+                if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+                if (slot.state.ses_client.vt_fd) |live_fd| {
+                    if (live_fd == slot.fd) {
+                        posix.close(live_fd);
+                        slot.state.ses_client.vt_fd = null;
+                        slot.state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
+                    }
+                }
+                return .disarm;
+            },
+        };
+        if (hdr.len > slot.buffer.len) {
+            var remaining: usize = hdr.len;
+            while (remaining > 0) {
+                const chunk = @min(remaining, slot.buffer.len);
+                wire.readExact(vt_fd, slot.buffer[0..chunk]) catch break;
+                remaining -= chunk;
+            }
+            continue;
+        }
+        if (hdr.len > 0) {
+            wire.readExact(vt_fd, slot.buffer[0..hdr.len]) catch {
+                if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+                if (slot.state.ses_client.vt_fd) |live_fd| {
+                    if (live_fd == slot.fd) {
+                        posix.close(live_fd);
+                        slot.state.ses_client.vt_fd = null;
+                        slot.state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
+                    }
+                }
+                return .disarm;
+            };
+        }
+
+        if (slot.state.findPaneByPaneId(hdr.pane_id)) |pane| {
+            if (hdr.frame_type == @intFromEnum(pod_protocol.FrameType.output)) {
+                mux.debugLog("vt recv: pane_id={d} output len={d}", .{ hdr.pane_id, hdr.len });
+                pane.feedPodOutput(slot.buffer[0..hdr.len]);
+                pane.vt.invalidateRenderState();
+                slot.state.needs_render = true;
+            } else if (hdr.frame_type == @intFromEnum(pod_protocol.FrameType.backlog_end)) {
+                mux.debugLog("vt recv: pane_id={d} backlog_end", .{hdr.pane_id});
+                pane.vt.invalidateRenderState();
+                slot.state.needs_render = true;
+                slot.state.force_full_render = true;
+            }
+        } else {
+            mux.debugLog("vt recv: unknown pane_id={d}", .{hdr.pane_id});
+        }
+    }
+
+    return .rearm;
+}
+
+fn sesCtlCallback(
+    ctx: ?*SesCtlSlot,
+    _: *xev.Loop,
+    _: *xev.Completion,
+    _: xev.File,
+    result: xev.PollError!xev.PollEvent,
+) xev.CallbackAction {
+    const slot = ctx orelse return .disarm;
+    _ = result catch {
+        if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+        if (slot.state.ses_client.ctl_fd) |ctl_fd| {
+            if (ctl_fd == slot.fd) {
+                posix.close(ctl_fd);
+                slot.state.ses_client.ctl_fd = null;
+                slot.state.notifications.showFor("Warning: Lost connection to ses daemon (CTL channel)", 5000);
+            }
+        }
+        return .disarm;
+    };
+
+    const ctl_fd = slot.state.ses_client.getCtlFd() orelse {
+        if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+        return .disarm;
+    };
+    if (ctl_fd != slot.fd) {
+        if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+        return .disarm;
+    }
+
+    loop_ipc.handleSesMessage(slot.state, slot.buffer);
+    return .rearm;
+}
+
 pub fn runMainLoop(state: *State) !void {
     const allocator = state.allocator;
 
@@ -73,6 +244,11 @@ pub fn runMainLoop(state: *State) !void {
     var poll_fds: std.ArrayList(posix.pollfd) = .empty;
     defer poll_fds.deinit(allocator);
     var buffer: [1024 * 1024]u8 = undefined; // Larger buffer for efficiency
+    var ses_vt_buffer: [1024 * 1024]u8 = undefined;
+    var ses_ctl_buffer: [1024 * 1024]u8 = undefined;
+
+    var ses_vt_watcher: SesVtWatcher = .{ .loop = &loop };
+    var ses_ctl_watcher: SesCtlWatcher = .{ .loop = &loop };
 
     // Frame timing.
     var last_render: i64 = std.time.milliTimestamp();
@@ -103,6 +279,8 @@ pub fn runMainLoop(state: *State) !void {
     // Main loop.
     while (state.running) {
         try loop.run(.no_wait);
+        ensureSesVtWatcherArmed(state, &ses_vt_watcher, &ses_vt_buffer);
+        ensureSesCtlWatcherArmed(state, &ses_ctl_watcher, &ses_ctl_buffer);
 
         // Clear skip flag from previous iteration.
         state.skip_dead_check = false;
@@ -226,20 +404,6 @@ pub fn runMainLoop(state: *State) !void {
                     .revents = 0,
                 });
             }
-        }
-
-        // Add SES VT channel fd (multiplexed output for all pod panes).
-        var ses_vt_fd_idx: ?usize = null;
-        if (state.ses_client.getVtFd()) |vt_fd| {
-            ses_vt_fd_idx = poll_fds.items.len;
-            try poll_fds.append(allocator, .{ .fd = vt_fd, .events = posix.POLL.IN, .revents = 0 });
-        }
-
-        // Add SES control channel fd (async messages: notifications, shell events).
-        var ses_fd_idx: ?usize = null;
-        if (state.ses_client.getCtlFd()) |ctl_fd| {
-            ses_fd_idx = poll_fds.items.len;
-            try poll_fds.append(allocator, .{ .fd = ctl_fd, .events = posix.POLL.IN, .revents = 0 });
         }
 
         // Calculate poll timeout - wait for next frame, status update, or input.
@@ -390,80 +554,6 @@ pub fn runMainLoop(state: *State) !void {
                     }
                 }
                 idx += 1;
-            }
-        }
-
-        // Handle SES VT channel (multiplexed pod output for all pod panes).
-        if (ses_vt_fd_idx) |vidx| {
-            const revents = poll_fds.items[vidx].revents;
-
-            // Check for VT connection errors (HUP, ERR, NVAL).
-            if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
-                mux.debugLog("VT channel error detected: revents=0x{x}", .{revents});
-                // Close the VT fd to prevent further use.
-                if (state.ses_client.vt_fd) |vt_fd| {
-                    posix.close(vt_fd);
-                    state.ses_client.vt_fd = null;
-                    state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
-                }
-                // VT disconnection is critical - all pod panes will freeze.
-                // Could attempt reconnection here, but for now just notify user.
-            } else if (revents & posix.POLL.IN != 0) {
-                const vt_fd = state.ses_client.getVtFd().?;
-                // Read as many frames as available without blocking.
-                var vt_frames: usize = 0;
-                while (vt_frames < 64) : (vt_frames += 1) {
-                    const hdr = wire.tryReadMuxVtHeader(vt_fd) catch break;
-                    if (hdr.len > buffer.len) {
-                        // Frame too large — skip it.
-                        var remaining: usize = hdr.len;
-                        while (remaining > 0) {
-                            const chunk = @min(remaining, buffer.len);
-                            wire.readExact(vt_fd, buffer[0..chunk]) catch break;
-                            remaining -= chunk;
-                        }
-                        continue;
-                    }
-                    if (hdr.len > 0) {
-                        wire.readExact(vt_fd, buffer[0..hdr.len]) catch break;
-                    }
-
-                    if (state.findPaneByPaneId(hdr.pane_id)) |pane| {
-                        if (hdr.frame_type == @intFromEnum(pod_protocol.FrameType.output)) {
-                            mux.debugLog("vt recv: pane_id={d} output len={d}", .{ hdr.pane_id, hdr.len });
-                            pane.feedPodOutput(buffer[0..hdr.len]);
-                            pane.vt.invalidateRenderState();
-                            state.needs_render = true;
-                        } else if (hdr.frame_type == @intFromEnum(pod_protocol.FrameType.backlog_end)) {
-                            mux.debugLog("vt recv: pane_id={d} backlog_end", .{hdr.pane_id});
-                            // Backlog replay finished — force full redraw.
-                            pane.vt.invalidateRenderState();
-                            state.needs_render = true;
-                            state.force_full_render = true;
-                        }
-                    } else {
-                        mux.debugLog("vt recv: unknown pane_id={d}", .{hdr.pane_id});
-                    }
-                }
-            }
-        }
-
-        // Handle ses control messages.
-        if (ses_fd_idx) |sidx| {
-            const revents = poll_fds.items[sidx].revents;
-
-            // Check for connection errors (HUP, ERR, NVAL).
-            if (revents & (posix.POLL.HUP | posix.POLL.ERR | posix.POLL.NVAL) != 0) {
-                mux.debugLog("CTL channel error detected: revents=0x{x}", .{revents});
-                // Close the CTL fd to prevent further use.
-                if (state.ses_client.ctl_fd) |ctl_fd| {
-                    posix.close(ctl_fd);
-                    state.ses_client.ctl_fd = null;
-                    state.notifications.showFor("Warning: Lost connection to ses daemon (CTL channel)", 5000);
-                }
-                // Continue running - panes still work via VT channel.
-            } else if (revents & posix.POLL.IN != 0) {
-                loop_ipc.handleSesMessage(state, &buffer);
             }
         }
 
