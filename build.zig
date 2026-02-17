@@ -28,6 +28,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     })) |voidbox_dep| voidbox_dep.module("voidbox") else null;
 
+    // Get libxev dependency for event loop migration
+    const xev_mod = if (b.lazyDependency("libxev", .{
+        .target = target,
+        .optimize = optimize,
+    })) |xev_dep| xev_dep.module("xev") else null;
+
     // Create core module
     const core_module = b.createModule(.{
         .root_source_file = b.path("src/core/mod.zig"),
@@ -96,6 +102,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     pod_module.addImport("core", core_module);
+    if (xev_mod) |xev| {
+        pod_module.addImport("xev", xev);
+    }
     if (voidbox_mod) |vb| {
         pod_module.addImport("voidbox", vb);
     }

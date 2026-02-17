@@ -40,198 +40,14 @@ const core = @import("core");
 const pod_protocol = core.pod_protocol;
 const pod_meta = core.pod_meta;
 const wire = core.wire;
+const xev = @import("xev").Dynamic;
+const PodUplink = @import("uplink.zig").PodUplink;
 
 var pod_debug: bool = false;
 
 fn debugLog(comptime fmt: []const u8, args: anytype) void {
     if (!pod_debug) return;
     std.debug.print("[pod] " ++ fmt ++ "\n", args);
-}
-
-const PodUplink = struct {
-    allocator: std.mem.Allocator,
-    uuid: [32]u8,
-    fd: ?posix.fd_t = null,
-    last_sent_ms: i64 = 0,
-    last_cwd: ?[]u8 = null,
-    last_fg_process: ?[]u8 = null,
-    last_fg_pid: ?i32 = null,
-
-    pub fn init(allocator: std.mem.Allocator, uuid: [32]u8) PodUplink {
-        return .{ .allocator = allocator, .uuid = uuid };
-    }
-
-    pub fn deinit(self: *PodUplink) void {
-        if (self.fd) |fd| posix.close(fd);
-        if (self.last_cwd) |s| self.allocator.free(s);
-        if (self.last_fg_process) |s| self.allocator.free(s);
-        self.* = undefined;
-    }
-
-    pub fn tick(self: *PodUplink, child_pid: posix.pid_t) void {
-        const now_ms: i64 = std.time.milliTimestamp();
-        // Reduced from 500ms to 100ms for more responsive CWD updates.
-        // This ensures float spawns get accurate CWD even when user
-        // changes directory and immediately toggles a float.
-        if (now_ms - self.last_sent_ms < 100) return;
-        self.last_sent_ms = now_ms;
-
-        const proc_cwd = readProcCwd(self.allocator, child_pid) catch null;
-        defer if (proc_cwd) |s| self.allocator.free(s);
-
-        const fg = readProcForeground(self.allocator, child_pid) catch null;
-        defer if (fg) |v| {
-            self.allocator.free(v.name);
-        };
-
-        var changed = false;
-        if (!optStrEql(self.last_cwd, proc_cwd)) changed = true;
-        const fg_name = if (fg) |v| v.name else null;
-        const fg_pid = if (fg) |v| v.pid else null;
-        if (!optStrEql(self.last_fg_process, fg_name)) changed = true;
-        if (!optIntEql(i32, self.last_fg_pid, fg_pid)) changed = true;
-        if (!changed) return;
-
-        if (self.last_cwd) |s| self.allocator.free(s);
-        self.last_cwd = if (proc_cwd) |s| self.allocator.dupe(u8, s) catch null else null;
-
-        if (self.last_fg_process) |s| self.allocator.free(s);
-        self.last_fg_process = if (fg_name) |s| self.allocator.dupe(u8, s) catch null else null;
-        self.last_fg_pid = fg_pid;
-
-        if (!self.ensureConnected()) return;
-
-        const fd = self.fd.?;
-
-        debugLog("uplink tick: sending updates", .{});
-
-        // Send CwdChanged if cwd is available.
-        if (proc_cwd) |cwd_str| {
-            var cwd_msg: wire.CwdChanged = .{
-                .uuid = self.uuid,
-                .cwd_len = @intCast(@min(cwd_str.len, std.math.maxInt(u16))),
-            };
-            const trails = [_][]const u8{cwd_str[0..cwd_msg.cwd_len]};
-            wire.writeControlMsg(fd, .cwd_changed, std.mem.asBytes(&cwd_msg), &trails) catch {
-                self.disconnect();
-                return;
-            };
-        }
-
-        // Send FgChanged if foreground process info is available.
-        if (fg_name) |name_str| {
-            var fg_msg: wire.FgChanged = .{
-                .uuid = self.uuid,
-                .pid = fg_pid orelse 0,
-                .name_len = @intCast(@min(name_str.len, std.math.maxInt(u16))),
-            };
-            const trails = [_][]const u8{name_str[0..fg_msg.name_len]};
-            wire.writeControlMsg(fd, .fg_changed, std.mem.asBytes(&fg_msg), &trails) catch {
-                self.disconnect();
-                return;
-            };
-        }
-    }
-
-    fn ensureConnected(self: *PodUplink) bool {
-        if (self.fd != null) return true;
-
-        const ses_path = core.ipc.getSesSocketPath(self.allocator) catch return false;
-        defer self.allocator.free(ses_path);
-
-        const client = core.ipc.Client.connect(ses_path) catch return false;
-        const fd = client.fd;
-
-        // Binary handshake: send [channel_type, version] + 16 raw UUID bytes.
-        var handshake: [18]u8 = undefined;
-        handshake[0] = wire.SES_HANDSHAKE_POD_CTL;
-        handshake[1] = wire.PROTOCOL_VERSION;
-        // Convert 32-char hex UUID to 16 binary bytes.
-        const uuid_bin = core.uuid.hexToBin(self.uuid) orelse {
-            posix.close(fd);
-            return false;
-        };
-        @memcpy(handshake[2..18], &uuid_bin);
-        wire.writeAll(fd, &handshake) catch {
-            posix.close(fd);
-            return false;
-        };
-
-        self.fd = fd;
-        debugLog("uplink connected fd={d}", .{fd});
-        return true;
-    }
-
-    fn disconnect(self: *PodUplink) void {
-        debugLog("uplink disconnected", .{});
-        if (self.fd) |fd| posix.close(fd);
-        self.fd = null;
-    }
-};
-
-fn optStrEql(a: ?[]const u8, b: ?[]const u8) bool {
-    if (a == null and b == null) return true;
-    if (a == null or b == null) return false;
-    return std.mem.eql(u8, a.?, b.?);
-}
-
-fn optIntEql(comptime T: type, a: ?T, b: ?T) bool {
-    if (a == null and b == null) return true;
-    if (a == null or b == null) return false;
-    return a.? == b.?;
-}
-
-fn readProcCwd(allocator: std.mem.Allocator, pid: posix.pid_t) !?[]u8 {
-    if (pid <= 0) return null;
-    var path_buf: [64]u8 = undefined;
-    const path = try std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pid});
-    var tmp: [std.fs.max_path_bytes]u8 = undefined;
-    const link = posix.readlink(path, &tmp) catch return null;
-    return try allocator.dupe(u8, link);
-}
-
-fn readProcForeground(allocator: std.mem.Allocator, child_pid: posix.pid_t) !?struct { name: []u8, pid: i32 } {
-    if (child_pid <= 0) return null;
-
-    // /proc/<pid>/stat field 8 after the comm+state is tpgid.
-    var stat_path_buf: [64]u8 = undefined;
-    const stat_path = try std.fmt.bufPrint(&stat_path_buf, "/proc/{d}/stat", .{child_pid});
-    const stat_file = std.fs.openFileAbsolute(stat_path, .{}) catch return null;
-    defer stat_file.close();
-
-    var stat_buf: [512]u8 = undefined;
-    const stat_len = stat_file.read(&stat_buf) catch return null;
-    if (stat_len == 0) return null;
-    const stat = stat_buf[0..stat_len];
-
-    const right_paren = std.mem.lastIndexOfScalar(u8, stat, ')') orelse return null;
-    if (right_paren + 2 >= stat.len) return null;
-    const rest = stat[right_paren + 2 ..];
-
-    var it = std.mem.tokenizeScalar(u8, rest, ' ');
-    var idx: usize = 0;
-    var tpgid: ?i32 = null;
-    while (it.next()) |tok| {
-        idx += 1;
-        if (idx == 6) {
-            const v = std.fmt.parseInt(i32, tok, 10) catch return null;
-            if (v > 0) tpgid = v;
-            break;
-        }
-    }
-    if (tpgid == null) return null;
-
-    var comm_path_buf: [64]u8 = undefined;
-    const comm_path = try std.fmt.bufPrint(&comm_path_buf, "/proc/{d}/comm", .{tpgid.?});
-    const comm_file = std.fs.openFileAbsolute(comm_path, .{}) catch return null;
-    defer comm_file.close();
-    var comm_buf: [128]u8 = undefined;
-    const comm_len = comm_file.read(&comm_buf) catch return null;
-    if (comm_len == 0) return null;
-    const end = if (comm_buf[comm_len - 1] == '\n') comm_len - 1 else comm_len;
-
-    const name = try allocator.dupe(u8, comm_buf[0..end]);
-    return .{ .name = name, .pid = tpgid.? };
 }
 
 fn setBlocking(fd: posix.fd_t) void {
@@ -766,11 +582,21 @@ const Pod = struct {
     }
 
     pub fn run(self: *Pod, opts: RunOptions) !void {
+        try xev.detect();
+        var loop = try xev.Loop.init(.{});
+        defer loop.deinit();
+
+        const server_watcher = xev.File.initFd(self.server.getFd());
+        var server_completion: xev.Completion = .{};
+
         var poll_fds: [3]posix.pollfd = undefined;
         var buf = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
         defer self.allocator.free(buf);
         const backlog_tmp = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
         defer self.allocator.free(backlog_tmp);
+
+        var accept_ctx = AcceptContext{ .pod = self, .backlog_tmp = backlog_tmp };
+        server_watcher.poll(&loop, &server_completion, .read, AcceptContext, &accept_ctx, acceptCallback);
 
         var last_meta_ms: i64 = 0;
 
@@ -810,61 +636,7 @@ const Pod = struct {
                 return err;
             };
 
-            // Accept new connection.
-            if (poll_fds[0].revents & posix.POLL.IN != 0) {
-                if (self.server.tryAccept() catch null) |conn| {
-                    // Security: verify peer has same UID
-                    if (!verifyPeerCredentials(conn.fd)) {
-                        var tmp = conn;
-                        tmp.close();
-                        continue;
-                    }
-
-                    // Read versioned handshake: [channel_type, version]
-                    var handshake: [2]u8 = undefined;
-                    var hoff: usize = 0;
-                    while (hoff < 2) {
-                        const n = posix.read(conn.fd, handshake[hoff..]) catch {
-                            var tmp_conn = conn;
-                            tmp_conn.close();
-                            continue;
-                        };
-                        if (n == 0) {
-                            var tmp_conn = conn;
-                            tmp_conn.close();
-                            continue;
-                        }
-                        hoff += n;
-                    }
-
-                    // Validate protocol version.
-                    if (handshake[1] != wire.PROTOCOL_VERSION) {
-                        debugLog("reject: unsupported protocol version {d} fd={d}", .{ handshake[1], conn.fd });
-                        var tmp_conn = conn;
-                        tmp_conn.close();
-                        continue;
-                    }
-
-                    if (handshake[0] == wire.POD_HANDSHAKE_SES_VT) {
-                        // SES VT channel (③) — treat as main client.
-                        debugLog("accept: SES VT client fd={d}", .{conn.fd});
-                        self.acceptVtClient(conn, backlog_tmp);
-                    } else if (handshake[0] == wire.POD_HANDSHAKE_SHP_CTL) {
-                        // SHP binary control (⑤) — read binary control messages.
-                        debugLog("accept: SHP ctl fd={d}", .{conn.fd});
-                        self.handleBinaryShpConnection(conn);
-                    } else if (handshake[0] == wire.POD_HANDSHAKE_AUX_INPUT) {
-                        // Auxiliary input (e.g., hexe pod send) — inject frames without replacing client.
-                        debugLog("accept: aux input fd={d}", .{conn.fd});
-                        self.handleAuxInput(conn);
-                    } else {
-                        // Unknown handshake — reject.
-                        debugLog("accept: unknown handshake 0x{x:0>2} fd={d}", .{ handshake[0], conn.fd });
-                        var tmp_conn = conn;
-                        tmp_conn.close();
-                    }
-                }
-            }
+            try loop.run(.no_wait);
 
             // Drain PTY output.
             if (poll_fds[1].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
@@ -946,6 +718,74 @@ const Pod = struct {
                     }
                 }
             }
+        }
+    }
+
+    const AcceptContext = struct {
+        pod: *Pod,
+        backlog_tmp: []u8,
+    };
+
+    fn acceptCallback(
+        ctx: ?*AcceptContext,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        _: xev.File,
+        result: xev.PollError!xev.PollEvent,
+    ) xev.CallbackAction {
+        const accept_ctx = ctx orelse return .disarm;
+        _ = result catch return .rearm;
+
+        while (accept_ctx.pod.server.tryAccept() catch null) |conn| {
+            accept_ctx.pod.handleAcceptedConnection(conn, accept_ctx.backlog_tmp);
+        }
+
+        return .rearm;
+    }
+
+    fn handleAcceptedConnection(self: *Pod, conn: core.IpcConnection, backlog_tmp: []u8) void {
+        if (!verifyPeerCredentials(conn.fd)) {
+            var tmp = conn;
+            tmp.close();
+            return;
+        }
+
+        var handshake: [2]u8 = undefined;
+        var hoff: usize = 0;
+        while (hoff < 2) {
+            const n = posix.read(conn.fd, handshake[hoff..]) catch {
+                var tmp_conn = conn;
+                tmp_conn.close();
+                return;
+            };
+            if (n == 0) {
+                var tmp_conn = conn;
+                tmp_conn.close();
+                return;
+            }
+            hoff += n;
+        }
+
+        if (handshake[1] != wire.PROTOCOL_VERSION) {
+            debugLog("reject: unsupported protocol version {d} fd={d}", .{ handshake[1], conn.fd });
+            var tmp_conn = conn;
+            tmp_conn.close();
+            return;
+        }
+
+        if (handshake[0] == wire.POD_HANDSHAKE_SES_VT) {
+            debugLog("accept: SES VT client fd={d}", .{conn.fd});
+            self.acceptVtClient(conn, backlog_tmp);
+        } else if (handshake[0] == wire.POD_HANDSHAKE_SHP_CTL) {
+            debugLog("accept: SHP ctl fd={d}", .{conn.fd});
+            self.handleBinaryShpConnection(conn);
+        } else if (handshake[0] == wire.POD_HANDSHAKE_AUX_INPUT) {
+            debugLog("accept: aux input fd={d}", .{conn.fd});
+            self.handleAuxInput(conn);
+        } else {
+            debugLog("accept: unknown handshake 0x{x:0>2} fd={d}", .{ handshake[0], conn.fd });
+            var tmp_conn = conn;
+            tmp_conn.close();
         }
     }
 
