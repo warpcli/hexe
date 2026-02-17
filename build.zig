@@ -28,11 +28,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     })) |voidbox_dep| voidbox_dep.module("voidbox") else null;
 
-    // Get libxev dependency for event loop migration
-    const xev_mod = if (b.lazyDependency("libxev", .{
+    // Get libxev dependency (required event loop backend)
+    const xev_mod = b.dependency("libxev", .{
         .target = target,
         .optimize = optimize,
-    })) |xev_dep| xev_dep.module("xev") else null;
+    }).module("xev");
 
     // Create core module
     const core_module = b.createModule(.{
@@ -51,6 +51,7 @@ pub fn build(b: *std.Build) void {
     if (voidbox_mod) |vb| {
         core_module.addImport("voidbox", vb);
     }
+    core_module.addImport("xev", xev_mod);
 
     // Create shp module (shell prompt/status bar segments)
     const shp_module = b.createModule(.{
@@ -76,9 +77,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     mux_module.addImport("core", core_module);
-    if (xev_mod) |xev| {
-        mux_module.addImport("xev", xev);
-    }
+    mux_module.addImport("xev", xev_mod);
     mux_module.addImport("shp", shp_module);
     mux_module.addImport("pop", pop_module);
     if (ghostty_vt_mod) |vt| {
@@ -93,9 +92,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     ses_module.addImport("core", core_module);
-    if (xev_mod) |xev| {
-        ses_module.addImport("xev", xev);
-    }
+    ses_module.addImport("xev", xev_mod);
     if (voidbox_mod) |vb| {
         ses_module.addImport("voidbox", vb);
     }
@@ -108,9 +105,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     pod_module.addImport("core", core_module);
-    if (xev_mod) |xev| {
-        pod_module.addImport("xev", xev);
-    }
+    pod_module.addImport("xev", xev_mod);
     if (voidbox_mod) |vb| {
         pod_module.addImport("voidbox", vb);
     }
@@ -127,6 +122,7 @@ pub fn build(b: *std.Build) void {
     cli_root.addImport("ses", ses_module);
     cli_root.addImport("pod", pod_module);
     cli_root.addImport("shp", shp_module);
+    cli_root.addImport("xev", xev_mod);
     if (argonaut_mod) |arg| {
         cli_root.addImport("argonaut", arg);
     }

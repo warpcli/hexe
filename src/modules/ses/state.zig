@@ -1194,8 +1194,8 @@ pub const SesState = struct {
         const instance_env = posix.getenv("HEXE_INSTANCE");
         const test_only_env = posix.getenv("HEXE_TEST_ONLY");
         const needs_runtime_env = (instance_env != null and instance_env.?.len > 0) or
-                                  (test_only_env != null and test_only_env.?.len > 0) or
-                                  (isolation_profile != null and isolation_profile.?.len > 0);
+            (test_only_env != null and test_only_env.?.len > 0) or
+            (isolation_profile != null and isolation_profile.?.len > 0);
 
         if (env != null or needs_runtime_env) {
             var env_map = if (env == null)
@@ -1250,11 +1250,10 @@ pub const SesState = struct {
             const remaining_ms = deadline_ms - std.time.milliTimestamp();
             if (remaining_ms <= 0) return error.PodSpawnTimeout;
 
-            var pfd = [_]posix.pollfd{.{ .fd = stdout_fd, .events = posix.POLL.IN, .revents = 0 }};
-            const rc = posix.poll(&pfd, @intCast(remaining_ms)) catch |err| return err;
-            if (rc == 0) return error.PodSpawnTimeout;
-            if (pfd[0].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) return error.PodNoHandshake;
-            if (pfd[0].revents & posix.POLL.IN == 0) continue;
+            wire.waitReadableTimeout(stdout_fd, @intCast(remaining_ms)) catch |err| switch (err) {
+                error.Timeout => return error.PodSpawnTimeout,
+                else => return err,
+            };
 
             var one: [1]u8 = undefined;
             const n = try stdout_file.read(&one);
