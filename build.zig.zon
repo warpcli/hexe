@@ -27,8 +27,8 @@
             .hash = "zlua-0.1.0-hGRpCww-BQCx3cX6zbKWfTgOx6B7Peo4P17RK2hm7-xV",
         },
         .voidbox = .{
-            .url = "git+https://github.com/bresilla/voidbox#0.0.8",
-            .hash = "voidbox-0.0.8-fHvjRcGvBAC_mMaReW3dL3H4CK9E1LNoUi6ce7AgndIp",
+            .url = "git+https://github.com/bresilla/voidbox#0.0.9",
+            .hash = "voidbox-0.0.9-fHvjRQsrBQCmQlJfs8hfE5HzK2r1rOEq9fkSznXY53FO",
         },
     },
     .fingerprint = 0x4c99ab0b473f252d,

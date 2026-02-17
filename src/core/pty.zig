@@ -130,6 +130,10 @@ pub const Pty = struct {
             // Build environment: inherit parent env + BOX=1 + TERM override + extra
             const envp = buildEnv(extra_env) catch posix.exit(1);
 
+            // Close all file descriptors >= 3 before exec to prevent FD leaks
+            // into the child process (other PTY masters, server sockets, etc.)
+            closeExtraFds();
+
             // Check if command has spaces (needs shell wrapper)
             const has_spaces = std.mem.indexOfScalar(u8, shell, ' ') != null;
 
@@ -236,6 +240,19 @@ pub const Pty = struct {
 
         const slice = try env_list.toOwnedSlice(allocator);
         return @ptrCast(slice.ptr);
+    }
+
+    fn closeExtraFds() void {
+        const first_fd: usize = 3;
+        const max_fd: usize = std.math.maxInt(u32);
+        const result = linux.syscall3(.close_range, first_fd, max_fd, 0);
+        const signed: isize = @bitCast(result);
+        if (!(signed < 0 and signed > -4096)) return;
+        // Fallback: close_range not available, close FDs individually
+        var fd: usize = first_fd;
+        while (fd < 1024) : (fd += 1) {
+            posix.close(@intCast(fd));
+        }
     }
 
     pub fn read(self: Pty, buffer: []u8) !usize {
