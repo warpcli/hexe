@@ -42,6 +42,10 @@ const pod_meta = core.pod_meta;
 const wire = core.wire;
 const xev = @import("xev").Dynamic;
 const PodUplink = @import("uplink.zig").PodUplink;
+const buffering = @import("buffering.zig");
+const RingBuffer = buffering.RingBuffer;
+const Osc7Scanner = buffering.Osc7Scanner;
+const containsClearSeq = buffering.containsClearSeq;
 
 var pod_debug: bool = false;
 
@@ -345,175 +349,6 @@ fn redirectStderrToLog(log_path: []const u8) void {
     if (logfd > 2) posix.close(logfd);
 }
 
-const RingBuffer = struct {
-    buf: []u8,
-    start: usize = 0,
-    len: usize = 0,
-
-    pub fn available(self: *const RingBuffer) usize {
-        return self.buf.len - self.len;
-    }
-
-    pub fn isFull(self: *const RingBuffer) bool {
-        return self.len == self.buf.len;
-    }
-
-    pub fn init(allocator: std.mem.Allocator, cap_bytes: usize) !RingBuffer {
-        return .{ .buf = try allocator.alloc(u8, cap_bytes) };
-    }
-
-    pub fn deinit(self: *RingBuffer, allocator: std.mem.Allocator) void {
-        allocator.free(self.buf);
-        self.* = undefined;
-    }
-
-    pub fn clear(self: *RingBuffer) void {
-        self.start = 0;
-        self.len = 0;
-    }
-
-    pub fn append(self: *RingBuffer, data: []const u8) void {
-        if (self.buf.len == 0) return;
-        if (data.len >= self.buf.len) {
-            // Keep only last capacity bytes.
-            const tail = data[data.len - self.buf.len ..];
-            @memcpy(self.buf, tail);
-            self.start = 0;
-            self.len = self.buf.len;
-            return;
-        }
-
-        const cap = self.buf.len;
-        var drop: usize = 0;
-        if (self.len + data.len > cap) {
-            drop = self.len + data.len - cap;
-        }
-        if (drop > 0) {
-            self.start = (self.start + drop) % cap;
-            self.len -= drop;
-        }
-
-        // Write at end.
-        const end = (self.start + self.len) % cap;
-        const first = @min(cap - end, data.len);
-        @memcpy(self.buf[end .. end + first], data[0..first]);
-        if (first < data.len) {
-            @memcpy(self.buf[0 .. data.len - first], data[first..]);
-        }
-        self.len += data.len;
-    }
-
-    /// Append without dropping any existing bytes.
-    /// Returns false if there isn't enough remaining capacity.
-    pub fn appendNoDrop(self: *RingBuffer, data: []const u8) bool {
-        if (self.buf.len == 0) return false;
-        if (data.len > self.available()) return false;
-
-        const cap = self.buf.len;
-        const end = (self.start + self.len) % cap;
-        const first = @min(cap - end, data.len);
-        @memcpy(self.buf[end .. end + first], data[0..first]);
-        if (first < data.len) {
-            @memcpy(self.buf[0 .. data.len - first], data[first..]);
-        }
-        self.len += data.len;
-        return true;
-    }
-
-    pub fn copyOut(self: *const RingBuffer, out: []u8) usize {
-        const n = @min(out.len, self.len);
-        if (n == 0) return 0;
-
-        const cap = self.buf.len;
-        const first = @min(cap - self.start, n);
-        @memcpy(out[0..first], self.buf[self.start .. self.start + first]);
-        if (first < n) {
-            @memcpy(out[first..n], self.buf[0 .. n - first]);
-        }
-        return n;
-    }
-};
-
-/// Simple OSC 7 scanner for extracting CWD from terminal output.
-/// OSC 7 format: ESC ] 7 ; file://hostname/path BEL (or ESC \)
-const Osc7Scanner = struct {
-    state: State = .normal,
-    buf: [4096]u8 = undefined,
-    len: usize = 0,
-
-    const State = enum {
-        normal,
-        esc, // saw ESC
-        osc, // saw ESC ]
-        osc7, // saw ESC ] 7
-        osc7_content, // saw ESC ] 7 ; collecting content
-        osc7_esc, // saw ESC while in content (looking for \)
-    };
-
-    pub fn feed(self: *Osc7Scanner, data: []const u8, out_cwd: *?[]const u8) void {
-        for (data) |byte| {
-            switch (self.state) {
-                .normal => {
-                    if (byte == 0x1b) self.state = .esc;
-                },
-                .esc => {
-                    if (byte == ']') {
-                        self.state = .osc;
-                    } else {
-                        self.state = .normal;
-                    }
-                },
-                .osc => {
-                    if (byte == '7') {
-                        self.state = .osc7;
-                    } else {
-                        self.state = .normal;
-                    }
-                },
-                .osc7 => {
-                    if (byte == ';') {
-                        self.state = .osc7_content;
-                        self.len = 0;
-                    } else {
-                        self.state = .normal;
-                    }
-                },
-                .osc7_content => {
-                    if (byte == 0x07) {
-                        // BEL terminator - extract path
-                        self.extractPath(out_cwd);
-                        self.state = .normal;
-                    } else if (byte == 0x1b) {
-                        self.state = .osc7_esc;
-                    } else if (self.len < self.buf.len) {
-                        self.buf[self.len] = byte;
-                        self.len += 1;
-                    }
-                },
-                .osc7_esc => {
-                    if (byte == '\\') {
-                        // ESC \ terminator - extract path
-                        self.extractPath(out_cwd);
-                    }
-                    self.state = .normal;
-                },
-            }
-        }
-    }
-
-    fn extractPath(self: *Osc7Scanner, out_cwd: *?[]const u8) void {
-        const content = self.buf[0..self.len];
-        // Format: file://hostname/path or file:///path
-        if (std.mem.startsWith(u8, content, "file://")) {
-            const after_scheme = content[7..];
-            // Find the path part after hostname
-            if (std.mem.indexOfScalar(u8, after_scheme, '/')) |slash_idx| {
-                out_cwd.* = after_scheme[slash_idx..];
-            }
-        }
-    }
-};
-
 const Pod = struct {
     allocator: std.mem.Allocator,
     uuid: [32]u8,
@@ -587,19 +422,41 @@ const Pod = struct {
         defer loop.deinit();
 
         const server_watcher = xev.File.initFd(self.server.getFd());
+        const pty_watcher = xev.File.initFd(self.pty.master_fd);
         var server_completion: xev.Completion = .{};
+        var pty_completion: xev.Completion = .{};
         var timer_completion: xev.Completion = .{};
         var ticker = try xev.Timer.init();
         defer ticker.deinit();
 
-        var poll_fds: [3]posix.pollfd = undefined;
+        var poll_fds: [1]posix.pollfd = undefined;
         var buf = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
         defer self.allocator.free(buf);
         const backlog_tmp = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
         defer self.allocator.free(backlog_tmp);
 
-        var accept_ctx = AcceptContext{ .pod = self, .backlog_tmp = backlog_tmp };
+        var should_stop = false;
+        var callback_error: ?anyerror = null;
+        var pty_armed = false;
+
+        var pty_ctx = PtyContext{
+            .pod = self,
+            .io_buf = buf,
+            .loop = &loop,
+            .watcher = pty_watcher,
+            .completion = &pty_completion,
+            .should_stop = &should_stop,
+            .callback_error = &callback_error,
+            .armed = &pty_armed,
+        };
+
+        var accept_ctx = AcceptContext{
+            .pod = self,
+            .backlog_tmp = backlog_tmp,
+            .pty_ctx = &pty_ctx,
+        };
         server_watcher.poll(&loop, &server_completion, .read, AcceptContext, &accept_ctx, acceptCallback);
+        armPtyWatcher(&pty_ctx);
 
         var timer_ctx = TimerContext{
             .pod = self,
@@ -611,19 +468,11 @@ const Pod = struct {
             // Exit if the child shell/process exited.
             if (self.pty.pollStatus() != null) break;
 
-            // server socket
-            poll_fds[0] = .{ .fd = self.server.getFd(), .events = posix.POLL.IN, .revents = 0 };
-            // pty
-            if (self.client == null and self.backlog.isFull()) {
-                self.pty_paused = true;
-            }
-            const pty_events: i16 = if (self.pty_paused)
-                @intCast(posix.POLL.HUP | posix.POLL.ERR)
-            else
-                @intCast(posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR);
-            poll_fds[1] = .{ .fd = self.pty.master_fd, .events = pty_events, .revents = 0 };
+            if (should_stop) break;
+            if (callback_error) |err| return err;
+
             // client (optional)
-            poll_fds[2] = .{ .fd = if (self.client) |client_conn| client_conn.fd else -1, .events = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR, .revents = 0 };
+            poll_fds[0] = .{ .fd = if (self.client) |client_conn| client_conn.fd else -1, .events = posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR, .revents = 0 };
 
             _ = posix.poll(&poll_fds, 100) catch |err| {
                 if (err == error.Interrupted) continue;
@@ -632,73 +481,17 @@ const Pod = struct {
 
             try loop.run(.no_wait);
 
-            // Drain PTY output.
-            if (poll_fds[1].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
-                break;
-            }
-            if (poll_fds[1].revents & posix.POLL.IN != 0) {
-                // If the mux is disconnected and backlog is full, pause PTY
-                // reads to apply backpressure instead of silently dropping.
-                if (self.client == null) {
-                    const free = self.backlog.available();
-                    if (free == 0) {
-                        self.pty_paused = true;
-                        continue;
-                    }
-
-                    const read_buf = buf[0..@min(buf.len, free)];
-                    const n = self.pty.read(read_buf) catch |err| switch (err) {
-                        error.WouldBlock => 0,
-                        else => return err,
-                    };
-                    if (n == 0) {
-                        // EOF => child exited / PTY closed.
-                        break;
-                    }
-                    const data = read_buf[0..n];
-                    self.scanOsc7(data);
-                    if (containsClearSeq(data)) {
-                        self.backlog.clear();
-                    }
-                    if (!self.backlog.appendNoDrop(data)) {
-                        // Shouldn't happen due to bounded read, but be safe.
-                        self.pty_paused = true;
-                    } else if (self.backlog.isFull()) {
-                        self.pty_paused = true;
-                    }
-                    continue;
-                }
-
-                const n = self.pty.read(buf) catch |err| switch (err) {
-                    error.WouldBlock => 0,
-                    else => return err,
-                };
-                if (n == 0) {
-                    // EOF => child exited / PTY closed.
-                    break;
-                }
-                const data = buf[0..n];
-                self.scanOsc7(data);
-                if (containsClearSeq(data)) {
-                    self.backlog.clear();
-                }
-                self.backlog.append(data);
-                if (self.client) |*client| {
-                    pod_protocol.writeFrame(client, .output, data) catch {
-                        client.close();
-                        self.client = null;
-                    };
-                }
-            }
+            if (should_stop) break;
+            if (callback_error) |err| return err;
 
             // Client input.
             // IMPORTANT: handle HUP/ERR first and ensure we never deref a client
             // after it has been closed in the same poll cycle.
-            if (self.client != null and poll_fds[2].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) != 0) {
-                if (poll_fds[2].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
+            if (self.client != null and poll_fds[0].revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) != 0) {
+                if (poll_fds[0].revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
                     self.client.?.close();
                     self.client = null;
-                } else if (poll_fds[2].revents & posix.POLL.IN != 0) {
+                } else if (poll_fds[0].revents & posix.POLL.IN != 0) {
                     const n = posix.read(self.client.?.fd, buf) catch |err| switch (err) {
                         error.WouldBlock => 0,
                         else => return err,
@@ -718,6 +511,18 @@ const Pod = struct {
     const AcceptContext = struct {
         pod: *Pod,
         backlog_tmp: []u8,
+        pty_ctx: *PtyContext,
+    };
+
+    const PtyContext = struct {
+        pod: *Pod,
+        io_buf: []u8,
+        loop: *xev.Loop,
+        watcher: xev.File,
+        completion: *xev.Completion,
+        should_stop: *bool,
+        callback_error: *?anyerror,
+        armed: *bool,
     };
 
     const TimerContext = struct {
@@ -738,6 +543,98 @@ const Pod = struct {
 
         while (accept_ctx.pod.server.tryAccept() catch null) |conn| {
             accept_ctx.pod.handleAcceptedConnection(conn, accept_ctx.backlog_tmp);
+            if (accept_ctx.pod.client != null and accept_ctx.pod.pty_paused) {
+                accept_ctx.pod.pty_paused = false;
+                armPtyWatcher(accept_ctx.pty_ctx);
+            }
+        }
+
+        return .rearm;
+    }
+
+    fn armPtyWatcher(ctx: *PtyContext) void {
+        if (ctx.armed.* or ctx.pod.pty_paused) return;
+        ctx.watcher.poll(ctx.loop, ctx.completion, .read, PtyContext, ctx, ptyCallback);
+        ctx.armed.* = true;
+    }
+
+    fn ptyCallback(
+        ctx: ?*PtyContext,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        _: xev.File,
+        result: xev.PollError!xev.PollEvent,
+    ) xev.CallbackAction {
+        const pty_ctx = ctx orelse return .disarm;
+        _ = result catch {
+            pty_ctx.armed.* = false;
+            pty_ctx.should_stop.* = true;
+            return .disarm;
+        };
+
+        if (pty_ctx.pod.client == null) {
+            const free = pty_ctx.pod.backlog.available();
+            if (free == 0) {
+                pty_ctx.pod.pty_paused = true;
+                pty_ctx.armed.* = false;
+                return .disarm;
+            }
+
+            const read_buf = pty_ctx.io_buf[0..@min(pty_ctx.io_buf.len, free)];
+            const n = pty_ctx.pod.pty.read(read_buf) catch |err| switch (err) {
+                error.WouldBlock => 0,
+                else => {
+                    pty_ctx.callback_error.* = err;
+                    pty_ctx.armed.* = false;
+                    return .disarm;
+                },
+            };
+
+            if (n == 0) {
+                pty_ctx.should_stop.* = true;
+                pty_ctx.armed.* = false;
+                return .disarm;
+            }
+
+            const data = read_buf[0..n];
+            pty_ctx.pod.scanOsc7(data);
+            if (containsClearSeq(data)) {
+                pty_ctx.pod.backlog.clear();
+            }
+            if (!pty_ctx.pod.backlog.appendNoDrop(data) or pty_ctx.pod.backlog.isFull()) {
+                pty_ctx.pod.pty_paused = true;
+                pty_ctx.armed.* = false;
+                return .disarm;
+            }
+
+            return .rearm;
+        }
+
+        const n = pty_ctx.pod.pty.read(pty_ctx.io_buf) catch |err| switch (err) {
+            error.WouldBlock => 0,
+            else => {
+                pty_ctx.callback_error.* = err;
+                pty_ctx.armed.* = false;
+                return .disarm;
+            },
+        };
+        if (n == 0) {
+            pty_ctx.should_stop.* = true;
+            pty_ctx.armed.* = false;
+            return .disarm;
+        }
+
+        const data = pty_ctx.io_buf[0..n];
+        pty_ctx.pod.scanOsc7(data);
+        if (containsClearSeq(data)) {
+            pty_ctx.pod.backlog.clear();
+        }
+        pty_ctx.pod.backlog.append(data);
+        if (pty_ctx.pod.client) |*client| {
+            pod_protocol.writeFrame(client, .output, data) catch {
+                client.close();
+                pty_ctx.pod.client = null;
+            };
         }
 
         return .rearm;
@@ -976,12 +873,6 @@ const Pod = struct {
 fn podFrameCallback(ctx: *anyopaque, frame: pod_protocol.Frame) void {
     const pod: *Pod = @ptrCast(@alignCast(ctx));
     pod.handleFrame(frame);
-}
-
-fn containsClearSeq(data: []const u8) bool {
-    // Keep it simple for MVP: form-feed or CSI 3J.
-    if (std.mem.indexOfScalar(u8, data, 0x0c) != null) return true;
-    return std.mem.indexOf(u8, data, "\x1b[3J") != null;
 }
 
 test "ring buffer basic" {
