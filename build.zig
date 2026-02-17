@@ -76,6 +76,9 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     mux_module.addImport("core", core_module);
+    if (xev_mod) |xev| {
+        mux_module.addImport("xev", xev);
+    }
     mux_module.addImport("shp", shp_module);
     mux_module.addImport("pop", pop_module);
     if (ghostty_vt_mod) |vt| {
