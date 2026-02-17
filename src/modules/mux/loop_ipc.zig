@@ -730,7 +730,6 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
             wire.readExact(fd, buffer[0..resp.name_len]) catch return;
             const pane_name = state.allocator.dupe(u8, buffer[0..resp.name_len]) catch null;
             if (pane_name) |name| {
-                std.debug.print("[pane_info] Got name '{s}' for uuid, pokemon.enabled={}\n", .{ name, state.pop_config.widgets.pokemon.enabled });
                 // Free old name if exists
                 if (state.pane_names.get(resp.uuid)) |old_name| {
                     state.allocator.free(old_name);
@@ -740,15 +739,13 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
                 // If pokemon widget is enabled by default, load the sprite
                 // But only if not manually toggled and content is null (first load)
                 if (state.pop_config.widgets.pokemon.enabled) {
-                    std.debug.print("[pane_info] pokemon widget enabled, checking {} floats\n", .{state.floats.items.len});
                     // Find the pane with this UUID and load its sprite
                     // Check all floats
-                    for (state.floats.items, 0..) |pane, i| {
+                    for (state.floats.items) |pane| {
                         const uuid_match = std.mem.eql(u8, pane.uuid[0..], resp.uuid[0..]);
-                        std.debug.print("[pane_info] Float {}: uuid_match={}, sprite_init={}, manually_toggled={}, has_content={}\n", .{ i, uuid_match, pane.pokemon_initialized, pane.pokemon_state.manually_toggled, pane.pokemon_state.sprite_content != null });
                         if (uuid_match and pane.pokemon_initialized and
-                            !pane.pokemon_state.manually_toggled and pane.pokemon_state.sprite_content == null) {
-                            std.debug.print("[pane_info] Loading sprite for float {}\n", .{i});
+                            !pane.pokemon_state.manually_toggled and pane.pokemon_state.sprite_content == null)
+                        {
                             pane.pokemon_state.loadSprite(name, false) catch {};
                         }
                     }
@@ -756,7 +753,8 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
                     var split_iter = state.currentLayout().splits.valueIterator();
                     while (split_iter.next()) |pane| {
                         if (std.mem.eql(u8, pane.*.uuid[0..], resp.uuid[0..]) and pane.*.pokemon_initialized and
-                            !pane.*.pokemon_state.manually_toggled and pane.*.pokemon_state.sprite_content == null) {
+                            !pane.*.pokemon_state.manually_toggled and pane.*.pokemon_state.sprite_content == null)
+                        {
                             pane.*.pokemon_state.loadSprite(name, false) catch {};
                         }
                     }
@@ -820,4 +818,3 @@ fn skipPayload(fd: posix.fd_t, len: u32, buffer: []u8) void {
         remaining -= chunk;
     }
 }
-

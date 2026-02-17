@@ -137,8 +137,8 @@ pub fn unfocusAllPanes(self: anytype) void {
                     null,
                     layout_path,
                 ) catch |err| {
-        core.logging.logError("mux", "failed IPC operation in state_sync", err);
-    };
+                    core.logging.logError("mux", "failed IPC operation in state_sync", err);
+                };
             }
         }
     }
@@ -169,8 +169,8 @@ pub fn unfocusAllPanes(self: anytype) void {
                 null,
                 layout_path,
             ) catch |err| {
-        core.logging.logError("mux", "failed IPC operation in state_sync", err);
-    };
+                core.logging.logError("mux", "failed IPC operation in state_sync", err);
+            };
         }
     }
 }
@@ -298,6 +298,17 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
     if (pane == null) return;
     const p = pane.?;
     if (p.uuid[0] == 0) return;
+
+    // Ensure pane metadata eventually converges even if an async response was
+    // missed during reconnect/startup races.
+    if (p.backend == .pod) {
+        if (!self.pane_names.contains(p.uuid)) {
+            self.ses_client.requestPaneProcess(p.uuid);
+        }
+        if (p.getRealCwd() == null) {
+            self.ses_client.requestPaneCwd(p.uuid);
+        }
+    }
 
     _ = self.refreshPaneCwd(p);
 

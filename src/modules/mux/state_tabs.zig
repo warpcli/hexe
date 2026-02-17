@@ -223,16 +223,17 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
     const vt_fd = self.ses_client.getVtFd() orelse return error.NoVtChannel;
     try pane.initWithPod(self.allocator, id, content_x, content_y, content_w, content_h, pane_id, vt_fd, uuid);
 
-    // Request pane info to populate pane name (Pokemon name) for sprites
-    std.debug.print("[DEBUG] About to request pane info, ctl_fd={}\n", .{self.ses_client.ctl_fd != null});
-    if (self.ses_client.ctl_fd) |ctl_fd| {
-        const msg = core.wire.PaneUuid{ .uuid = uuid };
-        std.debug.print("[DEBUG] Sending pane_info request for uuid\n", .{});
-        core.wire.writeControl(ctl_fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
-            std.debug.print("[DEBUG] Failed to send pane_info: {}\n", .{err});
-        };
+    if (self.ses_client.getPaneInfoSnapshot(uuid)) |snap| {
+        defer if (snap.fg_name) |s| self.allocator.free(s);
+        if (snap.name) |name| {
+            if (self.pane_names.get(uuid)) |old_name| self.allocator.free(old_name);
+            self.pane_names.put(uuid, name) catch self.allocator.free(name);
+        }
+        pane.setSesCwd(snap.cwd);
+        self.setPaneProc(uuid, snap.fg_name, snap.fg_pid);
     } else {
-        std.debug.print("[DEBUG] ctl_fd is null, cannot request pane info!\n", .{});
+        self.ses_client.requestPaneProcess(uuid);
+        self.ses_client.requestPaneCwd(uuid);
     }
 
     pane.floating = true;
@@ -793,16 +794,17 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                         continue;
                     };
 
-                    // Request pane info to populate pane name
-                    std.debug.print("[DEBUG] About to request pane info (restore panes), ctl_fd={}\n", .{self.ses_client.ctl_fd != null});
-                    if (self.ses_client.ctl_fd) |ctl_fd| {
-                        const msg = core.wire.PaneUuid{ .uuid = uuid_arr };
-                        std.debug.print("[DEBUG] Sending pane_info request for uuid\n", .{});
-                        core.wire.writeControl(ctl_fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
-                            std.debug.print("[DEBUG] Failed to send pane_info: {}\n", .{err});
-                        };
+                    if (self.ses_client.getPaneInfoSnapshot(uuid_arr)) |snap| {
+                        defer if (snap.fg_name) |s| self.allocator.free(s);
+                        if (snap.name) |name| {
+                            if (self.pane_names.get(uuid_arr)) |old_name| self.allocator.free(old_name);
+                            self.pane_names.put(uuid_arr, name) catch self.allocator.free(name);
+                        }
+                        pane.setSesCwd(snap.cwd);
+                        self.setPaneProc(uuid_arr, snap.fg_name, snap.fg_pid);
                     } else {
-                        std.debug.print("[DEBUG] ctl_fd is null!\n", .{});
+                        self.ses_client.requestPaneProcess(uuid_arr);
+                        self.ses_client.requestPaneCwd(uuid_arr);
                     }
 
                     // Restore pane properties.
@@ -952,7 +954,6 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             }
         }
     }
-
 
     // Prune dead pane nodes from layout trees. Pods that died during detach
     // (e.g., from SIGPIPE) leave orphan nodes in the tree that would corrupt
@@ -1143,16 +1144,17 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
                 return false;
             };
 
-            // Request pane info to populate pane name
-            std.debug.print("[DEBUG] About to request pane info (adopt), ctl_fd={}\n", .{self.ses_client.ctl_fd != null});
-            if (self.ses_client.ctl_fd) |ctl_fd| {
-                const msg = core.wire.PaneUuid{ .uuid = result.uuid };
-                std.debug.print("[DEBUG] Sending pane_info request for uuid\n", .{});
-                core.wire.writeControl(ctl_fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
-                    std.debug.print("[DEBUG] Failed to send pane_info: {}\n", .{err});
-                };
+            if (self.ses_client.getPaneInfoSnapshot(result.uuid)) |snap| {
+                defer if (snap.fg_name) |s| self.allocator.free(s);
+                if (snap.name) |name| {
+                    if (self.pane_names.get(result.uuid)) |old_name| self.allocator.free(old_name);
+                    self.pane_names.put(result.uuid, name) catch self.allocator.free(name);
+                }
+                pane.setSesCwd(snap.cwd);
+                self.setPaneProc(result.uuid, snap.fg_name, snap.fg_pid);
             } else {
-                std.debug.print("[DEBUG] ctl_fd is null!\n", .{});
+                self.ses_client.requestPaneProcess(result.uuid);
+                self.ses_client.requestPaneCwd(result.uuid);
             }
 
             pane.focused = true;
