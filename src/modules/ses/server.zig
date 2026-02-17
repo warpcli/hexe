@@ -5,9 +5,38 @@ const ipc = core.ipc;
 const wire = core.wire;
 const state = @import("state.zig");
 const ses = @import("main.zig");
+const xev = @import("xev").Dynamic;
 
 /// Maximum number of concurrent client connections (MUX instances).
 const MAX_CLIENTS: usize = core.constants.Limits.max_clients;
+
+const CtlWatcher = struct {
+    srv: *anyopaque,
+    fd: posix.fd_t,
+    completion: xev.Completion = .{},
+};
+
+const PendingCtlClose = struct {
+    fd: posix.fd_t,
+    watcher: ?*CtlWatcher,
+};
+
+const VtDirection = enum {
+    pod_to_mux,
+    mux_to_pod,
+};
+
+const VtWatcher = struct {
+    srv: *anyopaque,
+    fd: posix.fd_t,
+    direction: VtDirection,
+    completion: xev.Completion = .{},
+};
+
+const PendingVtClose = struct {
+    fd: posix.fd_t,
+    watcher: ?*VtWatcher,
+};
 
 /// Server that handles mux connections
 /// Note: Uses page_allocator internally to avoid GPA issues after fork/daemonization
@@ -20,6 +49,11 @@ pub const Server = struct {
     pending_pop_requests: std.AutoHashMap(posix.fd_t, posix.fd_t),
     // Track which fds use binary control protocol (MUX_CTL and POD_CTL connections).
     binary_ctl_fds: std.AutoHashMap(posix.fd_t, void),
+    ctl_watchers: std.AutoHashMap(posix.fd_t, *CtlWatcher),
+    pending_ctl_close_fds: std.ArrayList(PendingCtlClose),
+    vt_watchers: std.AutoHashMap(posix.fd_t, *VtWatcher),
+    pending_vt_close_fds: std.ArrayList(PendingVtClose),
+    loop_ptr: ?*xev.Loop = null,
     // CLI fd waiting for exit_intent response.
     pending_exit_intent_cli_fd: ?posix.fd_t = null,
     // CLI fds waiting for float result, keyed by float pane UUID.
@@ -44,6 +78,10 @@ pub const Server = struct {
             .running = true,
             .pending_pop_requests = std.AutoHashMap(posix.fd_t, posix.fd_t).init(page_alloc),
             .binary_ctl_fds = std.AutoHashMap(posix.fd_t, void).init(page_alloc),
+            .ctl_watchers = std.AutoHashMap(posix.fd_t, *CtlWatcher).init(page_alloc),
+            .pending_ctl_close_fds = .empty,
+            .vt_watchers = std.AutoHashMap(posix.fd_t, *VtWatcher).init(page_alloc),
+            .pending_vt_close_fds = .empty,
             .pending_float_cli_fds = std.AutoHashMap([32]u8, posix.fd_t).init(page_alloc),
             .resource_monitor = core.resource_limits.ResourceMonitor.init(limits),
         };
@@ -55,192 +93,327 @@ pub const Server = struct {
         while (float_it.next()) |entry| posix.close(entry.value_ptr.*);
         self.pending_float_cli_fds.deinit();
         self.pending_pop_requests.deinit();
+        var watch_it = self.ctl_watchers.iterator();
+        while (watch_it.next()) |entry| {
+            self.allocator.destroy(entry.value_ptr.*);
+        }
+        self.ctl_watchers.deinit();
+        self.pending_ctl_close_fds.deinit(self.allocator);
+
+        var vt_it = self.vt_watchers.iterator();
+        while (vt_it.next()) |entry| {
+            self.allocator.destroy(entry.value_ptr.*);
+        }
+        self.vt_watchers.deinit();
+        self.pending_vt_close_fds.deinit(self.allocator);
+
         self.binary_ctl_fds.deinit();
         self.socket.deinit();
     }
 
     /// Main server loop - handles connections and messages
     pub fn run(self: *Server) !void {
-        // Use page_allocator for poll_fds to avoid GPA issues after fork
-        const page_alloc = std.heap.page_allocator;
-        var poll_fds: std.ArrayList(posix.pollfd) = .empty;
-        defer poll_fds.deinit(page_alloc);
+        try xev.detect();
+        var loop = try xev.Loop.init(.{});
+        defer loop.deinit();
+        self.loop_ptr = &loop;
+        defer self.loop_ptr = null;
 
-        // Add server socket
-        try poll_fds.append(page_alloc, .{
-            .fd = self.socket.getFd(),
-            .events = posix.POLL.IN,
-            .revents = 0,
-        });
+        const server_watcher = xev.File.initFd(self.socket.getFd());
+        var server_completion: xev.Completion = .{};
+        var timer_completion: xev.Completion = .{};
+        var ticker = try xev.Timer.init();
+        defer ticker.deinit();
+        var accept_ctx = AcceptContext{
+            .server = self,
+        };
+        server_watcher.poll(&loop, &server_completion, .read, AcceptContext, &accept_ctx, acceptCallback);
 
-        var last_save: i64 = std.time.milliTimestamp();
-        var last_stats_update: i64 = last_save;
+        var periodic_ctx = PeriodicContext{
+            .server = self,
+            .last_save = std.time.milliTimestamp(),
+            .last_stats_update = std.time.milliTimestamp(),
+            .last_cleanup = std.time.milliTimestamp(),
+        };
+        ticker.run(&loop, &timer_completion, 100, PeriodicContext, &periodic_ctx, periodicCallback);
 
         while (self.running) {
-            // Periodic persistence (best-effort)
-            const now_ms = std.time.milliTimestamp();
-            if (self.ses_state.dirty and now_ms - last_save >= 1000) {
-                @import("persist.zig").save(self.allocator, self.ses_state) catch |e| {
-                    core.logging.logError("ses", "persist.save failed", e);
-                };
-                self.ses_state.dirty = false;
-                last_save = now_ms;
-            }
+            self.processPendingWatcherUpdates();
+            self.processPendingCtlCloses();
+            self.processPendingVtCloses();
+            try loop.run(.once);
+        }
+    }
 
-            // Update resource stats every 5 seconds
-            if (now_ms - last_stats_update >= 5000) {
-                const detached_sessions = self.ses_state.detached_sessions.count();
-                const total_panes = self.ses_state.panes.count();
-                const active_connections = self.ses_state.clients.items.len;
+    fn processPendingCtlCloses(self: *Server) void {
+        for (self.pending_ctl_close_fds.items) |pending| {
+            if (!self.disarmCtlWatcherMatching(pending.fd, pending.watcher)) continue;
+            _ = self.binary_ctl_fds.remove(pending.fd);
 
-                self.resource_monitor.updateStats(
-                    active_connections,
-                    detached_sessions,
-                    total_panes,
-                    0, // Memory tracking would require more instrumentation
-                );
-                last_stats_update = now_ms;
-            }
-            // Remove old pod_vt fds from poll set (closed by connectPodVt).
-            // Must happen BEFORE adding new fds to prevent fd-reuse duplicates.
-            for (self.ses_state.pending_remove_poll_fds.items) |old_fd| {
-                var j: usize = 1;
-                while (j < poll_fds.items.len) {
-                    if (poll_fds.items[j].fd == old_fd) {
-                        _ = poll_fds.orderedRemove(j);
-                        break;
-                    }
-                    j += 1;
+            var client_id: ?usize = null;
+            for (self.ses_state.clients.items) |client| {
+                if (client.fd == pending.fd or client.mux_ctl_fd == pending.fd) {
+                    client_id = client.id;
+                    break;
                 }
             }
-            self.ses_state.pending_remove_poll_fds.clearRetainingCapacity();
-
-            // Add any newly created pod_vt fds to the poll set.
-            for (self.ses_state.pending_poll_fds.items) |new_fd| {
-                poll_fds.append(page_alloc, .{
-                    .fd = new_fd,
-                    .events = posix.POLL.IN,
-                    .revents = 0,
-                }) catch {};
-            }
-            self.ses_state.pending_poll_fds.clearRetainingCapacity();
-
-            // Reset revents
-            for (poll_fds.items) |*pfd| {
-                pfd.revents = 0;
+            var closed_by_client_remove = false;
+            if (client_id) |cid| {
+                self.removeClientWithWatcherCleanup(cid);
+                closed_by_client_remove = true;
             }
 
-            // Poll with timeout for cleanup + persistence tasks
-            const ready = posix.poll(poll_fds.items, 1000) catch |err| {
-                if (err == error.Interrupted) continue;
-                return err;
-            };
-
-            if (ready == 0) {
-                // Timeout - do periodic cleanup
-                self.ses_state.cleanupOrphanedPanes();
-                self.ses_state.cleanupExpiredDetachedSessions();
-                continue;
+            if (self.pending_pop_requests.fetchRemove(pending.fd)) |kv| {
+                posix.close(kv.value);
             }
 
-            // Check server socket for new connections
-            if (poll_fds.items[0].revents & posix.POLL.IN != 0) {
-                if (self.socket.tryAccept() catch null) |conn| {
-                    self.dispatchNewConnection(conn, page_alloc, &poll_fds);
-                }
-            }
-
-            // Check client sockets
-            var i: usize = 1;
-            while (i < poll_fds.items.len) {
-                const pfd = &poll_fds.items[i];
-
-                // Handle invalid fds (closed but not yet removed from poll set).
-                if (pfd.revents & posix.POLL.NVAL != 0) {
-                    _ = poll_fds.orderedRemove(i);
-                    continue;
-                }
-
-                if (pfd.revents & (posix.POLL.IN | posix.POLL.HUP | posix.POLL.ERR) != 0) {
-                    // Check if this is a VT routing fd (pod_vt or mux_vt).
-                    const is_pod_vt = self.ses_state.pod_vt_to_pane_id.contains(pfd.fd);
-                    const is_mux_vt = self.isMuxVtFd(pfd.fd);
-
-                    if (pfd.revents & (posix.POLL.HUP | posix.POLL.ERR) != 0) {
-                        if (is_pod_vt) {
-                            self.removePodVtFd(pfd.fd);
-                        } else if (is_mux_vt) {
-                            self.removeMuxVtFd(pfd.fd);
-                        } else {
-                            _ = self.binary_ctl_fds.remove(pfd.fd);
-                            var client_id: ?usize = null;
-                            for (self.ses_state.clients.items) |client| {
-                                if (client.fd == pfd.fd or client.mux_ctl_fd == pfd.fd) {
-                                    client_id = client.id;
-                                    break;
-                                }
-                            }
-                            if (client_id) |cid| self.ses_state.removeClient(cid);
-                            // Clean up any pending pop request for this mux fd.
-                            if (self.pending_pop_requests.fetchRemove(pfd.fd)) |kv| {
-                                posix.close(kv.value); // Close orphaned CLI fd
-                            }
-                        }
-                        posix.close(pfd.fd);
-                        _ = poll_fds.orderedRemove(i);
-                        continue;
-                    }
-
-                    if (pfd.revents & posix.POLL.IN != 0) {
-                        if (is_pod_vt) {
-                            // POD → MUX VT routing.
-                            if (!self.routePodToMux(pfd.fd)) {
-                                self.removePodVtFd(pfd.fd);
-                                posix.close(pfd.fd);
-                                _ = poll_fds.orderedRemove(i);
-                                continue;
-                            }
-                        } else if (is_mux_vt) {
-                            // MUX → POD VT routing.
-                            if (!self.routeMuxToPod(pfd.fd)) {
-                                self.removeMuxVtFd(pfd.fd);
-                                posix.close(pfd.fd);
-                                _ = poll_fds.orderedRemove(i);
-                                continue;
-                            }
-                        } else if (self.binary_ctl_fds.contains(pfd.fd)) {
-                            // Binary control message (MUX CTL or POD CTL).
-                            if (!self.handleBinaryCtlMessage(pfd.fd)) {
-                                _ = self.binary_ctl_fds.remove(pfd.fd);
-                                var client_id2: ?usize = null;
-                                for (self.ses_state.clients.items) |client| {
-                                    if (client.fd == pfd.fd or client.mux_ctl_fd == pfd.fd) {
-                                        client_id2 = client.id;
-                                        break;
-                                    }
-                                }
-                                if (client_id2) |cid| self.ses_state.removeClient(cid);
-                                posix.close(pfd.fd);
-                                _ = poll_fds.orderedRemove(i);
-                                continue;
-                            }
-                        } else {
-                            // Unknown fd — close and remove.
-                            posix.close(pfd.fd);
-                            _ = poll_fds.orderedRemove(i);
-                            continue;
-                        }
-                    }
-                }
-
-                i += 1;
+            if (!closed_by_client_remove) {
+                posix.close(pending.fd);
             }
         }
+        self.pending_ctl_close_fds.clearRetainingCapacity();
+    }
+
+    fn removeClientWithWatcherCleanup(self: *Server, client_id: usize) void {
+        if (self.ses_state.getClient(client_id)) |client| {
+            if (client.mux_ctl_fd) |ctl_fd| {
+                _ = self.binary_ctl_fds.remove(ctl_fd);
+                self.disarmCtlWatcher(ctl_fd);
+            }
+            if (client.mux_vt_fd) |vt_fd| {
+                self.disarmVtWatcher(vt_fd);
+            }
+        }
+        self.ses_state.removeClient(client_id);
+    }
+
+    fn processPendingVtCloses(self: *Server) void {
+        for (self.pending_vt_close_fds.items) |pending| {
+            if (!self.disarmVtWatcherMatching(pending.fd, pending.watcher)) continue;
+
+            if (self.ses_state.pod_vt_to_pane_id.contains(pending.fd)) {
+                self.removePodVtFd(pending.fd);
+            }
+            if (self.isMuxVtFd(pending.fd)) {
+                self.removeMuxVtFd(pending.fd);
+            }
+
+            posix.close(pending.fd);
+        }
+        self.pending_vt_close_fds.clearRetainingCapacity();
+    }
+
+    fn queueCtlClose(self: *Server, fd: posix.fd_t, watcher: ?*CtlWatcher) void {
+        for (self.pending_ctl_close_fds.items) |existing| {
+            if (existing.fd == fd) return;
+        }
+        self.pending_ctl_close_fds.append(self.allocator, .{ .fd = fd, .watcher = watcher }) catch {};
+    }
+
+    fn queueVtClose(self: *Server, fd: posix.fd_t, watcher: ?*VtWatcher) void {
+        for (self.pending_vt_close_fds.items) |existing| {
+            if (existing.fd == fd) return;
+        }
+        self.pending_vt_close_fds.append(self.allocator, .{ .fd = fd, .watcher = watcher }) catch {};
+    }
+
+    fn processPendingWatcherUpdates(self: *Server) void {
+        for (self.ses_state.pending_poll_fds.items) |fd| {
+            self.armVtWatcher(fd, .pod_to_mux);
+        }
+
+        for (self.ses_state.pending_remove_poll_fds.items) |fd| {
+            if (self.binary_ctl_fds.contains(fd)) {
+                self.disarmCtlWatcher(fd);
+            }
+            self.disarmVtWatcher(fd);
+        }
+
+        self.ses_state.pending_remove_poll_fds.clearRetainingCapacity();
+        self.ses_state.pending_poll_fds.clearRetainingCapacity();
+    }
+
+    fn armCtlWatcher(self: *Server, fd: posix.fd_t) void {
+        if (self.loop_ptr == null) return;
+        if (self.ctl_watchers.contains(fd)) return;
+
+        const node = self.allocator.create(CtlWatcher) catch return;
+        node.* = .{ .srv = @ptrCast(self), .fd = fd };
+        self.ctl_watchers.put(fd, node) catch {
+            self.allocator.destroy(node);
+            return;
+        };
+
+        const watcher = xev.File.initFd(fd);
+        watcher.poll(self.loop_ptr.?, &node.completion, .read, CtlWatcher, node, ctlWatcherCallback);
+    }
+
+    fn disarmCtlWatcher(self: *Server, fd: posix.fd_t) void {
+        if (self.ctl_watchers.fetchRemove(fd)) |kv| {
+            self.allocator.destroy(kv.value);
+        }
+    }
+
+    fn disarmCtlWatcherMatching(self: *Server, fd: posix.fd_t, expected: ?*CtlWatcher) bool {
+        if (expected) |watcher| {
+            const current = self.ctl_watchers.get(fd) orelse return false;
+            if (current != watcher) return false;
+        }
+        self.disarmCtlWatcher(fd);
+        return true;
+    }
+
+    fn armVtWatcher(self: *Server, fd: posix.fd_t, direction: VtDirection) void {
+        if (self.loop_ptr == null) return;
+        if (self.vt_watchers.contains(fd)) return;
+
+        const node = self.allocator.create(VtWatcher) catch return;
+        node.* = .{ .srv = @ptrCast(self), .fd = fd, .direction = direction };
+        self.vt_watchers.put(fd, node) catch {
+            self.allocator.destroy(node);
+            return;
+        };
+
+        const watcher = xev.File.initFd(fd);
+        watcher.poll(self.loop_ptr.?, &node.completion, .read, VtWatcher, node, vtWatcherCallback);
+    }
+
+    fn disarmVtWatcher(self: *Server, fd: posix.fd_t) void {
+        if (self.vt_watchers.fetchRemove(fd)) |kv| {
+            self.allocator.destroy(kv.value);
+        }
+    }
+
+    fn disarmVtWatcherMatching(self: *Server, fd: posix.fd_t, expected: ?*VtWatcher) bool {
+        if (expected) |watcher| {
+            const current = self.vt_watchers.get(fd) orelse return false;
+            if (current != watcher) return false;
+        }
+        self.disarmVtWatcher(fd);
+        return true;
+    }
+
+    const AcceptContext = struct {
+        server: *Server,
+    };
+
+    const PeriodicContext = struct {
+        server: *Server,
+        last_save: i64,
+        last_stats_update: i64,
+        last_cleanup: i64,
+    };
+
+    fn acceptCallback(
+        ctx: ?*AcceptContext,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        _: xev.File,
+        result: xev.PollError!xev.PollEvent,
+    ) xev.CallbackAction {
+        const accept_ctx = ctx orelse return .disarm;
+        _ = result catch return .rearm;
+
+        while (accept_ctx.server.socket.tryAccept() catch null) |conn| {
+            accept_ctx.server.dispatchNewConnection(conn);
+        }
+
+        return .rearm;
+    }
+
+    fn ctlWatcherCallback(
+        ctx: ?*CtlWatcher,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        _: xev.File,
+        result: xev.PollError!xev.PollEvent,
+    ) xev.CallbackAction {
+        const watch = ctx orelse return .disarm;
+        const server: *Server = @ptrCast(@alignCast(watch.srv));
+        _ = result catch {
+            server.queueCtlClose(watch.fd, watch);
+            return .disarm;
+        };
+
+        if (!server.handleBinaryCtlMessage(watch.fd)) {
+            server.queueCtlClose(watch.fd, watch);
+            return .disarm;
+        }
+
+        return .rearm;
+    }
+
+    fn vtWatcherCallback(
+        ctx: ?*VtWatcher,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        _: xev.File,
+        result: xev.PollError!xev.PollEvent,
+    ) xev.CallbackAction {
+        const watch = ctx orelse return .disarm;
+        const server: *Server = @ptrCast(@alignCast(watch.srv));
+        _ = result catch {
+            server.queueVtClose(watch.fd, watch);
+            return .disarm;
+        };
+
+        const ok = switch (watch.direction) {
+            .pod_to_mux => server.routePodToMux(watch.fd),
+            .mux_to_pod => server.routeMuxToPod(watch.fd),
+        };
+        if (!ok) {
+            server.queueVtClose(watch.fd, watch);
+            return .disarm;
+        }
+
+        return .rearm;
+    }
+
+    fn periodicCallback(
+        ctx: ?*PeriodicContext,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        result: xev.Timer.RunError!void,
+    ) xev.CallbackAction {
+        const periodic = ctx orelse return .disarm;
+        _ = result catch return .rearm;
+
+        const now_ms = std.time.milliTimestamp();
+
+        if (periodic.server.ses_state.dirty and now_ms - periodic.last_save >= 1000) {
+            @import("persist.zig").save(periodic.server.allocator, periodic.server.ses_state) catch |e| {
+                core.logging.logError("ses", "persist.save failed", e);
+            };
+            periodic.server.ses_state.dirty = false;
+            periodic.last_save = now_ms;
+        }
+
+        if (now_ms - periodic.last_stats_update >= 5000) {
+            const detached_sessions = periodic.server.ses_state.detached_sessions.count();
+            const total_panes = periodic.server.ses_state.panes.count();
+            const active_connections = periodic.server.ses_state.clients.items.len;
+
+            periodic.server.resource_monitor.updateStats(
+                active_connections,
+                detached_sessions,
+                total_panes,
+                0,
+            );
+            periodic.last_stats_update = now_ms;
+        }
+
+        if (now_ms - periodic.last_cleanup >= 1000) {
+            periodic.server.ses_state.cleanupOrphanedPanes();
+            periodic.server.ses_state.cleanupExpiredDetachedSessions();
+            periodic.last_cleanup = now_ms;
+        }
+
+        return .rearm;
     }
 
     /// Dispatch a newly accepted connection based on its handshake bytes.
     /// Handshake format: [channel_type, protocol_version]
-    fn dispatchNewConnection(self: *Server, conn: ipc.Connection, alloc: std.mem.Allocator, poll_fds: *std.ArrayList(posix.pollfd)) void {
+    fn dispatchNewConnection(self: *Server, conn: ipc.Connection) void {
         // Check resource limits and rate limiting
         if (!self.resource_monitor.allowNewConnection()) {
             ses.debugLog("reject: connection limit or rate limit exceeded", .{});
@@ -283,11 +456,11 @@ pub const Server = struct {
             if (handshake[0] == wire.SES_HANDSHAKE_MUX_CTL or handshake[0] == wire.SES_HANDSHAKE_POD_CTL) {
                 // Send version mismatch error with version range
                 const err_msg = std.fmt.allocPrint(
-                    alloc,
+                    self.allocator,
                     "protocol_version_mismatch: client={d} supported={d}-{d}",
                     .{ client_version, wire.MIN_PROTOCOL_VERSION, wire.PROTOCOL_VERSION },
                 ) catch "protocol_version_mismatch";
-                defer if (!std.mem.eql(u8, err_msg, "protocol_version_mismatch")) alloc.free(err_msg);
+                defer if (!std.mem.eql(u8, err_msg, "protocol_version_mismatch")) self.allocator.free(err_msg);
 
                 const err_payload = wire.Error{ .msg_len = @intCast(err_msg.len) };
                 wire.writeControlWithTrail(conn.fd, .@"error", std.mem.asBytes(&err_payload), err_msg) catch {};
@@ -306,11 +479,11 @@ pub const Server = struct {
             // Send deprecation notice if this is a CTL channel
             if (handshake[0] == wire.SES_HANDSHAKE_MUX_CTL) {
                 const warn_msg = std.fmt.allocPrint(
-                    alloc,
+                    self.allocator,
                     "Protocol version {d} is deprecated. Please update to version {d}.",
                     .{ client_version, wire.PROTOCOL_VERSION },
                 ) catch "";
-                defer if (warn_msg.len > 0) alloc.free(warn_msg);
+                defer if (warn_msg.len > 0) self.allocator.free(warn_msg);
 
                 if (warn_msg.len > 0) {
                     const notify = wire.Notify{ .msg_len = @intCast(warn_msg.len) };
@@ -324,15 +497,7 @@ pub const Server = struct {
                 // MUX binary control channel.
                 ses.debugLog("accept: MUX ctl channel fd={d}", .{conn.fd});
                 self.binary_ctl_fds.put(conn.fd, {}) catch {};
-                poll_fds.append(alloc, .{
-                    .fd = conn.fd,
-                    .events = posix.POLL.IN,
-                    .revents = 0,
-                }) catch {
-                    _ = self.binary_ctl_fds.remove(conn.fd);
-                    var tmp = conn;
-                    tmp.close();
-                };
+                self.armCtlWatcher(conn.fd);
             },
             wire.SES_HANDSHAKE_MUX_VT => {
                 // MUX VT data channel — read 32-byte session_id to identify client.
@@ -356,10 +521,7 @@ pub const Server = struct {
                     if (client.session_id) |csid| {
                         if (std.mem.eql(u8, &csid, &session_id)) {
                             if (client.mux_vt_fd) |old| {
-                                // Remove old VT fd from poll set before closing
-                                // to prevent fd-reuse causing duplicate poll entries.
-                                self.ses_state.pending_remove_poll_fds.append(self.ses_state.allocator, old) catch {};
-                                posix.close(old);
+                                self.queueVtClose(old, null);
                             }
                             client.mux_vt_fd = conn.fd;
                             ses.debugLog("MUX VT: assigned fd={d} to client_id={d}", .{ conn.fd, client.id });
@@ -374,14 +536,7 @@ pub const Server = struct {
                     tmp.close();
                     return;
                 }
-                poll_fds.append(alloc, .{
-                    .fd = conn.fd,
-                    .events = posix.POLL.IN,
-                    .revents = 0,
-                }) catch {
-                    var tmp = conn;
-                    tmp.close();
-                };
+                self.armVtWatcher(conn.fd, .mux_to_pod);
             },
             wire.SES_HANDSHAKE_CLI => {
                 // CLI tool request (focus_move, exit_intent, float).
@@ -401,18 +556,11 @@ pub const Server = struct {
                 // Store fd in the pane's pod_ctl_fd.
                 if (self.ses_state.panes.getPtr(uuid_hex)) |pane| {
                     if (pane.pod_ctl_fd) |old_fd| {
-                        _ = self.binary_ctl_fds.remove(old_fd);
-                        self.ses_state.pending_remove_poll_fds.append(self.ses_state.allocator, old_fd) catch {};
-                        posix.close(old_fd);
+                        self.queueCtlClose(old_fd, null);
                     }
                     pane.pod_ctl_fd = conn.fd;
                     self.binary_ctl_fds.put(conn.fd, {}) catch {};
-                    // Add to poll set for reading control messages.
-                    poll_fds.append(alloc, .{
-                        .fd = conn.fd,
-                        .events = posix.POLL.IN,
-                        .revents = 0,
-                    }) catch {};
+                    self.armCtlWatcher(conn.fd);
                 } else {
                     ses.debugLog("POD ctl: unknown UUID {s}", .{uuid_hex});
                     var tmp = conn;
