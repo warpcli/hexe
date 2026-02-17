@@ -437,14 +437,8 @@ const Pod = struct {
         var should_stop = false;
         var callback_error: ?anyerror = null;
         var pty_armed = false;
-        var client_completions: [4]xev.Completion = .{ .{}, .{}, .{}, .{} };
-        var client_slots: [4]ClientSlot = .{
-            .{ .parent = undefined, .fd = -1 },
-            .{ .parent = undefined, .fd = -1 },
-            .{ .parent = undefined, .fd = -1 },
-            .{ .parent = undefined, .fd = -1 },
-        };
-        var client_next_slot: usize = 0;
+        var client_completion: xev.Completion = .{};
+        var client_slot: ClientSlot = .{ .parent = undefined, .fd = -1 };
 
         var pty_ctx = PtyContext{
             .pod = self,
@@ -462,9 +456,8 @@ const Pod = struct {
             .io_buf = buf,
             .loop = &loop,
             .callback_error = &callback_error,
-            .completions = &client_completions,
-            .slots = &client_slots,
-            .next_slot = &client_next_slot,
+            .completion = &client_completion,
+            .slot = &client_slot,
         };
 
         var accept_ctx = AcceptContext{
@@ -524,9 +517,9 @@ const Pod = struct {
         io_buf: []u8,
         loop: *xev.Loop,
         callback_error: *?anyerror,
-        completions: *[4]xev.Completion,
-        slots: *[4]ClientSlot,
-        next_slot: *usize,
+        completion: *xev.Completion,
+        slot: *ClientSlot,
+        watched_fd: ?posix.fd_t = null,
     };
 
     const TimerContext = struct {
@@ -560,14 +553,13 @@ const Pod = struct {
     }
 
     fn armClientWatcher(ctx: *ClientContext, client_fd: posix.fd_t) void {
-        const slot = ctx.next_slot.* % ctx.completions.len;
-        ctx.next_slot.* += 1;
+        if (ctx.watched_fd != null) return;
+        ctx.watched_fd = client_fd;
 
-        ctx.slots[slot] = .{ .parent = ctx, .fd = client_fd };
+        ctx.slot.* = .{ .parent = ctx, .fd = client_fd };
         const watcher = xev.File.initFd(client_fd);
-        const completion = &ctx.completions[slot];
-        completion.* = .{};
-        watcher.poll(ctx.loop, completion, .read, ClientSlot, &ctx.slots[slot], clientCallback);
+        ctx.completion.* = .{};
+        watcher.poll(ctx.loop, ctx.completion, .read, ClientSlot, ctx.slot, clientCallback);
     }
 
     fn clientCallback(
@@ -581,8 +573,14 @@ const Pod = struct {
         const client_ctx = slot.parent;
         _ = result catch return .disarm;
 
-        const current = client_ctx.pod.client orelse return .disarm;
-        if (current.fd != slot.fd) return .disarm;
+        const current = client_ctx.pod.client orelse {
+            if (client_ctx.watched_fd == slot.fd) client_ctx.watched_fd = null;
+            return .disarm;
+        };
+        if (current.fd != slot.fd) {
+            if (client_ctx.watched_fd == slot.fd) client_ctx.watched_fd = null;
+            return .disarm;
+        }
 
         const n = posix.read(slot.fd, client_ctx.io_buf) catch |err| switch (err) {
             error.WouldBlock => 0,
@@ -595,6 +593,7 @@ const Pod = struct {
         if (n == 0) {
             if (client_ctx.pod.client) |*conn| conn.close();
             client_ctx.pod.client = null;
+            client_ctx.watched_fd = null;
             return .disarm;
         }
 
