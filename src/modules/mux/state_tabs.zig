@@ -425,7 +425,6 @@ fn validateMuxStateJson(value: *const std.json.Value) bool {
 /// Reattach to a detached session, restoring full state.
 pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     mux.debugLog("reattachSession: starting with prefix={s}", .{session_id_prefix});
-    std.debug.print("[mux] REATTACH: starting for prefix={s}\n", .{session_id_prefix});
 
     // Set flag to prevent SIGHUP from interrupting reattach
     self.reattach_in_progress.store(true, .release);
@@ -436,50 +435,39 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     if (!self.ses_client.isConnected()) {
         mux.debugLog("reattachSession: ses_client not connected, aborting", .{});
-        std.debug.print("[mux] REATTACH: ses_client not connected, aborting\n", .{});
         return false;
     }
 
     // Try to reattach session (server supports prefix matching).
     mux.debugLog("reattachSession: calling ses_client.reattachSession", .{});
-    std.debug.print("[mux] REATTACH: calling ses_client.reattachSession\n", .{});
     const result = self.ses_client.reattachSession(session_id_prefix) catch |e| {
         mux.debugLog("reattachSession: ses_client.reattachSession failed: {s}", .{@errorName(e)});
-        std.debug.print("[mux] REATTACH: ses_client.reattachSession FAILED: {s}\n", .{@errorName(e)});
         return false;
     };
     if (result == null) {
         mux.debugLog("reattachSession: ses_client.reattachSession returned null (session not found)", .{});
-        std.debug.print("[mux] REATTACH: ses_client returned null (not found)\n", .{});
         return false;
     }
 
     const reattach_result = result.?;
     mux.debugLog("reattachSession: got result with {d} panes, state_json_len={d}", .{ reattach_result.pane_uuids.len, reattach_result.mux_state_json.len });
-    std.debug.print("[mux] REATTACH: got result with {d} panes, json_len={d}\n", .{ reattach_result.pane_uuids.len, reattach_result.mux_state_json.len });
     defer {
         self.allocator.free(reattach_result.mux_state_json);
         self.allocator.free(reattach_result.pane_uuids);
     }
 
     // Parse the mux state JSON.
-    std.debug.print("[mux] REATTACH: parsing JSON...\n", .{});
     const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, reattach_result.mux_state_json, .{}) catch |e| {
         mux.debugLog("reattachSession: JSON parse failed: {s}", .{@errorName(e)});
-        std.debug.print("[mux] REATTACH: JSON parse FAILED: {s}\n", .{@errorName(e)});
         return false;
     };
     defer parsed.deinit();
 
-    std.debug.print("[mux] REATTACH: JSON parsed OK\n", .{});
-
     // Validate JSON schema before attempting to use it
     if (!validateMuxStateJson(&parsed.value)) {
         mux.debugLog("reattachSession: JSON schema validation failed", .{});
-        std.debug.print("[mux] REATTACH: JSON schema INVALID\n", .{});
         return false;
     }
-    std.debug.print("[mux] REATTACH: JSON schema valid\n", .{});
 
     // Validate serialization version and checksum for integrity
     if (parsed.value.object.get("version")) |ver_val| {
@@ -599,7 +587,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                     // Strip the "-N" suffix to recover session name.
                     restored_name = restored_name[0 .. restored_name.len - 2];
                     mux.debugLog("VALIDATION: stripped corrupted tab-format suffix from session_name, recovered: {s}", .{restored_name});
-                    std.debug.print("[mux] REATTACH: session_name was corrupted (tab format), recovered: {s}\n", .{restored_name});
+                    mux.debugLog("reattachSession: session_name recovered from tab-format corruption: {s}", .{restored_name});
                 }
             }
         }
@@ -660,38 +648,32 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     defer used_uuids.deinit();
 
     mux.debugLog("reattachSession: adopting {d} panes", .{reattach_result.pane_uuids.len});
-    std.debug.print("[mux] REATTACH: adopting {d} panes\n", .{reattach_result.pane_uuids.len});
     // Track adoption failures for user notification
     var failed_adoptions: usize = 0;
     const total_panes = reattach_result.pane_uuids.len;
 
     for (reattach_result.pane_uuids, 0..) |uuid, i| {
         mux.debugLog("reattachSession: adopting pane {d}/{d} uuid={s}", .{ i + 1, total_panes, uuid[0..8] });
-        std.debug.print("[mux] REATTACH: adoptPane {d}/{d} uuid={s}\n", .{ i + 1, total_panes, uuid[0..8] });
 
         // Check for duplicate UUID in the list
         if (uuid_pane_map.contains(uuid)) {
             mux.debugLog("reattachSession: DUPLICATE UUID detected: {s}, skipping", .{uuid[0..8]});
-            std.debug.print("[mux] REATTACH: DUPLICATE UUID {s}, skipping\n", .{uuid[0..8]});
             failed_adoptions += 1;
             continue;
         }
 
         const adopt_result = self.ses_client.adoptPane(uuid) catch |e| {
             mux.debugLog("reattachSession: adoptPane failed for uuid={s}: {s}", .{ uuid[0..8], @errorName(e) });
-            std.debug.print("[mux] REATTACH: adoptPane FAILED: {s}\n", .{@errorName(e)});
             failed_adoptions += 1;
             continue;
         };
         mux.debugLog("reattachSession: adoptPane success, pane_id={d}", .{adopt_result.pane_id});
-        std.debug.print("[mux] REATTACH: adoptPane OK pane_id={d}\n", .{adopt_result.pane_id});
         uuid_pane_map.put(uuid, .{ .pane_id = adopt_result.pane_id }) catch {
             failed_adoptions += 1;
             continue;
         };
     }
     mux.debugLog("reattachSession: adopted {d} panes into uuid_pane_map", .{uuid_pane_map.count()});
-    std.debug.print("[mux] REATTACH: adopted {d} panes total\n", .{uuid_pane_map.count()});
 
     // Notify user if some panes failed to reattach
     if (failed_adoptions > 0) {
@@ -1054,7 +1036,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     self.renderer.invalidate();
     self.force_full_render = true;
 
-    std.debug.print("[mux] REATTACH: tabs restored={d}, floats restored={d}\n", .{ self.tabs.items.len, self.floats.items.len });
+    mux.debugLog("reattachSession: tabs restored={d}, floats restored={d}", .{ self.tabs.items.len, self.floats.items.len });
 
     // Check timeout after layout restoration
     {
@@ -1077,11 +1059,11 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     // Signal SES that we're ready for backlog replay.
     // This triggers deferred VT reconnection to PODs, which replays their buffers.
-    std.debug.print("[mux] REATTACH: calling requestBacklogReplay\n", .{});
+    mux.debugLog("reattachSession: calling requestBacklogReplay", .{});
     self.ses_client.requestBacklogReplay() catch |e| {
-        std.debug.print("[mux] REATTACH: requestBacklogReplay FAILED: {s}\n", .{@errorName(e)});
+        mux.debugLog("reattachSession: requestBacklogReplay FAILED: {s}", .{@errorName(e)});
     };
-    std.debug.print("[mux] REATTACH: requestBacklogReplay done\n", .{});
+    mux.debugLog("reattachSession: requestBacklogReplay done", .{});
 
     // Final timeout check after backlog replay
     {
@@ -1095,19 +1077,19 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     }
 
     if (self.tabs.items.len == 0) {
-        std.debug.print("[mux] REATTACH: no tabs restored, returning false\n", .{});
+        mux.debugLog("reattachSession: no tabs restored, returning false", .{});
         return false;
     }
 
     // Restore succeeded — re-register with SES using restored UUID/name.
     // This also removes the detached session from SES (via handleBinaryRegister).
-    std.debug.print("[mux] REATTACH: calling updateSession uuid={s} name={s}\n", .{ self.uuid[0..8], self.session_name });
+    mux.debugLog("reattachSession: calling updateSession uuid={s} name={s}", .{ self.uuid[0..8], self.session_name });
     self.ses_client.updateSession(self.uuid, self.session_name) catch |e| {
         core.logging.logError("mux", "updateSession failed in restoreLayout", e);
-        std.debug.print("[mux] REATTACH: updateSession FAILED: {s}\n", .{@errorName(e)});
+        mux.debugLog("reattachSession: updateSession FAILED: {s}", .{@errorName(e)});
     };
 
-    std.debug.print("[mux] REATTACH: returning true, tabs={d} floats={d}\n", .{ self.tabs.items.len, self.floats.items.len });
+    mux.debugLog("reattachSession: returning true, tabs={d} floats={d}", .{ self.tabs.items.len, self.floats.items.len });
     return true;
 }
 
