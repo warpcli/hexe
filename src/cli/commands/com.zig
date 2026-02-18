@@ -319,24 +319,64 @@ pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator:
 
     // Parse trailing data in order: name, fg, cwd, tty, socket, session_name, layout, last_cmd, base_process, sticky_pwd
     var off: usize = 0;
+    if (off + resp.name_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const name = trail_buf[off .. off + resp.name_len];
     off += resp.name_len;
+    if (off + resp.fg_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const fg_process = trail_buf[off .. off + resp.fg_len];
     off += resp.fg_len;
+    if (off + resp.cwd_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const cwd_str = trail_buf[off .. off + resp.cwd_len];
     off += resp.cwd_len;
+    if (off + resp.tty_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const tty_str = trail_buf[off .. off + resp.tty_len];
     off += resp.tty_len;
+    if (off + resp.socket_path_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const socket_path = trail_buf[off .. off + resp.socket_path_len];
     off += resp.socket_path_len;
+    if (off + resp.session_name_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const session_name = trail_buf[off .. off + resp.session_name_len];
     off += resp.session_name_len;
+    if (off + resp.layout_path_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const layout_path = trail_buf[off .. off + resp.layout_path_len];
     off += resp.layout_path_len;
+    if (off + resp.last_cmd_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const last_cmd = trail_buf[off .. off + resp.last_cmd_len];
     off += resp.last_cmd_len;
+    if (off + resp.base_process_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const base_process = trail_buf[off .. off + resp.base_process_len];
     off += resp.base_process_len;
+    if (off + resp.sticky_pwd_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     _ = trail_buf[off .. off + resp.sticky_pwd_len]; // sticky_pwd (not displayed currently)
 
     // Display
