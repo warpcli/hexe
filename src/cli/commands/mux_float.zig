@@ -24,6 +24,19 @@ pub fn runMuxFloat(
         return;
     }
 
+    if (isolation_profile.len > 0) {
+        const valid = std.mem.eql(u8, isolation_profile, "none") or
+            std.mem.eql(u8, isolation_profile, "minimal") or
+            std.mem.eql(u8, isolation_profile, "default") or
+            std.mem.eql(u8, isolation_profile, "balanced") or
+            std.mem.eql(u8, isolation_profile, "sandbox") or
+            std.mem.eql(u8, isolation_profile, "full");
+        if (!valid) {
+            print("Error: invalid --isolation profile '{s}' (use: none|minimal|default|balanced|sandbox|full)\n", .{isolation_profile});
+            return;
+        }
+    }
+
     const posix = std.posix;
 
     // Parse size parameter (format: width,height,shift_x,shift_y)
