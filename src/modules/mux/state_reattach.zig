@@ -504,15 +504,13 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     // Reset per-tab float focus tracking to match restored tabs.
     self.tab_last_floating_uuid.clearRetainingCapacity();
-    self.tab_last_floating_uuid.ensureTotalCapacity(self.allocator, self.tabs.items.len) catch {};
     for (0..self.tabs.items.len) |_| {
-        self.tab_last_floating_uuid.appendAssumeCapacity(null);
+        self.tab_last_floating_uuid.append(self.allocator, null) catch return false;
     }
 
     self.tab_last_focus_kind.clearRetainingCapacity();
-    self.tab_last_focus_kind.ensureTotalCapacity(self.allocator, self.tabs.items.len) catch {};
     for (0..self.tabs.items.len) |_| {
-        self.tab_last_focus_kind.appendAssumeCapacity(.split);
+        self.tab_last_focus_kind.append(self.allocator, .split) catch return false;
     }
 
     // Restore floats.
