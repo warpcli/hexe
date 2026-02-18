@@ -859,6 +859,19 @@ pub fn runShellEvent(
 ) !void {
     const pod_socket = std.posix.getenv("HEXE_POD_SOCKET") orelse return;
 
+    if (status < std.math.minInt(i32) or status > std.math.maxInt(i32)) {
+        print("Error: status out of range for shell event\n", .{});
+        return;
+    }
+    if (jobs < 0 or jobs > std.math.maxInt(u16)) {
+        print("Error: jobs out of range for shell event\n", .{});
+        return;
+    }
+    if (cmd.len > std.math.maxInt(u16) or cwd.len > std.math.maxInt(u16)) {
+        print("Error: shell event payload too long\n", .{});
+        return;
+    }
+
     const wire = core.wire;
 
     var client = ipc.Client.connect(pod_socket) catch return;
