@@ -339,6 +339,7 @@ pub const Pane = struct {
                 self.backend = .{ .local = new_pty };
 
                 self.osc_buf.deinit(self.allocator);
+                self.osc_buf = .empty;
                 self.vt.deinit();
 
                 try self.vt.init(self.allocator, self.width, self.height);
