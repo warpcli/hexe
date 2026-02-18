@@ -228,23 +228,7 @@ This gives you:
 
 #### Float Defaults
 
-The first entry in `floats` without a `key` field sets defaults for all floats:
-
-```json
-{
-  "floats": [
-    {
-      "width": 60,
-      "height": 60,
-      "padding_x": 1,
-      "padding_y": 0,
-      "color": { "active": 2, "passive": 8 }
-    },
-    { "key": "f", "command": "fzf", "pwd": true },
-    { "key": "g", "command": "lazygit", "pwd": true }
-  ]
-}
-```
+Set float defaults explicitly in Lua with `hexe.mux.float.set_defaults(...)`, then define keyed floats.
 
 ### Persistent scrollback
 
@@ -316,7 +300,7 @@ Detach (keeps panes alive), then reattach:
 
 List what is available to attach:
 
-- hexe mux list
+- hexe ses list
 
 ---
 

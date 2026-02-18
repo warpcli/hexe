@@ -180,11 +180,6 @@ fn scanMetaFiles(allocator: std.mem.Allocator, socket_dir: []const u8, out: *std
         if (!std.mem.startsWith(u8, line_raw, pod_meta.POD_META_PREFIX)) continue;
 
         const rec = parseMetaLine(allocator, line_raw) catch continue;
-        // Basic sanity.
-        if (rec.uuid.len != 32) {
-            freeRecord(allocator, rec);
-            continue;
-        }
         try out.append(allocator, rec);
     }
 }
@@ -199,7 +194,8 @@ fn freeRecord(allocator: std.mem.Allocator, rec: PodRecord) void {
 
 fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !PodRecord {
     // Format: HEXE_POD k=v k=v ... (single line)
-    var uuid: [32]u8 = undefined;
+    var uuid: [32]u8 = .{0} ** 32;
+    var has_uuid = false;
     var name: []const u8 = "";
     var pid: i64 = 0;
     var child_pid: i64 = 0;
@@ -222,7 +218,19 @@ fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !PodRecord {
         const val = part[eq + 1 ..];
 
         if (std.mem.eql(u8, key, "uuid")) {
-            if (val.len == 32) @memcpy(&uuid, val[0..32]);
+            if (val.len == 32) {
+                var valid_hex = true;
+                for (val) |c| {
+                    if (!std.ascii.isHex(c)) {
+                        valid_hex = false;
+                        break;
+                    }
+                }
+                if (valid_hex) {
+                    @memcpy(&uuid, val[0..32]);
+                    has_uuid = true;
+                }
+            }
         } else if (std.mem.eql(u8, key, "name")) {
             name = val;
         } else if (std.mem.eql(u8, key, "pid")) {
@@ -254,6 +262,15 @@ fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !PodRecord {
     const owned_shell = try allocator.dupe(u8, shell);
     errdefer allocator.free(owned_shell);
     const labels = try labels_list.toOwnedSlice(allocator);
+
+    if (!has_uuid) {
+        allocator.free(owned_name);
+        allocator.free(owned_cwd);
+        allocator.free(owned_shell);
+        for (labels) |lab| allocator.free(lab);
+        allocator.free(labels);
+        return error.InvalidMeta;
+    }
 
     return .{
         .uuid = uuid,

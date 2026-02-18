@@ -152,7 +152,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     // Validate serialization version and checksum for integrity
     if (parsed.value.object.get("version")) |ver_val| {
-        if (ver_val == .integer) {
+        if (ver_val == .integer and ver_val.integer >= 0) {
             const version: u32 = @intCast(ver_val.integer);
             if (version > 1) {
                 mux.debugLog("reattachSession: unsupported version {d}, current is 1", .{version});
@@ -163,7 +163,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     // Verify checksum if present
     if (parsed.value.object.get("_checksum")) |checksum_val| {
-        if (checksum_val == .integer) {
+        if (checksum_val == .integer and checksum_val.integer >= 0) {
             const stored_checksum: u64 = @intCast(checksum_val.integer);
             // Recalculate checksum on content before the checksum field
             // Find where ",\"_checksum\":" starts in the JSON
@@ -285,7 +285,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     // Restore tab counter (for session-N tab naming).
     if (root.get("tab_counter")) |tc_val| {
-        if (tc_val == .integer) {
+        if (tc_val == .integer and tc_val.integer >= 0) {
             const restored_counter: usize = @intCast(tc_val.integer);
             // Validate tab_counter is reasonable (not absurdly large).
             // A counter > 1000 suggests corruption or overflow.
@@ -304,7 +304,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     // Remember active tab/floating from the stored state.
     // We apply these after restoring tabs/floats so indices are valid.
     const wanted_active_tab: usize = if (root.get("active_tab")) |at| blk: {
-        if (at != .integer) {
+        if (at != .integer or at.integer < 0) {
             mux.debugLog("reattachSession: active_tab is not an integer, defaulting to 0", .{});
             break :blk 0;
         }
@@ -312,7 +312,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     } else 0;
     const wanted_active_floating: ?usize = if (root.get("active_floating")) |af| blk: {
         if (af == .null) break :blk null;
-        if (af != .integer) {
+        if (af != .integer or af.integer < 0) {
             mux.debugLog("reattachSession: active_floating is not an integer, defaulting to null", .{});
             break :blk null;
         }
@@ -391,9 +391,12 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     if (root.get("tabs")) |tabs_arr| {
         for (tabs_arr.array.items) |tab_val| {
             const tab_obj = tab_val.object;
-            const name_json = (tab_obj.get("name") orelse continue).string;
-            const focused_split_id: u16 = @intCast((tab_obj.get("focused_split_id") orelse continue).integer);
-            const next_split_id: u16 = @intCast((tab_obj.get("next_split_id") orelse continue).integer);
+            const name_json = switch (tab_obj.get("name") orelse continue) {
+                .string => |s| s,
+                else => continue,
+            };
+            const focused_split_id = intFieldCast(u16, tab_obj, "focused_split_id") orelse continue;
+            const next_split_id = intFieldCast(u16, tab_obj, "next_split_id") orelse continue;
 
             // Dupe the name since parsed JSON will be freed.
             const name_owned = self.allocator.dupe(u8, name_json) catch continue;
@@ -418,8 +421,11 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             if (tab_obj.get("splits")) |splits_arr| {
                 for (splits_arr.array.items) |pane_val| {
                     const pane_obj = pane_val.object;
-                    const pane_id: u16 = @intCast((pane_obj.get("id") orelse continue).integer);
-                    const uuid_str = (pane_obj.get("uuid") orelse continue).string;
+                    const pane_id = intFieldCast(u16, pane_obj, "id") orelse continue;
+                    const uuid_str = switch (pane_obj.get("uuid") orelse continue) {
+                        .string => |s| s,
+                        else => continue,
+                    };
                     if (uuid_str.len != 32) continue;
 
                     // Convert to [32]u8 for lookup.
@@ -559,18 +565,18 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 // Restore float properties.
                 pane.floating = true;
                 pane.visible = if (pane_obj.get("visible")) |v| (v != .bool or v.bool) else true;
-                pane.tab_visible = if (pane_obj.get("tab_visible")) |tv| @intCast(tv.integer) else 0;
-                pane.float_key = if (pane_obj.get("float_key")) |fk| @intCast(fk.integer) else 0;
-                pane.float_width_pct = if (pane_obj.get("float_width_pct")) |wp| @intCast(wp.integer) else 60;
-                pane.float_height_pct = if (pane_obj.get("float_height_pct")) |hp| @intCast(hp.integer) else 60;
-                pane.float_pos_x_pct = if (pane_obj.get("float_pos_x_pct")) |xp| @intCast(xp.integer) else 50;
-                pane.float_pos_y_pct = if (pane_obj.get("float_pos_y_pct")) |yp| @intCast(yp.integer) else 50;
-                pane.float_pad_x = if (pane_obj.get("float_pad_x")) |px| @intCast(px.integer) else 1;
-                pane.float_pad_y = if (pane_obj.get("float_pad_y")) |py| @intCast(py.integer) else 0;
+                pane.tab_visible = intFieldCast(u8, pane_obj, "tab_visible") orelse 0;
+                pane.float_key = intFieldCast(u8, pane_obj, "float_key") orelse 0;
+                pane.float_width_pct = intFieldCast(u8, pane_obj, "float_width_pct") orelse 60;
+                pane.float_height_pct = intFieldCast(u8, pane_obj, "float_height_pct") orelse 60;
+                pane.float_pos_x_pct = intFieldCast(u8, pane_obj, "float_pos_x_pct") orelse 50;
+                pane.float_pos_y_pct = intFieldCast(u8, pane_obj, "float_pos_y_pct") orelse 50;
+                pane.float_pad_x = intFieldCast(u8, pane_obj, "float_pad_x") orelse 1;
+                pane.float_pad_y = intFieldCast(u8, pane_obj, "float_pad_y") orelse 0;
                 pane.is_pwd = if (pane_obj.get("is_pwd")) |ip| (ip == .bool and ip.bool) else false;
                 pane.sticky = if (pane_obj.get("sticky")) |s| (s == .bool and s.bool) else false;
                 pane.parent_tab = if (pane_obj.get("parent_tab")) |pt| blk: {
-                    if (pt != .integer) {
+                    if (pt != .integer or pt.integer < 0) {
                         mux.debugLog("reattachSession: parent_tab is not an integer for float pane", .{});
                         break :blk null;
                     }
@@ -772,6 +778,13 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     mux.debugLog("reattachSession: returning true, tabs={d} floats={d}", .{ self.tabs.items.len, self.floats.items.len });
     return true;
+}
+
+fn intFieldCast(comptime T: type, obj: std.json.ObjectMap, key: []const u8) ?T {
+    const value = obj.get(key) orelse return null;
+    if (value != .integer) return null;
+    if (value.integer < 0) return null;
+    return std.math.cast(T, value.integer);
 }
 
 /// Attach to orphaned pane by UUID prefix (for --attach CLI).

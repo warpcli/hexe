@@ -257,13 +257,13 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     var split_iter = current_tab.layout.splits.valueIterator();
     while (split_iter.next()) |pane| {
         if (pane.*.popups.getActivePopup()) |popup| {
-            popup_render.drawInBounds(renderer, popup, &state.pop_config.carrier, pane.*.x, pane.*.y, pane.*.width, pane.*.height);
+            popup_render.drawInBounds(renderer, popup, &state.pop_config.pane, pane.*.x, pane.*.y, pane.*.width, pane.*.height);
         }
     }
     // Check all floats.
     for (state.floats.items) |fpane| {
         if (fpane.popups.getActivePopup()) |popup| {
-            popup_render.drawInBounds(renderer, popup, &state.pop_config.carrier, fpane.x, fpane.y, fpane.width, fpane.height);
+            popup_render.drawInBounds(renderer, popup, &state.pop_config.pane, fpane.x, fpane.y, fpane.width, fpane.height);
         }
     }
     if (current_tab.notifications.hasActive()) {

@@ -256,35 +256,12 @@ pub const MuxConfigBuilder = struct {
         if (self.mouse_selection_override_mods) |v| result.mouse.selection_override_mods = v;
 
         // Apply binds (deep copy to prevent use-after-free)
-        std.debug.print("DEBUG MuxConfigBuilder.build: self.binds.items.len={}\n", .{self.binds.items.len});
         if (self.binds.items.len > 0) {
-            // Debug: check bindings 10-14 in builder (the arrow keys)
-            const start = @min(10, self.binds.items.len);
-            const end = @min(15, self.binds.items.len);
-            if (start < end) {
-                for (self.binds.items[start..end], start..) |b, i| {
-                    std.debug.print("  builder bind[{}]: mods={} key={s}\n", .{i, b.mods, @tagName(@as(config.Config.BindKeyKind, b.key))});
-                }
-            }
-
             var binds = try self.allocator.alloc(config.Config.Bind, self.binds.items.len);
             for (self.binds.items, 0..) |bind, i| {
                 binds[i] = try duplicateBind(bind, self.allocator);
             }
             result.input.binds = binds;
-
-            // Debug: check bindings 10-14 after copy (the arrow keys)
-            const start_c = @min(10, binds.len);
-            const end_c = @min(15, binds.len);
-            if (start_c < end_c) {
-                for (binds[start_c..end_c], start_c..) |b, i| {
-                    std.debug.print("  copied bind[{}]: mods={} key={s}\n", .{i, b.mods, @tagName(@as(config.Config.BindKeyKind, b.key))});
-                }
-            }
-
-            std.debug.print("DEBUG MuxConfigBuilder.build: copied {} bindings to result.input.binds\n", .{binds.len});
-        } else {
-            std.debug.print("DEBUG MuxConfigBuilder.build: NO BINDINGS IN BUILDER\n", .{});
         }
 
         // Apply float defaults

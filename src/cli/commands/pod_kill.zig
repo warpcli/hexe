@@ -82,9 +82,6 @@ fn resolvePodPid(allocator: std.mem.Allocator, uuid: []const u8, name: []const u
         if (!std.mem.startsWith(u8, entry.name, "pod-")) continue;
         if (!std.mem.endsWith(u8, entry.name, ".meta")) continue;
 
-        const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, entry.name });
-        defer allocator.free(full);
-
         var f = d.openFile(entry.name, .{}) catch continue;
         defer f.close();
         var buf: [4096]u8 = undefined;

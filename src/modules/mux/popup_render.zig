@@ -5,7 +5,7 @@ const render = @import("render.zig");
 pub const Renderer = render.Renderer;
 
 /// Draw a blocking popup (confirm or picker) centered in bounds
-pub fn drawInBounds(renderer: *Renderer, popup: pop.Popup, cfg: *const pop.CarrierConfig, bounds_x: u16, bounds_y: u16, bounds_w: u16, bounds_h: u16) void {
+pub fn drawInBounds(renderer: *Renderer, popup: pop.Popup, cfg: anytype, bounds_x: u16, bounds_y: u16, bounds_w: u16, bounds_h: u16) void {
     switch (popup) {
         .confirm => |confirm| drawConfirmInBounds(renderer, confirm, cfg.confirm, bounds_x, bounds_y, bounds_w, bounds_h),
         .picker => |picker| drawPickerInBounds(renderer, picker, cfg.choose, bounds_x, bounds_y, bounds_w, bounds_h),
@@ -13,7 +13,7 @@ pub fn drawInBounds(renderer: *Renderer, popup: pop.Popup, cfg: *const pop.Carri
 }
 
 /// Draw a blocking popup centered on full screen
-pub fn draw(renderer: *Renderer, popup: pop.Popup, cfg: *const pop.CarrierConfig, term_width: u16, term_height: u16) void {
+pub fn draw(renderer: *Renderer, popup: pop.Popup, cfg: anytype, term_width: u16, term_height: u16) void {
     drawInBounds(renderer, popup, cfg, 0, 0, term_width, term_height);
 }
 

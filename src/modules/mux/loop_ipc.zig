@@ -160,13 +160,18 @@ fn handlePopConfirm(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
     wire.readExact(fd, buffer[0..pc.msg_len]) catch return;
     const msg = buffer[0..pc.msg_len];
     const timeout_ms: ?i64 = if (pc.timeout_ms > 0) @as(i64, pc.timeout_ms) else null;
-    const opts: pop.ConfirmOptions = .{ .timeout_ms = timeout_ms };
 
     // Check if target UUID is non-zero.
     const zero_uuid: [32]u8 = .{0} ** 32;
     if (!std.mem.eql(u8, &pc.uuid, &zero_uuid)) {
         // Try pane match.
         if (state.findPaneByUuid(pc.uuid)) |pane| {
+            const pane_cfg = state.pop_config.pane.confirm;
+            const opts: pop.ConfirmOptions = .{
+                .timeout_ms = timeout_ms,
+                .yes_label = pane_cfg.yes_label,
+                .no_label = pane_cfg.no_label,
+            };
             pane.popups.showConfirmOwned(msg, opts) catch return;
             state.pending_pop_response = true;
             state.pending_pop_scope = .pane;
@@ -177,6 +182,12 @@ fn handlePopConfirm(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
         // Try tab match.
         for (state.tabs.items, 0..) |*tab, tab_idx| {
             if (std.mem.startsWith(u8, &tab.uuid, &pc.uuid)) {
+                const carrier_cfg = state.pop_config.carrier.confirm;
+                const opts: pop.ConfirmOptions = .{
+                    .timeout_ms = timeout_ms,
+                    .yes_label = carrier_cfg.yes_label,
+                    .no_label = carrier_cfg.no_label,
+                };
                 tab.popups.showConfirmOwned(msg, opts) catch return;
                 state.pending_pop_response = true;
                 state.pending_pop_scope = .tab;
@@ -187,6 +198,12 @@ fn handlePopConfirm(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
         }
     }
     // Default: MUX level.
+    const carrier_cfg = state.pop_config.carrier.confirm;
+    const opts: pop.ConfirmOptions = .{
+        .timeout_ms = timeout_ms,
+        .yes_label = carrier_cfg.yes_label,
+        .no_label = carrier_cfg.no_label,
+    };
     state.popups.showConfirmOwned(msg, opts) catch return;
     state.pending_pop_response = true;
     state.pending_pop_scope = .mux;
@@ -229,12 +246,16 @@ fn handlePopChoose(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8
 
     if (items_list.items.len == 0) return;
 
-    const opts: pop.PickerOptions = .{ .title = title, .timeout_ms = timeout_ms };
-
     // Route by UUID (like PopConfirm).
     const zero_uuid: [32]u8 = .{0} ** 32;
     if (!std.mem.eql(u8, &pc.uuid, &zero_uuid)) {
         if (state.findPaneByUuid(pc.uuid)) |pane| {
+            const pane_cfg = state.pop_config.pane.choose;
+            const opts: pop.PickerOptions = .{
+                .title = title,
+                .timeout_ms = timeout_ms,
+                .visible_count = pane_cfg.visible_count,
+            };
             pane.popups.showPickerOwned(items_list.items, opts) catch {
                 for (items_list.items) |item| state.allocator.free(item);
                 return;
@@ -247,6 +268,12 @@ fn handlePopChoose(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8
         }
         for (state.tabs.items, 0..) |*tab, tab_idx| {
             if (std.mem.startsWith(u8, &tab.uuid, &pc.uuid)) {
+                const carrier_cfg = state.pop_config.carrier.choose;
+                const opts: pop.PickerOptions = .{
+                    .title = title,
+                    .timeout_ms = timeout_ms,
+                    .visible_count = carrier_cfg.visible_count,
+                };
                 tab.popups.showPickerOwned(items_list.items, opts) catch {
                     for (items_list.items) |item| state.allocator.free(item);
                     return;
@@ -260,6 +287,12 @@ fn handlePopChoose(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8
         }
     }
     // Default: MUX level.
+    const carrier_cfg = state.pop_config.carrier.choose;
+    const opts: pop.PickerOptions = .{
+        .title = title,
+        .timeout_ms = timeout_ms,
+        .visible_count = carrier_cfg.visible_count,
+    };
     state.popups.showPickerOwned(items_list.items, opts) catch {
         for (items_list.items) |item| state.allocator.free(item);
         return;

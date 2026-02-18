@@ -161,7 +161,6 @@ pub fn main() !void {
     const pod_gc = try pod_cmd.newCommand("gc", "Garbage-collect stale pod metadata");
     const pod_gc_dry = try pod_gc.flag("n", "dry-run", null);
 
-
     // MUX subcommands
     const mux_new = try mux_cmd.newCommand("new", "Create new multiplexer session");
     const mux_new_name = try mux_new.string("n", "name", null);
@@ -346,32 +345,31 @@ pub fn main() !void {
         if (std.mem.eql(u8, arg, "stats")) found_stats = true;
     }
 
-        if (has_help) {
-            // Show help for the most specific command found (manual strings to avoid argonaut crash)
-            if (found_mux and found_layout and found_save) {
-                print("Usage: hexe mux layout save <name>\n\nSave the current tab's layout to disk.\n\nLayouts are stored in ~/.config/hexe/layouts/<name>.json\n", .{});
-            } else if (found_mux and found_layout and found_load) {
-                print("Usage: hexe mux layout load <name>\n\nApply a saved layout to the current tab.\n\nExisting panes are closed and new ones created to match the layout.\n", .{});
-            } else if (found_mux and found_layout) {
-                print("Usage: hexe mux layout <command>\n\nSave and restore layouts\n\nCommands:\n  save <name>  Save current tab's layout\n  load <name>  Apply a saved layout\n  list         List saved layouts\n", .{});
-            } else if (found_mux and found_focus) {
-                print(
-                    "Usage: hexe mux focus <dir>\n\nMove focus to adjacent pane in the mux. Intended for editor integration (nvim).\n\nDirs: left, right, up, down\n\nRequires running inside mux (HEXE_PANE_UUID)\n",
-                    .{},
-                );
-            } else
-            if (found_mux and found_send) {
-                print("Usage: hexe mux send [OPTIONS] [text]\n\nSend keystrokes to pane (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>        Target specific pane\n  -c, --creator            Send to pane that created current pane\n  -l, --last               Send to previously focused pane\n  -b, --broadcast          Broadcast to all attached panes\n  -e, --enter              Append Enter key after text\n  -C, --ctrl <char>        Send Ctrl+<char> (e.g., -C c for Ctrl+C)\n  -I, --instance <NAME>    Target a specific instance\n", .{});
-            } else if (found_mux and found_notify) {
-                print("Usage: hexe mux notify [OPTIONS] <message>\n\nSend notification (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>        Target specific mux or pane\n  -c, --creator            Send to pane that created current pane\n  -l, --last               Send to previously focused pane\n  -b, --broadcast          Broadcast to all muxes\n  -I, --instance <NAME>    Target a specific instance\n", .{});
-            } else if (found_mux and found_info) {
-                print("Usage: hexe mux info [OPTIONS]\n\nShow information about a pane\n\nOptions:\n  -u, --uuid <UUID>        Query specific pane by UUID (works from anywhere)\n  -c, --creator            Print only the creator pane UUID\n  -l, --last               Print only the last focused pane UUID\n  -I, --instance <NAME>    Target a specific instance\n\nWithout --uuid, queries current pane (requires running inside mux)\n", .{});
-            } else if (found_pod and found_list) {
-                print("Usage: hexe pod list [OPTIONS]\n\nList discoverable pods by scanning pod-*.meta in the hexe socket dir.\n\nOptions:\n      --where <LUA>   Lua predicate (return boolean). Variable: pod\n      --probe         Probe sockets (best-effort)\n      --alive         Only show pods whose socket is connectable (implies --probe)\n  -j, --json          Output as JSON array\n", .{});
-            } else if (found_pod and found_new) {
-                print("Usage: hexe pod new [OPTIONS]\n\nCreate a standalone pod and print a JSON line once ready.\n\nOptions:\n  -n, --name <NAME>         Pod name (also used for ps/alias)\n  -S, --shell <CMD>         Shell/command to run (default: $SHELL)\n  -C, --cwd <DIR>           Working directory\n      --labels <a,b,c>      Comma-separated labels\n      --alias               Create pod@<name>.sock alias symlink\n  -d, --debug               Enable debug output\n  -L, --logfile <PATH>      Log debug output to PATH\n  -I, --instance <NAME>     Run under instance namespace\n  -T, --test-only           Mark as test-only (requires instance)\n", .{});
-            } else if (found_ses and found_list) {
-                print("Usage: hexe ses list [OPTIONS]\n\nList all sessions and panes\n\nOptions:\n  -d, --details           Show extra details\n  -j, --json              Output as JSON\n  -I, --instance <NAME>   Target a specific instance\n", .{});
+    if (has_help) {
+        // Show help for the most specific command found (manual strings to avoid argonaut crash)
+        if (found_mux and found_layout and found_save) {
+            print("Usage: hexe mux layout save <name>\n\nSave the current tab's layout to disk.\n\nLayouts are stored in ~/.config/hexe/layouts/<name>.json\n", .{});
+        } else if (found_mux and found_layout and found_load) {
+            print("Usage: hexe mux layout load <name>\n\nApply a saved layout to the current tab.\n\nExisting panes are closed and new ones created to match the layout.\n", .{});
+        } else if (found_mux and found_layout) {
+            print("Usage: hexe mux layout <command>\n\nSave and restore layouts\n\nCommands:\n  save <name>  Save current tab's layout\n  load <name>  Apply a saved layout\n  list         List saved layouts\n", .{});
+        } else if (found_mux and found_focus) {
+            print(
+                "Usage: hexe mux focus <dir>\n\nMove focus to adjacent pane in the mux. Intended for editor integration (nvim).\n\nDirs: left, right, up, down\n\nRequires running inside mux (HEXE_PANE_UUID)\n",
+                .{},
+            );
+        } else if (found_mux and found_send) {
+            print("Usage: hexe mux send [OPTIONS] [text]\n\nSend keystrokes to pane (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>        Target specific pane\n  -c, --creator            Send to pane that created current pane\n  -l, --last               Send to previously focused pane\n  -b, --broadcast          Broadcast to all attached panes\n  -e, --enter              Append Enter key after text\n  -C, --ctrl <char>        Send Ctrl+<char> (e.g., -C c for Ctrl+C)\n  -I, --instance <NAME>    Target a specific instance\n", .{});
+        } else if (found_mux and found_notify) {
+            print("Usage: hexe mux notify [OPTIONS] <message>\n\nSend notification (defaults to current pane if inside mux)\n\nOptions:\n  -u, --uuid <UUID>        Target specific mux or pane\n  -c, --creator            Send to pane that created current pane\n  -l, --last               Send to previously focused pane\n  -b, --broadcast          Broadcast to all muxes\n  -I, --instance <NAME>    Target a specific instance\n", .{});
+        } else if (found_mux and found_info) {
+            print("Usage: hexe mux info [OPTIONS]\n\nShow information about a pane\n\nOptions:\n  -u, --uuid <UUID>        Query specific pane by UUID (works from anywhere)\n  -c, --creator            Print only the creator pane UUID\n  -l, --last               Print only the last focused pane UUID\n  -I, --instance <NAME>    Target a specific instance\n\nWithout --uuid, queries current pane (requires running inside mux)\n", .{});
+        } else if (found_pod and found_list) {
+            print("Usage: hexe pod list [OPTIONS]\n\nList discoverable pods by scanning pod-*.meta in the hexe socket dir.\n\nOptions:\n      --where <LUA>   Lua predicate (return boolean). Variable: pod\n      --probe         Probe sockets (best-effort)\n      --alive         Only show pods whose socket is connectable (implies --probe)\n  -j, --json          Output as JSON array\n", .{});
+        } else if (found_pod and found_new) {
+            print("Usage: hexe pod new [OPTIONS]\n\nCreate a standalone pod and print a JSON line once ready.\n\nOptions:\n  -n, --name <NAME>         Pod name (also used for ps/alias)\n  -S, --shell <CMD>         Shell/command to run (default: $SHELL)\n  -C, --cwd <DIR>           Working directory\n      --labels <a,b,c>      Comma-separated labels\n      --alias               Create pod@<name>.sock alias symlink\n  -d, --debug               Enable debug output\n  -L, --logfile <PATH>      Log debug output to PATH\n  -I, --instance <NAME>     Run under instance namespace\n  -T, --test-only           Mark as test-only (requires instance)\n", .{});
+        } else if (found_ses and found_list) {
+            print("Usage: hexe ses list [OPTIONS]\n\nList all sessions and panes\n\nOptions:\n  -d, --details           Show extra details\n  -j, --json              Output as JSON\n  -I, --instance <NAME>   Target a specific instance\n", .{});
         } else if (found_ses and found_kill) {
             print("Usage: hexe ses kill <name|uuid-prefix>\n\nKill a detached session by name or UUID prefix\n\nOptions:\n  -I, --instance <NAME>   Target a specific instance\n", .{});
         } else if (found_ses and found_clear) {
@@ -389,18 +387,18 @@ pub fn main() !void {
             );
         } else if (found_ses and found_daemon) {
             print("Usage: hexe ses daemon [OPTIONS]\n\nStart the session daemon\n\nOptions:\n  -f, --foreground        Run in foreground (don't daemonize)\n  -d, --debug             Enable debug output\n  -L, --logfile <PATH>    Log debug output to PATH\n  -I, --instance <NAME>   Run under instance namespace\n  -T, --test-only         Mark as test-only (requires instance)\n", .{});
-            } else if (found_pod and found_daemon) {
-                print("Usage: hexe pod daemon [OPTIONS]\n\nStart a per-pane pod daemon (normally launched by ses)\n\nOptions:\n  -u, --uuid <UUID>            Pane UUID (32 hex chars)\n  -n, --name <NAME>            Human-friendly pane name (for `ps`)\n  -s, --socket <PATH>          Pod unix socket path\n  -S, --shell <CMD>            Shell/command to run\n  -C, --cwd <DIR>              Working directory\n      --labels <a,b,c>         Comma-separated labels for discovery\n      --no-write-meta           Disable writing pod-<uuid>.meta\n      --write-alias             Create pod@<name>.sock alias symlink\n  -f, --foreground             Run in foreground (prints pod_ready JSON)\n  -d, --debug                  Enable debug output\n  -L, --logfile <PATH>         Log debug output to PATH\n  -I, --instance <NAME>        Run under instance namespace\n  -T, --test-only              Mark as test-only (requires instance)\n", .{});
-            } else if (found_pod and found_send) {
-                print("Usage: hexe pod send [OPTIONS] [text]\n\nSend input to a pod without ses/mux.\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID (32 hex chars)\n  -n, --name <NAME>        Target pod by name (via pod-*.meta scan)\n  -s, --socket <PATH>      Target pod by explicit socket path\n  -e, --enter              Append Enter key\n  -C, --ctrl <char>        Send Ctrl+<char> (e.g., -C c for Ctrl+C)\n", .{});
-            } else if (found_pod and found_attach) {
-                print("Usage: hexe pod attach [OPTIONS]\n\nInteractive attach to a pod socket (raw tty).\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID (32 hex chars)\n  -n, --name <NAME>        Target pod by name (via pod-*.meta scan)\n  -s, --socket <PATH>      Target pod by explicit socket path\n      --detach <key>       Detach prefix Ctrl+<key> (default: b), then press 'd'\n", .{});
-            } else if (found_pod and found_kill) {
-                print("Usage: hexe pod kill [OPTIONS]\n\nKill a pod process (reads pid from pod-*.meta).\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID\n  -n, --name <NAME>        Target pod by name (newest created_at wins)\n  -s, --signal <SIG>       Signal name or number (default: TERM)\n                           Names: TERM, KILL, INT, HUP, QUIT, STOP, CONT, TSTP, USR1, USR2\n  -f, --force              Follow with SIGKILL\n", .{});
-            } else if (found_pod and found_gc) {
-                print("Usage: hexe pod gc [--dry-run]\n\nDelete stale pod-*.meta and broken pod@*.sock aliases.\n\nOptions:\n  -n, --dry-run            Only print what would be deleted\n", .{});
-            } else if (found_mux and found_new) {
-                print("Usage: hexe mux new [OPTIONS]\n\nCreate new multiplexer session\n\nOptions:\n  -n, --name <NAME>        Session name\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n  -I, --instance <NAME>    Use instance namespace\n  -T, --test-only          Create an isolated test instance\n", .{});
+        } else if (found_pod and found_daemon) {
+            print("Usage: hexe pod daemon [OPTIONS]\n\nStart a per-pane pod daemon (normally launched by ses)\n\nOptions:\n  -u, --uuid <UUID>            Pane UUID (32 hex chars)\n  -n, --name <NAME>            Human-friendly pane name (for `ps`)\n  -s, --socket <PATH>          Pod unix socket path\n  -S, --shell <CMD>            Shell/command to run\n  -C, --cwd <DIR>              Working directory\n      --labels <a,b,c>         Comma-separated labels for discovery\n      --no-write-meta           Disable writing pod-<uuid>.meta\n      --write-alias             Create pod@<name>.sock alias symlink\n  -f, --foreground             Run in foreground (prints pod_ready JSON)\n  -d, --debug                  Enable debug output\n  -L, --logfile <PATH>         Log debug output to PATH\n  -I, --instance <NAME>        Run under instance namespace\n  -T, --test-only              Mark as test-only (requires instance)\n", .{});
+        } else if (found_pod and found_send) {
+            print("Usage: hexe pod send [OPTIONS] [text]\n\nSend input to a pod without ses/mux.\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID (32 hex chars)\n  -n, --name <NAME>        Target pod by name (via pod-*.meta scan)\n  -s, --socket <PATH>      Target pod by explicit socket path\n  -e, --enter              Append Enter key\n  -C, --ctrl <char>        Send Ctrl+<char> (e.g., -C c for Ctrl+C)\n", .{});
+        } else if (found_pod and found_attach) {
+            print("Usage: hexe pod attach [OPTIONS]\n\nInteractive attach to a pod socket (raw tty).\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID (32 hex chars)\n  -n, --name <NAME>        Target pod by name (via pod-*.meta scan)\n  -s, --socket <PATH>      Target pod by explicit socket path\n      --detach <key>       Detach prefix Ctrl+<key> (default: b), then press 'd'\n", .{});
+        } else if (found_pod and found_kill) {
+            print("Usage: hexe pod kill [OPTIONS]\n\nKill a pod process (reads pid from pod-*.meta).\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID\n  -n, --name <NAME>        Target pod by name (newest created_at wins)\n  -s, --signal <SIG>       Signal name or number (default: TERM)\n                           Names: TERM, KILL, INT, HUP, QUIT, STOP, CONT, TSTP, USR1, USR2\n  -f, --force              Follow with SIGKILL\n", .{});
+        } else if (found_pod and found_gc) {
+            print("Usage: hexe pod gc [--dry-run]\n\nDelete stale pod-*.meta and broken pod@*.sock aliases.\n\nOptions:\n  -n, --dry-run            Only print what would be deleted\n", .{});
+        } else if (found_mux and found_new) {
+            print("Usage: hexe mux new [OPTIONS]\n\nCreate new multiplexer session\n\nOptions:\n  -n, --name <NAME>        Session name\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n  -I, --instance <NAME>    Use instance namespace\n  -T, --test-only          Create an isolated test instance\n", .{});
         } else if (found_mux and found_attach) {
             print("Usage: hexe mux attach [OPTIONS] <name>\n\nAttach to existing session by name or UUID prefix\n\nOptions:\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n  -I, --instance <NAME>    Target a specific instance\n", .{});
         } else if (found_mux and found_float) {
@@ -431,7 +429,7 @@ pub fn main() !void {
         } else if (found_shp) {
             print("Usage: hexe shp <command>\n\nShell prompt renderer\n\nCommands:\n  prompt       Render shell prompt\n  init         Print shell initialization script\n  exit-intent  Ask mux permission before shell exits\n  shell-event  Send shell metadata to mux\n  spinner      Render/animate a spinner\n", .{});
         } else if (found_config and found_validate) {
-            print("Usage: hexe config validate\n\nValidate the Hexa configuration file.\n\nChecks:\n  - Lua syntax correctness\n  - Configuration structure\n  - Color format validity\n  - Keybinding syntax\n  - Type correctness\n\nExpected location: ~/.config/hexe/config.lua\n", .{});
+            print("Usage: hexe config validate\n\nValidate the Hexe configuration file.\n\nChecks:\n  - Lua syntax correctness\n  - Configuration structure\n  - Color format validity\n  - Keybinding syntax\n  - Type correctness\n\nExpected location: ~/.config/hexe/init.lua\n", .{});
         } else if (found_config) {
             print("Usage: hexe config <command>\n\nConfiguration management\n\nCommands:\n  validate  Validate configuration file syntax and structure\n", .{});
         } else {
