@@ -235,35 +235,6 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         self.active_floating = null;
         self.tab_last_floating_uuid.clearRetainingCapacity();
         self.tab_last_focus_kind.clearRetainingCapacity();
-
-        // Clear per-pane metadata caches from previous session state.
-        {
-            var shell_it = self.pane_shell.iterator();
-            while (shell_it.next()) |entry| {
-                entry.value_ptr.deinit(self.allocator);
-            }
-            self.pane_shell.clearRetainingCapacity();
-
-            var proc_it = self.pane_proc.iterator();
-            while (proc_it.next()) |entry| {
-                entry.value_ptr.deinit(self.allocator);
-            }
-            self.pane_proc.clearRetainingCapacity();
-
-            var name_it = self.pane_names.iterator();
-            while (name_it.next()) |entry| {
-                self.allocator.free(entry.value_ptr.*);
-            }
-            self.pane_names.clearRetainingCapacity();
-
-            var req_it = self.pending_float_requests.iterator();
-            while (req_it.next()) |entry| {
-                if (entry.value_ptr.result_path) |path| {
-                    self.allocator.free(path);
-                }
-            }
-            self.pending_float_requests.clearRetainingCapacity();
-        }
     }
 
     // Restore mux UUID (persistent identity).
@@ -447,7 +418,6 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             tab.layout.next_split_id = next_split_id;
 
             // Restore splits.
-            var restored_split_count: usize = 0;
             if (tab_obj.get("splits")) |splits_arr| {
                 for (splits_arr.array.items) |pane_val| {
                     const pane_obj = pane_val.object;
@@ -514,14 +484,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                         self.allocator.destroy(pane);
                         continue;
                     };
-                    restored_split_count += 1;
                 }
-            }
-
-            // Skip empty tabs that restored no panes.
-            if (restored_split_count == 0) {
-                tab.deinit();
-                continue;
             }
 
             // Restore layout tree.
@@ -531,25 +494,12 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 }
             }
 
-            // Remove tree nodes that reference panes we failed to restore.
-            tab.layout.pruneDeadNodes();
-
-            // Skip tabs that became empty after pruning dead nodes.
-            if (tab.layout.splits.count() == 0) {
-                tab.deinit();
-                continue;
-            }
-
             // Ensure focused split points to an existing pane.
             if (!tab.layout.splits.contains(tab.layout.focused_split_id)) {
                 var split_it = tab.layout.splits.iterator();
                 if (split_it.next()) |entry| {
                     tab.layout.focused_split_id = entry.key_ptr.*;
                 }
-            }
-
-            if (tab.layout.getFocusedPane()) |focused| {
-                focused.focused = true;
             }
 
             // Ensure there is a root node for rendering if tree restore failed.
@@ -810,6 +760,19 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         }
     }
 
+    if (self.tabs.items.len == 0) {
+        mux.debugLog("reattachSession: no tabs restored, returning false", .{});
+        return false;
+    }
+
+    // Re-register with restored UUID/name before requesting backlog replay.
+    // This releases the attach session lock and stabilizes client identity first.
+    mux.debugLog("reattachSession: calling updateSession uuid={s} name={s}", .{ self.uuid[0..8], self.session_name });
+    self.ses_client.updateSession(self.uuid, self.session_name) catch |e| {
+        core.logging.logError("mux", "updateSession failed in restoreLayout", e);
+        mux.debugLog("reattachSession: updateSession FAILED: {s}", .{@errorName(e)});
+    };
+
     // Signal SES that we're ready for backlog replay.
     // This triggers deferred VT reconnection to PODs, which replays their buffers.
     mux.debugLog("reattachSession: calling requestBacklogReplay", .{});
@@ -828,19 +791,6 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             // Don't return false here - the session is already restored, just warn user
         }
     }
-
-    if (self.tabs.items.len == 0) {
-        mux.debugLog("reattachSession: no tabs restored, returning false", .{});
-        return false;
-    }
-
-    // Restore succeeded - re-register with SES using restored UUID/name.
-    // This also removes the detached session from SES (via handleBinaryRegister).
-    mux.debugLog("reattachSession: calling updateSession uuid={s} name={s}", .{ self.uuid[0..8], self.session_name });
-    self.ses_client.updateSession(self.uuid, self.session_name) catch |e| {
-        core.logging.logError("mux", "updateSession failed in restoreLayout", e);
-        mux.debugLog("reattachSession: updateSession FAILED: {s}", .{@errorName(e)});
-    };
 
     mux.debugLog("reattachSession: returning true, tabs={d} floats={d}", .{ self.tabs.items.len, self.floats.items.len });
     return true;
