@@ -1,4 +1,7 @@
 const std = @import("std");
+const core = @import("core");
+const ipc = core.ipc;
+const pod_meta = core.pod_meta;
 
 /// Parse a ` key=value` field from a line.
 /// Returns the value (until next space or end of line), or null if not found.
@@ -15,6 +18,96 @@ pub fn parseField(line: []const u8, key: []const u8) ?[]const u8 {
     const rest = line[val_start..];
     const end_rel = std.mem.indexOfScalar(u8, rest, ' ') orelse rest.len;
     return rest[0..end_rel];
+}
+
+pub fn isUuid32Hex(uuid: []const u8) bool {
+    if (uuid.len != 32) return false;
+    for (uuid) |c| {
+        if (!std.ascii.isHex(c)) return false;
+    }
+    return true;
+}
+
+pub fn resolvePodSocketTarget(
+    allocator: std.mem.Allocator,
+    uuid: []const u8,
+    name: []const u8,
+    socket_path: []const u8,
+) ![]const u8 {
+    if (socket_path.len > 0) {
+        return allocator.dupe(u8, socket_path);
+    }
+    if (uuid.len > 0) {
+        if (!isUuid32Hex(uuid)) {
+            return error.InvalidUuid;
+        }
+        return ipc.getPodSocketPath(allocator, uuid);
+    }
+    if (name.len > 0) {
+        if (try findNewestPodMetaByName(allocator, name)) |match| {
+            return ipc.getPodSocketPath(allocator, &match.uuid);
+        }
+        return pod_meta.PodMeta.aliasSocketPath(allocator, name);
+    }
+    return error.MissingTarget;
+}
+
+pub fn resolveNewestPodPidByName(allocator: std.mem.Allocator, name: []const u8) !?i64 {
+    if (name.len == 0) return null;
+    const match = try findNewestPodMetaByName(allocator, name);
+    if (match) |m| {
+        return m.pid;
+    }
+    return null;
+}
+
+const PodMetaMatch = struct {
+    uuid: [32]u8,
+    pid: i64,
+    created_at: i64,
+};
+
+fn findNewestPodMetaByName(allocator: std.mem.Allocator, name: []const u8) !?PodMetaMatch {
+    const dir = try ipc.getSocketDir(allocator);
+    defer allocator.free(dir);
+
+    var best: ?PodMetaMatch = null;
+
+    var d = try std.fs.cwd().openDir(dir, .{ .iterate = true });
+    defer d.close();
+    var it = d.iterate();
+    while (try it.next()) |entry| {
+        if (entry.kind != .file) continue;
+        if (!std.mem.startsWith(u8, entry.name, "pod-")) continue;
+        if (!std.mem.endsWith(u8, entry.name, ".meta")) continue;
+
+        var f = d.openFile(entry.name, .{}) catch continue;
+        defer f.close();
+        var buf: [4096]u8 = undefined;
+        const n = f.readAll(&buf) catch continue;
+        if (n == 0) continue;
+        const line = std.mem.trim(u8, buf[0..n], " \t\n\r");
+        if (!std.mem.startsWith(u8, line, pod_meta.POD_META_PREFIX)) continue;
+
+        const name_val = parseField(line, "name") orelse continue;
+        if (!std.mem.eql(u8, name_val, name)) continue;
+
+        const uuid_text = parseField(line, "uuid") orelse continue;
+        if (!isUuid32Hex(uuid_text)) continue;
+
+        const pid_text = parseField(line, "pid") orelse continue;
+        const pid = std.fmt.parseInt(i64, pid_text, 10) catch continue;
+        const created_at_text = parseField(line, "created_at") orelse "0";
+        const created_at = std.fmt.parseInt(i64, created_at_text, 10) catch 0;
+
+        if (best == null or created_at >= best.?.created_at) {
+            var uuid_buf: [32]u8 = undefined;
+            @memcpy(&uuid_buf, uuid_text[0..32]);
+            best = .{ .uuid = uuid_buf, .pid = pid, .created_at = created_at };
+        }
+    }
+
+    return best;
 }
 
 test "parseField basic" {

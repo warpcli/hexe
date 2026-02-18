@@ -707,15 +707,6 @@ pub const Config = struct {
             return config;
         };
 
-        // Build config from ConfigBuilder (new API)
-        if (runtime.getBuilder()) |builder| {
-            if (builder.mux) |mux_builder| {
-                log.debug("building mux config from ConfigBuilder", .{});
-                config = mux_builder.build() catch config;
-                config._allocator = allocator;
-            }
-        }
-
         // Pop config return value (if any) from stack
         runtime.pop();
 
@@ -729,6 +720,7 @@ pub const Config = struct {
         std.fs.cwd().access(local_path, .{}) catch {
             // No local config, use global only
             log.debug("no local config found", .{});
+            applyBuilderConfig(&runtime, &config, allocator);
             if (config.status != .@"error") {
                 if (PARSE_ERROR) |msg| {
                     config.status = .@"error";
@@ -745,6 +737,7 @@ pub const Config = struct {
         runtime.loadConfig(local_path) catch |err| {
             // Failed to load local config, but global is already loaded
             log.warn("failed to load local config: {}", .{err});
+            applyBuilderConfig(&runtime, &config, allocator);
             if (config.status != .@"error") {
                 if (PARSE_ERROR) |msg| {
                     config.status = .@"error";
@@ -754,6 +747,10 @@ pub const Config = struct {
             }
             return config;
         };
+
+        // Rebuild from ConfigBuilder after local config load so local builder calls
+        // (hexe.mux.* API) are applied consistently with global config loading.
+        applyBuilderConfig(&runtime, &config, allocator);
 
         // Access the "mux" section of the local config table and merge
         if (runtime.pushTable(-1, "mux")) {
@@ -776,6 +773,16 @@ pub const Config = struct {
         }
 
         return config;
+    }
+
+    fn applyBuilderConfig(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocator) void {
+        if (runtime.getBuilder()) |builder| {
+            if (builder.mux) |mux_builder| {
+                log.debug("building mux config from ConfigBuilder", .{});
+                config.* = mux_builder.build() catch config.*;
+                config._allocator = allocator;
+            }
+        }
     }
 
     /// Parse config from an already-loaded Lua runtime.
