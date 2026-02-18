@@ -565,7 +565,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 // Restore float properties.
                 pane.floating = true;
                 pane.visible = if (pane_obj.get("visible")) |v| (v != .bool or v.bool) else true;
-                pane.tab_visible = intFieldCast(u8, pane_obj, "tab_visible") orelse 0;
+                pane.tab_visible = intFieldCast(u64, pane_obj, "tab_visible") orelse 0;
                 pane.float_key = intFieldCast(u8, pane_obj, "float_key") orelse 0;
                 pane.float_width_pct = intFieldCast(u8, pane_obj, "float_width_pct") orelse 60;
                 pane.float_height_pct = intFieldCast(u8, pane_obj, "float_height_pct") orelse 60;
