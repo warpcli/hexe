@@ -262,21 +262,6 @@ pub const Pane = struct {
         }
     }
 
-    fn buildEnvPairs(allocator: std.mem.Allocator, lines: []const []const u8) ![]const [2][]const u8 {
-        var pairs: std.ArrayList([2][]const u8) = .empty;
-        errdefer pairs.deinit(allocator);
-
-        for (lines) |line| {
-            const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-            if (eq == 0 or eq + 1 > line.len) continue;
-            const key = line[0..eq];
-            const value = line[eq + 1 ..];
-            try pairs.append(allocator, .{ key, value });
-        }
-
-        return pairs.toOwnedSlice(allocator);
-    }
-
     fn buildEnvPairsWithExtra(allocator: std.mem.Allocator, lines: []const []const u8, extra: []const [2][]const u8) ![]const [2][]const u8 {
         var pairs: std.ArrayList([2][]const u8) = .empty;
         errdefer pairs.deinit(allocator);
