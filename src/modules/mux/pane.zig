@@ -235,6 +235,7 @@ pub const Pane = struct {
             .pod => {}, // VT channel is shared, not owned by pane
         }
         self.vt.deinit();
+        self.osc_buf.deinit(self.allocator);
         self.captured_output.deinit(self.allocator);
         if (self.pwd_dir) |dir| {
             self.allocator.free(dir);
@@ -254,6 +255,10 @@ pub const Pane = struct {
         if (self.float_title) |t| {
             self.allocator.free(t);
             self.float_title = null;
+        }
+        if (self.exit_key) |k| {
+            self.allocator.free(k);
+            self.exit_key = null;
         }
     }
 
