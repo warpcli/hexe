@@ -19,7 +19,8 @@ Each float definition can declare a set of boolean attributes:
 ```
 
 The first float entry (the one with no `key`) can also provide *default attributes*.
-Those defaults are applied to every keyed float unless that float overrides the value.
+Current merge behavior is additive: defaults only turn attributes on for keyed floats.
+Keyed floats do not currently force a default `true` back to `false`.
 
 ## exclusive
 
