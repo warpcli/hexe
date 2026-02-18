@@ -198,7 +198,7 @@ All message types are identified by a `u16` value in the control header.
 MsgType              Value   Direction  Payload Struct
 ───────────────────  ──────  ─────────  ──────────────────────────────────
 register             0x0100  MUX->SES   Register + name bytes
-registered           0x0101  SES->MUX   (empty)
+registered           0x0101  SES->MUX   Registered + resolved session name
 create_pane          0x0102  MUX->SES   CreatePane + shell + cwd + sticky
 pane_created         0x0103  SES->MUX   PaneCreated + socket_path
 destroy_pane         0x0104  MUX->SES   PaneUuid
@@ -245,6 +245,13 @@ float_request        0x012C  SES->MUX   FloatRequest + cmd + env
 float_created        0x012D  MUX->SES   FloatCreated
 float_result         0x012E  MUX->SES   FloatResult + output
 pane_exited          0x012F  SES->MUX   PaneExited
+replay_backlogs      0x0130  MUX->SES   (empty)
+kill_session         0x0131  CLI->SES   PaneUuid
+clear_sessions       0x0132  CLI->SES   (empty)
+clear_orphaned_panes 0x0133  CLI->SES   (empty)
+get_layout           0x0134  CLI->SES   GetLayout
+apply_layout         0x0135  SES->MUX   ApplyLayout + tree JSON
+get_session_state    0x0136  CLI->SES   PaneUuid
 ```
 
 ### Channel [4] -- POD -> SES Control (0x04xx)

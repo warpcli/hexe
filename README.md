@@ -23,18 +23,18 @@ If the UI dies at the wrong time, you lose state or your PTYs get stuck.
 
 Hexe splits responsibilities on purpose:
 
-- hexe-mux (UI)
+- `hexe mux` (UI)
   - Rendering, tabs/splits layout, keybinds, mouse handling
   - Runs Ghostty VT state per pane
   - Safe to restart
 
-- hexe-pod (one per pane)
+- `hexe pod` (one per pane)
   - Owns the PTY master file descriptor
   - Spawns/holds the shell process
   - Continuously drains PTY output so processes do not block
   - Buffers scrollback so detach/reattach does not lose history
 
-- hexe-ses (registry)
+- `hexe ses` (registry)
   - Knows what panes exist and where their pods are
   - Stores detached session layouts
   - Periodically persists state so a daemon crash is survivable
@@ -65,7 +65,7 @@ This is the foundation for:
 
 ### Keybindings
 
-Keybindings are configured in `mux.json`.
+Keybindings are configured in Lua under `mux.input.binds`.
 
 See `docs/keybindings.md`.
 
@@ -312,11 +312,11 @@ Start a mux:
 
 Detach (keeps panes alive), then reattach:
 
-- hexe mux --attach <session-uuid-or-prefix>
+- hexe mux attach <session-uuid-or-prefix>
 
 List what is available to attach:
 
-- hexe mux --list
+- hexe mux list
 
 ---
 
@@ -324,7 +324,9 @@ List what is available to attach:
 
 Config is read from:
 
-- ~/.config/hexe/
+- `$XDG_CONFIG_HOME/hexe/init.lua` (if `XDG_CONFIG_HOME` is set)
+- `~/.config/hexe/init.lua` (default)
+- `./.hexe.lua` (optional local override in current directory)
 
 State is stored under XDG state home (by default):
 

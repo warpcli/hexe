@@ -11,10 +11,11 @@ This system is designed to:
 ## File locations
 
 Hexe reads its config from:
-- `$XDG_CONFIG_HOME/hexe/config.lua`
-- or `~/.config/hexe/config.lua`
+- `$XDG_CONFIG_HOME/hexe/init.lua`
+- or `~/.config/hexe/init.lua`
+- optional local override: `./.hexe.lua`
 
-The repository also contains a template at `configs/hexa/config.lua`.
+Main config should return a Lua table containing the `mux` section.
 
 ## Basic schema
 

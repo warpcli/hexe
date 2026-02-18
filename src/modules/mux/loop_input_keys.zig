@@ -71,13 +71,12 @@ pub fn checkExitKey(state: *State, inp: []const u8) usize {
     const matched = blk: {
         // No modifiers - match raw byte.
         if (parsed.mods == 0) {
-            // Special case for Esc: must be standalone (not part of CSI/SS3).
+            // Special case for Esc: only treat as standalone if it is the
+            // entire input slice (prevents Alt+key from triggering Esc exit).
             if (key_char == 0x1b) {
-                if (inp.len >= 1 and inp[0] == 0x1b) {
-                    if (inp.len == 1 or (inp[1] != '[' and inp[1] != 'O')) {
-                        consumed = 1;
-                        break :blk true;
-                    }
+                if (inp.len == 1 and inp[0] == 0x1b) {
+                    consumed = 1;
+                    break :blk true;
                 }
                 break :blk false;
             }
@@ -89,63 +88,42 @@ pub fn checkExitKey(state: *State, inp: []const u8) usize {
             break :blk false;
         }
 
-        // Alt only (mods == 1): ESC + char.
-        if (parsed.mods == 1) {
+        // Alt-only / Alt+Shift: ESC + char.
+        if (parsed.mods == 1 or parsed.mods == 5) {
             if (inp.len >= 2 and inp[0] == 0x1b) {
                 // Make sure it's not a CSI/SS3 sequence.
-                if (inp[1] != '[' and inp[1] != 'O') {
-                    if (inp[1] == key_char) {
-                        consumed = 2;
-                        break :blk true;
-                    }
-                    // Also check lowercase version for letters.
-                    if (key_char >= 'A' and key_char <= 'Z') {
-                        if (inp[1] == key_char + 32) {
-                            consumed = 2;
-                            break :blk true;
-                        }
-                    } else if (key_char >= 'a' and key_char <= 'z') {
-                        if (inp[1] == key_char - 32) {
-                            consumed = 2;
-                            break :blk true;
-                        }
-                    }
-                }
-            }
-            break :blk false;
-        }
-
-        // Ctrl only (mods == 2): control character (0x01-0x1a for a-z).
-        if (parsed.mods == 2) {
-            if (inp.len >= 1) {
-                var ctrl_char: u8 = 0;
-                if (key_char >= 'a' and key_char <= 'z') {
-                    ctrl_char = key_char - 'a' + 1;
-                } else if (key_char >= 'A' and key_char <= 'Z') {
-                    ctrl_char = key_char - 'A' + 1;
-                }
-                if (ctrl_char != 0 and inp[0] == ctrl_char) {
-                    consumed = 1;
+                if (inp[1] != '[' and inp[1] != 'O' and matchAltChar(inp[1], key_char)) {
+                    consumed = 2;
                     break :blk true;
                 }
             }
             break :blk false;
         }
 
-        // Ctrl+Alt (mods == 3): ESC + control character.
-        if (parsed.mods == 3) {
+        // Shift-only: same raw key byte as terminal encoding.
+        if (parsed.mods == 4) {
+            if (inp.len >= 1 and inp[0] == key_char) {
+                consumed = 1;
+                break :blk true;
+            }
+            break :blk false;
+        }
+
+        // Ctrl-only / Ctrl+Shift: control character (0x01-0x1a for a-z).
+        if (parsed.mods == 2 or parsed.mods == 6) {
+            if (inp.len >= 1 and matchCtrlChar(inp[0], key_char)) {
+                consumed = 1;
+                break :blk true;
+            }
+            break :blk false;
+        }
+
+        // Ctrl+Alt / Ctrl+Alt+Shift: ESC + control character.
+        if (parsed.mods == 3 or parsed.mods == 7) {
             if (inp.len >= 2 and inp[0] == 0x1b) {
-                if (inp[1] != '[' and inp[1] != 'O') {
-                    var ctrl_char: u8 = 0;
-                    if (key_char >= 'a' and key_char <= 'z') {
-                        ctrl_char = key_char - 'a' + 1;
-                    } else if (key_char >= 'A' and key_char <= 'Z') {
-                        ctrl_char = key_char - 'A' + 1;
-                    }
-                    if (ctrl_char != 0 and inp[1] == ctrl_char) {
-                        consumed = 2;
-                        break :blk true;
-                    }
+                if (inp[1] != '[' and inp[1] != 'O' and matchCtrlChar(inp[1], key_char)) {
+                    consumed = 2;
+                    break :blk true;
                 }
             }
             break :blk false;
@@ -168,6 +146,23 @@ pub fn checkExitKey(state: *State, inp: []const u8) usize {
     }
 
     return 0;
+}
+
+fn matchAltChar(actual: u8, expected: u8) bool {
+    if (actual == expected) return true;
+    if (expected >= 'A' and expected <= 'Z') return actual == expected + 32;
+    if (expected >= 'a' and expected <= 'z') return actual == expected - 32;
+    return false;
+}
+
+fn matchCtrlChar(actual: u8, expected: u8) bool {
+    var ctrl_char: u8 = 0;
+    if (expected >= 'a' and expected <= 'z') {
+        ctrl_char = expected - 'a' + 1;
+    } else if (expected >= 'A' and expected <= 'Z') {
+        ctrl_char = expected - 'A' + 1;
+    }
+    return ctrl_char != 0 and actual == ctrl_char;
 }
 
 /// Check if a CSI-u event matches focused float exit key and close float.

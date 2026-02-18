@@ -6,7 +6,6 @@ const Pane = @import("pane.zig").Pane;
 
 const input = @import("input.zig");
 const loop_ipc = @import("loop_ipc.zig");
-const actions = @import("loop_actions.zig");
 const keybinds_actions = @import("keybinds_actions.zig");
 const main = @import("main.zig");
 
@@ -342,13 +341,7 @@ pub fn processKeyTimers(state: *State, now_ms: i64) void {
         if (t.kind == .hold) {
             // Enforce context at fire time.
             if (t.focus_ctx == currentFocusContext(state)) {
-                // Test: Ctrl+Alt+; hold = HOLD notification
-                if (t.mods == 3 and @as(BindKeyKind, t.key) == .char and t.key.char == ';') {
-                    state.notifications.show("HOLD");
-                    state.needs_render = true;
-                } else {
-                    _ = dispatchAction(state, t.action);
-                }
+                _ = dispatchAction(state, t.action);
             }
             state.key_timers.items[i].kind = .hold_fired;
             state.key_timers.items[i].deadline_ms = std.math.maxInt(i64);
@@ -392,23 +385,6 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
     if (!kitty_mode) {
         if (when != .press) return true; // Ignore non-press in legacy
 
-        // Hardcoded test: Ctrl+Alt+O toggles pane select mode
-        if (mods == 3 and @as(BindKeyKind, key) == .char and key.char == 'o') {
-            if (state.overlays.isPaneSelectActive()) {
-                state.overlays.exitPaneSelectMode();
-            } else {
-                actions.enterPaneSelectMode(state, false);
-            }
-            return true;
-        }
-
-        // Hardcoded test: Ctrl+Alt+K toggles keycast mode
-        if (mods == 3 and @as(BindKeyKind, key) == .char and key.char == 'k') {
-            state.overlays.toggleKeycast();
-            state.needs_render = true;
-            return true;
-        }
-
         if (findBestBind(state, mods, key, .press, allow_only_tabs, &query)) |b| {
             return dispatchBindWithMode(state, b, mods, key);
         }
@@ -432,40 +408,6 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
 
     // --- RELEASE ---
     if (when == .release) {
-        // Test: Ctrl+Alt+; release after hold = HOLD notification
-        if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == ';') {
-            // Check if hold_fired exists - means hold action already fired
-            var had_hold_fired = false;
-            var i: usize = 0;
-            while (i < state.key_timers.items.len) {
-                const t = state.key_timers.items[i];
-                if (t.kind == .hold_fired and t.mods == mods_eff and keyEq(t.key, key)) {
-                    _ = state.key_timers.orderedRemove(i);
-                    had_hold_fired = true;
-                    continue;
-                }
-                i += 1;
-            }
-            // Check if hold was pending (tap)
-            var had_hold_pending = false;
-            i = 0;
-            while (i < state.key_timers.items.len) {
-                const t = state.key_timers.items[i];
-                if (t.kind == .hold and t.mods == mods_eff and keyEq(t.key, key)) {
-                    _ = state.key_timers.orderedRemove(i);
-                    had_hold_pending = true;
-                    continue;
-                }
-                i += 1;
-            }
-            cancelTimer(state, .repeat_active, mods_eff, key);
-            if (had_hold_pending) {
-                state.notifications.show("TAP");
-                state.needs_render = true;
-            }
-            return true;
-        }
-
         // If hold already fired, just clean up
         var had_hold_fired = false;
         var i: usize = 0;
@@ -545,15 +487,6 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
 
     // --- REPEAT ---
     if (when == .repeat) {
-        // Test: Ctrl+Alt+; repeat = REPEAT notification
-        if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == ';') {
-            cancelTimer(state, .hold, mods_eff, key);
-            cancelTimer(state, .hold_fired, mods_eff, key);
-            state.notifications.show("REPEAT");
-            state.needs_render = true;
-            return true;
-        }
-
         // Terminal auto-repeat: cancel hold timer (repeating != holding)
         cancelTimer(state, .hold, mods_eff, key);
         cancelTimer(state, .hold_fired, mods_eff, key);
@@ -645,33 +578,6 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
                 // Only schedule new repeat_locked when first entering repeat mode
                 scheduleTimer(state, .repeat_locked, std.math.maxInt(i64), mods_eff, key, .mux_quit, focus_ctx);
             }
-            return true;
-        }
-
-        // Test: Ctrl+Alt+; press = arm hold timer for HOLD test
-        if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == ';') {
-            main.debugLog("test key matched, arming hold timer", .{});
-            cancelTimer(state, .hold, mods_eff, key);
-            cancelTimer(state, .hold_fired, mods_eff, key);
-            // Arm hold timer - when it fires, show HOLD notification
-            scheduleTimerWithStart(state, .hold, now_ms + cfg.input.hold_ms, mods_eff, key, .mux_quit, focus_ctx, now_ms);
-            return true;
-        }
-
-        // Hardcoded test: Ctrl+Alt+O toggles pane select mode
-        if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == 'o') {
-            if (state.overlays.isPaneSelectActive()) {
-                state.overlays.exitPaneSelectMode();
-            } else {
-                actions.enterPaneSelectMode(state, false);
-            }
-            return true;
-        }
-
-        // Hardcoded test: Ctrl+Alt+K toggles keycast mode
-        if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == 'k') {
-            state.overlays.toggleKeycast();
-            state.needs_render = true;
             return true;
         }
 

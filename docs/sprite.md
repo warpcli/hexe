@@ -13,11 +13,10 @@ Added a feature to display Pokemon sprites overlaid in the center of panes when 
 - **Format**: ANSI-colored text files (terminal-friendly)
 - **Coverage**: All generations with variants (Mega, Gigantamax, regional forms)
 
-### 2. **Sprite System** (`src/modules/mux/sprite.zig`)
-- `SpriteState` struct for managing sprite display per-pane
-- `loadSprite()` - loads sprite from file system
-- `toggle()` / `hide()` - control visibility
-- `estimateVisualWidth()` - calculates sprite dimensions ignoring ANSI codes
+### 2. **Sprite System**
+- Sprite state is managed per pane via `PokemonState`
+- Implementation lives in `src/modules/pop/widgets/pokemon.zig`
+- Sprites are loaded via embedded sprite assets and rendered as terminal cells
 
 ### 3. **Rendering Pipeline**
 - Added `drawSpriteOverlay()` to `Renderer` (`src/modules/mux/render.zig`)
@@ -41,25 +40,16 @@ Added a feature to display Pokemon sprites overlaid in the center of panes when 
 
 ### Add Keybinding to Config
 
-Edit `~/.config/hexe/config.lua` and add to the `binds` array:
+Edit `~/.config/hexe/init.lua` and add to `mux.input.binds`:
 
 ```lua
--- Toggle Pokemon sprite overlay
-{
-  key = { hx.key.ctrl, hx.key.alt, hx.key.p },
-  action = { type = hx.action.sprite_toggle }
-},
+{ when = "press", mods = { hx.mod.ctrl, hx.mod.alt }, key = "p", action = { type = hx.action.sprite_toggle } },
 ```
 
 Or use any key combination you prefer:
 
 ```lua
--- Hold Ctrl+Alt+S for sprite
-{
-  on = "hold",  -- Show while holding the key
-  key = { hx.key.ctrl, hx.key.alt, hx.key.s },
-  action = { type = hx.action.sprite_toggle }
-},
+{ when = "hold", hold_ms = 400, mods = { hx.mod.ctrl, hx.mod.alt }, key = "s", action = { type = hx.action.sprite_toggle } },
 ```
 
 ### Using the Feature
@@ -74,13 +64,13 @@ Or use any key combination you prefer:
 
 ```lua
 -- Quick toggle
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.p }, action = { type = hx.action.sprite_toggle } },
+{ when = "press", mods = { hx.mod.ctrl, hx.mod.alt }, key = "p", action = { type = hx.action.sprite_toggle } },
 
 -- Hold to show (release to hide)
-{ on = "hold", key = { hx.key.ctrl, hx.key.alt, hx.key.s }, action = { type = hx.action.sprite_toggle } },
+{ when = "hold", hold_ms = 400, mods = { hx.mod.ctrl, hx.mod.alt }, key = "s", action = { type = hx.action.sprite_toggle } },
 
 -- Double-tap to show
-{ on = "double_tap", key = { hx.key.ctrl, hx.key.alt, hx.key.p }, action = { type = hx.action.sprite_toggle } },
+{ when = "double_tap", mods = { hx.mod.ctrl, hx.mod.alt }, key = "p", action = { type = hx.action.sprite_toggle } },
 ```
 
 ## Available Sprites
@@ -133,10 +123,9 @@ rayquaza, kyogre, groudon, dialga, palkia, arceus, and many more!
 
 1. `src/core/config.zig` - Added `sprite_toggle` action
 2. `src/modules/mux/pane.zig` - Added sprite state to panes
-3. `src/modules/mux/sprite.zig` - New sprite system module
-4. `src/modules/mux/render.zig` - Added sprite rendering
-5. `src/modules/mux/loop_render.zig` - Integrated sprite overlay
-6. `src/modules/mux/keybinds.zig` - Added sprite toggle handler
+3. `src/modules/pop/widgets/pokemon.zig` - Sprite state and loading
+4. `src/modules/mux/loop_render.zig` - Integrated sprite overlay rendering
+5. `src/modules/mux/keybinds_actions.zig` - Sprite toggle action handler
 7. `src/sprites/` - Pokemon sprite assets (1,152 × 2)
 
 ## Credits
