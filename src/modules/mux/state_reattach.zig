@@ -447,6 +447,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             tab.layout.next_split_id = next_split_id;
 
             // Restore splits.
+            var restored_split_count: usize = 0;
             if (tab_obj.get("splits")) |splits_arr| {
                 for (splits_arr.array.items) |pane_val| {
                     const pane_obj = pane_val.object;
@@ -513,7 +514,14 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                         self.allocator.destroy(pane);
                         continue;
                     };
+                    restored_split_count += 1;
                 }
+            }
+
+            // Skip empty tabs that restored no panes.
+            if (restored_split_count == 0) {
+                tab.deinit();
+                continue;
             }
 
             // Restore layout tree.
@@ -521,6 +529,24 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 if (tree_val != .null) {
                     tab.layout.root = self.deserializeLayoutNode(tree_val.object) catch null;
                 }
+            }
+
+            // Ensure focused split points to an existing pane.
+            if (!tab.layout.splits.contains(tab.layout.focused_split_id)) {
+                var split_it = tab.layout.splits.iterator();
+                if (split_it.next()) |entry| {
+                    tab.layout.focused_split_id = entry.key_ptr.*;
+                }
+            }
+
+            // Ensure there is a root node for rendering if tree restore failed.
+            if (tab.layout.root == null) {
+                const node = self.allocator.create(LayoutNode) catch {
+                    tab.deinit();
+                    continue;
+                };
+                node.* = .{ .pane = tab.layout.focused_split_id };
+                tab.layout.root = node;
             }
 
             self.tabs.append(self.allocator, tab) catch {
