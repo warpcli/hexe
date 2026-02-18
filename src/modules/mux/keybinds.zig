@@ -7,6 +7,7 @@ const Pane = @import("pane.zig").Pane;
 const input = @import("input.zig");
 const loop_ipc = @import("loop_ipc.zig");
 const keybinds_actions = @import("keybinds_actions.zig");
+const key_translate = @import("key_translate.zig");
 const main = @import("main.zig");
 
 pub const BindWhen = core.Config.BindWhen;
@@ -56,7 +57,6 @@ pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
 /// Forward a key (with modifiers) to the focused pane as escape sequence.
 pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
     var out: [16]u8 = undefined;
-    var n: usize = 0;
 
     const use_application_arrows = blk: {
         if (state.active_floating) |idx| {
@@ -74,92 +74,9 @@ pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
         break :blk false;
     };
 
-    switch (@as(BindKeyKind, key)) {
-        .space => {
-            if ((mods & 2) != 0) { // Ctrl+Space = NUL
-                out[n] = 0x00;
-                n += 1;
-            } else {
-                if ((mods & 1) != 0) { // Alt
-                    out[n] = 0x1b;
-                    n += 1;
-                }
-                out[n] = ' ';
-                n += 1;
-            }
-        },
-        .char => {
-            var ch: u8 = key.char;
-            // Shift+Tab = backtab (CSI Z)
-            if ((mods & 4) != 0 and ch == 0x09) {
-                out[n] = 0x1b;
-                n += 1;
-                out[n] = '[';
-                n += 1;
-                out[n] = 'Z';
-                n += 1;
-            } else {
-                if ((mods & 4) != 0 and ch >= 'a' and ch <= 'z') ch = ch - 'a' + 'A'; // Shift
-                if ((mods & 2) != 0) { // Ctrl
-                    if (ch >= 'a' and ch <= 'z') ch = ch - 'a' + 1;
-                    if (ch >= 'A' and ch <= 'Z') ch = ch - 'A' + 1;
-                }
-                if ((mods & 1) != 0) { // Alt
-                    out[n] = 0x1b;
-                    n += 1;
-                }
-                out[n] = ch;
-                n += 1;
-            }
-        },
-        .up, .down, .left, .right => {
-            // Arrow keys:
-            // - Alternate screen + no modifiers: ESC O A/B/C/D (application cursor mode)
-            // - Otherwise: ESC [ A/B/C/D (no mods) or ESC [ 1 ; <mod> A/B/C/D (with mods)
-            const dir_char: u8 = switch (@as(BindKeyKind, key)) {
-                .up => 'A',
-                .down => 'B',
-                .right => 'C',
-                .left => 'D',
-                else => unreachable,
-            };
-
-            out[n] = 0x1b;
-            n += 1;
-
-            if (mods == 0 and use_application_arrows) {
-                out[n] = 'O';
-                n += 1;
-                out[n] = dir_char;
-                n += 1;
-            } else {
-                out[n] = '[';
-                n += 1;
-
-                if (mods != 0) {
-                    // Convert our mods to CSI modifier parameter:
-                    // CSI mod = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0)
-                    // Our encoding: alt=1, ctrl=2, shift=4
-                    var csi_mod: u8 = 1;
-                    if ((mods & 4) != 0) csi_mod |= 1; // shift
-                    if ((mods & 1) != 0) csi_mod |= 2; // alt
-                    if ((mods & 2) != 0) csi_mod |= 4; // ctrl
-
-                    out[n] = '1';
-                    n += 1;
-                    out[n] = ';';
-                    n += 1;
-                    out[n] = '0' + csi_mod;
-                    n += 1;
-                }
-
-                out[n] = dir_char;
-                n += 1;
-            }
-        },
+    if (key_translate.encodeLegacyKey(out[0..], mods, key, use_application_arrows)) |n| {
+        if (n > 0) forwardInputToFocusedPane(state, out[0..n]);
     }
-
-    if (n > 0) forwardInputToFocusedPane(state, out[0..n]);
 }
 
 /// Legacy focus context for backward compatibility with timer storage.
