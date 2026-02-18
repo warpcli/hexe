@@ -934,9 +934,9 @@ pub fn readHandshake(fd: posix.fd_t) !struct { channel: u8, version: u8 } {
     return .{ .channel = buf[0], .version = buf[1] };
 }
 
-/// Read handshake and validate version matches PROTOCOL_VERSION.
+/// Read handshake and validate version is within supported range.
 pub fn readAndValidateHandshake(fd: posix.fd_t) !u8 {
     const hs = try readHandshake(fd);
-    if (hs.version != PROTOCOL_VERSION) return error.UnsupportedVersion;
+    if (!isProtocolVersionSupported(hs.version)) return error.UnsupportedVersion;
     return hs.channel;
 }
