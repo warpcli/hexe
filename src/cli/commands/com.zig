@@ -504,6 +504,13 @@ pub fn connectSesCliChannel(allocator: std.mem.Allocator) ?std.posix.fd_t {
         return null;
     };
     const fd = client.fd;
+
+    // Guard against stale/wrong listeners on ses.sock (e.g. inherited fd bugs).
+    // Without read/write timeouts, CLI commands can hang indefinitely.
+    const timeout = std.posix.timeval{ .sec = 3, .usec = 0 };
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
+
     wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch {
         client.close();
         return null;
