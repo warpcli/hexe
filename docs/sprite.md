@@ -43,13 +43,13 @@ Added a feature to display Pokemon sprites overlaid in the center of panes when 
 Edit `~/.config/hexe/init.lua` and add to `mux.input.binds`:
 
 ```lua
-{ when = "press", mods = { hx.mod.ctrl, hx.mod.alt }, key = "p", action = { type = hx.action.sprite_toggle } },
+{ on = "press", mods = { hx.mod.ctrl, hx.mod.alt }, key = "p", action = { type = hx.action.sprite_toggle } },
 ```
 
 Or use any key combination you prefer:
 
 ```lua
-{ when = "hold", hold_ms = 400, mods = { hx.mod.ctrl, hx.mod.alt }, key = "s", action = { type = hx.action.sprite_toggle } },
+{ on = "hold", hold_ms = 400, mods = { hx.mod.ctrl, hx.mod.alt }, key = "s", action = { type = hx.action.sprite_toggle } },
 ```
 
 ### Using the Feature
@@ -64,13 +64,13 @@ Or use any key combination you prefer:
 
 ```lua
 -- Quick toggle
-{ when = "press", mods = { hx.mod.ctrl, hx.mod.alt }, key = "p", action = { type = hx.action.sprite_toggle } },
+{ on = "press", mods = { hx.mod.ctrl, hx.mod.alt }, key = "p", action = { type = hx.action.sprite_toggle } },
 
 -- Hold to show (release to hide)
-{ when = "hold", hold_ms = 400, mods = { hx.mod.ctrl, hx.mod.alt }, key = "s", action = { type = hx.action.sprite_toggle } },
+{ on = "hold", hold_ms = 400, mods = { hx.mod.ctrl, hx.mod.alt }, key = "s", action = { type = hx.action.sprite_toggle } },
 
--- Double-tap to show
-{ when = "double_tap", mods = { hx.mod.ctrl, hx.mod.alt }, key = "p", action = { type = hx.action.sprite_toggle } },
+-- Repeat-friendly toggle
+{ on = "repeat", mods = { hx.mod.ctrl, hx.mod.alt }, key = "p", action = { type = hx.action.sprite_toggle } },
 ```
 
 ## Available Sprites
