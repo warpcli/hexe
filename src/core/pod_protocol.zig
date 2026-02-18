@@ -82,7 +82,12 @@ pub const Reader = struct {
                 i += take;
 
                 if (self.header_len == self.header.len) {
-                    self.frame_type = @enumFromInt(self.header[0]);
+                    self.frame_type = std.meta.intToEnum(FrameType, self.header[0]) catch {
+                        self.header_len = 0;
+                        self.payload_len = 0;
+                        self.frame_len = 0;
+                        continue;
+                    };
                     self.frame_len = std.mem.readInt(u32, self.header[1..5], .big);
                     self.payload_len = 0;
 
