@@ -235,6 +235,35 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         self.active_floating = null;
         self.tab_last_floating_uuid.clearRetainingCapacity();
         self.tab_last_focus_kind.clearRetainingCapacity();
+
+        // Clear per-pane metadata caches from previous session state.
+        {
+            var shell_it = self.pane_shell.iterator();
+            while (shell_it.next()) |entry| {
+                entry.value_ptr.deinit(self.allocator);
+            }
+            self.pane_shell.clearRetainingCapacity();
+
+            var proc_it = self.pane_proc.iterator();
+            while (proc_it.next()) |entry| {
+                entry.value_ptr.deinit(self.allocator);
+            }
+            self.pane_proc.clearRetainingCapacity();
+
+            var name_it = self.pane_names.iterator();
+            while (name_it.next()) |entry| {
+                self.allocator.free(entry.value_ptr.*);
+            }
+            self.pane_names.clearRetainingCapacity();
+
+            var req_it = self.pending_float_requests.iterator();
+            while (req_it.next()) |entry| {
+                if (entry.value_ptr.result_path) |path| {
+                    self.allocator.free(path);
+                }
+            }
+            self.pending_float_requests.clearRetainingCapacity();
+        }
     }
 
     // Restore mux UUID (persistent identity).
