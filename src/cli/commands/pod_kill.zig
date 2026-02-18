@@ -7,7 +7,12 @@ const shared = @import("shared.zig");
 const print = std.debug.print;
 
 pub fn runPodKill(allocator: std.mem.Allocator, uuid: []const u8, name: []const u8, signal_name: []const u8, force: bool) !void {
-    const pid = try resolvePodPid(allocator, uuid, name);
+    const pid = resolvePodPid(allocator, uuid, name) catch |err| {
+        if (err == error.InvalidUuid) {
+            print("Error: --uuid must be 32 hex chars\n", .{});
+        }
+        return err;
+    };
     if (pid == null) {
         print("pod not found\n", .{});
         return;
