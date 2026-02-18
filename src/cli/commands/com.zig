@@ -505,7 +505,6 @@ fn resolveRelatedPane(allocator: std.mem.Allocator, want_creator: bool) ?[32]u8 
 
 // ─── End binary CLI helpers ────────────────────────────────────────────────
 
-
 pub fn printMuxTree(allocator: std.mem.Allocator, json: []const u8, indent: []const u8, pane_name_map: ?*const std.StringHashMap([]const u8)) void {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json, .{}) catch return;
     defer parsed.deinit();
@@ -1370,11 +1369,7 @@ fn serializeJsonValue(val: std.json.Value, writer: anytype) !void {
         .bool => |b| try writer.writeAll(if (b) "true" else "false"),
         .integer => |i| try writer.print("{d}", .{i}),
         .float => |f| try writer.print("{d}", .{f}),
-        .string => |s| {
-            try writer.writeAll("\"");
-            try writer.writeAll(s);
-            try writer.writeAll("\"");
-        },
+        .string => |s| try writeJsonString(writer, s),
         .array => |a| {
             try writer.writeAll("[");
             for (a.items, 0..) |item, idx| {
@@ -1390,15 +1385,37 @@ fn serializeJsonValue(val: std.json.Value, writer: anytype) !void {
             while (it.next()) |entry| {
                 if (!first) try writer.writeAll(",");
                 first = false;
-                try writer.writeAll("\"");
-                try writer.writeAll(entry.key_ptr.*);
-                try writer.writeAll("\":");
+                try writeJsonString(writer, entry.key_ptr.*);
+                try writer.writeAll(":");
                 try serializeJsonValue(entry.value_ptr.*, writer);
             }
             try writer.writeAll("}");
         },
         .number_string => |s| try writer.writeAll(s),
     }
+}
+
+fn writeJsonString(writer: anytype, s: []const u8) !void {
+    try writer.writeAll("\"");
+    for (s) |ch| {
+        switch (ch) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x08 => try writer.writeAll("\\b"),
+            0x0c => try writer.writeAll("\\f"),
+            else => {
+                if (ch < 0x20) {
+                    try writer.print("\\u00{X:0>2}", .{ch});
+                } else {
+                    try writer.writeByte(ch);
+                }
+            },
+        }
+    }
+    try writer.writeAll("\"");
 }
 
 pub fn runLayoutLoad(allocator: std.mem.Allocator, name: []const u8) !void {
@@ -1520,4 +1537,3 @@ pub fn runLayoutList(allocator: std.mem.Allocator) !void {
         print("No saved layouts\n", .{});
     }
 }
-
