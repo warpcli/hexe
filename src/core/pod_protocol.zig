@@ -13,6 +13,7 @@ pub const FrameType = enum(u8) {
 };
 
 pub fn writeFrame(conn: *ipc.Connection, frame_type: FrameType, payload: []const u8) !void {
+    if (payload.len > MAX_FRAME_LEN) return error.FrameTooLarge;
     if (payload.len > std.math.maxInt(u32)) return error.FrameTooLarge;
 
     var header: [5]u8 = undefined;
