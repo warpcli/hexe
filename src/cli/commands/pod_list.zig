@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("core");
 const ipc = core.ipc;
 const pod_meta = core.pod_meta;
+const shared = @import("shared.zig");
 
 const print = std.debug.print;
 
@@ -196,11 +197,11 @@ fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !PodRecord {
     // Format: HEXE_POD k=v k=v ... (single line)
     var uuid: [32]u8 = .{0} ** 32;
     var has_uuid = false;
-    var name: []const u8 = "";
+    var name_raw: []const u8 = "";
     var pid: i64 = 0;
     var child_pid: i64 = 0;
-    var cwd: []const u8 = "";
-    var shell: []const u8 = "";
+    var cwd_raw: []const u8 = "";
+    var shell_raw: []const u8 = "";
     var isolated: bool = false;
     var created_at: i64 = 0;
     var labels_list: std.ArrayList([]const u8) = .empty;
@@ -232,15 +233,15 @@ fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !PodRecord {
                 }
             }
         } else if (std.mem.eql(u8, key, "name")) {
-            name = val;
+            name_raw = val;
         } else if (std.mem.eql(u8, key, "pid")) {
             pid = std.fmt.parseInt(i64, val, 10) catch 0;
         } else if (std.mem.eql(u8, key, "child_pid")) {
             child_pid = std.fmt.parseInt(i64, val, 10) catch 0;
         } else if (std.mem.eql(u8, key, "cwd")) {
-            cwd = val;
+            cwd_raw = val;
         } else if (std.mem.eql(u8, key, "shell")) {
-            shell = val;
+            shell_raw = val;
         } else if (std.mem.eql(u8, key, "isolated")) {
             isolated = std.mem.eql(u8, val, "1");
         } else if (std.mem.eql(u8, key, "created_at")) {
@@ -255,11 +256,20 @@ fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !PodRecord {
         }
     }
 
-    const owned_name = try allocator.dupe(u8, if (name.len > 0) name else "-");
+    const owned_name = if (name_raw.len > 0)
+        try shared.decodePercentAlloc(allocator, name_raw)
+    else
+        try allocator.dupe(u8, "-");
     errdefer allocator.free(owned_name);
-    const owned_cwd = try allocator.dupe(u8, if (cwd.len > 0) cwd else "-");
+    const owned_cwd = if (cwd_raw.len > 0)
+        try shared.decodePercentAlloc(allocator, cwd_raw)
+    else
+        try allocator.dupe(u8, "-");
     errdefer allocator.free(owned_cwd);
-    const owned_shell = try allocator.dupe(u8, shell);
+    const owned_shell = if (shell_raw.len > 0)
+        try shared.decodePercentAlloc(allocator, shell_raw)
+    else
+        try allocator.dupe(u8, "");
     errdefer allocator.free(owned_shell);
     const labels = try labels_list.toOwnedSlice(allocator);
 

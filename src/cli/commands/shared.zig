@@ -20,6 +20,11 @@ pub fn parseField(line: []const u8, key: []const u8) ?[]const u8 {
     return rest[0..end_rel];
 }
 
+pub fn parseFieldDecodedAlloc(allocator: std.mem.Allocator, line: []const u8, key: []const u8) !?[]u8 {
+    const raw = parseField(line, key) orelse return null;
+    return decodePercentAlloc(allocator, raw);
+}
+
 pub fn isUuid32Hex(uuid: []const u8) bool {
     if (uuid.len != 32) return false;
     for (uuid) |c| {
@@ -90,7 +95,9 @@ fn findNewestPodMetaByName(allocator: std.mem.Allocator, name: []const u8) !?Pod
         if (!std.mem.startsWith(u8, line, pod_meta.POD_META_PREFIX)) continue;
 
         const name_val = parseField(line, "name") orelse continue;
-        if (!std.mem.eql(u8, name_val, name)) continue;
+        const name_decoded = decodePercentAlloc(allocator, name_val) catch continue;
+        defer allocator.free(name_decoded);
+        if (!std.mem.eql(u8, name_decoded, name)) continue;
 
         const uuid_text = parseField(line, "uuid") orelse continue;
         if (!isUuid32Hex(uuid_text)) continue;
@@ -110,10 +117,53 @@ fn findNewestPodMetaByName(allocator: std.mem.Allocator, name: []const u8) !?Pod
     return best;
 }
 
+pub fn decodePercentAlloc(allocator: std.mem.Allocator, value: []const u8) ![]u8 {
+    if (std.mem.indexOfScalar(u8, value, '%') == null) {
+        return allocator.dupe(u8, value);
+    }
+
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var i: usize = 0;
+    while (i < value.len) {
+        if (value[i] == '%' and i + 2 < value.len) {
+            const hi = std.fmt.charToDigit(value[i + 1], 16) catch {
+                try out.append(allocator, value[i]);
+                i += 1;
+                continue;
+            };
+            const lo = std.fmt.charToDigit(value[i + 2], 16) catch {
+                try out.append(allocator, value[i]);
+                i += 1;
+                continue;
+            };
+            try out.append(allocator, @as(u8, @intCast((hi << 4) | lo)));
+            i += 3;
+            continue;
+        }
+        try out.append(allocator, value[i]);
+        i += 1;
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
 test "parseField basic" {
     const line = " uuid=abc123 pid=456 state=running";
     try std.testing.expectEqualSlices(u8, "abc123", parseField(line, "uuid").?);
     try std.testing.expectEqualSlices(u8, "456", parseField(line, "pid").?);
     try std.testing.expectEqualSlices(u8, "running", parseField(line, "state").?);
     try std.testing.expect(parseField(line, "missing") == null);
+}
+
+test "parseFieldDecodedAlloc decodes percent escapes" {
+    const alloc = std.testing.allocator;
+    const line = " uuid=abc name=hello%20world cwd=/tmp/a%20b";
+    const name = (try parseFieldDecodedAlloc(alloc, line, "name")).?;
+    defer alloc.free(name);
+    const cwd = (try parseFieldDecodedAlloc(alloc, line, "cwd")).?;
+    defer alloc.free(cwd);
+    try std.testing.expectEqualSlices(u8, "hello world", name);
+    try std.testing.expectEqualSlices(u8, "/tmp/a b", cwd);
 }
