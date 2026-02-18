@@ -441,9 +441,21 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 state.syncPaneFocus(pane, old_uuid);
                 // If alone mode, hide all other floats on this tab.
                 if (float_def.attributes.exclusive) {
+                    var to_hide: std.ArrayList([32]u8) = .empty;
+                    defer to_hide.deinit(state.allocator);
+
                     for (state.floats.items) |other| {
                         if (other.float_key != float_def.key) {
-                            hideOrDestroyFloat(state, other, state.active_tab);
+                            to_hide.append(state.allocator, other.uuid) catch {};
+                        }
+                    }
+
+                    for (to_hide.items) |target_uuid| {
+                        for (state.floats.items) |candidate| {
+                            if (std.mem.eql(u8, &candidate.uuid, &target_uuid)) {
+                                hideOrDestroyFloat(state, candidate, state.active_tab);
+                                break;
+                            }
                         }
                     }
                 }
@@ -483,18 +495,42 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
 
     // If alone mode, hide all other floats on this tab.
     if (float_def.attributes.exclusive) {
+        var to_hide: std.ArrayList([32]u8) = .empty;
+        defer to_hide.deinit(state.allocator);
+
         for (state.floats.items) |pane| {
             if (pane.float_key != float_def.key) {
-                hideOrDestroyFloat(state, pane, state.active_tab);
+                to_hide.append(state.allocator, pane.uuid) catch {};
+            }
+        }
+
+        for (to_hide.items) |target_uuid| {
+            for (state.floats.items) |candidate| {
+                if (std.mem.eql(u8, &candidate.uuid, &target_uuid)) {
+                    hideOrDestroyFloat(state, candidate, state.active_tab);
+                    break;
+                }
             }
         }
     }
     // For pwd floats, hide other instances of same float (different dirs) on this tab.
     if (float_def.attributes.per_cwd) {
         const new_idx = state.floats.items.len - 1;
+        var to_hide: std.ArrayList([32]u8) = .empty;
+        defer to_hide.deinit(state.allocator);
+
         for (state.floats.items, 0..) |pane, i| {
             if (i != new_idx and pane.float_key == float_def.key) {
-                hideOrDestroyFloat(state, pane, state.active_tab);
+                to_hide.append(state.allocator, pane.uuid) catch {};
+            }
+        }
+
+        for (to_hide.items) |target_uuid| {
+            for (state.floats.items) |candidate| {
+                if (std.mem.eql(u8, &candidate.uuid, &target_uuid)) {
+                    hideOrDestroyFloat(state, candidate, state.active_tab);
+                    break;
+                }
             }
         }
     }
