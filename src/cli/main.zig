@@ -897,6 +897,16 @@ fn runShpSpinner(name: []const u8, width_i: i64, interval_i: i64, hold_i: i64, l
 // POP handlers
 // ============================================================================
 
+fn parseUuid32Hex(text: []const u8) ?[32]u8 {
+    if (text.len != 32) return null;
+    var out: [32]u8 = undefined;
+    for (text, 0..) |ch, i| {
+        if (!std.ascii.isHex(ch)) return null;
+        out[i] = ch;
+    }
+    return out;
+}
+
 fn runPopNotify(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64, message: []const u8) !void {
     const wire = core.wire;
     const posix = std.posix;
@@ -907,16 +917,20 @@ fn runPopNotify(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64, me
     }
 
     var target_uuid: [32]u8 = undefined;
-    if (uuid.len >= 32) {
-        @memcpy(&target_uuid, uuid[0..32]);
+    if (uuid.len > 0) {
+        target_uuid = parseUuid32Hex(uuid) orelse {
+            print("Error: --uuid must be 32 hex chars\n", .{});
+            return;
+        };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
             print("Error: --uuid required (or run inside hexe mux)\n", .{});
             return;
         };
-        if (env_uuid.len >= 32) {
-            @memcpy(&target_uuid, env_uuid[0..32]);
-        } else return;
+        target_uuid = parseUuid32Hex(env_uuid) orelse {
+            print("Error: invalid HEXE_PANE_UUID\n", .{});
+            return;
+        };
     }
 
     const fd = cli_cmds.connectSesCliChannel(allocator) orelse return;
@@ -941,18 +955,20 @@ fn runPopConfirm(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64, m
     }
 
     var target_uuid: [32]u8 = undefined;
-    if (uuid.len >= 32) {
-        @memcpy(&target_uuid, uuid[0..32]);
+    if (uuid.len > 0) {
+        target_uuid = parseUuid32Hex(uuid) orelse {
+            print("Error: --uuid must be 32 hex chars\n", .{});
+            std.process.exit(1);
+        };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
             print("Error: --uuid required (or run inside hexe mux)\n", .{});
             return;
         };
-        if (env_uuid.len >= 32) {
-            @memcpy(&target_uuid, env_uuid[0..32]);
-        } else {
+        target_uuid = parseUuid32Hex(env_uuid) orelse {
+            print("Error: invalid HEXE_PANE_UUID\n", .{});
             std.process.exit(1);
-        }
+        };
     }
 
     const fd = cli_cmds.connectSesCliChannel(allocator) orelse std.process.exit(1);
@@ -1001,18 +1017,20 @@ fn runPopChoose(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64, it
     }
 
     var target_uuid: [32]u8 = undefined;
-    if (uuid.len >= 32) {
-        @memcpy(&target_uuid, uuid[0..32]);
+    if (uuid.len > 0) {
+        target_uuid = parseUuid32Hex(uuid) orelse {
+            print("Error: --uuid must be 32 hex chars\n", .{});
+            std.process.exit(1);
+        };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
             print("Error: --uuid required (or run inside hexe mux)\n", .{});
             return;
         };
-        if (env_uuid.len >= 32) {
-            @memcpy(&target_uuid, env_uuid[0..32]);
-        } else {
+        target_uuid = parseUuid32Hex(env_uuid) orelse {
+            print("Error: invalid HEXE_PANE_UUID\n", .{});
             std.process.exit(1);
-        }
+        };
     }
 
     // Build trailing data: title + length-prefixed items.
