@@ -178,7 +178,7 @@ pub fn run(mux_args: MuxArgs) !void {
 
     // Show notification for config status.
     switch (state.config.status) {
-        .missing => state.notifications.showFor("Config not found (~/.config/hexe/mux.lua), using defaults", 5000),
+        .missing => state.notifications.showFor("Config not found (~/.config/hexe/init.lua), using defaults", 5000),
         .@"error" => {
             if (state.config.status_message) |msg| {
                 const err_msg = std.fmt.allocPrint(allocator, "Config error: {s}", .{msg}) catch null;
