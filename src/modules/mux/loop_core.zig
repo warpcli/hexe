@@ -270,6 +270,49 @@ fn stdinCallback(
     return .rearm;
 }
 
+fn cleanupDeadFloat(state: *State, index: usize) void {
+    if (index >= state.floats.items.len) return;
+
+    const was_active = if (state.active_floating) |af| af == index else false;
+    const exit_code = state.floats.items[index].getExitCode();
+    const pane = state.floats.orderedRemove(index);
+
+    mux.debugLog("float pane died: uuid={s} exit_code={d} focused={}", .{ pane.uuid[0..8], exit_code, was_active });
+
+    if (!was_active and exit_code != 0) {
+        const msg = std.fmt.allocPrint(
+            state.allocator,
+            "Background float exited with code {d}",
+            .{exit_code},
+        ) catch "Background float exited unexpectedly";
+        defer if (!std.mem.eql(u8, msg, "Background float exited unexpectedly")) state.allocator.free(msg);
+        state.notifications.showFor(msg, 3000);
+    }
+
+    float_completion.handleBlockingFloatCompletion(state, pane);
+
+    if (state.ses_client.isConnected()) {
+        state.ses_client.killPane(pane.uuid) catch |e| {
+            core.logging.logError("mux", "killPane failed for float", e);
+        };
+    }
+
+    pane.deinit();
+    state.allocator.destroy(pane);
+    state.needs_render = true;
+    state.force_full_render = true;
+    state.renderer.invalidate();
+    state.syncStateToSes();
+
+    if (was_active) {
+        state.active_floating = null;
+        state.cursor_needs_restore = true;
+        if (state.currentLayout().getFocusedPane()) |tiled| {
+            state.syncPaneFocus(tiled, null);
+        }
+    }
+}
+
 pub fn runMainLoop(state: *State) !void {
     const allocator = state.allocator;
 
@@ -514,51 +557,7 @@ pub fn runMainLoop(state: *State) !void {
                 while (fi > 0) {
                     fi -= 1;
                     if (!state.floats.items[fi].isAlive()) {
-                        // Check if this was the active float.
-                        const was_active = if (state.active_floating) |af| af == fi else false;
-                        const exit_code = state.floats.items[fi].getExitCode();
-
-                        const pane = state.floats.orderedRemove(fi);
-
-                        // Log float pane death
-                        mux.debugLog("float pane died: uuid={s} exit_code={d} focused={}", .{ pane.uuid[0..8], exit_code, was_active });
-
-                        // Show notification if float died with non-zero exit and wasn't focused
-                        if (!was_active and exit_code != 0) {
-                            const msg = std.fmt.allocPrint(
-                                allocator,
-                                "Background float exited with code {d}",
-                                .{exit_code},
-                            ) catch "Background float exited unexpectedly";
-                            defer if (!std.mem.eql(u8, msg, "Background float exited unexpectedly")) allocator.free(msg);
-                            state.notifications.showFor(msg, 3000);
-                        }
-
-                        float_completion.handleBlockingFloatCompletion(state, pane);
-
-                        // Kill in ses (dead panes don't need to be orphaned).
-                        if (state.ses_client.isConnected()) {
-                            state.ses_client.killPane(pane.uuid) catch |e| {
-                                core.logging.logError("mux", "killPane failed for float", e);
-                            };
-                        }
-
-                        pane.deinit();
-                        state.allocator.destroy(pane);
-                        state.needs_render = true;
-                        state.force_full_render = true;
-                        state.renderer.invalidate();
-                        state.syncStateToSes();
-
-                        // Clear focus if this was the active float, sync focus to tiled pane.
-                        if (was_active) {
-                            state.active_floating = null;
-                            // Force cursor restoration - float may have hidden cursor
-                            state.cursor_needs_restore = true;
-                            if (state.currentLayout().getFocusedPane()) |tiled| {
-                                state.syncPaneFocus(tiled, null);
-                            }
-                        }
+                        cleanupDeadFloat(state, fi);
                         // When iterating in reverse, removals don't affect unprocessed indices.
                     }
                 }
@@ -670,39 +669,7 @@ pub fn runMainLoop(state: *State) !void {
         while (df_idx > 0) {
             df_idx -= 1;
             const fi = dead_floating.items[df_idx];
-            // Check if this was the active float before removing.
-            const was_active = if (state.active_floating) |af| af == fi else false;
-
-            const pane = state.floats.orderedRemove(fi);
-
-            // Capture exit status (not yet set if detected via HUP/ERR).
-            _ = pane.isAlive();
-
-            float_completion.handleBlockingFloatCompletion(state, pane);
-
-            // Kill in ses (dead panes don't need to be orphaned).
-            if (state.ses_client.isConnected()) {
-                state.ses_client.killPane(pane.uuid) catch |e| {
-                    core.logging.logError("mux", "killPane failed for float", e);
-                };
-            }
-
-            pane.deinit();
-            state.allocator.destroy(pane);
-            state.needs_render = true;
-            state.force_full_render = true;
-            state.renderer.invalidate();
-            state.syncStateToSes();
-
-            // Clear focus if this was the active float, sync focus to tiled pane.
-            if (was_active) {
-                state.active_floating = null;
-                // Force cursor restoration - float may have hidden cursor
-                state.cursor_needs_restore = true;
-                if (state.currentLayout().getFocusedPane()) |tiled| {
-                    state.syncPaneFocus(tiled, null);
-                }
-            }
+            cleanupDeadFloat(state, fi);
         }
         // Ensure active_floating is still valid.
         if (state.active_floating) |af| {
