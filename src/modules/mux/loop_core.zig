@@ -414,9 +414,10 @@ pub fn runMainLoop(state: *State) !void {
             }
         }
         for (stale_local_split_fds.items) |fd| {
-            if (local_pane_watchers.fetchRemove(fd)) |kv| {
-                allocator.destroy(kv.value);
-            }
+            // Do not destroy watcher nodes here: xev callbacks may still be in-flight
+            // for these fds, and eager free can cause use-after-free crashes.
+            // Let callback-driven pending removal own node destruction.
+            _ = fd;
         }
 
         for (pending_float_remove_fds.items) |pending| {
@@ -466,9 +467,10 @@ pub fn runMainLoop(state: *State) !void {
             }
         }
         for (stale_float_fds.items) |fd| {
-            if (float_pane_watchers.fetchRemove(fd)) |kv| {
-                allocator.destroy(kv.value);
-            }
+            // Do not destroy watcher nodes here: xev callbacks may still be in-flight
+            // for these fds, and eager free can cause use-after-free crashes.
+            // Let callback-driven pending removal own node destruction.
+            _ = fd;
         }
 
         try loop.run(.once);
