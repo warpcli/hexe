@@ -6,8 +6,7 @@ const pop = @import("pop");
 const layout_mod = @import("layout.zig");
 const Layout = layout_mod.Layout;
 
-const notification = @import("notification.zig");
-const NotificationManager = notification.NotificationManager;
+const NotificationManager = pop.notification.NotificationManager;
 
 /// Pending action that needs confirmation.
 pub const PendingAction = enum {
@@ -38,7 +37,7 @@ pub const Tab = struct {
             .name = name,
             .name_owned = null,
             .uuid = core.ipc.generateUuid(),
-            .notifications = NotificationManager.initWithPopConfig(allocator, notif_cfg),
+            .notifications = NotificationManager.initWithConfig(allocator, notif_cfg),
             .popups = pop.PopupManager.init(allocator),
             .allocator = allocator,
         };

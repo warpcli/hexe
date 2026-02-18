@@ -9,9 +9,8 @@ const pane_capture = @import("pane_capture.zig");
 const pane_output = @import("pane_output.zig");
 const widgets = pop.widgets;
 
-const notification = @import("notification.zig");
-const NotificationManager = notification.NotificationManager;
 const pop = @import("pop");
+const NotificationManager = pop.notification.NotificationManager;
 
 const QueryState = enum {
     idle,
@@ -653,7 +652,7 @@ pub const Pane = struct {
     /// Configure notifications from config
     pub fn configureNotifications(self: *Pane, cfg: anytype) void {
         if (self.notifications_initialized) {
-            self.notifications.default_style = notification.Style.fromConfig(cfg);
+            self.notifications.default_style = pop.notification.Style.fromConfig(cfg);
             self.notifications.default_duration_ms = @intCast(cfg.duration_ms);
         }
     }
@@ -661,7 +660,7 @@ pub const Pane = struct {
     /// Configure notifications from pop.NotificationStyle config
     pub fn configureNotificationsFromPop(self: *Pane, cfg: anytype) void {
         if (self.notifications_initialized) {
-            self.notifications.default_style = notification.Style.fromConfig(cfg);
+            self.notifications.default_style = pop.notification.Style.fromConfig(cfg);
             self.notifications.default_duration_ms = @intCast(cfg.duration_ms);
         }
     }

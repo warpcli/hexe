@@ -144,7 +144,7 @@ pub const LuaRuntime = struct {
 
     /// Set the target section for config evaluation.
     ///
-    /// This is a performance knob: a single `config.lua` can branch on
+    /// This is a performance knob: a single config file can branch on
     /// `HEXE_SECTION` and only construct the relevant subtree (mux/shp/pop/etc).
     pub fn setHexeSection(self: *Self, section: []const u8) void {
         _ = self.lua.pushString(section);

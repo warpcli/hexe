@@ -19,8 +19,7 @@ const ses_client = @import("ses_client.zig");
 const SesClient = ses_client.SesClient;
 const OrphanedPaneInfo = ses_client.OrphanedPaneInfo;
 
-const notification = @import("notification.zig");
-const NotificationManager = notification.NotificationManager;
+const NotificationManager = pop.notification.NotificationManager;
 
 const OverlayManager = pop.overlay.OverlayManager;
 
@@ -308,7 +307,7 @@ pub const State = struct {
             .layout_height = layout_h,
             .renderer = try Renderer.init(allocator, width, height),
             .ses_client = SesClient.init(allocator, uuid, session_name, true, debug, log_file),
-            .notifications = NotificationManager.initWithPopConfig(allocator, pop_cfg.carrier.notification),
+            .notifications = NotificationManager.initWithConfig(allocator, pop_cfg.carrier.notification),
             .overlays = OverlayManager.initWithConfig(allocator, pop_cfg.widgets.keycast),
             .popups = pop.PopupManager.init(allocator),
             .pending_action = null,

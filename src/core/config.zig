@@ -688,7 +688,7 @@ pub const Config = struct {
         };
         defer runtime.deinit();
 
-        // Let a single config.lua avoid building other sections.
+        // Let a single config file avoid building other sections.
         runtime.setHexeSection("mux");
 
         // Load global config

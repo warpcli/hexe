@@ -10,6 +10,7 @@ const borders = @import("borders.zig");
 const mouse_selection = @import("mouse_selection.zig");
 const float_title = @import("float_title.zig");
 const overlay_render = @import("overlay_render.zig");
+const notification = @import("notification.zig");
 
 /// Apply winpulse brightness effect to a pane area
 fn applyPulseEffect(state: *State) void {
@@ -103,7 +104,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
         // Draw pane-local notification (PANE realm - bottom of pane).
         if (pane.*.hasActiveNotification()) {
-            pane.*.notifications.renderInBounds(renderer, pane.*.x, pane.*.y, pane.*.width, pane.*.height, false);
+            notification.renderInBounds(&pane.*.notifications, renderer, pane.*.x, pane.*.y, pane.*.width, pane.*.height, false);
         }
 
         // Draw sprite overlay if enabled
@@ -150,7 +151,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
         // Draw pane-local notification (PANE realm - bottom of pane).
         if (pane.hasActiveNotification()) {
-            pane.notifications.renderInBounds(renderer, pane.x, pane.y, pane.width, pane.height, false);
+            notification.renderInBounds(&pane.notifications, renderer, pane.x, pane.y, pane.width, pane.height, false);
         }
 
         // Draw sprite overlay if enabled
@@ -191,7 +192,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
             // Draw pane-local notification (PANE realm - bottom of pane).
             if (pane.hasActiveNotification()) {
-                pane.notifications.renderInBounds(renderer, pane.x, pane.y, pane.width, pane.height, false);
+                notification.renderInBounds(&pane.notifications, renderer, pane.x, pane.y, pane.width, pane.height, false);
             }
 
             // Draw sprite overlay if enabled
@@ -268,7 +269,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     }
     if (current_tab.notifications.hasActive()) {
         // TAB notifications render in center area (distinct from MUX at top).
-        current_tab.notifications.renderInBounds(renderer, 0, 0, state.term_width, state.layout_height, true);
+        notification.renderInBounds(&current_tab.notifications, renderer, 0, 0, state.term_width, state.layout_height, true);
     }
 
     // Draw TAB-level blocking popup (below MUX popup).
@@ -277,7 +278,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     }
 
     // Draw MUX realm notifications overlay (top of screen).
-    state.notifications.render(renderer, state.term_width, state.term_height);
+    notification.renderFull(&state.notifications, renderer, state.term_width, state.term_height);
 
     // Draw MUX-level blocking popup overlay (on top of everything).
     if (state.popups.getActivePopup()) |popup| {

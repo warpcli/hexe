@@ -91,12 +91,11 @@ fn handleNotify(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) v
     }
     wire.readExact(fd, buffer[0..notify.msg_len]) catch return;
     const msg_copy = state.allocator.dupe(u8, buffer[0..notify.msg_len]) catch return;
-    state.notifications.showWithOptions(
-        msg_copy,
-        state.notifications.default_duration_ms,
-        state.notifications.default_style,
-        true,
-    );
+    state.notifications.showWithOptions(msg_copy, .{
+        .duration_ms = state.notifications.default_duration_ms,
+        .style = state.notifications.default_style,
+        .owned = true,
+    });
     state.needs_render = true;
 }
 
@@ -117,12 +116,11 @@ fn handleTargetedNotify(state: *State, fd: posix.fd_t, payload_len: u32, buffer:
     // Try to find pane with this UUID.
     if (state.findPaneByUuid(notify.uuid)) |pane| {
         const dur = if (duration > 0) duration else pane.notifications.default_duration_ms;
-        pane.notifications.showWithOptions(
-            msg_copy,
-            dur,
-            pane.notifications.default_style,
-            true,
-        );
+        pane.notifications.showWithOptions(msg_copy, .{
+            .duration_ms = dur,
+            .style = pane.notifications.default_style,
+            .owned = true,
+        });
         state.needs_render = true;
         return;
     }
@@ -131,12 +129,11 @@ fn handleTargetedNotify(state: *State, fd: posix.fd_t, payload_len: u32, buffer:
     for (state.tabs.items) |*tab| {
         if (std.mem.startsWith(u8, &tab.uuid, &notify.uuid)) {
             const dur = if (duration > 0) duration else tab.notifications.default_duration_ms;
-            tab.notifications.showWithOptions(
-                msg_copy,
-                dur,
-                tab.notifications.default_style,
-                true,
-            );
+            tab.notifications.showWithOptions(msg_copy, .{
+                .duration_ms = dur,
+                .style = tab.notifications.default_style,
+                .owned = true,
+            });
             state.needs_render = true;
             return;
         }

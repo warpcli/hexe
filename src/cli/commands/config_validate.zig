@@ -3,7 +3,7 @@ const core = @import("core");
 
 const print = std.debug.print;
 
-/// Validate the Hexa configuration file
+/// Validate the Hexe configuration file
 pub fn run() !void {
     const allocator = std.heap.page_allocator;
 

@@ -89,7 +89,7 @@ pub const PopConfig = struct {
         };
         defer runtime.deinit();
 
-        // Let a single config.lua avoid building other sections.
+        // Let a single config file avoid building other sections.
         runtime.setHexeSection("pop");
 
         // Load global config
