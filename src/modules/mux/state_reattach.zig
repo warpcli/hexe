@@ -531,12 +531,25 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 }
             }
 
+            // Remove tree nodes that reference panes we failed to restore.
+            tab.layout.pruneDeadNodes();
+
+            // Skip tabs that became empty after pruning dead nodes.
+            if (tab.layout.splits.count() == 0) {
+                tab.deinit();
+                continue;
+            }
+
             // Ensure focused split points to an existing pane.
             if (!tab.layout.splits.contains(tab.layout.focused_split_id)) {
                 var split_it = tab.layout.splits.iterator();
                 if (split_it.next()) |entry| {
                     tab.layout.focused_split_id = entry.key_ptr.*;
                 }
+            }
+
+            if (tab.layout.getFocusedPane()) |focused| {
+                focused.focused = true;
             }
 
             // Ensure there is a root node for rendering if tree restore failed.
