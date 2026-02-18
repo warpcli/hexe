@@ -157,53 +157,19 @@ fn handlePopConfirm(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
     wire.readExact(fd, buffer[0..pc.msg_len]) catch return;
     const msg = buffer[0..pc.msg_len];
     const timeout_ms: ?i64 = if (pc.timeout_ms > 0) @as(i64, pc.timeout_ms) else null;
+    const target = resolvePopupTarget(state, pc.uuid);
 
-    // Check if target UUID is non-zero.
-    const zero_uuid: [32]u8 = .{0} ** 32;
-    if (!std.mem.eql(u8, &pc.uuid, &zero_uuid)) {
-        // Try pane match.
-        if (state.findPaneByUuid(pc.uuid)) |pane| {
-            const pane_cfg = state.pop_config.pane.confirm;
-            const opts: pop.ConfirmOptions = .{
-                .timeout_ms = timeout_ms,
-                .yes_label = pane_cfg.yes_label,
-                .no_label = pane_cfg.no_label,
-            };
-            pane.popups.showConfirmOwned(msg, opts) catch return;
-            state.pending_pop_response = true;
-            state.pending_pop_scope = .pane;
-            state.pending_pop_pane = pane;
-            state.needs_render = true;
-            return;
-        }
-        // Try tab match.
-        for (state.tabs.items, 0..) |*tab, tab_idx| {
-            if (std.mem.startsWith(u8, &tab.uuid, &pc.uuid)) {
-                const carrier_cfg = state.pop_config.carrier.confirm;
-                const opts: pop.ConfirmOptions = .{
-                    .timeout_ms = timeout_ms,
-                    .yes_label = carrier_cfg.yes_label,
-                    .no_label = carrier_cfg.no_label,
-                };
-                tab.popups.showConfirmOwned(msg, opts) catch return;
-                state.pending_pop_response = true;
-                state.pending_pop_scope = .tab;
-                state.pending_pop_tab = tab_idx;
-                state.needs_render = true;
-                return;
-            }
-        }
-    }
-    // Default: MUX level.
-    const carrier_cfg = state.pop_config.carrier.confirm;
+    const confirm_cfg = switch (target.scope) {
+        .pane => state.pop_config.pane.confirm,
+        else => state.pop_config.carrier.confirm,
+    };
     const opts: pop.ConfirmOptions = .{
         .timeout_ms = timeout_ms,
-        .yes_label = carrier_cfg.yes_label,
-        .no_label = carrier_cfg.no_label,
+        .yes_label = confirm_cfg.yes_label,
+        .no_label = confirm_cfg.no_label,
     };
-    state.popups.showConfirmOwned(msg, opts) catch return;
-    state.pending_pop_response = true;
-    state.pending_pop_scope = .mux;
+    target.manager.showConfirmOwned(msg, opts) catch return;
+    setPendingPopupTarget(state, target);
     state.needs_render = true;
 }
 
@@ -242,61 +208,63 @@ fn handlePopChoose(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8
     }
 
     if (items_list.items.len == 0) return;
+    const target = resolvePopupTarget(state, pc.uuid);
 
-    // Route by UUID (like PopConfirm).
-    const zero_uuid: [32]u8 = .{0} ** 32;
-    if (!std.mem.eql(u8, &pc.uuid, &zero_uuid)) {
-        if (state.findPaneByUuid(pc.uuid)) |pane| {
-            const pane_cfg = state.pop_config.pane.choose;
-            const opts: pop.PickerOptions = .{
-                .title = title,
-                .timeout_ms = timeout_ms,
-                .visible_count = pane_cfg.visible_count,
-            };
-            pane.popups.showPickerOwned(items_list.items, opts) catch {
-                for (items_list.items) |item| state.allocator.free(item);
-                return;
-            };
-            state.pending_pop_response = true;
-            state.pending_pop_scope = .pane;
-            state.pending_pop_pane = pane;
-            state.needs_render = true;
-            return;
-        }
-        for (state.tabs.items, 0..) |*tab, tab_idx| {
-            if (std.mem.startsWith(u8, &tab.uuid, &pc.uuid)) {
-                const carrier_cfg = state.pop_config.carrier.choose;
-                const opts: pop.PickerOptions = .{
-                    .title = title,
-                    .timeout_ms = timeout_ms,
-                    .visible_count = carrier_cfg.visible_count,
-                };
-                tab.popups.showPickerOwned(items_list.items, opts) catch {
-                    for (items_list.items) |item| state.allocator.free(item);
-                    return;
-                };
-                state.pending_pop_response = true;
-                state.pending_pop_scope = .tab;
-                state.pending_pop_tab = tab_idx;
-                state.needs_render = true;
-                return;
-            }
-        }
-    }
-    // Default: MUX level.
-    const carrier_cfg = state.pop_config.carrier.choose;
+    const choose_cfg = switch (target.scope) {
+        .pane => state.pop_config.pane.choose,
+        else => state.pop_config.carrier.choose,
+    };
     const opts: pop.PickerOptions = .{
         .title = title,
         .timeout_ms = timeout_ms,
-        .visible_count = carrier_cfg.visible_count,
+        .visible_count = choose_cfg.visible_count,
     };
-    state.popups.showPickerOwned(items_list.items, opts) catch {
+    target.manager.showPickerOwned(items_list.items, opts) catch {
         for (items_list.items) |item| state.allocator.free(item);
         return;
     };
-    state.pending_pop_response = true;
-    state.pending_pop_scope = .mux;
+    setPendingPopupTarget(state, target);
     state.needs_render = true;
+}
+
+const PopupTarget = struct {
+    manager: *pop.PopupManager,
+    scope: pop.Scope,
+    tab_idx: usize = 0,
+    pane: ?*Pane = null,
+};
+
+fn resolvePopupTarget(state: *State, uuid: [32]u8) PopupTarget {
+    const zero_uuid: [32]u8 = .{0} ** 32;
+    if (!std.mem.eql(u8, &uuid, &zero_uuid)) {
+        if (state.findPaneByUuid(uuid)) |pane| {
+            return .{ .manager = &pane.popups, .scope = .pane, .pane = pane };
+        }
+        for (state.tabs.items, 0..) |*tab, tab_idx| {
+            if (std.mem.startsWith(u8, &tab.uuid, &uuid)) {
+                return .{ .manager = &tab.popups, .scope = .tab, .tab_idx = tab_idx };
+            }
+        }
+    }
+    return .{ .manager = &state.popups, .scope = .mux };
+}
+
+fn setPendingPopupTarget(state: *State, target: PopupTarget) void {
+    state.pending_pop_response = true;
+    state.pending_pop_scope = target.scope;
+    switch (target.scope) {
+        .mux => {
+            state.pending_pop_pane = null;
+            state.pending_pop_tab = 0;
+        },
+        .tab => {
+            state.pending_pop_pane = null;
+            state.pending_pop_tab = target.tab_idx;
+        },
+        .pane => {
+            state.pending_pop_pane = target.pane;
+        },
+    }
 }
 
 fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
