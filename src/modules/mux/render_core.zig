@@ -63,6 +63,14 @@ pub const Renderer = struct {
         self.next.get(x, y).* = cell;
     }
 
+    pub fn screenWidth(self: *const Renderer) u16 {
+        return self.next.width;
+    }
+
+    pub fn screenHeight(self: *const Renderer) u16 {
+        return self.next.height;
+    }
+
     /// Mutable access to a cell in the next-frame buffer.
     /// Returns null when coordinates are out of bounds.
     pub fn getCellMutable(self: *Renderer, x: u16, y: u16) ?*Cell {

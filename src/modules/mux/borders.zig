@@ -2,7 +2,7 @@ const std = @import("std");
 const core = @import("core");
 const shp = @import("shp");
 const vaxis = @import("vaxis");
-const render = @import("render.zig");
+const Renderer = @import("render_core.zig").Renderer;
 const Color = @import("render_types.zig").Color;
 const statusbar = @import("statusbar.zig");
 const vaxis_cell = @import("vaxis_cell.zig");
@@ -10,8 +10,6 @@ const vaxis_surface = @import("vaxis_surface.zig");
 const style_bridge = @import("style_bridge.zig");
 const Pane = @import("pane.zig").Pane;
 const Layout = @import("layout.zig").Layout;
-
-pub const Renderer = render.Renderer;
 
 fn toShpStyle(seg: statusbar.RenderedSegment) shp.Style {
     return .{

@@ -4,9 +4,8 @@ const text_width = @import("text_width.zig");
 const core = @import("core");
 
 const Pane = @import("pane.zig").Pane;
-const render = @import("render.zig");
+const Renderer = @import("render_core.zig").Renderer;
 const Color = @import("render_types.zig").Color;
-const Renderer = render.Renderer;
 const statusbar = @import("statusbar.zig");
 
 pub const TitleRect = struct {

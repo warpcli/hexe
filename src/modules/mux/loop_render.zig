@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const State = @import("state.zig").State;
-const render_mod = @import("render.zig");
+const CursorInfo = @import("render_types.zig").CursorInfo;
 
 const statusbar = @import("statusbar.zig");
 const popup_render = @import("popup_render.zig");
@@ -215,7 +215,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     }
 
     // Gather cursor info.
-    var cursor = render_mod.CursorInfo{};
+    var cursor = CursorInfo{};
 
     if (state.active_floating) |idx| {
         const pane = state.floats.items[idx];

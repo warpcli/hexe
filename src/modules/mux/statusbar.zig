@@ -10,7 +10,7 @@ const randomdo_mod = core.segments.randomdo;
 const LuaRuntime = core.LuaRuntime;
 
 const State = @import("state.zig").State;
-const render = @import("render.zig");
+const Renderer = @import("render_core.zig").Renderer;
 const Color = @import("render_types.zig").Color;
 const Pane = @import("pane.zig").Pane;
 
@@ -290,8 +290,6 @@ fn passesWhenClause(ctx: *shp.Context, query: *const core.PaneQuery, w: core.Whe
 
     return true;
 }
-
-pub const Renderer = render.Renderer;
 
 pub const RenderedSegment = struct {
     text: []const u8,

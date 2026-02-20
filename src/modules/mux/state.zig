@@ -12,8 +12,7 @@ pub const PendingFloatRequest = state_types.PendingFloatRequest;
 const layout_mod = @import("layout.zig");
 const Layout = layout_mod.Layout;
 
-const render = @import("render.zig");
-const Renderer = render.Renderer;
+const Renderer = @import("render_core.zig").Renderer;
 
 const ses_client = @import("ses_client.zig");
 const SesClient = ses_client.SesClient;

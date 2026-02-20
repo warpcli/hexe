@@ -2,8 +2,7 @@ const std = @import("std");
 const ghostty = @import("ghostty-vt");
 
 const Pane = @import("pane.zig").Pane;
-const render = @import("render.zig");
-const Renderer = render.Renderer;
+const Renderer = @import("render_core.zig").Renderer;
 
 /// Pane-local mouse coordinate (viewport coordinate space).
 pub const Pos = struct {

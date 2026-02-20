@@ -1,15 +1,13 @@
 const std = @import("std");
 const pop = @import("pop");
 const vaxis = @import("vaxis");
-const render = @import("render.zig");
+const Renderer = @import("render_core.zig").Renderer;
 const Color = @import("render_types.zig").Color;
 const statusbar = @import("statusbar.zig");
 const vaxis_cell = @import("vaxis_cell.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
 const text_width = @import("text_width.zig");
 const style_bridge = @import("style_bridge.zig");
-
-pub const Renderer = render.Renderer;
 
 fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Color, bg: Color, title: ?[]const u8) void {
     if (w == 0 or h == 0) return;

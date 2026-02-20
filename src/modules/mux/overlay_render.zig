@@ -1,6 +1,5 @@
 const std = @import("std");
-const render = @import("render.zig");
-const Renderer = render.Renderer;
+const Renderer = @import("render_core.zig").Renderer;
 const statusbar = @import("statusbar.zig");
 const text_width = @import("text_width.zig");
 const style_bridge = @import("style_bridge.zig");

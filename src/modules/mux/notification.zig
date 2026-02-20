@@ -1,13 +1,11 @@
 const std = @import("std");
 const pop = @import("pop");
 const vaxis = @import("vaxis");
-const render = @import("render.zig");
+const Renderer = @import("render_core.zig").Renderer;
 const Color = @import("render_types.zig").Color;
 const vaxis_cell = @import("vaxis_cell.zig");
 const text_width = @import("text_width.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
-
-const Renderer = render.Renderer;
 
 pub fn renderFull(self: *pop.notification.NotificationManager, renderer: *Renderer, screen_width: u16, screen_height: u16) void {
     renderInBounds(self, renderer, 0, 0, screen_width, screen_height, true);

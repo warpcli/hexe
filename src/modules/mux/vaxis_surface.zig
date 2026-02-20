@@ -1,9 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
-const render = @import("render.zig");
+const Renderer = @import("render_core.zig").Renderer;
 const vaxis_cell = @import("vaxis_cell.zig");
-
-pub const Renderer = render.Renderer;
 
 threadlocal var pooled_screen: ?vaxis.Screen = null;
 threadlocal var pooled_cols: u16 = 0;
