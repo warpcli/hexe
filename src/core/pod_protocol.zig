@@ -13,6 +13,7 @@ pub const FrameType = enum(u8) {
 };
 
 pub fn writeFrame(conn: *ipc.Connection, frame_type: FrameType, payload: []const u8) !void {
+    if (payload.len > MAX_FRAME_LEN) return error.FrameTooLarge;
     if (payload.len > std.math.maxInt(u32)) return error.FrameTooLarge;
 
     var header: [5]u8 = undefined;
@@ -82,7 +83,12 @@ pub const Reader = struct {
                 i += take;
 
                 if (self.header_len == self.header.len) {
-                    self.frame_type = @enumFromInt(self.header[0]);
+                    self.frame_type = std.meta.intToEnum(FrameType, self.header[0]) catch {
+                        self.header_len = 0;
+                        self.payload_len = 0;
+                        self.frame_len = 0;
+                        continue;
+                    };
                     self.frame_len = std.mem.readInt(u32, self.header[1..5], .big);
                     self.payload_len = 0;
 

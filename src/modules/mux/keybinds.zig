@@ -1,15 +1,13 @@
 const std = @import("std");
 const core = @import("core");
 
-const layout_mod = @import("layout.zig");
-
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 
 const input = @import("input.zig");
 const loop_ipc = @import("loop_ipc.zig");
-const actions = @import("loop_actions.zig");
-const focus_move = @import("focus_move.zig");
+const keybinds_actions = @import("keybinds_actions.zig");
+const key_translate = @import("key_translate.zig");
 const main = @import("main.zig");
 
 pub const BindWhen = core.Config.BindWhen;
@@ -59,7 +57,6 @@ pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
 /// Forward a key (with modifiers) to the focused pane as escape sequence.
 pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
     var out: [16]u8 = undefined;
-    var n: usize = 0;
 
     const use_application_arrows = blk: {
         if (state.active_floating) |idx| {
@@ -77,92 +74,9 @@ pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
         break :blk false;
     };
 
-    switch (@as(BindKeyKind, key)) {
-        .space => {
-            if ((mods & 2) != 0) { // Ctrl+Space = NUL
-                out[n] = 0x00;
-                n += 1;
-            } else {
-                if ((mods & 1) != 0) { // Alt
-                    out[n] = 0x1b;
-                    n += 1;
-                }
-                out[n] = ' ';
-                n += 1;
-            }
-        },
-        .char => {
-            var ch: u8 = key.char;
-            // Shift+Tab = backtab (CSI Z)
-            if ((mods & 4) != 0 and ch == 0x09) {
-                out[n] = 0x1b;
-                n += 1;
-                out[n] = '[';
-                n += 1;
-                out[n] = 'Z';
-                n += 1;
-            } else {
-                if ((mods & 4) != 0 and ch >= 'a' and ch <= 'z') ch = ch - 'a' + 'A'; // Shift
-                if ((mods & 2) != 0) { // Ctrl
-                    if (ch >= 'a' and ch <= 'z') ch = ch - 'a' + 1;
-                    if (ch >= 'A' and ch <= 'Z') ch = ch - 'A' + 1;
-                }
-                if ((mods & 1) != 0) { // Alt
-                    out[n] = 0x1b;
-                    n += 1;
-                }
-                out[n] = ch;
-                n += 1;
-            }
-        },
-        .up, .down, .left, .right => {
-            // Arrow keys:
-            // - Alternate screen + no modifiers: ESC O A/B/C/D (application cursor mode)
-            // - Otherwise: ESC [ A/B/C/D (no mods) or ESC [ 1 ; <mod> A/B/C/D (with mods)
-            const dir_char: u8 = switch (@as(BindKeyKind, key)) {
-                .up => 'A',
-                .down => 'B',
-                .right => 'C',
-                .left => 'D',
-                else => unreachable,
-            };
-
-            out[n] = 0x1b;
-            n += 1;
-
-            if (mods == 0 and use_application_arrows) {
-                out[n] = 'O';
-                n += 1;
-                out[n] = dir_char;
-                n += 1;
-            } else {
-                out[n] = '[';
-                n += 1;
-
-                if (mods != 0) {
-                    // Convert our mods to CSI modifier parameter:
-                    // CSI mod = 1 + (shift ? 1 : 0) + (alt ? 2 : 0) + (ctrl ? 4 : 0)
-                    // Our encoding: alt=1, ctrl=2, shift=4
-                    var csi_mod: u8 = 1;
-                    if ((mods & 4) != 0) csi_mod |= 1; // shift
-                    if ((mods & 1) != 0) csi_mod |= 2; // alt
-                    if ((mods & 2) != 0) csi_mod |= 4; // ctrl
-
-                    out[n] = '1';
-                    n += 1;
-                    out[n] = ';';
-                    n += 1;
-                    out[n] = '0' + csi_mod;
-                    n += 1;
-                }
-
-                out[n] = dir_char;
-                n += 1;
-            }
-        },
+    if (key_translate.encodeLegacyKey(out[0..], mods, key, use_application_arrows)) |n| {
+        if (n > 0) forwardInputToFocusedPane(state, out[0..n]);
     }
-
-    if (n > 0) forwardInputToFocusedPane(state, out[0..n]);
 }
 
 /// Legacy focus context for backward compatibility with timer storage.
@@ -254,48 +168,14 @@ fn findBestBind(state: *State, mods: u8, key: BindKey, on: BindWhen, allow_only_
     var best: ?core.Config.Bind = null;
     var best_score: u8 = 0;
 
-    // Debug: log what we're looking for
-    const is_debug_key = (mods == 3 and @as(BindKeyKind, key) == .up) or
-        (mods == 3 and key == .char and key.char == '1');
-    if (is_debug_key) {
-        std.debug.print("DEBUG findBestBind: looking for mods={} key={s} on={s}, total_binds={}\n", .{ mods, @tagName(@as(BindKeyKind, key)), @tagName(on), cfg.input.binds.len });
-    }
-
     for (cfg.input.binds, 0..) |b, idx| {
-        // Debug arrow key bindings and '1' key
-        if (is_debug_key) {
-            std.debug.print("  checking bind[{}]: on={s}(want {s}) mods={}(want {}) key={s}\n", .{ idx, @tagName(b.on), @tagName(on), b.mods, mods, @tagName(@as(BindKeyKind, b.key)) });
-        }
+        _ = idx;
 
-        if (b.on != on) {
-            if (is_debug_key) {
-                std.debug.print("    SKIP: on mismatch\n", .{});
-            }
-            continue;
-        }
-        if (b.mods != mods) {
-            if (is_debug_key) {
-                std.debug.print("    SKIP: mods mismatch\n", .{});
-            }
-            continue;
-        }
-        if (!keyEq(b.key, key)) {
-            if (is_debug_key) {
-                std.debug.print("    SKIP: key mismatch\n", .{});
-            }
-            continue;
-        }
+        if (b.on != on) continue;
+        if (b.mods != mods) continue;
+        if (!keyEq(b.key, key)) continue;
         const when_match = matchesWhen(b.when, query);
-        if (!when_match) {
-            if (is_debug_key) {
-                std.debug.print("    SKIP: when mismatch (has_when={})\n", .{b.when != null});
-            }
-            continue;
-        }
-
-        if (is_debug_key) {
-            std.debug.print("    MATCH! score will be calculated\n", .{});
-        }
+        if (!when_match) continue;
 
         if (allow_only_tabs) {
             if (b.action != .tab_next and b.action != .tab_prev) continue;
@@ -308,15 +188,6 @@ fn findBestBind(state: *State, mods: u8, key: BindKey, on: BindWhen, allow_only_
         if (best == null or score > best_score) {
             best = b;
             best_score = score;
-        }
-    }
-
-    // Debug: log result
-    if (is_debug_key) {
-        if (best) |b| {
-            std.debug.print("DEBUG findBestBind: FOUND binding, score={}, action={s}\n", .{ best_score, @tagName(b.action) });
-        } else {
-            std.debug.print("DEBUG findBestBind: NO binding found\n", .{});
         }
     }
 
@@ -387,13 +258,7 @@ pub fn processKeyTimers(state: *State, now_ms: i64) void {
         if (t.kind == .hold) {
             // Enforce context at fire time.
             if (t.focus_ctx == currentFocusContext(state)) {
-                // Test: Ctrl+Alt+; hold = HOLD notification
-                if (t.mods == 3 and @as(BindKeyKind, t.key) == .char and t.key.char == ';') {
-                    state.notifications.show("HOLD");
-                    state.needs_render = true;
-                } else {
-                    _ = dispatchAction(state, t.action);
-                }
+                _ = dispatchAction(state, t.action);
             }
             state.key_timers.items[i].kind = .hold_fired;
             state.key_timers.items[i].deadline_ms = std.math.maxInt(i64);
@@ -437,23 +302,6 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
     if (!kitty_mode) {
         if (when != .press) return true; // Ignore non-press in legacy
 
-        // Hardcoded test: Ctrl+Alt+O toggles pane select mode
-        if (mods == 3 and @as(BindKeyKind, key) == .char and key.char == 'o') {
-            if (state.overlays.isPaneSelectActive()) {
-                state.overlays.exitPaneSelectMode();
-            } else {
-                actions.enterPaneSelectMode(state, false);
-            }
-            return true;
-        }
-
-        // Hardcoded test: Ctrl+Alt+K toggles keycast mode
-        if (mods == 3 and @as(BindKeyKind, key) == .char and key.char == 'k') {
-            state.overlays.toggleKeycast();
-            state.needs_render = true;
-            return true;
-        }
-
         if (findBestBind(state, mods, key, .press, allow_only_tabs, &query)) |b| {
             return dispatchBindWithMode(state, b, mods, key);
         }
@@ -477,40 +325,6 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
 
     // --- RELEASE ---
     if (when == .release) {
-        // Test: Ctrl+Alt+; release after hold = HOLD notification
-        if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == ';') {
-            // Check if hold_fired exists - means hold action already fired
-            var had_hold_fired = false;
-            var i: usize = 0;
-            while (i < state.key_timers.items.len) {
-                const t = state.key_timers.items[i];
-                if (t.kind == .hold_fired and t.mods == mods_eff and keyEq(t.key, key)) {
-                    _ = state.key_timers.orderedRemove(i);
-                    had_hold_fired = true;
-                    continue;
-                }
-                i += 1;
-            }
-            // Check if hold was pending (tap)
-            var had_hold_pending = false;
-            i = 0;
-            while (i < state.key_timers.items.len) {
-                const t = state.key_timers.items[i];
-                if (t.kind == .hold and t.mods == mods_eff and keyEq(t.key, key)) {
-                    _ = state.key_timers.orderedRemove(i);
-                    had_hold_pending = true;
-                    continue;
-                }
-                i += 1;
-            }
-            cancelTimer(state, .repeat_active, mods_eff, key);
-            if (had_hold_pending) {
-                state.notifications.show("TAP");
-                state.needs_render = true;
-            }
-            return true;
-        }
-
         // If hold already fired, just clean up
         var had_hold_fired = false;
         var i: usize = 0;
@@ -590,15 +404,6 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
 
     // --- REPEAT ---
     if (when == .repeat) {
-        // Test: Ctrl+Alt+; repeat = REPEAT notification
-        if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == ';') {
-            cancelTimer(state, .hold, mods_eff, key);
-            cancelTimer(state, .hold_fired, mods_eff, key);
-            state.notifications.show("REPEAT");
-            state.needs_render = true;
-            return true;
-        }
-
         // Terminal auto-repeat: cancel hold timer (repeating != holding)
         cancelTimer(state, .hold, mods_eff, key);
         cancelTimer(state, .hold_fired, mods_eff, key);
@@ -693,33 +498,6 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
             return true;
         }
 
-        // Test: Ctrl+Alt+; press = arm hold timer for HOLD test
-        if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == ';') {
-            main.debugLog("test key matched, arming hold timer", .{});
-            cancelTimer(state, .hold, mods_eff, key);
-            cancelTimer(state, .hold_fired, mods_eff, key);
-            // Arm hold timer - when it fires, show HOLD notification
-            scheduleTimerWithStart(state, .hold, now_ms + cfg.input.hold_ms, mods_eff, key, .mux_quit, focus_ctx, now_ms);
-            return true;
-        }
-
-        // Hardcoded test: Ctrl+Alt+O toggles pane select mode
-        if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == 'o') {
-            if (state.overlays.isPaneSelectActive()) {
-                state.overlays.exitPaneSelectMode();
-            } else {
-                actions.enterPaneSelectMode(state, false);
-            }
-            return true;
-        }
-
-        // Hardcoded test: Ctrl+Alt+K toggles keycast mode
-        if (mods_eff == 3 and @as(BindKeyKind, key) == .char and key.char == 'k') {
-            state.overlays.toggleKeycast();
-            state.needs_render = true;
-            return true;
-        }
-
         // For modified keys, only defer if there's an actual binding.
         // Keys without bindings should pass through raw to preserve escape sequences.
         if (mods_eff != 0) {
@@ -779,315 +557,5 @@ fn dispatchBindWithMode(state: *State, bind: core.Config.Bind, mods: u8, key: Bi
 }
 
 fn dispatchAction(state: *State, action: BindAction) bool {
-    const cfg = &state.config;
-
-    switch (action) {
-        .mux_quit => {
-            if (cfg.confirm_on_exit) {
-                state.pending_action = .exit;
-                state.popups.showConfirm("Exit mux?", .{}) catch {};
-                state.needs_render = true;
-            } else {
-                state.running = false;
-            }
-            return true;
-        },
-        .pane_disown => {
-            const current_pane: ?*Pane = if (state.active_floating) |idx|
-                state.floats.items[idx]
-            else
-                state.currentLayout().getFocusedPane();
-
-            if (current_pane) |p| {
-                if (p.sticky) {
-                    state.notifications.show("Cannot disown sticky float");
-                    state.needs_render = true;
-                    return true;
-                }
-            }
-
-            if (cfg.confirm_on_disown) {
-                state.pending_action = .disown;
-                state.popups.showConfirm("Disown pane?", .{}) catch {};
-                state.needs_render = true;
-            } else {
-                actions.performDisown(state);
-            }
-            return true;
-        },
-        .pane_adopt => {
-            actions.startAdoptFlow(state);
-            return true;
-        },
-        .pane_select_mode => {
-            actions.enterPaneSelectMode(state, false);
-            return true;
-        },
-        .keycast_toggle => {
-            state.overlays.toggleKeycast();
-            state.needs_render = true;
-            return true;
-        },
-        .sprite_toggle => {
-            // Toggle sprite on the focused pane - use the pane's actual Pokemon name!
-            if (state.active_floating) |idx| {
-                if (idx < state.floats.items.len) {
-                    const pane = state.floats.items[idx];
-                    if (pane.pokemon_initialized) {
-                        if (pane.pokemon_state.show_sprite) {
-                            pane.pokemon_state.hide();
-                        } else {
-                            // Get the pane's Pokemon name from pane_names cache
-                            const pokemon_name = state.pane_names.get(pane.uuid) orelse "pikachu";
-
-                            pane.pokemon_state.loadSprite(pokemon_name, false) catch {
-                                // Fallback to pikachu if loading fails
-                                pane.pokemon_state.loadSprite("pikachu", false) catch {};
-                            };
-                        }
-                        state.needs_render = true;
-                    }
-                }
-            } else if (state.currentLayout().getFocusedPane()) |pane| {
-                if (pane.pokemon_initialized) {
-                    if (pane.pokemon_state.show_sprite) {
-                        pane.pokemon_state.hide();
-                    } else {
-                        // Get the pane's Pokemon name from pane_names cache
-                        const pokemon_name = state.pane_names.get(pane.uuid) orelse "pikachu";
-
-                        pane.pokemon_state.loadSprite(pokemon_name, false) catch {
-                            pane.pokemon_state.loadSprite("pikachu", false) catch {};
-                        };
-                    }
-                    state.needs_render = true;
-                }
-            }
-            return true;
-        },
-        .split_h => {
-            // Prevent split creation during detach (race prevention)
-            if (state.detach_mode) {
-                return true; // Silently ignore during detach
-            }
-            const parent_uuid = state.getCurrentFocusedUuid();
-            var cwd: ?[]const u8 = null;
-            if (state.currentLayout().getFocusedPane()) |p| {
-                cwd = state.getReliableCwd(p);
-            }
-            // Fallback to mux's CWD if pane CWD unavailable
-            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-            if (cwd == null) {
-                cwd = std.posix.getcwd(&cwd_buf) catch null;
-            }
-            if (state.currentLayout().splitFocused(.horizontal, cwd) catch null) |new_pane| {
-                state.syncPaneAux(new_pane, parent_uuid);
-            }
-            state.needs_render = true;
-            state.syncStateToSes();
-            return true;
-        },
-        .split_v => {
-            // Prevent split creation during detach (race prevention)
-            if (state.detach_mode) {
-                return true; // Silently ignore during detach
-            }
-            const parent_uuid = state.getCurrentFocusedUuid();
-            var cwd: ?[]const u8 = null;
-            if (state.currentLayout().getFocusedPane()) |p| {
-                cwd = state.getReliableCwd(p);
-            }
-            // Fallback to mux's CWD if pane CWD unavailable
-            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-            if (cwd == null) {
-                cwd = std.posix.getcwd(&cwd_buf) catch null;
-            }
-            if (state.currentLayout().splitFocused(.vertical, cwd) catch null) |new_pane| {
-                state.syncPaneAux(new_pane, parent_uuid);
-            }
-            state.needs_render = true;
-            state.syncStateToSes();
-            return true;
-        },
-        .split_resize => |dir_kind| {
-            // Only applies to split panes (floats should ignore).
-            if (state.active_floating != null) return true;
-            const dir: ?layout_mod.Layout.Direction = switch (dir_kind) {
-                .up => .up,
-                .down => .down,
-                .left => .left,
-                .right => .right,
-                else => null,
-            };
-            if (dir == null) return true;
-            if (state.currentLayout().resizeFocused(dir.?, 1)) {
-                state.needs_render = true;
-                state.renderer.invalidate();
-                state.force_full_render = true;
-            }
-            return true;
-        },
-        .tab_new => {
-            // Prevent tab creation during detach (race prevention)
-            if (state.detach_mode) {
-                return true; // Silently ignore during detach
-            }
-            state.active_floating = null;
-            state.createTab() catch |e| {
-                core.logging.logError("mux", "createTab failed", e);
-            };
-            state.needs_render = true;
-            return true;
-        },
-        .tab_next => {
-            actions.switchToNextTab(state);
-            return true;
-        },
-        .tab_prev => {
-            actions.switchToPrevTab(state);
-            return true;
-        },
-        .pane_close => {
-            // Close float or split pane, but never the tab.
-            if (state.active_floating != null) {
-                // Close the focused float.
-                if (cfg.confirm_on_close) {
-                    state.pending_action = .close;
-                    state.popups.showConfirm("Close float?", .{}) catch {};
-                    state.needs_render = true;
-                } else {
-                    actions.performClose(state);
-                }
-            } else {
-                // Close split pane if there are multiple splits.
-                const layout = state.currentLayout();
-                if (layout.splitCount() > 1) {
-                    if (cfg.confirm_on_close) {
-                        state.pending_action = .pane_close;
-                        state.popups.showConfirm("Close pane?", .{}) catch {};
-                        state.needs_render = true;
-                    } else {
-                        _ = layout.closePane(layout.focused_split_id);
-                        if (layout.getFocusedPane()) |new_pane| {
-                            state.syncPaneFocus(new_pane, null);
-                        }
-                        state.syncStateToSes();
-                        state.needs_render = true;
-                    }
-                }
-                // If only one pane, do nothing (don't close the tab).
-            }
-            return true;
-        },
-        .tab_close => {
-            if (cfg.confirm_on_close) {
-                state.pending_action = .close;
-                const msg = if (state.active_floating != null) "Close float?" else "Close tab?";
-                state.popups.showConfirm(msg, .{}) catch {};
-                state.needs_render = true;
-            } else {
-                actions.performClose(state);
-            }
-            return true;
-        },
-        .mux_detach => {
-            if (cfg.confirm_on_detach) {
-                state.pending_action = .detach;
-                state.popups.showConfirm("Detach session?", .{}) catch {};
-                state.needs_render = true;
-                return true;
-            }
-            actions.performDetach(state);
-            return true;
-        },
-        .float_toggle => |fk| {
-            std.debug.print("DEBUG dispatchAction: float_toggle key='{}' (0x{x})\n", .{ fk, fk });
-            if (state.getLayoutFloatByKey(fk)) |float_def| {
-                std.debug.print("DEBUG dispatchAction: found float_def, toggling\n", .{});
-                actions.toggleNamedFloat(state, float_def);
-                state.needs_render = true;
-                return true;
-            }
-            std.debug.print("DEBUG dispatchAction: float NOT FOUND for key='{}'\n", .{fk});
-            return false;
-        },
-        .float_nudge => |dir_kind| {
-            const dir: ?layout_mod.Layout.Direction = switch (dir_kind) {
-                .up => .up,
-                .down => .down,
-                .left => .left,
-                .right => .right,
-                else => null,
-            };
-            if (dir == null) return false;
-            const fi = state.active_floating orelse return false;
-            if (fi >= state.floats.items.len) return false;
-            const pane = state.floats.items[fi];
-            if (pane.parent_tab) |parent| {
-                if (parent != state.active_tab) return false;
-            }
-
-            nudgeFloat(state, pane, dir.?, 1);
-            state.needs_render = true;
-            return true;
-        },
-        .focus_move => |dir_kind| {
-            const dir: ?layout_mod.Layout.Direction = switch (dir_kind) {
-                .up => .up,
-                .down => .down,
-                .left => .left,
-                .right => .right,
-                else => null,
-            };
-            if (dir) |d| return focus_move.perform(state, d);
-            return true;
-        },
-    }
-}
-
-fn nudgeFloat(state: *State, pane: *Pane, dir: layout_mod.Layout.Direction, step_cells: u16) void {
-    const avail_h: u16 = state.term_height - state.status_height;
-
-    const shadow_enabled = if (pane.float_style) |s| s.shadow_color != null else false;
-    const usable_w: u16 = if (shadow_enabled) (state.term_width -| 1) else state.term_width;
-    const usable_h: u16 = if (shadow_enabled and state.status_height == 0) (avail_h -| 1) else avail_h;
-
-    const outer_w: u16 = usable_w * pane.float_width_pct / 100;
-    const outer_h: u16 = usable_h * pane.float_height_pct / 100;
-
-    const max_x: u16 = usable_w -| outer_w;
-    const max_y: u16 = usable_h -| outer_h;
-
-    var outer_x: i32 = @intCast(pane.border_x);
-    var outer_y: i32 = @intCast(pane.border_y);
-    const dx: i32 = switch (dir) {
-        .left => -@as(i32, @intCast(step_cells)),
-        .right => @as(i32, @intCast(step_cells)),
-        else => 0,
-    };
-    const dy: i32 = switch (dir) {
-        .up => -@as(i32, @intCast(step_cells)),
-        .down => @as(i32, @intCast(step_cells)),
-        else => 0,
-    };
-
-    outer_x += dx;
-    outer_y += dy;
-
-    if (outer_x < 0) outer_x = 0;
-    if (outer_y < 0) outer_y = 0;
-    if (outer_x > @as(i32, @intCast(max_x))) outer_x = @as(i32, @intCast(max_x));
-    if (outer_y > @as(i32, @intCast(max_y))) outer_y = @as(i32, @intCast(max_y));
-
-    // Convert back to percentage (stable across resizes).
-    if (max_x > 0) {
-        const xp: u32 = (@as(u32, @intCast(outer_x)) * 100) / @as(u32, max_x);
-        pane.float_pos_x_pct = @intCast(@min(100, xp));
-    }
-    if (max_y > 0) {
-        const yp: u32 = (@as(u32, @intCast(outer_y)) * 100) / @as(u32, max_y);
-        pane.float_pos_y_pct = @intCast(@min(100, yp));
-    }
-
-    state.resizeFloatingPanes();
+    return keybinds_actions.dispatchAction(state, action);
 }

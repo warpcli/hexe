@@ -1,7 +1,6 @@
 const std = @import("std");
 const core = @import("core");
 const wire = core.wire;
-const posix = std.posix;
 
 const print = std.debug.print;
 
@@ -20,8 +19,8 @@ pub fn run(allocator: std.mem.Allocator) !void {
 
     const fd = client.fd;
 
-    // Send handshake
-    _ = try posix.write(fd, &.{wire.SES_HANDSHAKE_CLI});
+    // Send versioned CLI handshake
+    try wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI);
 
     // Request status
     try wire.writeControl(fd, .status, &.{});
@@ -29,10 +28,14 @@ pub fn run(allocator: std.mem.Allocator) !void {
     // Read response
     const hdr = try wire.readControlHeader(fd);
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-    if (msg_type != .ok) {
+    if (msg_type != .status) {
         print("Error: Failed to retrieve status\n", .{});
         return error.StatusFailed;
     }
+
+    const status_payload = try allocator.alloc(u8, hdr.payload_len);
+    defer allocator.free(status_payload);
+    try wire.readExact(fd, status_payload);
 
     // For now, show basic info from list operations
     // Request sessions list to count
@@ -49,18 +52,34 @@ pub fn run(allocator: std.mem.Allocator) !void {
     defer allocator.free(payload);
     try wire.readExact(fd, payload);
 
+    if (payload.len < @sizeOf(wire.SessionsList)) {
+        print("Error: malformed sessions list response\n", .{});
+        return error.MalformedResponse;
+    }
+
+    const list_hdr = std.mem.bytesToValue(wire.SessionsList, payload[0..@sizeOf(wire.SessionsList)]);
+
     // Count sessions
     var session_count: usize = 0;
     var total_panes: usize = 0;
-    var off: usize = 0;
+    var off: usize = @sizeOf(wire.SessionsList);
 
-    while (off + @sizeOf(wire.DetachedSessionEntry) <= payload.len) {
-        const entry_bytes = payload[off..][0..@sizeOf(wire.DetachedSessionEntry)];
-        const entry = std.mem.bytesToValue(wire.DetachedSessionEntry, entry_bytes);
-        off += @sizeOf(wire.DetachedSessionEntry);
+    var i: u16 = 0;
+    while (i < list_hdr.session_count) : (i += 1) {
+        if (off + @sizeOf(wire.SessionEntry) > payload.len) {
+            print("Error: malformed sessions list entry\n", .{});
+            return error.MalformedResponse;
+        }
+
+        const entry_bytes = payload[off..][0..@sizeOf(wire.SessionEntry)];
+        const entry = std.mem.bytesToValue(wire.SessionEntry, entry_bytes);
+        off += @sizeOf(wire.SessionEntry);
 
         const name_end = off + entry.name_len;
-        if (name_end > payload.len) break;
+        if (name_end > payload.len) {
+            print("Error: malformed session name\n", .{});
+            return error.MalformedResponse;
+        }
         off = name_end;
 
         session_count += 1;

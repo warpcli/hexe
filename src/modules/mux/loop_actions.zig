@@ -12,6 +12,7 @@ const SesClient = @import("ses_client.zig").SesClient;
 
 const helpers = @import("helpers.zig");
 const float_completion = @import("float_completion.zig");
+const loop_actions_focus = @import("loop_actions_focus.zig");
 
 /// Hide or destroy a float. If it's a CLI-blocking float (capture_output=true),
 /// destroy it and send result back to CLI instead of just hiding.
@@ -134,6 +135,13 @@ fn isValidEnvKey(key: []const u8) bool {
     return true;
 }
 
+fn getCurrentFocusedPane(state: *State) ?*Pane {
+    if (state.active_floating) |idx| {
+        if (idx < state.floats.items.len) return state.floats.items[idx];
+    }
+    return state.currentLayout().getFocusedPane();
+}
+
 /// Perform the actual detach action.
 pub fn performDetach(state: *State) void {
     // Always set detach_mode to prevent killing panes on exit.
@@ -154,7 +162,7 @@ pub fn performDetach(state: *State) void {
         return;
     };
     // Print session_id (our UUID) so user can reattach.
-    std.debug.print("\nSession detached: {s}\nReattach with: hexe-mux --attach {s}\n", .{ state.uuid, state.uuid[0..8] });
+    std.debug.print("\nSession detached: {s}\nReattach with: hexe mux attach {s}\n", .{ state.uuid, state.uuid[0..8] });
     state.running = false;
 }
 
@@ -433,9 +441,21 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 state.syncPaneFocus(pane, old_uuid);
                 // If alone mode, hide all other floats on this tab.
                 if (float_def.attributes.exclusive) {
+                    var to_hide: std.ArrayList([32]u8) = .empty;
+                    defer to_hide.deinit(state.allocator);
+
                     for (state.floats.items) |other| {
                         if (other.float_key != float_def.key) {
-                            hideOrDestroyFloat(state, other, state.active_tab);
+                            to_hide.append(state.allocator, other.uuid) catch {};
+                        }
+                    }
+
+                    for (to_hide.items) |target_uuid| {
+                        for (state.floats.items) |candidate| {
+                            if (std.mem.eql(u8, &candidate.uuid, &target_uuid)) {
+                                hideOrDestroyFloat(state, candidate, state.active_tab);
+                                break;
+                            }
                         }
                     }
                 }
@@ -475,18 +495,42 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
 
     // If alone mode, hide all other floats on this tab.
     if (float_def.attributes.exclusive) {
+        var to_hide: std.ArrayList([32]u8) = .empty;
+        defer to_hide.deinit(state.allocator);
+
         for (state.floats.items) |pane| {
             if (pane.float_key != float_def.key) {
-                hideOrDestroyFloat(state, pane, state.active_tab);
+                to_hide.append(state.allocator, pane.uuid) catch {};
+            }
+        }
+
+        for (to_hide.items) |target_uuid| {
+            for (state.floats.items) |candidate| {
+                if (std.mem.eql(u8, &candidate.uuid, &target_uuid)) {
+                    hideOrDestroyFloat(state, candidate, state.active_tab);
+                    break;
+                }
             }
         }
     }
     // For pwd floats, hide other instances of same float (different dirs) on this tab.
     if (float_def.attributes.per_cwd) {
         const new_idx = state.floats.items.len - 1;
+        var to_hide: std.ArrayList([32]u8) = .empty;
+        defer to_hide.deinit(state.allocator);
+
         for (state.floats.items, 0..) |pane, i| {
             if (i != new_idx and pane.float_key == float_def.key) {
-                hideOrDestroyFloat(state, pane, state.active_tab);
+                to_hide.append(state.allocator, pane.uuid) catch {};
+            }
+        }
+
+        for (to_hide.items) |target_uuid| {
+            for (state.floats.items) |candidate| {
+                if (std.mem.eql(u8, &candidate.uuid, &target_uuid)) {
+                    hideOrDestroyFloat(state, candidate, state.active_tab);
+                    break;
+                }
             }
         }
     }
@@ -763,366 +807,22 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     state.syncStateToSes();
 }
 
-const pop = @import("pop");
-
-/// Enter pane select mode - displays numbered labels on all panes.
-/// If swap is true, selecting a pane will swap it with the focused pane.
-/// If swap is false, selecting a pane will just focus it.
 pub fn enterPaneSelectMode(state: *State, swap: bool) void {
-    state.overlays.enterPaneSelectMode(swap);
-
-    // Generate labels for all visible panes
-    var label_idx: usize = 0;
-
-    // Add split panes from current layout
-    const layout = state.currentLayout();
-    var pane_iter = layout.splits.valueIterator();
-    while (pane_iter.next()) |pane_ptr| {
-        const pane = pane_ptr.*;
-        if (pop.overlay.labelForIndex(label_idx)) |label| {
-            state.overlays.addPaneLabel(
-                pane.uuid,
-                label,
-                pane.x,
-                pane.y,
-                pane.width,
-                pane.height,
-            );
-            label_idx += 1;
-        } else break;
-    }
-
-    // Add visible floats
-    for (state.floats.items) |pane| {
-        if (!pane.isVisibleOnTab(state.active_tab)) continue;
-        if (pane.parent_tab) |parent| {
-            if (parent != state.active_tab) continue;
-        }
-
-        if (pop.overlay.labelForIndex(label_idx)) |label| {
-            state.overlays.addPaneLabel(
-                pane.uuid,
-                label,
-                pane.x,
-                pane.y,
-                pane.width,
-                pane.height,
-            );
-            label_idx += 1;
-        } else break;
-    }
-
-    state.needs_render = true;
+    return loop_actions_focus.enterPaneSelectMode(state, swap);
 }
 
-/// Focus a pane by UUID. Works for both split panes and floats.
 pub fn focusPaneByUuid(state: *State, uuid: [32]u8) void {
-    // Check floats first
-    for (state.floats.items, 0..) |pane, i| {
-        if (std.mem.eql(u8, &pane.uuid, &uuid)) {
-            if (!pane.isVisibleOnTab(state.active_tab)) continue;
-            if (pane.parent_tab) |parent| {
-                if (parent != state.active_tab) continue;
-            }
-
-            // Unfocus current
-            state.unfocusAllPanes();
-
-            // Focus this float
-            state.active_floating = i;
-            pane.focused = true;
-            state.syncPaneFocus(pane, null);
-            state.needs_render = true;
-            return;
-        }
-    }
-
-    // Check split panes in current layout
-    const layout = state.currentLayout();
-    var it = layout.splits.iterator();
-    while (it.next()) |entry| {
-        const pane = entry.value_ptr.*;
-        if (std.mem.eql(u8, &pane.uuid, &uuid)) {
-            // Unfocus current
-            state.unfocusAllPanes();
-
-            // Focus this split pane
-            state.active_floating = null;
-            layout.focused_split_id = entry.key_ptr.*;
-            pane.focused = true;
-            state.syncPaneFocus(pane, null);
-            state.needs_render = true;
-            return;
-        }
-    }
+    return loop_actions_focus.focusPaneByUuid(state, uuid);
 }
 
-/// Handle input when pane select mode is active.
-/// Returns true if input was consumed.
-/// - Lowercase (a-z): Focus that pane
-/// - Uppercase (A-Z): Swap focused pane position with target
-/// - ESC: Cancel
 pub fn handlePaneSelectInput(state: *State, byte: u8) bool {
-    if (!state.overlays.isPaneSelectActive()) return false;
-
-    // ESC cancels
-    if (byte == 0x1b) {
-        state.overlays.exitPaneSelectMode();
-        state.needs_render = true;
-        return true;
-    }
-
-    // Uppercase = swap, lowercase = focus
-    const is_swap = byte >= 'A' and byte <= 'Z';
-    const label: u8 = if (is_swap) byte + 32 else byte;
-
-    // Only handle a-z
-    if (label < 'a' or label > 'z') return true;
-
-    if (state.overlays.findPaneByLabel(label)) |target_uuid| {
-        if (is_swap) {
-            // Swap: exchange positions of focused pane and target pane
-            const focused = getCurrentFocusedPane(state);
-            const target = state.findPaneByUuid(target_uuid);
-            if (focused != null and target != null and focused.? != target.?) {
-                swapPanePositions(state, focused.?, target.?);
-            }
-        } else {
-            focusPaneByUuid(state, target_uuid);
-        }
-        state.overlays.exitPaneSelectMode();
-        state.needs_render = true;
-        return true;
-    }
-
-    // Invalid label - ignore but consume
-    return true;
+    return loop_actions_focus.handlePaneSelectInput(state, byte);
 }
 
-/// Get the currently focused pane (float or split).
-fn getCurrentFocusedPane(state: *State) ?*Pane {
-    if (state.active_floating) |idx| {
-        if (idx < state.floats.items.len) return state.floats.items[idx];
-    }
-    return state.currentLayout().getFocusedPane();
-}
-
-/// Swap the screen positions of two panes.
-/// VTs, backends, and UUIDs stay with their pane objects — only the
-/// position in the layout / float array changes so each pane renders
-/// where the other one used to be.
-fn swapPanePositions(state: *State, pane_a: *Pane, pane_b: *Pane) void {
-    if (pane_a == pane_b) return;
-
-    const a_float = pane_a.floating;
-    const b_float = pane_b.floating;
-
-    if (!a_float and !b_float) {
-        // Both are split panes — swap pointers in the layout hashmap.
-        const layout = state.currentLayout();
-
-        var key_a: ?u16 = null;
-        var key_b: ?u16 = null;
-        var it = layout.splits.iterator();
-        while (it.next()) |entry| {
-            if (entry.value_ptr.* == pane_a) key_a = entry.key_ptr.*;
-            if (entry.value_ptr.* == pane_b) key_b = entry.key_ptr.*;
-        }
-        if (key_a == null or key_b == null) return;
-
-        // Swap *Pane pointers directly via getPtr
-        const ptr_a = layout.splits.getPtr(key_a.?) orelse return;
-        const ptr_b = layout.splits.getPtr(key_b.?) orelse return;
-        ptr_a.* = pane_b;
-        ptr_b.* = pane_a;
-
-        // Swap pane IDs so each pane.id matches its new hashmap key
-        const tmp_id = pane_a.id;
-        pane_a.id = pane_b.id;
-        pane_b.id = tmp_id;
-
-        // Keep focus on the same pane (follow it to its new slot)
-        if (layout.focused_split_id == key_a.?) {
-            layout.focused_split_id = key_b.?;
-        } else if (layout.focused_split_id == key_b.?) {
-            layout.focused_split_id = key_a.?;
-        }
-
-        // Recalculate — assigns new x/y/w/h and resizes VTs + backends
-        layout.recalculateLayout();
-    } else if (a_float and b_float) {
-        // Both are floats — swap their position/border fields, then resize.
-        swapFloatPositions(pane_a, pane_b);
-    } else {
-        // Mixed split + float — not supported yet
-        state.notifications.show("Cannot swap split with float");
-        return;
-    }
-
-    state.renderer.invalidate();
-    state.force_full_render = true;
-    state.needs_render = true;
-}
-
-/// Swap position and border fields between two float panes, then resize VTs.
-fn swapFloatPositions(a: *Pane, b: *Pane) void {
-    // Content area
-    const ax = a.x;
-    const ay = a.y;
-    const aw = a.width;
-    const ah = a.height;
-    a.x = b.x;
-    a.y = b.y;
-    a.width = b.width;
-    a.height = b.height;
-    b.x = ax;
-    b.y = ay;
-    b.width = aw;
-    b.height = ah;
-
-    // Border area
-    const abx = a.border_x;
-    const aby = a.border_y;
-    const abw = a.border_w;
-    const abh = a.border_h;
-    a.border_x = b.border_x;
-    a.border_y = b.border_y;
-    a.border_w = b.border_w;
-    a.border_h = b.border_h;
-    b.border_x = abx;
-    b.border_y = aby;
-    b.border_w = abw;
-    b.border_h = abh;
-
-    // Layout percentages
-    const awp = a.float_width_pct;
-    const ahp = a.float_height_pct;
-    const axp = a.float_pos_x_pct;
-    const ayp = a.float_pos_y_pct;
-    const apx = a.float_pad_x;
-    const apy = a.float_pad_y;
-    a.float_width_pct = b.float_width_pct;
-    a.float_height_pct = b.float_height_pct;
-    a.float_pos_x_pct = b.float_pos_x_pct;
-    a.float_pos_y_pct = b.float_pos_y_pct;
-    a.float_pad_x = b.float_pad_x;
-    a.float_pad_y = b.float_pad_y;
-    b.float_width_pct = awp;
-    b.float_height_pct = ahp;
-    b.float_pos_x_pct = axp;
-    b.float_pos_y_pct = ayp;
-    b.float_pad_x = apx;
-    b.float_pad_y = apy;
-
-    // Resize VTs to their new dimensions
-    a.vt.resize(a.width, a.height) catch {};
-    b.vt.resize(b.width, b.height) catch {};
-
-    // Resize backends
-    switch (a.backend) {
-        .local => |*pty| pty.setSize(a.width, a.height) catch {},
-        .pod => |pod| {
-            var payload: [4]u8 = undefined;
-            std.mem.writeInt(u16, payload[0..2], a.width, .big);
-            std.mem.writeInt(u16, payload[2..4], a.height, .big);
-            const ft = @intFromEnum(core.pod_protocol.FrameType.resize);
-            core.wire.writeMuxVt(pod.vt_fd, pod.pane_id, ft, &payload) catch {};
-        },
-    }
-    switch (b.backend) {
-        .local => |*pty| pty.setSize(b.width, b.height) catch {},
-        .pod => |pod| {
-            var payload: [4]u8 = undefined;
-            std.mem.writeInt(u16, payload[0..2], b.width, .big);
-            std.mem.writeInt(u16, payload[2..4], b.height, .big);
-            const ft = @intFromEnum(core.pod_protocol.FrameType.resize);
-            core.wire.writeMuxVt(pod.vt_fd, pod.pane_id, ft, &payload) catch {};
-        },
-    }
-}
-
-/// Switch to the next tab, handling focus transitions.
-/// Does NOT wrap around - stays on last tab if already there.
 pub fn switchToNextTab(state: *State) void {
-    // Don't wrap around - if on last tab, do nothing
-    if (state.tabs.items.len <= 1) return;
-    if (state.active_tab >= state.tabs.items.len - 1) return;
-
-    const old_uuid = state.getCurrentFocusedUuid();
-
-    // Unfocus current pane
-    if (state.active_floating) |idx| {
-        if (idx < state.floats.items.len) {
-            const fp = state.floats.items[idx];
-            state.syncPaneUnfocus(fp);
-            state.active_floating = null;
-            // Restore cursor when switching away from float
-            state.cursor_needs_restore = true;
-        }
-    } else if (state.currentLayout().getFocusedPane()) |old_pane| {
-        state.syncPaneUnfocus(old_pane);
-    }
-
-    state.active_tab += 1;
-    restoreFocusInTab(state, old_uuid);
-    state.renderer.invalidate();
-    state.force_full_render = true;
-    state.needs_render = true;
+    return loop_actions_focus.switchToNextTab(state);
 }
 
-/// Switch to the previous tab, handling focus transitions.
-/// Does NOT wrap around - stays on first tab if already there.
 pub fn switchToPrevTab(state: *State) void {
-    // Don't wrap around - if on first tab, do nothing
-    if (state.tabs.items.len <= 1) return;
-    if (state.active_tab == 0) return;
-
-    const old_uuid = state.getCurrentFocusedUuid();
-
-    // Unfocus current pane
-    if (state.active_floating) |idx| {
-        if (idx < state.floats.items.len) {
-            const fp = state.floats.items[idx];
-            state.syncPaneUnfocus(fp);
-            state.active_floating = null;
-            // Restore cursor when switching away from float
-            state.cursor_needs_restore = true;
-        }
-    } else if (state.currentLayout().getFocusedPane()) |old_pane| {
-        state.syncPaneUnfocus(old_pane);
-    }
-
-    state.active_tab -= 1;
-    restoreFocusInTab(state, old_uuid);
-    state.renderer.invalidate();
-    state.force_full_render = true;
-    state.needs_render = true;
-}
-
-/// Restore focus to the appropriate pane in the current tab.
-fn restoreFocusInTab(state: *State, old_uuid: ?[32]u8) void {
-    // Check if last focus was a float in this tab
-    if (state.tab_last_focus_kind.items.len > state.active_tab and
-        state.tab_last_focus_kind.items[state.active_tab] == .float)
-    {
-        if (state.tab_last_floating_uuid.items.len > state.active_tab) {
-            if (state.tab_last_floating_uuid.items[state.active_tab]) |uuid| {
-                for (state.floats.items, 0..) |pane, fi| {
-                    if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
-                    if (!pane.isVisibleOnTab(state.active_tab)) continue;
-                    if (pane.parent_tab) |parent| {
-                        if (parent != state.active_tab) continue;
-                    }
-                    state.active_floating = fi;
-                    state.syncPaneFocus(pane, old_uuid);
-                    return;
-                }
-            }
-        }
-    }
-
-    // Fall back to focused split pane
-    if (state.currentLayout().getFocusedPane()) |new_pane| {
-        state.syncPaneFocus(new_pane, old_uuid);
-    }
+    return loop_actions_focus.switchToPrevTab(state);
 }

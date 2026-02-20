@@ -270,6 +270,49 @@ fn stdinCallback(
     return .rearm;
 }
 
+fn cleanupDeadFloat(state: *State, index: usize) void {
+    if (index >= state.floats.items.len) return;
+
+    const was_active = if (state.active_floating) |af| af == index else false;
+    const exit_code = state.floats.items[index].getExitCode();
+    const pane = state.floats.orderedRemove(index);
+
+    mux.debugLog("float pane died: uuid={s} exit_code={d} focused={}", .{ pane.uuid[0..8], exit_code, was_active });
+
+    if (!was_active and exit_code != 0) {
+        const msg = std.fmt.allocPrint(
+            state.allocator,
+            "Background float exited with code {d}",
+            .{exit_code},
+        ) catch "Background float exited unexpectedly";
+        defer if (!std.mem.eql(u8, msg, "Background float exited unexpectedly")) state.allocator.free(msg);
+        state.notifications.showFor(msg, 3000);
+    }
+
+    float_completion.handleBlockingFloatCompletion(state, pane);
+
+    if (state.ses_client.isConnected()) {
+        state.ses_client.killPane(pane.uuid) catch |e| {
+            core.logging.logError("mux", "killPane failed for float", e);
+        };
+    }
+
+    pane.deinit();
+    state.allocator.destroy(pane);
+    state.needs_render = true;
+    state.force_full_render = true;
+    state.renderer.invalidate();
+    state.syncStateToSes();
+
+    if (was_active) {
+        state.active_floating = null;
+        state.cursor_needs_restore = true;
+        if (state.currentLayout().getFocusedPane()) |tiled| {
+            state.syncPaneFocus(tiled, null);
+        }
+    }
+}
+
 pub fn runMainLoop(state: *State) !void {
     const allocator = state.allocator;
 
@@ -310,10 +353,6 @@ pub fn runMainLoop(state: *State) !void {
     defer pending_local_pane_remove_fds.deinit(allocator);
     var pending_dead_splits: std.ArrayList(u16) = .empty;
     defer pending_dead_splits.deinit(allocator);
-    var current_local_split_fds: std.ArrayList(posix.fd_t) = .empty;
-    defer current_local_split_fds.deinit(allocator);
-    var stale_local_split_fds: std.ArrayList(posix.fd_t) = .empty;
-    defer stale_local_split_fds.deinit(allocator);
 
     var float_pane_watchers: std.AutoHashMap(posix.fd_t, *loop_local_watchers.FloatPaneWatcher) = std.AutoHashMap(posix.fd_t, *loop_local_watchers.FloatPaneWatcher).init(allocator);
     defer {
@@ -327,10 +366,6 @@ pub fn runMainLoop(state: *State) !void {
     defer pending_float_remove_fds.deinit(allocator);
     var pending_dead_float_uuids: std.ArrayList([32]u8) = .empty;
     defer pending_dead_float_uuids.deinit(allocator);
-    var current_float_fds: std.ArrayList(posix.fd_t) = .empty;
-    defer current_float_fds.deinit(allocator);
-    var stale_float_fds: std.ArrayList(posix.fd_t) = .empty;
-    defer stale_float_fds.deinit(allocator);
     var next_local_generation: u64 = 1;
     var next_float_generation: u64 = 1;
 
@@ -377,12 +412,10 @@ pub fn runMainLoop(state: *State) !void {
         }
         pending_local_pane_remove_fds.clearRetainingCapacity();
 
-        current_local_split_fds.clearRetainingCapacity();
         var local_it = state.currentLayout().splitIterator();
         while (local_it.next()) |pane| {
             if (!pane.*.hasPollableFd()) continue;
             const fd = pane.*.getFd();
-            current_local_split_fds.append(allocator, fd) catch continue;
             if (!local_pane_watchers.contains(fd)) {
                 const node = allocator.create(loop_local_watchers.LocalPaneWatcher) catch continue;
                 node.* = .{
@@ -405,20 +438,6 @@ pub fn runMainLoop(state: *State) !void {
             }
         }
 
-        stale_local_split_fds.clearRetainingCapacity();
-        var watch_it = local_pane_watchers.iterator();
-        while (watch_it.next()) |entry| {
-            const fd = entry.key_ptr.*;
-            if (!loop_local_watchers.fdListContains(current_local_split_fds.items, fd)) {
-                stale_local_split_fds.append(allocator, fd) catch {};
-            }
-        }
-        for (stale_local_split_fds.items) |fd| {
-            if (local_pane_watchers.fetchRemove(fd)) |kv| {
-                allocator.destroy(kv.value);
-            }
-        }
-
         for (pending_float_remove_fds.items) |pending| {
             if (float_pane_watchers.get(pending.fd)) |node| {
                 if (node.slot.generation == pending.generation) {
@@ -430,11 +449,9 @@ pub fn runMainLoop(state: *State) !void {
         }
         pending_float_remove_fds.clearRetainingCapacity();
 
-        current_float_fds.clearRetainingCapacity();
         for (state.floats.items) |pane| {
             if (!pane.hasPollableFd()) continue;
             const fd = pane.getFd();
-            current_float_fds.append(allocator, fd) catch continue;
             if (!float_pane_watchers.contains(fd)) {
                 const node = allocator.create(loop_local_watchers.FloatPaneWatcher) catch continue;
                 node.* = .{
@@ -454,20 +471,6 @@ pub fn runMainLoop(state: *State) !void {
                 };
                 const file = xev.File.initFd(fd);
                 file.poll(&loop, &node.completion, .read, loop_local_watchers.FloatPaneSlot, &node.slot, loop_local_watchers.floatPaneCallback);
-            }
-        }
-
-        stale_float_fds.clearRetainingCapacity();
-        var float_watch_it = float_pane_watchers.iterator();
-        while (float_watch_it.next()) |entry| {
-            const fd = entry.key_ptr.*;
-            if (!loop_local_watchers.fdListContains(current_float_fds.items, fd)) {
-                stale_float_fds.append(allocator, fd) catch {};
-            }
-        }
-        for (stale_float_fds.items) |fd| {
-            if (float_pane_watchers.fetchRemove(fd)) |kv| {
-                allocator.destroy(kv.value);
             }
         }
 
@@ -512,51 +515,7 @@ pub fn runMainLoop(state: *State) !void {
                 while (fi > 0) {
                     fi -= 1;
                     if (!state.floats.items[fi].isAlive()) {
-                        // Check if this was the active float.
-                        const was_active = if (state.active_floating) |af| af == fi else false;
-                        const exit_code = state.floats.items[fi].getExitCode();
-
-                        const pane = state.floats.orderedRemove(fi);
-
-                        // Log float pane death
-                        mux.debugLog("float pane died: uuid={s} exit_code={d} focused={}", .{ pane.uuid[0..8], exit_code, was_active });
-
-                        // Show notification if float died with non-zero exit and wasn't focused
-                        if (!was_active and exit_code != 0) {
-                            const msg = std.fmt.allocPrint(
-                                allocator,
-                                "Background float exited with code {d}",
-                                .{exit_code},
-                            ) catch "Background float exited unexpectedly";
-                            defer if (!std.mem.eql(u8, msg, "Background float exited unexpectedly")) allocator.free(msg);
-                            state.notifications.showFor(msg, 3000);
-                        }
-
-                        float_completion.handleBlockingFloatCompletion(state, pane);
-
-                        // Kill in ses (dead panes don't need to be orphaned).
-                        if (state.ses_client.isConnected()) {
-                            state.ses_client.killPane(pane.uuid) catch |e| {
-                                core.logging.logError("mux", "killPane failed for float", e);
-                            };
-                        }
-
-                        pane.deinit();
-                        state.allocator.destroy(pane);
-                        state.needs_render = true;
-                        state.force_full_render = true;
-                        state.renderer.invalidate();
-                        state.syncStateToSes();
-
-                        // Clear focus if this was the active float, sync focus to tiled pane.
-                        if (was_active) {
-                            state.active_floating = null;
-                            // Force cursor restoration - float may have hidden cursor
-                            state.cursor_needs_restore = true;
-                            if (state.currentLayout().getFocusedPane()) |tiled| {
-                                state.syncPaneFocus(tiled, null);
-                            }
-                        }
+                        cleanupDeadFloat(state, fi);
                         // When iterating in reverse, removals don't affect unprocessed indices.
                     }
                 }
@@ -668,39 +627,7 @@ pub fn runMainLoop(state: *State) !void {
         while (df_idx > 0) {
             df_idx -= 1;
             const fi = dead_floating.items[df_idx];
-            // Check if this was the active float before removing.
-            const was_active = if (state.active_floating) |af| af == fi else false;
-
-            const pane = state.floats.orderedRemove(fi);
-
-            // Capture exit status (not yet set if detected via HUP/ERR).
-            _ = pane.isAlive();
-
-            float_completion.handleBlockingFloatCompletion(state, pane);
-
-            // Kill in ses (dead panes don't need to be orphaned).
-            if (state.ses_client.isConnected()) {
-                state.ses_client.killPane(pane.uuid) catch |e| {
-                    core.logging.logError("mux", "killPane failed for float", e);
-                };
-            }
-
-            pane.deinit();
-            state.allocator.destroy(pane);
-            state.needs_render = true;
-            state.force_full_render = true;
-            state.renderer.invalidate();
-            state.syncStateToSes();
-
-            // Clear focus if this was the active float, sync focus to tiled pane.
-            if (was_active) {
-                state.active_floating = null;
-                // Force cursor restoration - float may have hidden cursor
-                state.cursor_needs_restore = true;
-                if (state.currentLayout().getFocusedPane()) |tiled| {
-                    state.syncPaneFocus(tiled, null);
-                }
-            }
+            cleanupDeadFloat(state, fi);
         }
         // Ensure active_floating is still valid.
         if (state.active_floating) |af| {

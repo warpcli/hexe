@@ -7,7 +7,12 @@ const shared = @import("shared.zig");
 const print = std.debug.print;
 
 pub fn runPodKill(allocator: std.mem.Allocator, uuid: []const u8, name: []const u8, signal_name: []const u8, force: bool) !void {
-    const pid = try resolvePodPid(allocator, uuid, name);
+    const pid = resolvePodPid(allocator, uuid, name) catch |err| {
+        if (err == error.InvalidUuid) {
+            print("Error: --uuid must be 32 hex chars\n", .{});
+        }
+        return err;
+    };
     if (pid == null) {
         print("pod not found\n", .{});
         return;
@@ -58,53 +63,14 @@ fn parseSignal(name: []const u8) ?c_int {
 fn resolvePodPid(allocator: std.mem.Allocator, uuid: []const u8, name: []const u8) !?i64 {
     // If uuid is provided, we can just read the .meta file for pid.
     if (uuid.len > 0) {
-        if (uuid.len != 32) return error.InvalidUuid;
+        if (!shared.isUuid32Hex(uuid)) return error.InvalidUuid;
         const dir = try ipc.getSocketDir(allocator);
         defer allocator.free(dir);
         const path = try std.fmt.allocPrint(allocator, "{s}/pod-{s}.meta", .{ dir, uuid });
         defer allocator.free(path);
         return readPidFromMeta(path);
     }
-    if (name.len == 0) return null;
-
-    // Scan all meta files; pick newest created_at for matching name.
-    const dir = try ipc.getSocketDir(allocator);
-    defer allocator.free(dir);
-
-    var best_pid: ?i64 = null;
-    var best_created_at: i64 = -1;
-
-    var d = try std.fs.cwd().openDir(dir, .{ .iterate = true });
-    defer d.close();
-    var it = d.iterate();
-    while (try it.next()) |entry| {
-        if (entry.kind != .file) continue;
-        if (!std.mem.startsWith(u8, entry.name, "pod-")) continue;
-        if (!std.mem.endsWith(u8, entry.name, ".meta")) continue;
-
-        const full = try std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, entry.name });
-        defer allocator.free(full);
-
-        var f = d.openFile(entry.name, .{}) catch continue;
-        defer f.close();
-        var buf: [4096]u8 = undefined;
-        const n = f.readAll(&buf) catch continue;
-        if (n == 0) continue;
-        const line = std.mem.trim(u8, buf[0..n], " \t\n\r");
-        if (!std.mem.startsWith(u8, line, pod_meta.POD_META_PREFIX)) continue;
-        const nm = parseField(line, "name") orelse continue;
-        if (!std.mem.eql(u8, nm, name)) continue;
-        const pid_s = parseField(line, "pid") orelse continue;
-        const pid = std.fmt.parseInt(i64, pid_s, 10) catch continue;
-        const ca = parseField(line, "created_at") orelse "0";
-        const created_at = std.fmt.parseInt(i64, ca, 10) catch 0;
-        if (created_at >= best_created_at) {
-            best_created_at = created_at;
-            best_pid = pid;
-        }
-    }
-
-    return best_pid;
+    return shared.resolveNewestPodPidByName(allocator, name);
 }
 
 fn readPidFromMeta(path: []const u8) ?i64 {

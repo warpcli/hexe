@@ -83,7 +83,7 @@ pub fn getPopBuilder(lua: *Lua) !*config_builder.PopConfigBuilder {
 /// Parse a key string into BindKey
 fn parseKeyString(key_str: []const u8) ?config.Config.BindKey {
     // Debug: print what we're parsing
-    std.debug.print("DEBUG parseKeyString: key_str='{s}' len={}\n", .{key_str, key_str.len});
+    std.debug.print("DEBUG parseKeyString: key_str='{s}' len={}\n", .{ key_str, key_str.len });
 
     if (key_str.len == 1) return .{ .char = key_str[0] };
     if (std.mem.eql(u8, key_str, "space")) return .space;
@@ -139,7 +139,7 @@ pub fn parseKeyArray(lua: *Lua, table_idx: i32) ?ParsedKey {
 
     if (key) |k| {
         const result = ParsedKey{ .mods = mods, .key = k };
-        std.debug.print("DEBUG parseKeyArray returning: mods={} key={s}\n", .{result.mods, @tagName(@as(config.Config.BindKeyKind, result.key))});
+        std.debug.print("DEBUG parseKeyArray returning: mods={} key={s}\n", .{ result.mods, @tagName(@as(config.Config.BindKeyKind, result.key)) });
         return result;
     }
 
@@ -330,7 +330,7 @@ pub fn parseAction(lua: *Lua, idx: i32) ?config.Config.BindAction {
             _ = lua.getField(idx, "dir");
             const has_dir = lua.typeOf(-1) != .nil;
             const dir_type = lua.typeOf(-1);
-            std.debug.print("DEBUG focus.move action: has_type={} has_dir={} dir_type={s} idx={}\n", .{has_type, has_dir, @tagName(dir_type), idx});
+            std.debug.print("DEBUG focus.move action: has_type={} has_dir={} dir_type={s} idx={}\n", .{ has_type, has_dir, @tagName(dir_type), idx });
             const dir_str = lua.toString(-1) catch {
                 std.debug.print("DEBUG parseAction focus.move: failed to get dir string (type was {s})\n", .{@tagName(dir_type)});
                 lua.pop(1); // Pop "dir" value before returning
@@ -572,7 +572,8 @@ fn parseWhen(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.WhenDef 
     // If nothing was set, return null
     if (when.all == null and when.any == null and
         when.bash == null and when.lua == null and
-        when.env == null and when.env_not == null) {
+        when.env == null and when.env_not == null)
+    {
         return null;
     }
 
@@ -773,7 +774,7 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
                 };
 
                 // Debug: check what we're appending
-                std.debug.print("DEBUG appending bind[{}]: mods={} key={s} action_found={}\n", .{i, bind.mods, @tagName(@as(config.Config.BindKeyKind, bind.key)), action_found});
+                std.debug.print("DEBUG appending bind[{}]: mods={} key={s} action_found={}\n", .{ i, bind.mods, @tagName(@as(config.Config.BindKeyKind, bind.key)), action_found });
 
                 mux.binds.append(mux.allocator, bind) catch {
                     _ = lua.pushString("keymap.set: failed to append binding");
@@ -1050,7 +1051,7 @@ pub export fn hexe_mux_float_define(L: ?*LuaState) callconv(.c) c_int {
         lua.raiseError();
     }
     const key = key_str[0];
-    std.debug.print("DEBUG float.define: key='{}' (0x{x})\n", .{key, key});
+    std.debug.print("DEBUG float.define: key='{}' (0x{x})\n", .{ key, key });
 
     // Arg 2 must be a table
     if (lua.typeOf(2) != .table) {
@@ -1348,7 +1349,7 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         return null;
     }
     const key = key_str[0];
-    std.debug.print("DEBUG parseLayoutFloat: key='{}' (0x{x})\n", .{key, key});
+    std.debug.print("DEBUG parseLayoutFloat: key='{}' (0x{x})\n", .{ key, key });
     lua.pop(1);
 
     // Create float with defaults
@@ -1729,7 +1730,7 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
             if (lua.typeOf(-1) == .table) {
                 // Parse tab
                 _ = lua.getField(-1, "name");
-                const tab_name_str = lua.toString(-2) catch {
+                const tab_name_str = lua.toString(-1) catch {
                     lua.pop(2); // pop name and tab
                     continue;
                 };

@@ -167,26 +167,24 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
         return false;
     };
 
-    // Wait for process with timeout
+    // Wait for process with timeout using non-blocking waitpid polling.
     const timeout_ms = getConditionTimeout();
     const start_ms = std.time.milliTimestamp();
-    var ok = false;
 
     while (std.time.milliTimestamp() - start_ms < timeout_ms) {
-        if (child.wait() catch null) |term| {
-            ok = switch (term) {
-                .Exited => |ec| ec == 0,
-                else => false,
-            };
+        const wait_res = std.posix.waitpid(child.id, std.posix.W.NOHANG);
+        if (wait_res.pid == child.id) {
+            child.id = undefined;
+            const ok = std.posix.W.IFEXITED(wait_res.status) and std.posix.W.EXITSTATUS(wait_res.status) == 0;
             map.put(key, .{ .last_eval_ms = now, .last_result = ok }) catch {};
             return ok;
         }
+
         std.Thread.sleep(5 * std.time.ns_per_ms); // Sleep 5ms between checks
     }
 
     // Timeout - kill the process
     _ = child.kill() catch {};
-    _ = child.wait() catch {};
     map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
     return false;
 }
@@ -525,12 +523,10 @@ pub fn draw(
     const right_budget = width -| (center_start +| center_width);
 
     // Collect left modules with widths
-    std.debug.print("DEBUG: cfg.left.len={} cfg.left.ptr={*}\n", .{cfg.left.len, cfg.left.ptr});
     const ModuleInfo = struct { mod: *const core.Segment, width: u16, visible: bool };
     var left_modules: [24]ModuleInfo = undefined;
     var left_count: usize = 0;
     for (cfg.left) |*mod| {
-        std.debug.print("DEBUG: Processing segment {}: name.ptr={*} name.len={}\n", .{left_count, mod.name.ptr, mod.name.len});
         if (left_count < 24) {
             left_modules[left_count] = .{
                 .mod = mod,
@@ -540,17 +536,10 @@ pub fn draw(
             left_count += 1;
         }
     }
-    std.debug.print("DEBUG: Final left_count={}\n", .{left_count});
 
     // Sort left by priority and mark visible
     var left_order: [24]usize = undefined;
     for (0..left_count) |i| left_order[i] = i;
-
-    // Debug: check bounds
-    if (left_count > 24) {
-        std.debug.print("ERROR: left_count={} exceeds array size 24, cfg.left.len={}\n", .{left_count, cfg.left.len});
-        @panic("left_count out of bounds");
-    }
 
     for (1..left_count) |i| {
         const key = left_order[i];

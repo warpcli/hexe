@@ -4,6 +4,7 @@ const core = @import("core");
 
 const State = @import("state.zig").State;
 const keybinds = @import("keybinds.zig");
+const key_translate = @import("key_translate.zig");
 
 fn focusedPaneInAltScreen(state: *State) bool {
     if (state.active_floating) |idx| {
@@ -111,12 +112,7 @@ pub fn parse(inp: []const u8) ?CsiUEvent {
         return null;
     }
 
-    const mask: u32 = if (mod_val > 0) mod_val - 1 else 0;
-    var mods: u8 = 0;
-    if ((mask & 2) != 0) mods |= 1; // alt
-    if ((mask & 4) != 0) mods |= 2; // ctrl
-    if ((mask & 1) != 0) mods |= 4; // shift
-    if ((mask & 8) != 0) mods |= 8; // super
+    const mods = key_translate.decodeKittyMods(mod_val);
 
     const key: core.Config.BindKey = blk: {
         if (keycode == 32) break :blk .space;
@@ -128,45 +124,7 @@ pub fn parse(inp: []const u8) ?CsiUEvent {
 }
 
 pub fn translateToLegacy(out: *[8]u8, ev: CsiUEvent) ?usize {
-    var ch: u8 = switch (@as(core.Config.BindKeyKind, ev.key)) {
-        .space => ' ',
-        .char => ev.key.char,
-        else => return null,
-    };
-
-    // Shift+Tab = backtab (CSI Z)
-    if ((ev.mods & 4) != 0 and ch == 0x09) {
-        out[0] = 0x1b;
-        out[1] = '[';
-        out[2] = 'Z';
-        return 3;
-    }
-
-    // Ctrl+Space = NUL
-    if ((ev.mods & 2) != 0 and ch == ' ') {
-        out[0] = 0x00;
-        return 1;
-    }
-
-    if ((ev.mods & 4) != 0) {
-        if (ch >= 'a' and ch <= 'z') ch = ch - 'a' + 'A';
-    }
-    if ((ev.mods & 2) != 0) {
-        if (ch >= 'a' and ch <= 'z') {
-            ch = ch - 'a' + 1;
-        } else if (ch >= 'A' and ch <= 'Z') {
-            ch = ch - 'A' + 1;
-        }
-    }
-
-    var n: usize = 0;
-    if ((ev.mods & 1) != 0) {
-        out[n] = 0x1b;
-        n += 1;
-    }
-    out[n] = ch;
-    n += 1;
-    return n;
+    return key_translate.encodeLegacyKey(out[0..], ev.mods, ev.key, false);
 }
 
 pub fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {

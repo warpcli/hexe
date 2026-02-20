@@ -871,7 +871,7 @@ pub const SesClient = struct {
 
         var child = std.process.Child.init(args_list.items, std.heap.page_allocator);
         child.spawn() catch |err| {
-            std.debug.print("Failed to start ses daemon: {}\n", .{err});
+            mux.debugLog("failed to start ses daemon: {s}", .{@errorName(err)});
             return err;
         };
         _ = child.wait() catch {};
