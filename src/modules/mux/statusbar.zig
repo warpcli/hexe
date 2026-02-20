@@ -12,7 +12,7 @@ const LuaRuntime = core.LuaRuntime;
 
 const State = @import("state.zig").State;
 const Renderer = @import("render_core.zig").Renderer;
-const Color = @import("render_types.zig").Color;
+const Color = core.style.Color;
 const Pane = @import("pane.zig").Pane;
 
 const WhenCacheEntry = struct {

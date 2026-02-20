@@ -1,7 +1,7 @@
 const std = @import("std");
 
 const State = @import("state.zig").State;
-const CursorInfo = @import("render_types.zig").CursorInfo;
+const CursorInfo = @import("render_core.zig").CursorInfo;
 
 const statusbar = @import("statusbar.zig");
 const popup_render = @import("popup_render.zig");

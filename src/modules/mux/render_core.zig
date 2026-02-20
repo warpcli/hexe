@@ -3,11 +3,16 @@ const vaxis = @import("vaxis");
 const ghostty = @import("ghostty-vt");
 const pop = @import("pop");
 
-const CursorInfo = @import("render_types.zig").CursorInfo;
-
 const vt_bridge = @import("vt_bridge.zig");
 const render_sprite = @import("render_sprite.zig");
 const render_vx = @import("render_vx.zig");
+
+pub const CursorInfo = struct {
+    x: u16 = 0,
+    y: u16 = 0,
+    style: u8 = 0,
+    visible: bool = true,
+};
 
 /// Differential renderer that tracks state and only emits changed cells.
 pub const Renderer = struct {

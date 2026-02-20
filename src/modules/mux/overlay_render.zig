@@ -1,8 +1,9 @@
 const std = @import("std");
+const shp = @import("shp");
+const core = @import("core");
 const Renderer = @import("render_core.zig").Renderer;
 const statusbar = @import("statusbar.zig");
 const text_width = @import("text_width.zig");
-const style_bridge = @import("style_bridge.zig");
 const vaxis_draw = @import("vaxis_draw.zig");
 
 const pop = @import("pop");
@@ -176,7 +177,7 @@ fn renderResizeInfo(renderer: *Renderer, overlays: *OverlayManager) void {
     }
 
     // Draw text
-    _ = statusbar.drawStyledText(renderer, box_x + padding, box_y, text, style_bridge.textStyle(.{ .palette = 0 }, .{ .palette = 1 }, false));
+    _ = statusbar.drawStyledText(renderer, box_x + padding, box_y, text, textStyle(.{ .palette = 0 }, .{ .palette = 1 }, false));
 }
 
 /// Render keycast history in bottom-right corner
@@ -211,7 +212,7 @@ fn renderKeycast(renderer: *Renderer, overlays: *const OverlayManager, screen_wi
         }
 
         // Draw text
-        _ = statusbar.drawStyledText(renderer, box_x + padding, y, text, style_bridge.textStyle(.{ .palette = 15 }, .{ .palette = 238 }, true));
+        _ = statusbar.drawStyledText(renderer, box_x + padding, y, text, textStyle(.{ .palette = 15 }, .{ .palette = 238 }, true));
 
         y += 1;
     }
@@ -244,7 +245,7 @@ fn renderOverlay(renderer: *Renderer, ov: overlay.Overlay, screen_width: u16, sc
     // Draw text
     const text_x = pos.x + ov.padding_x;
     const text_y = pos.y + ov.padding_y;
-    _ = statusbar.drawStyledText(renderer, text_x, text_y, clipped, style_bridge.textStyle(.{ .palette = ov.fg }, .{ .palette = ov.bg }, ov.bold));
+    _ = statusbar.drawStyledText(renderer, text_x, text_y, clipped, textStyle(.{ .palette = ov.fg }, .{ .palette = ov.bg }, ov.bold));
 }
 
 fn calculateCornerPosition(
@@ -262,5 +263,20 @@ fn calculateCornerPosition(
         .bottom_left => .{ .x = offset_x, .y = screen_height -| box_height -| offset_y },
         .bottom_right => .{ .x = screen_width -| box_width -| offset_x, .y = screen_height -| box_height -| offset_y },
         .center => .{ .x = screen_width / 2 -| box_width / 2, .y = screen_height / 2 -| box_height / 2 },
+    };
+}
+fn textStyle(fg: core.style.Color, bg: core.style.Color, bold: bool) shp.Style {
+    return .{
+        .fg = switch (fg) {
+            .none => .none,
+            .palette => |idx| .{ .palette = idx },
+            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
+        },
+        .bg = switch (bg) {
+            .none => .none,
+            .palette => |idx| .{ .palette = idx },
+            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
+        },
+        .bold = bold,
     };
 }

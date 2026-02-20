@@ -5,7 +5,7 @@ const core = @import("core");
 
 const Pane = @import("pane.zig").Pane;
 const Renderer = @import("render_core.zig").Renderer;
-const Color = @import("render_types.zig").Color;
+const Color = core.style.Color;
 const statusbar = @import("statusbar.zig");
 const vaxis_draw = @import("vaxis_draw.zig");
 

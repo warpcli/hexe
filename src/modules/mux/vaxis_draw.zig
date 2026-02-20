@@ -1,7 +1,8 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
+const core = @import("core");
 const Renderer = @import("render_core.zig").Renderer;
-const Color = @import("render_types.zig").Color;
+const Color = core.style.Color;
 const vaxis_cell = @import("vaxis_cell.zig");
 
 pub fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: ?Color, bg: ?Color, bold: bool) void {

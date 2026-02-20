@@ -3,20 +3,27 @@ const core = @import("core");
 const shp = @import("shp");
 const vaxis = @import("vaxis");
 const Renderer = @import("render_core.zig").Renderer;
-const Color = @import("render_types.zig").Color;
+const Color = core.style.Color;
 const statusbar = @import("statusbar.zig");
 const text_width = @import("text_width.zig");
 const vaxis_cell = @import("vaxis_cell.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
 const vaxis_draw = @import("vaxis_draw.zig");
-const style_bridge = @import("style_bridge.zig");
 const Pane = @import("pane.zig").Pane;
 const Layout = @import("layout.zig").Layout;
 
 fn toShpStyle(seg: statusbar.RenderedSegment) shp.Style {
     return .{
-        .fg = style_bridge.renderColorToShp(seg.fg),
-        .bg = style_bridge.renderColorToShp(seg.bg),
+        .fg = switch (seg.fg) {
+            .none => .none,
+            .palette => |idx| .{ .palette = idx },
+            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
+        },
+        .bg = switch (seg.bg) {
+            .none => .none,
+            .palette => |idx| .{ .palette = idx },
+            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
+        },
         .bold = seg.bold,
         .italic = seg.italic,
     };

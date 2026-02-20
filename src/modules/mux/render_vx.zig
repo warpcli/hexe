@@ -1,8 +1,5 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
-const render_types = @import("render_types.zig");
-
-const CursorInfo = render_types.CursorInfo;
 
 fn mapCursorShape(style: u8) vaxis.Cell.CursorShape {
     return switch (style) {
@@ -40,7 +37,7 @@ pub fn resizeVaxisForSize(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, width:
     vx.screen_last = try vaxis.AllocatingScreen.init(allocator, width, height);
 }
 
-pub fn renderFrame(vx: *vaxis.Vaxis, stdout: std.fs.File, cursor: CursorInfo, force_full: bool) !void {
+pub fn renderFrame(vx: *vaxis.Vaxis, stdout: std.fs.File, cursor: anytype, force_full: bool) !void {
     vx.screen.cursor_vis = cursor.visible;
     if (cursor.visible) {
         vx.screen.cursor = .{ .col = cursor.x, .row = cursor.y };
