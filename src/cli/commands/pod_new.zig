@@ -96,11 +96,10 @@ pub fn runPodNew(
         const remaining_ms = deadline_ms - std.time.milliTimestamp();
         if (remaining_ms <= 0) return error.PodSpawnTimeout;
 
-        var pfd = [_]std.posix.pollfd{.{ .fd = stdout_fd, .events = std.posix.POLL.IN, .revents = 0 }};
-        const rc = std.posix.poll(&pfd, @intCast(remaining_ms)) catch |err| return err;
-        if (rc == 0) return error.PodSpawnTimeout;
-        if (pfd[0].revents & (std.posix.POLL.HUP | std.posix.POLL.ERR) != 0) return error.PodNoHandshake;
-        if (pfd[0].revents & std.posix.POLL.IN == 0) continue;
+        core.wire.waitReadableTimeout(stdout_fd, @intCast(remaining_ms)) catch |err| switch (err) {
+            error.Timeout => return error.PodSpawnTimeout,
+            else => return err,
+        };
 
         var one: [1]u8 = undefined;
         const n = try stdout_file.read(&one);
@@ -140,9 +139,6 @@ pub fn runPodNew(
 
     const stdout = std.fs.File.stdout();
     var buf: [4096]u8 = undefined;
-    const json_str = try std.fmt.bufPrint(&buf,
-        "{{\"type\":\"{s}\",\"uuid\":\"{s}\",\"socket\":\"{s}\",\"pod_pid\":{d},\"child_pid\":{d}}}\n",
-        .{response.type, response.uuid, response.socket, response.pod_pid, response.child_pid}
-    );
+    const json_str = try std.fmt.bufPrint(&buf, "{{\"type\":\"{s}\",\"uuid\":\"{s}\",\"socket\":\"{s}\",\"pod_pid\":{d},\"child_pid\":{d}}}\n", .{ response.type, response.uuid, response.socket, response.pod_pid, response.child_pid });
     try stdout.writeAll(json_str);
 }

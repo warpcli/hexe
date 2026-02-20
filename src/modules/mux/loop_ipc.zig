@@ -91,12 +91,11 @@ fn handleNotify(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) v
     }
     wire.readExact(fd, buffer[0..notify.msg_len]) catch return;
     const msg_copy = state.allocator.dupe(u8, buffer[0..notify.msg_len]) catch return;
-    state.notifications.showWithOptions(
-        msg_copy,
-        state.notifications.default_duration_ms,
-        state.notifications.default_style,
-        true,
-    );
+    state.notifications.showWithOptions(msg_copy, .{
+        .duration_ms = state.notifications.default_duration_ms,
+        .style = state.notifications.default_style,
+        .owned = true,
+    });
     state.needs_render = true;
 }
 
@@ -117,12 +116,11 @@ fn handleTargetedNotify(state: *State, fd: posix.fd_t, payload_len: u32, buffer:
     // Try to find pane with this UUID.
     if (state.findPaneByUuid(notify.uuid)) |pane| {
         const dur = if (duration > 0) duration else pane.notifications.default_duration_ms;
-        pane.notifications.showWithOptions(
-            msg_copy,
-            dur,
-            pane.notifications.default_style,
-            true,
-        );
+        pane.notifications.showWithOptions(msg_copy, .{
+            .duration_ms = dur,
+            .style = pane.notifications.default_style,
+            .owned = true,
+        });
         state.needs_render = true;
         return;
     }
@@ -131,12 +129,11 @@ fn handleTargetedNotify(state: *State, fd: posix.fd_t, payload_len: u32, buffer:
     for (state.tabs.items) |*tab| {
         if (std.mem.startsWith(u8, &tab.uuid, &notify.uuid)) {
             const dur = if (duration > 0) duration else tab.notifications.default_duration_ms;
-            tab.notifications.showWithOptions(
-                msg_copy,
-                dur,
-                tab.notifications.default_style,
-                true,
-            );
+            tab.notifications.showWithOptions(msg_copy, .{
+                .duration_ms = dur,
+                .style = tab.notifications.default_style,
+                .owned = true,
+            });
             state.needs_render = true;
             return;
         }
@@ -160,36 +157,19 @@ fn handlePopConfirm(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
     wire.readExact(fd, buffer[0..pc.msg_len]) catch return;
     const msg = buffer[0..pc.msg_len];
     const timeout_ms: ?i64 = if (pc.timeout_ms > 0) @as(i64, pc.timeout_ms) else null;
-    const opts: pop.ConfirmOptions = .{ .timeout_ms = timeout_ms };
+    const target = resolvePopupTarget(state, pc.uuid);
 
-    // Check if target UUID is non-zero.
-    const zero_uuid: [32]u8 = .{0} ** 32;
-    if (!std.mem.eql(u8, &pc.uuid, &zero_uuid)) {
-        // Try pane match.
-        if (state.findPaneByUuid(pc.uuid)) |pane| {
-            pane.popups.showConfirmOwned(msg, opts) catch return;
-            state.pending_pop_response = true;
-            state.pending_pop_scope = .pane;
-            state.pending_pop_pane = pane;
-            state.needs_render = true;
-            return;
-        }
-        // Try tab match.
-        for (state.tabs.items, 0..) |*tab, tab_idx| {
-            if (std.mem.startsWith(u8, &tab.uuid, &pc.uuid)) {
-                tab.popups.showConfirmOwned(msg, opts) catch return;
-                state.pending_pop_response = true;
-                state.pending_pop_scope = .tab;
-                state.pending_pop_tab = tab_idx;
-                state.needs_render = true;
-                return;
-            }
-        }
-    }
-    // Default: MUX level.
-    state.popups.showConfirmOwned(msg, opts) catch return;
-    state.pending_pop_response = true;
-    state.pending_pop_scope = .mux;
+    const confirm_cfg = switch (target.scope) {
+        .pane => state.pop_config.pane.confirm,
+        else => state.pop_config.carrier.confirm,
+    };
+    const opts: pop.ConfirmOptions = .{
+        .timeout_ms = timeout_ms,
+        .yes_label = confirm_cfg.yes_label,
+        .no_label = confirm_cfg.no_label,
+    };
+    target.manager.showConfirmOwned(msg, opts) catch return;
+    setPendingPopupTarget(state, target);
     state.needs_render = true;
 }
 
@@ -228,45 +208,63 @@ fn handlePopChoose(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8
     }
 
     if (items_list.items.len == 0) return;
+    const target = resolvePopupTarget(state, pc.uuid);
 
-    const opts: pop.PickerOptions = .{ .title = title, .timeout_ms = timeout_ms };
-
-    // Route by UUID (like PopConfirm).
-    const zero_uuid: [32]u8 = .{0} ** 32;
-    if (!std.mem.eql(u8, &pc.uuid, &zero_uuid)) {
-        if (state.findPaneByUuid(pc.uuid)) |pane| {
-            pane.popups.showPickerOwned(items_list.items, opts) catch {
-                for (items_list.items) |item| state.allocator.free(item);
-                return;
-            };
-            state.pending_pop_response = true;
-            state.pending_pop_scope = .pane;
-            state.pending_pop_pane = pane;
-            state.needs_render = true;
-            return;
-        }
-        for (state.tabs.items, 0..) |*tab, tab_idx| {
-            if (std.mem.startsWith(u8, &tab.uuid, &pc.uuid)) {
-                tab.popups.showPickerOwned(items_list.items, opts) catch {
-                    for (items_list.items) |item| state.allocator.free(item);
-                    return;
-                };
-                state.pending_pop_response = true;
-                state.pending_pop_scope = .tab;
-                state.pending_pop_tab = tab_idx;
-                state.needs_render = true;
-                return;
-            }
-        }
-    }
-    // Default: MUX level.
-    state.popups.showPickerOwned(items_list.items, opts) catch {
+    const choose_cfg = switch (target.scope) {
+        .pane => state.pop_config.pane.choose,
+        else => state.pop_config.carrier.choose,
+    };
+    const opts: pop.PickerOptions = .{
+        .title = title,
+        .timeout_ms = timeout_ms,
+        .visible_count = choose_cfg.visible_count,
+    };
+    target.manager.showPickerOwned(items_list.items, opts) catch {
         for (items_list.items) |item| state.allocator.free(item);
         return;
     };
-    state.pending_pop_response = true;
-    state.pending_pop_scope = .mux;
+    setPendingPopupTarget(state, target);
     state.needs_render = true;
+}
+
+const PopupTarget = struct {
+    manager: *pop.PopupManager,
+    scope: pop.Scope,
+    tab_idx: usize = 0,
+    pane: ?*Pane = null,
+};
+
+fn resolvePopupTarget(state: *State, uuid: [32]u8) PopupTarget {
+    const zero_uuid: [32]u8 = .{0} ** 32;
+    if (!std.mem.eql(u8, &uuid, &zero_uuid)) {
+        if (state.findPaneByUuid(uuid)) |pane| {
+            return .{ .manager = &pane.popups, .scope = .pane, .pane = pane };
+        }
+        for (state.tabs.items, 0..) |*tab, tab_idx| {
+            if (std.mem.startsWith(u8, &tab.uuid, &uuid)) {
+                return .{ .manager = &tab.popups, .scope = .tab, .tab_idx = tab_idx };
+            }
+        }
+    }
+    return .{ .manager = &state.popups, .scope = .mux };
+}
+
+fn setPendingPopupTarget(state: *State, target: PopupTarget) void {
+    state.pending_pop_response = true;
+    state.pending_pop_scope = target.scope;
+    switch (target.scope) {
+        .mux => {
+            state.pending_pop_pane = null;
+            state.pending_pop_tab = 0;
+        },
+        .tab => {
+            state.pending_pop_pane = null;
+            state.pending_pop_tab = target.tab_idx;
+        },
+        .pane => {
+            state.pending_pop_pane = target.pane;
+        },
+    }
 }
 
 fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
@@ -527,6 +525,12 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         offset += fr.exit_key_len;
     }
 
+    var isolation_profile_slice: []const u8 = "";
+    if (fr.isolation_profile_len > 0 and offset + fr.isolation_profile_len <= trail_len) {
+        isolation_profile_slice = buffer[offset .. offset + fr.isolation_profile_len];
+        offset += fr.isolation_profile_len;
+    }
+
     // Parse env entries.
     var env_list: std.ArrayList([]const u8) = .empty;
     defer env_list.deinit(state.allocator);
@@ -595,8 +599,11 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
 
     const env_items: ?[]const []const u8 = if (env_list.items.len > 0) env_list.items else null;
     const extra_items: ?[]const []const u8 = if (extra_env_list.items.len > 0) extra_env_list.items else null;
-    const use_pod = (!wait_for_exit) or isolated;
+    const isolation_profile: ?[]const u8 = if (isolation_profile_slice.len > 0) isolation_profile_slice else null;
+    const use_pod = (!wait_for_exit) or isolated or (isolation_profile != null);
     const title: ?[]const u8 = if (title_slice.len > 0) title_slice else null;
+
+    mux.debugLog("handleFloatRequest: wait_for_exit={} isolation_profile={s} use_pod={}", .{ wait_for_exit, isolation_profile orelse "", use_pod });
 
     const command = state.allocator.dupe(u8, cmd) catch return;
     defer state.allocator.free(command);
@@ -609,7 +616,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         .dim_background = focus,
         .exit_key = if (exit_key_slice.len > 0) exit_key_slice else null,
     };
-    const new_uuid = actions.createAdhocFloatWithSize(state, command, title, spawn_cwd, env_items, extra_items, use_pod, float_size) catch {
+    const new_uuid = actions.createAdhocFloatWithSize(state, command, title, spawn_cwd, env_items, extra_items, use_pod, float_size, isolation_profile) catch {
         // Spawn failed — if wait_for_exit, send error result so CLI doesn't hang.
         if (wait_for_exit) {
             const ctl_fd = state.ses_client.getCtlFd() orelse return;
@@ -721,7 +728,6 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
             wire.readExact(fd, buffer[0..resp.name_len]) catch return;
             const pane_name = state.allocator.dupe(u8, buffer[0..resp.name_len]) catch null;
             if (pane_name) |name| {
-                std.debug.print("[pane_info] Got name '{s}' for uuid, pokemon.enabled={}\n", .{ name, state.pop_config.widgets.pokemon.enabled });
                 // Free old name if exists
                 if (state.pane_names.get(resp.uuid)) |old_name| {
                     state.allocator.free(old_name);
@@ -731,15 +737,13 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
                 // If pokemon widget is enabled by default, load the sprite
                 // But only if not manually toggled and content is null (first load)
                 if (state.pop_config.widgets.pokemon.enabled) {
-                    std.debug.print("[pane_info] pokemon widget enabled, checking {} floats\n", .{state.floats.items.len});
                     // Find the pane with this UUID and load its sprite
                     // Check all floats
-                    for (state.floats.items, 0..) |pane, i| {
+                    for (state.floats.items) |pane| {
                         const uuid_match = std.mem.eql(u8, pane.uuid[0..], resp.uuid[0..]);
-                        std.debug.print("[pane_info] Float {}: uuid_match={}, sprite_init={}, manually_toggled={}, has_content={}\n", .{ i, uuid_match, pane.pokemon_initialized, pane.pokemon_state.manually_toggled, pane.pokemon_state.sprite_content != null });
                         if (uuid_match and pane.pokemon_initialized and
-                            !pane.pokemon_state.manually_toggled and pane.pokemon_state.sprite_content == null) {
-                            std.debug.print("[pane_info] Loading sprite for float {}\n", .{i});
+                            !pane.pokemon_state.manually_toggled and pane.pokemon_state.sprite_content == null)
+                        {
                             pane.pokemon_state.loadSprite(name, false) catch {};
                         }
                     }
@@ -747,7 +751,8 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
                     var split_iter = state.currentLayout().splits.valueIterator();
                     while (split_iter.next()) |pane| {
                         if (std.mem.eql(u8, pane.*.uuid[0..], resp.uuid[0..]) and pane.*.pokemon_initialized and
-                            !pane.*.pokemon_state.manually_toggled and pane.*.pokemon_state.sprite_content == null) {
+                            !pane.*.pokemon_state.manually_toggled and pane.*.pokemon_state.sprite_content == null)
+                        {
                             pane.*.pokemon_state.loadSprite(name, false) catch {};
                         }
                     }
@@ -811,4 +816,3 @@ fn skipPayload(fd: posix.fd_t, len: u32, buffer: []u8) void {
         remaining -= chunk;
     }
 }
-

@@ -77,7 +77,7 @@ pub fn renderOverlays(
 
     // Render keycast
     if (overlays.keycast.hasContent()) {
-        renderKeycast(renderer, &overlays.keycast, screen_width, content_height);
+        renderKeycast(renderer, overlays, screen_width, content_height);
     }
 
     // Render generic overlays
@@ -191,12 +191,17 @@ fn renderResizeInfo(renderer: *Renderer, overlays: *OverlayManager) void {
 }
 
 /// Render keycast history in bottom-right corner
-fn renderKeycast(renderer: *Renderer, keycast_state: *const overlay.KeycastState, screen_width: u16, content_height: u16) void {
+fn renderKeycast(renderer: *Renderer, overlays: *const OverlayManager, screen_width: u16, content_height: u16) void {
+    const keycast_state = &overlays.keycast;
     const entries = keycast_state.getEntries();
     if (entries.len == 0) return;
 
     const margin: u16 = 2;
-    var y = content_height -| margin -| @as(u16, @intCast(entries.len));
+    var y: u16 = switch (overlays.keycast_position) {
+        .topleft, .topright => margin,
+        .center => content_height / 2 -| @as(u16, @intCast(entries.len / 2)),
+        .bottomleft, .bottomright => content_height -| margin -| @as(u16, @intCast(entries.len)),
+    };
 
     for (entries) |entry| {
         const text = entry.getText();
@@ -204,7 +209,11 @@ fn renderKeycast(renderer: *Renderer, keycast_state: *const overlay.KeycastState
         const padding: u16 = 1;
         const box_width = text_len + padding * 2;
 
-        const box_x = screen_width -| margin -| box_width;
+        const box_x: u16 = switch (overlays.keycast_position) {
+            .topleft, .bottomleft => margin,
+            .center => screen_width / 2 -| box_width / 2,
+            .topright, .bottomright => screen_width -| margin -| box_width,
+        };
 
         // Draw background
         for (0..box_width) |dx| {

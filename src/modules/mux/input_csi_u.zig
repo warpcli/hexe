@@ -4,6 +4,23 @@ const core = @import("core");
 
 const State = @import("state.zig").State;
 const keybinds = @import("keybinds.zig");
+const key_translate = @import("key_translate.zig");
+
+fn focusedPaneInAltScreen(state: *State) bool {
+    if (state.active_floating) |idx| {
+        const fpane = state.floats.items[idx];
+        const can_interact = if (fpane.parent_tab) |parent| parent == state.active_tab else true;
+        if (fpane.isVisibleOnTab(state.active_tab) and can_interact) {
+            return fpane.vt.inAltScreen();
+        }
+    }
+
+    if (state.currentLayout().getFocusedPane()) |pane| {
+        return pane.vt.inAltScreen();
+    }
+
+    return false;
+}
 
 pub const CsiUEvent = struct {
     consumed: usize,
@@ -95,12 +112,7 @@ pub fn parse(inp: []const u8) ?CsiUEvent {
         return null;
     }
 
-    const mask: u32 = if (mod_val > 0) mod_val - 1 else 0;
-    var mods: u8 = 0;
-    if ((mask & 2) != 0) mods |= 1; // alt
-    if ((mask & 4) != 0) mods |= 2; // ctrl
-    if ((mask & 1) != 0) mods |= 4; // shift
-    if ((mask & 8) != 0) mods |= 8; // super
+    const mods = key_translate.decodeKittyMods(mod_val);
 
     const key: core.Config.BindKey = blk: {
         if (keycode == 32) break :blk .space;
@@ -112,49 +124,12 @@ pub fn parse(inp: []const u8) ?CsiUEvent {
 }
 
 pub fn translateToLegacy(out: *[8]u8, ev: CsiUEvent) ?usize {
-    var ch: u8 = switch (@as(core.Config.BindKeyKind, ev.key)) {
-        .space => ' ',
-        .char => ev.key.char,
-        else => return null,
-    };
-
-    // Shift+Tab = backtab (CSI Z)
-    if ((ev.mods & 4) != 0 and ch == 0x09) {
-        out[0] = 0x1b;
-        out[1] = '[';
-        out[2] = 'Z';
-        return 3;
-    }
-
-    // Ctrl+Space = NUL
-    if ((ev.mods & 2) != 0 and ch == ' ') {
-        out[0] = 0x00;
-        return 1;
-    }
-
-    if ((ev.mods & 4) != 0) {
-        if (ch >= 'a' and ch <= 'z') ch = ch - 'a' + 'A';
-    }
-    if ((ev.mods & 2) != 0) {
-        if (ch >= 'a' and ch <= 'z') {
-            ch = ch - 'a' + 1;
-        } else if (ch >= 'A' and ch <= 'Z') {
-            ch = ch - 'A' + 1;
-        }
-    }
-
-    var n: usize = 0;
-    if ((ev.mods & 1) != 0) {
-        out[n] = 0x1b;
-        n += 1;
-    }
-    out[n] = ch;
-    n += 1;
-    return n;
+    return key_translate.encodeLegacyKey(out[0..], ev.mods, ev.key, false);
 }
 
 pub fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
     const ESC: u8 = 0x1b;
+    const use_application_arrows = focusedPaneInAltScreen(state);
 
     var scratch: [8192]u8 = undefined;
     var n: usize = 0;
@@ -169,6 +144,19 @@ pub fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
 
     var i: usize = 0;
     while (i < bytes.len) {
+        // In alternate screen mode, map plain CSI arrows to SS3 arrows
+        // (application cursor mode) for better ncurses compatibility.
+        if (use_application_arrows and i + 2 < bytes.len and bytes[i] == ESC and bytes[i + 1] == '[') {
+            const dir = bytes[i + 2];
+            if (dir == 'A' or dir == 'B' or dir == 'C' or dir == 'D') {
+                flush(state, &scratch, &n);
+                const app_arrow = [3]u8{ ESC, 'O', dir };
+                keybinds.forwardInputToFocusedPane(state, &app_arrow);
+                i += 3;
+                continue;
+            }
+        }
+
         if (bytes[i] == ESC and i + 1 < bytes.len and bytes[i + 1] == '[') {
             if (parse(bytes[i..])) |ev| {
                 // Drop release, translate others.
@@ -202,8 +190,8 @@ pub fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
                         if (event_type != 3) {
                             // Strip event type and forward as traditional sequence
                             // Convert ESC[5;1:3~ to ESC[5~, or ESC[5~ as-is
-                            const colon_pos = std.mem.indexOf(u8, bytes[i..j+1], ":");
-                            const semi_pos = std.mem.indexOf(u8, bytes[i..j+1], ";");
+                            const colon_pos = std.mem.indexOf(u8, bytes[i .. j + 1], ":");
+                            const semi_pos = std.mem.indexOf(u8, bytes[i .. j + 1], ";");
 
                             if (colon_pos != null or semi_pos != null) {
                                 // Has modifiers/event type - strip them, keep just keycode~
@@ -217,7 +205,7 @@ pub fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
                             } else {
                                 // Plain sequence, no modifiers - forward as-is
                                 flush(state, &scratch, &n);
-                                keybinds.forwardInputToFocusedPane(state, bytes[i..j+1]);
+                                keybinds.forwardInputToFocusedPane(state, bytes[i .. j + 1]);
                             }
                         }
                         i = j + 1;

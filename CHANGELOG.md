@@ -1,5 +1,99 @@
 # Changelog
 
+## [0.0.4] - 2026-02-20
+
+### <!-- 0 -->⛰️  Features
+
+- Refactor notification management
+- Extract session reattachment logic into a dedicated module
+- Close extra file descriptors in child process
+- Implement synchronous pane info snapshot
+- Migrate I/O handling to xev event loop
+- Remove poll-based wait from main loop
+- Migrate local float PTY reads to xev watchers
+- Migrate local split PTY reads to xev watchers
+- Migrate stdin input handling to xev watcher
+- Move SES VT and CTL reads to xev watchers
+- Move pane sync and heartbeat to xev timer
+- Add libxev loop skeleton to runtime
+- Remove poll scaffolding from event loop runtime
+- Migrate VT routing fds to xev watchers
+- Process binary control fds with xev watchers
+- Move periodic maintenance to xev timer
+- Move server accept path to libxev
+- Migrate client IO loop to libxev
+- Move PTY drain path to libxev callbacks
+- Drive metadata and uplink ticks with xev timer
+- Add libxev accept loop and split uplink logic
+- Consolidate Voidbox integration and define isolation profiles
+- Implement isolation profile for float panes
+- Implement voidbox isolation for panes
+- Integrate voidbox for process sandboxing
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Prevent stale ses socket inheritance and add cli socket timeouts
+- Remove aggressive reattach pruning and reorder replay registration
+- Prune dead layout nodes during session reattach
+- Harden reattach tab restore against missing splits and root
+- Validate shell event numeric ranges before casting
+- Validate mux float isolation profile values
+- Clear stale pane metadata caches during reattach reset
+- Avoid mutating float list during toggle iteration
+- Enforce strict UUID parsing in pop command handlers
+- Enforce max frame length in pod frame writer
+- Validate pane info trailing payload bounds
+- Remove assume-capacity appends in reattach tracking reset
+- Safely reject unknown pod frame types
+- Accept supported protocol version range in handshakes
+- Enforce strict 32-hex UUID parsing in com commands
+- Escape layout JSON serializer strings correctly
+- Preserve 64-bit tab visibility on reattach
+- Free pane osc and exit key allocations on deinit
+- Reinitialize osc buffer after pane respawn deinit
+- Lazy remove stale watcher nodes to prevent UAF
+- Correct config file path in validation and messages
+- Handle invalid UUID in pod kill command
+- Decode percent-encoded pod metadata fields
+- Update SES handshake and CLI message types
+- Improve JSON string serialization and config handling
+- Guard local watcher removals against fd reuse
+- Guard queued closes against fd reuse races
+- Disarm client watchers before removing sessions
+- Keep xev accept responsive during poll cycles
+- Prevent duplicate client watchers from piling up
+
+### <!-- 2 -->🚜 Refactor
+
+- Centralize popup target routing in mux ipc handlers
+- Remove unused pane env pair builder
+- Remove dead stale-fd watcher scans in mux loop
+- Share key modifier translation across mux input paths
+- Make popup renderer dimensions derive from config style
+- Unify dead float cleanup handling in mux loop
+- Standardize and improve config loading
+- Move widget logic to new overlay modules
+- Modularize mux input and output logic
+- Extract poll fd registry reconciliation
+
+### <!-- 3 -->📚 Documentation
+
+- Clarify additive float attribute default merge behavior
+- Align sprite keybinding examples with supported bind events
+- Add write-meta option to pod daemon help
+- Remove unsupported uuid flag from mux float help
+- Isolate and clarify isolation documentation
+- Update isolation documentation with voidbox profiles
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Refactor pod target resolution into shared module
+- Extract keybind action dispatch logic
+- Replace debug prints with structured logs
+- Remove debug logging from mux module
+- Refactor wait timeout logic for write operations
+- Update voidbox dependency to use URL and hash
+
 ## [0.0.3] - 2026-02-15
 
 ### <!-- 0 -->⛰️  Features

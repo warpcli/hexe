@@ -19,6 +19,7 @@ const hexe_mux_tabs_set_status = api_bridge.hexe_mux_tabs_set_status;
 const hexe_mux_splits_setup = api_bridge.hexe_mux_splits_setup;
 const hexe_ses_layout_define = api_bridge.hexe_ses_layout_define;
 const hexe_ses_session_setup = api_bridge.hexe_ses_session_setup;
+const hexe_ses_isolation_set = api_bridge.hexe_ses_isolation_set;
 
 const hexe_shp_prompt_left = api_bridge.hexe_shp_prompt_left;
 const hexe_shp_prompt_right = api_bridge.hexe_shp_prompt_right;
@@ -143,7 +144,7 @@ pub const LuaRuntime = struct {
 
     /// Set the target section for config evaluation.
     ///
-    /// This is a performance knob: a single `config.lua` can branch on
+    /// This is a performance knob: a single config file can branch on
     /// `HEXE_SECTION` and only construct the relevant subtree (mux/shp/pop/etc).
     pub fn setHexeSection(self: *Self, section: []const u8) void {
         _ = self.lua.pushString(section);
@@ -551,6 +552,12 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.pushFunction(hexe_ses_session_setup);
     lua.setField(-2, "setup");
     lua.setField(-2, "session");
+
+    // hexe.ses.isolation = { set = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(hexe_ses_isolation_set);
+    lua.setField(-2, "set");
+    lua.setField(-2, "isolation");
 
     lua.setField(-2, "ses");
 

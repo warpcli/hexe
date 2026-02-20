@@ -10,25 +10,22 @@ const borders = @import("borders.zig");
 const mouse_selection = @import("mouse_selection.zig");
 const float_title = @import("float_title.zig");
 const overlay_render = @import("overlay_render.zig");
+const notification = @import("notification.zig");
 
 /// Apply winpulse brightness effect to a pane area
 fn applyPulseEffect(state: *State) void {
     if (!state.config.winpulse_enabled) {
-        std.debug.print("Winpulse disabled\n", .{});
         return;
     }
     if (state.pulse_start_ms == 0) {
-        std.debug.print("No active pulse\n", .{});
         return;
     }
     const bounds = state.pulse_pane_bounds orelse {
-        std.debug.print("No pulse bounds\n", .{});
         return;
     };
 
     const now_ms = std.time.milliTimestamp();
     const elapsed_ms = now_ms - state.pulse_start_ms;
-    std.debug.print("Pulse active: elapsed={}ms, duration={}ms\n", .{ elapsed_ms, state.config.winpulse_duration_ms });
     if (elapsed_ms >= state.config.winpulse_duration_ms) {
         // Animation finished - restore colors
         restorePulseColors(state);
@@ -107,7 +104,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
         // Draw pane-local notification (PANE realm - bottom of pane).
         if (pane.*.hasActiveNotification()) {
-            pane.*.notifications.renderInBounds(renderer, pane.*.x, pane.*.y, pane.*.width, pane.*.height, false);
+            notification.renderInBounds(&pane.*.notifications, renderer, pane.*.x, pane.*.y, pane.*.width, pane.*.height, false);
         }
 
         // Draw sprite overlay if enabled
@@ -154,7 +151,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
         // Draw pane-local notification (PANE realm - bottom of pane).
         if (pane.hasActiveNotification()) {
-            pane.notifications.renderInBounds(renderer, pane.x, pane.y, pane.width, pane.height, false);
+            notification.renderInBounds(&pane.notifications, renderer, pane.x, pane.y, pane.width, pane.height, false);
         }
 
         // Draw sprite overlay if enabled
@@ -195,7 +192,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
             // Draw pane-local notification (PANE realm - bottom of pane).
             if (pane.hasActiveNotification()) {
-                pane.notifications.renderInBounds(renderer, pane.x, pane.y, pane.width, pane.height, false);
+                notification.renderInBounds(&pane.notifications, renderer, pane.x, pane.y, pane.width, pane.height, false);
             }
 
             // Draw sprite overlay if enabled
@@ -261,18 +258,18 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     var split_iter = current_tab.layout.splits.valueIterator();
     while (split_iter.next()) |pane| {
         if (pane.*.popups.getActivePopup()) |popup| {
-            popup_render.drawInBounds(renderer, popup, &state.pop_config.carrier, pane.*.x, pane.*.y, pane.*.width, pane.*.height);
+            popup_render.drawInBounds(renderer, popup, &state.pop_config.pane, pane.*.x, pane.*.y, pane.*.width, pane.*.height);
         }
     }
     // Check all floats.
     for (state.floats.items) |fpane| {
         if (fpane.popups.getActivePopup()) |popup| {
-            popup_render.drawInBounds(renderer, popup, &state.pop_config.carrier, fpane.x, fpane.y, fpane.width, fpane.height);
+            popup_render.drawInBounds(renderer, popup, &state.pop_config.pane, fpane.x, fpane.y, fpane.width, fpane.height);
         }
     }
     if (current_tab.notifications.hasActive()) {
         // TAB notifications render in center area (distinct from MUX at top).
-        current_tab.notifications.renderInBounds(renderer, 0, 0, state.term_width, state.layout_height, true);
+        notification.renderInBounds(&current_tab.notifications, renderer, 0, 0, state.term_width, state.layout_height, true);
     }
 
     // Draw TAB-level blocking popup (below MUX popup).
@@ -281,7 +278,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     }
 
     // Draw MUX realm notifications overlay (top of screen).
-    state.notifications.render(renderer, state.term_width, state.term_height);
+    notification.renderFull(&state.notifications, renderer, state.term_width, state.term_height);
 
     // Draw MUX-level blocking popup overlay (on top of everything).
     if (state.popups.getActivePopup()) |popup| {

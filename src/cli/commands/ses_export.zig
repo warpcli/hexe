@@ -1,8 +1,6 @@
 const std = @import("std");
 const core = @import("core");
 const wire = core.wire;
-const posix = std.posix;
-const shared = @import("shared.zig");
 
 const print = std.debug.print;
 
@@ -22,8 +20,8 @@ pub fn run(allocator: std.mem.Allocator, session_id: []const u8, output_path: []
 
     const fd = client.fd;
 
-    // Send handshake
-    _ = try posix.write(fd, &.{wire.SES_HANDSHAKE_CLI});
+    // Send versioned CLI handshake
+    try wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI);
 
     // Request list of detached sessions
     try wire.writeControl(fd, .list_sessions, &.{});
@@ -45,19 +43,36 @@ pub fn run(allocator: std.mem.Allocator, session_id: []const u8, output_path: []
     var found = false;
     var target_session_id: [32]u8 = undefined;
 
-    while (off + @sizeOf(wire.DetachedSessionEntry) <= payload.len) {
-        const entry_bytes = payload[off..][0..@sizeOf(wire.DetachedSessionEntry)];
-        const entry = std.mem.bytesToValue(wire.DetachedSessionEntry, entry_bytes);
-        off += @sizeOf(wire.DetachedSessionEntry);
+    if (payload.len < @sizeOf(wire.SessionsList)) {
+        print("Error: malformed sessions list response\n", .{});
+        return error.MalformedResponse;
+    }
+
+    const list_hdr = std.mem.bytesToValue(wire.SessionsList, payload[0..@sizeOf(wire.SessionsList)]);
+    off = @sizeOf(wire.SessionsList);
+
+    var i: u16 = 0;
+    while (i < list_hdr.session_count) : (i += 1) {
+        if (off + @sizeOf(wire.SessionEntry) > payload.len) {
+            print("Error: malformed sessions list entry\n", .{});
+            return error.MalformedResponse;
+        }
+
+        const entry_bytes = payload[off..][0..@sizeOf(wire.SessionEntry)];
+        const entry = std.mem.bytesToValue(wire.SessionEntry, entry_bytes);
+        off += @sizeOf(wire.SessionEntry);
 
         const name_end = off + entry.name_len;
-        if (name_end > payload.len) break;
+        if (name_end > payload.len) {
+            print("Error: malformed session name\n", .{});
+            return error.MalformedResponse;
+        }
         const name = payload[off..name_end];
         off = name_end;
 
         // Check if this matches the requested session (by name or ID prefix)
         if (std.mem.eql(u8, name, session_id) or
-            std.mem.startsWith(u8, &entry.session_id, session_id) or
+            std.mem.startsWith(u8, entry.session_id[0..], session_id) or
             std.ascii.eqlIgnoreCase(name, session_id))
         {
             target_session_id = entry.session_id;

@@ -114,7 +114,8 @@ pub const PodMeta = struct {
         try w.print("{s} uuid={s}", .{ POD_META_PREFIX, self.uuid[0..] });
 
         if (self.name) |n| {
-            try w.print(" name={s}", .{n});
+            try w.writeAll(" name=");
+            try writeMetaEscaped(w, n);
         } else {
             try w.writeAll(" name=");
         }
@@ -122,13 +123,15 @@ pub const PodMeta = struct {
         try w.print(" pid={d} child_pid={d}", .{ self.pid, self.child_pid });
 
         if (self.cwd) |d| {
-            try w.print(" cwd={s}", .{d});
+            try w.writeAll(" cwd=");
+            try writeMetaEscaped(w, d);
         } else {
             try w.writeAll(" cwd=");
         }
 
         if (self.shell) |s| {
-            try w.print(" shell={s}", .{s});
+            try w.writeAll(" shell=");
+            try writeMetaEscaped(w, s);
         }
 
         try w.print(" isolated={d}", .{if (self.isolated) @as(u8, 1) else 0});
@@ -185,4 +188,20 @@ const strings = @import("strings.zig");
 
 pub fn sanitizeNameForAlias(out: []u8, raw: []const u8) []const u8 {
     return strings.sanitizeWithFallback(out, raw, 48, "pod");
+}
+
+fn writeMetaEscaped(writer: anytype, value: []const u8) !void {
+    for (value) |ch| {
+        const safe =
+            (ch >= 'a' and ch <= 'z') or
+            (ch >= 'A' and ch <= 'Z') or
+            (ch >= '0' and ch <= '9') or
+            ch == '-' or ch == '_' or ch == '.' or
+            ch == '~' or ch == '/' or ch == ':';
+        if (safe) {
+            try writer.writeByte(ch);
+        } else {
+            try writer.print("%{X:0>2}", .{ch});
+        }
+    }
 }

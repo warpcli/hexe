@@ -11,10 +11,11 @@ This system is designed to:
 ## File locations
 
 Hexe reads its config from:
-- `$XDG_CONFIG_HOME/hexe/config.lua`
-- or `~/.config/hexe/config.lua`
+- `$XDG_CONFIG_HOME/hexe/init.lua`
+- or `~/.config/hexe/init.lua`
+- optional local override: `./.hexe.lua`
 
-The repository also contains a template at `configs/hexa/config.lua`.
+Main config should return a Lua table containing the `mux` section.
 
 ## Basic schema
 
@@ -26,14 +27,14 @@ return {
     input = {
       timing = {
         hold_ms = 350,
-        double_tap_ms = 250,
+        tap_ms = 200,
       },
       binds = {
         {
-          when = "press",
+          on = "press",
           mods = { hx.mod.alt },
           key = "q",
-          context = { focus = "any" },
+          when = { all = { "focus:any" } },
           action = { type = hx.action.mux_quit },
         },
       },
@@ -56,21 +57,13 @@ Supported key values:
 - single characters like `"q"`, `"1"`, `"."`
 - named keys: `"up"`, `"down"`, `"left"`, `"right"`, `"space"`
 
-### `context`
+### `when` (conditions)
 
-`context` filters when a bind can fire.
+`when` filters when a bind can fire.
 
-Currently supported:
-- `context.focus`: `any` | `split` | `float`
-
-Optional:
-- `context.program`: include/exclude binds based on what is running in the focused pane.
-
-`context.program` supports:
-- `include = {"nvim", "vim"}`
-- `exclude = {"nvim", "vim"}`
-
-Matching uses the detected foreground program name when available (Linux: `/proc/<pid>/comm`), and falls back to shell integration metadata.
+- string shorthand: `when = "focus:any"`
+- table form: `when = { all = { "focus:split", "fg:nvim" } }`
+- script form: `when = { bash = "[[ -n $SSH_CONNECTION ]]" }` or `when = { lua = "return true" }`
 
 ### `mode`
 
@@ -85,7 +78,7 @@ Example use cases:
 ```lua
 -- Default: Alt+T creates tab, key is consumed
 {
-  when = "press",
+  on = "press",
   mods = { hx.mod.alt },
   key = "t",
   action = { type = hx.action.tab_new },
@@ -94,21 +87,21 @@ Example use cases:
 
 -- Execute action AND send key to pane (e.g., for logging/notifications)
 {
-  when = "press",
+  on = "press",
   mods = { hx.mod.ctrl },
   key = "s",
   mode = "act_and_passthrough",
-  action = { type = hx.action.notify, message = "Saved!" },
+  action = { type = hx.action.keycast_toggle },
 }
 
 -- Passthrough only: useful for conditional forwarding
 -- When in nvim, forward Ctrl+W to pane (let nvim handle it)
 {
-  when = "press",
+  on = "press",
   mods = { hx.mod.ctrl },
   key = "w",
   mode = "passthrough_only",
-  context = { program = { include = { "nvim", "vim" } } },
+  when = { all = { "fg:nvim" } },
 }
 ```
 
@@ -147,15 +140,15 @@ Action parameters:
 
 These features are enabled by the kitty keyboard protocol when the terminal supports it.
 
-### `when: press`
+### `on: press`
 
 Runs when the key is pressed.
 
 ```lua
-{ when = "press", mods = { hx.mod.alt }, key = "t", context = { focus = "any" }, action = { type = hx.action.tab_new } }
+{ on = "press", mods = { hx.mod.alt }, key = "t", when = { all = { "focus:any" } }, action = { type = hx.action.tab_new } }
 ```
 
-### `when: repeat`
+### `on: repeat`
 
 Runs while the key is held and repeat events are generated.
 
@@ -164,10 +157,10 @@ Notes:
 - Useful for repeating navigation actions.
 
 ```lua
-{ when = "repeat", mods = { hx.mod.alt }, key = "left", context = { focus = "any" }, action = { type = hx.action.focus_move, dir = "left" } }
+{ on = "repeat", mods = { hx.mod.alt }, key = "left", when = { all = { "focus:any" } }, action = { type = hx.action.focus_move, dir = "left" } }
 ```
 
-### `when: release`
+### `on: release`
 
 Runs when the key is released.
 
@@ -176,10 +169,10 @@ Notes:
 - Release events are mux-only; they are not forwarded into panes.
 
 ```lua
-{ when = "release", mods = { hx.mod.alt, hx.mod.shift }, key = "d", context = { focus = "any" }, action = { type = hx.action.mux_detach } }
+{ on = "release", mods = { hx.mod.alt, hx.mod.shift }, key = "d", when = { all = { "focus:any" } }, action = { type = hx.action.mux_detach } }
 ```
 
-### `when: hold`
+### `on: hold`
 
 Runs once after the key has been held for a given duration.
 
@@ -192,33 +185,20 @@ Notes:
 - A key release cancels a pending hold.
 
 ```lua
-{ when = "hold", mods = { hx.mod.alt }, key = "q", hold_ms = 600, context = { focus = "any" }, action = { type = hx.action.mux_quit } }
+{ on = "hold", mods = { hx.mod.alt }, key = "q", hold_ms = 600, when = { all = { "focus:any" } }, action = { type = hx.action.mux_quit } }
 ```
 
-### `when: double_tap`
+### `double_tap`
 
-Runs when the same key is pressed twice within a time window.
-
-Configuration:
-- per-bind: `double_tap_ms`
-- default: `input.timing.double_tap_ms`
-
-Notes:
-- If a `double_tap` bind exists for a key chord, the normal `press` bind for that same chord is delayed until the double-tap window expires.
-- If the second tap happens in time, the delayed single-press is cancelled.
-
-```lua
-{ when = "press", mods = { hx.mod.alt }, key = "x", context = { focus = "any" }, action = { type = hx.action.tab_close } }
-{ when = "double_tap", mods = { hx.mod.alt }, key = "x", context = { focus = "any" }, action = { type = hx.action.mux_quit } }
-```
+`double_tap` is not currently supported in bind parsing. Use `on = "press" | "release" | "repeat" | "hold"`.
 
 ## Context-sensitive use cases
 
 ### Same key, different action depending on focus
 
 ```lua
-{ mods = { hx.mod.alt }, key = "x", when = "press", context = { focus = "float" }, action = { type = hx.action.pane_close } }
-{ mods = { hx.mod.alt }, key = "x", when = "press", context = { focus = "split" }, action = { type = hx.action.tab_close } }
+{ mods = { hx.mod.alt }, key = "x", on = "press", when = { all = { "focus:float" } }, action = { type = hx.action.pane_close } }
+{ mods = { hx.mod.alt }, key = "x", on = "press", when = { all = { "focus:split" } }, action = { type = hx.action.tab_close } }
 ```
 
 ### Float toggles
@@ -226,7 +206,7 @@ Notes:
 Named floats are configured under `floats[]` (command, size, style, attributes), and are triggered via binds:
 
 ```lua
-{ mods = { hx.mod.alt }, key = "p", when = "press", context = { focus = "any" }, action = { type = hx.action.float_toggle, float = "p" } }
+{ mods = { hx.mod.alt }, key = "p", on = "press", when = { all = { "focus:any" } }, action = { type = hx.action.float_toggle, float = "p" } }
 ```
 
 ### Disable binds in specific apps (Neovim integration)
@@ -234,7 +214,7 @@ Named floats are configured under `floats[]` (command, size, style, attributes),
 If you want Hexe to handle `Alt+Arrow` everywhere except inside Neovim (so Neovim can use the same keys), add an exclude filter:
 
 ```lua
-{ mods = { hx.mod.alt }, key = "left", when = "press", context = { focus = "any", program = { exclude = { "nvim", "vim" } } }, action = { type = hx.action.focus_move, dir = "left" } }
+{ mods = { hx.mod.alt }, key = "left", on = "press", when = { all = { "focus:any", "not_fg:nvim" } }, action = { type = hx.action.focus_move, dir = "left" } }
 ```
 
 Then Neovim can call `hexe mux focus left|right|up|down` when it needs to move between mux panes.
@@ -246,19 +226,19 @@ Forward Ctrl+W to pane only when running vim/nvim (otherwise mux handles it):
 ```lua
 -- In vim: let vim handle Ctrl+W (window commands)
 {
-  when = "press",
+  on = "press",
   mods = { hx.mod.ctrl },
   key = "w",
   mode = "passthrough_only",
-  context = { program = { include = { "nvim", "vim" } } },
+  when = { all = { "fg:nvim" } },
 }
 
 -- Outside vim: close pane
 {
-  when = "press",
+  on = "press",
   mods = { hx.mod.ctrl },
   key = "w",
-  context = { program = { exclude = { "nvim", "vim" } } },
+  when = { all = { "not_fg:nvim" } },
   action = { type = hx.action.pane_close },
 }
 ```

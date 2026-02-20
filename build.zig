@@ -22,6 +22,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Get voidbox dependency for sandboxing
+    const voidbox_mod = if (b.lazyDependency("voidbox", .{
+        .target = target,
+        .optimize = optimize,
+    })) |voidbox_dep| voidbox_dep.module("voidbox") else null;
+
+    // Get libxev dependency (required event loop backend)
+    const xev_mod = b.dependency("libxev", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("xev");
+
     // Create core module
     const core_module = b.createModule(.{
         .root_source_file = b.path("src/core/mod.zig"),
@@ -36,6 +48,10 @@ pub fn build(b: *std.Build) void {
         const zlua_mod = dep.module("zlua");
         core_module.addImport("zlua", zlua_mod);
     }
+    if (voidbox_mod) |vb| {
+        core_module.addImport("voidbox", vb);
+    }
+    core_module.addImport("xev", xev_mod);
 
     // Create shp module (shell prompt/status bar segments)
     const shp_module = b.createModule(.{
@@ -61,6 +77,7 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     mux_module.addImport("core", core_module);
+    mux_module.addImport("xev", xev_mod);
     mux_module.addImport("shp", shp_module);
     mux_module.addImport("pop", pop_module);
     if (ghostty_vt_mod) |vt| {
@@ -75,6 +92,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     ses_module.addImport("core", core_module);
+    ses_module.addImport("xev", xev_mod);
+    if (voidbox_mod) |vb| {
+        ses_module.addImport("voidbox", vb);
+    }
 
     // Create pod module (per-pane PTY + scrollback; launched via `hexe pod daemon`)
     const pod_module = b.createModule(.{
@@ -84,6 +105,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     pod_module.addImport("core", core_module);
+    pod_module.addImport("xev", xev_mod);
+    if (voidbox_mod) |vb| {
+        pod_module.addImport("voidbox", vb);
+    }
 
     // Build unified hexe CLI executable
     const cli_root = b.createModule(.{
@@ -97,6 +122,7 @@ pub fn build(b: *std.Build) void {
     cli_root.addImport("ses", ses_module);
     cli_root.addImport("pod", pod_module);
     cli_root.addImport("shp", shp_module);
+    cli_root.addImport("xev", xev_mod);
     if (argonaut_mod) |arg| {
         cli_root.addImport("argonaut", arg);
     }

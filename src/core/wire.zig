@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const xev = @import("xev").Dynamic;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Protocol limits
@@ -172,6 +173,7 @@ pub const CreatePane = extern struct {
     cwd_len: u16 align(1),
     sticky_key: u8 align(1),
     sticky_pwd_len: u16 align(1),
+    isolation_profile_len: u8 align(1),
 };
 
 /// PaneCreated (response to CreatePane).
@@ -388,6 +390,7 @@ pub const FloatRequest = extern struct {
     cwd_len: u16 align(1),
     result_path_len: u16 align(1),
     exit_key_len: u8 align(1), // length of exit key string (e.g., "Esc", "q")
+    isolation_profile_len: u8 align(1), // length of isolation profile string (e.g., "sandbox", "full")
     env_count: u16 align(1),
     // Size parameters (0 = use default)
     size_width: u16 align(1), // width percentage (0 = default)
@@ -734,7 +737,7 @@ pub fn tryReadMuxVtHeader(fd: posix.fd_t) !MuxVtHeader {
         const n = posix.read(fd, buf[off..]) catch |err| switch (err) {
             error.WouldBlock => {
                 // Wait for more data with timeout
-                waitForReady(fd, posix.POLL.IN, DEFAULT_IO_TIMEOUT_MS) catch |wait_err| return wait_err;
+                waitReadableTimeout(fd, DEFAULT_IO_TIMEOUT_MS) catch |wait_err| return wait_err;
                 continue;
             },
             else => return err,
@@ -752,18 +755,109 @@ pub fn tryReadMuxVtHeader(fd: posix.fd_t) !MuxVtHeader {
 /// Default timeout for network I/O operations (10 seconds).
 pub const DEFAULT_IO_TIMEOUT_MS: i32 = 10_000;
 
-/// Wait for fd to be ready with timeout. Returns error.Timeout if timeout expires.
-fn waitForReady(fd: posix.fd_t, events: i16, timeout_ms: i32) !void {
-    var pfd = [_]posix.pollfd{.{
-        .fd = fd,
-        .events = events,
-        .revents = 0,
-    }};
-    const ready = posix.poll(&pfd, timeout_ms) catch |err| return err;
-    if (ready == 0) return error.Timeout;
-    if (pfd[0].revents & posix.POLL.ERR != 0) return error.PollError;
-    if (pfd[0].revents & posix.POLL.HUP != 0) return error.ConnectionClosed;
-    if (pfd[0].revents & posix.POLL.NVAL != 0) return error.InvalidFileDescriptor;
+/// Wait for fd readability with timeout. Returns error.Timeout on expiry.
+fn waitForReadable(fd: posix.fd_t, timeout_ms: i32) !void {
+    try xev.detect();
+
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+
+    var timer = try xev.Timer.init();
+    defer timer.deinit();
+
+    const WaitContext = struct {
+        ready: bool = false,
+        timed_out: bool = false,
+    };
+
+    var ctx: WaitContext = .{};
+    var file_completion: xev.Completion = .{};
+    var timer_completion: xev.Completion = .{};
+
+    const waitCallback = struct {
+        fn call(
+            cb_ctx: ?*WaitContext,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            _: xev.File,
+            result: xev.PollError!xev.PollEvent,
+        ) xev.CallbackAction {
+            const c = cb_ctx orelse return .disarm;
+            _ = result catch return .disarm;
+            c.ready = true;
+            return .disarm;
+        }
+    }.call;
+
+    const timeoutCallback = struct {
+        fn call(
+            cb_ctx: ?*WaitContext,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            result: xev.Timer.RunError!void,
+        ) xev.CallbackAction {
+            const c = cb_ctx orelse return .disarm;
+            _ = result catch return .disarm;
+            c.timed_out = true;
+            return .disarm;
+        }
+    }.call;
+
+    const watcher = xev.File.initFd(fd);
+    watcher.poll(&loop, &file_completion, .read, WaitContext, &ctx, waitCallback);
+    timer.run(&loop, &timer_completion, @intCast(@max(timeout_ms, 0)), WaitContext, &ctx, timeoutCallback);
+
+    while (!ctx.ready and !ctx.timed_out) {
+        try loop.run(.once);
+    }
+
+    if (ctx.ready) return;
+    return error.Timeout;
+}
+
+pub fn waitReadableTimeout(fd: posix.fd_t, timeout_ms: i32) !void {
+    return waitForReadable(fd, timeout_ms);
+}
+
+pub fn waitWritableTimeout(fd: posix.fd_t, timeout_ms: i32) !void {
+    _ = fd;
+    if (timeout_ms <= 0) return error.Timeout;
+    try waitDelayTimeout(timeout_ms);
+}
+
+fn waitDelayTimeout(timeout_ms: i32) !void {
+    if (timeout_ms <= 0) return error.Timeout;
+
+    try xev.detect();
+    var loop = try xev.Loop.init(.{});
+    defer loop.deinit();
+    var timer = try xev.Timer.init();
+    defer timer.deinit();
+
+    const DelayContext = struct {
+        done: bool = false,
+    };
+    var ctx: DelayContext = .{};
+    var completion: xev.Completion = .{};
+
+    const cb = struct {
+        fn call(
+            cctx: ?*DelayContext,
+            _: *xev.Loop,
+            _: *xev.Completion,
+            result: xev.Timer.RunError!void,
+        ) xev.CallbackAction {
+            const c = cctx orelse return .disarm;
+            _ = result catch return .disarm;
+            c.done = true;
+            return .disarm;
+        }
+    }.call;
+
+    timer.run(&loop, &completion, @intCast(timeout_ms), DelayContext, &ctx, cb);
+    while (!ctx.done) {
+        try loop.run(.once);
+    }
 }
 
 pub fn writeAll(fd: posix.fd_t, data: []const u8) !void {
@@ -771,12 +865,15 @@ pub fn writeAll(fd: posix.fd_t, data: []const u8) !void {
 }
 
 pub fn writeAllTimeout(fd: posix.fd_t, data: []const u8, timeout_ms: i32) !void {
+    const deadline_ms = std.time.milliTimestamp() + timeout_ms;
     var off: usize = 0;
     while (off < data.len) {
         const n = posix.write(fd, data[off..]) catch |err| switch (err) {
             error.WouldBlock => {
-                // Wait for fd to become writable with timeout
-                waitForReady(fd, posix.POLL.OUT, timeout_ms) catch |wait_err| return wait_err;
+                const remaining_ms = deadline_ms - std.time.milliTimestamp();
+                if (remaining_ms <= 0) return error.Timeout;
+                const backoff_ms: i32 = @intCast(@min(remaining_ms, 10));
+                waitWritableTimeout(fd, backoff_ms) catch |wait_err| return wait_err;
                 continue;
             },
             else => return err,
@@ -799,7 +896,7 @@ pub fn readExactTimeout(fd: posix.fd_t, buf: []u8, timeout_ms: i32) !void {
         const n = posix.read(fd, buf[off..]) catch |err| switch (err) {
             error.WouldBlock => {
                 // Wait for fd to become readable with timeout
-                waitForReady(fd, posix.POLL.IN, timeout_ms) catch |wait_err| return wait_err;
+                waitReadableTimeout(fd, timeout_ms) catch |wait_err| return wait_err;
                 retries += 1;
                 if (retries > MAX_RETRIES) return error.TooManyRetries;
                 continue;
@@ -837,9 +934,9 @@ pub fn readHandshake(fd: posix.fd_t) !struct { channel: u8, version: u8 } {
     return .{ .channel = buf[0], .version = buf[1] };
 }
 
-/// Read handshake and validate version matches PROTOCOL_VERSION.
+/// Read handshake and validate version is within supported range.
 pub fn readAndValidateHandshake(fd: posix.fd_t) !u8 {
     const hs = try readHandshake(fd);
-    if (hs.version != PROTOCOL_VERSION) return error.UnsupportedVersion;
+    if (!isProtocolVersionSupported(hs.version)) return error.UnsupportedVersion;
     return hs.channel;
 }

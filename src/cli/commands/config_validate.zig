@@ -3,21 +3,12 @@ const core = @import("core");
 
 const print = std.debug.print;
 
-/// Validate the Hexa configuration file
+/// Validate the Hexe configuration file
 pub fn run() !void {
     const allocator = std.heap.page_allocator;
 
-    // Get config path
-    const home = std.posix.getenv("HOME") orelse {
-        print("Error: HOME environment variable not set\n", .{});
-        return error.NoHome;
-    };
-
-    const config_path = try std.fmt.allocPrint(
-        allocator,
-        "{s}/.config/hexe/mux.lua",
-        .{home},
-    );
+    // Get config path (same resolver used by runtime config loading).
+    const config_path = try core.lua_runtime.getConfigPath(allocator, "init.lua");
     defer allocator.free(config_path);
 
     // Check if config file exists

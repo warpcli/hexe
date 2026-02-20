@@ -14,11 +14,14 @@ pub const KeycastEntry = struct {
 
 /// Keycast state - tracks recent keypresses for display
 pub const KeycastState = struct {
+    const MAX_HISTORY: u8 = 8;
+
     enabled: bool,
-    history: [8]KeycastEntry,
+    history: [MAX_HISTORY]KeycastEntry,
     count: u8,
     duration_ms: i64,
     grouping_timeout_ms: i64, // Keys within this time get grouped together
+    max_entries: u8,
     last_keypress_time: i64, // Timestamp of last recorded keypress
 
     pub fn init() KeycastState {
@@ -28,8 +31,27 @@ pub const KeycastState = struct {
             .count = 0,
             .duration_ms = 2000,
             .grouping_timeout_ms = 700, // 0.7 seconds
+            .max_entries = MAX_HISTORY,
             .last_keypress_time = 0,
         };
+    }
+
+    pub fn setConfig(self: *KeycastState, enabled: bool, duration_ms: i64, grouping_timeout_ms: i64, max_entries: u8) void {
+        self.enabled = enabled;
+        if (duration_ms > 0) self.duration_ms = duration_ms;
+        if (grouping_timeout_ms >= 0) self.grouping_timeout_ms = grouping_timeout_ms;
+        self.max_entries = @max(@as(u8, 1), @min(MAX_HISTORY, max_entries));
+        if (!enabled) {
+            self.count = 0;
+            self.last_keypress_time = 0;
+        } else if (self.count > self.max_entries) {
+            const drop = self.count - self.max_entries;
+            var i: u8 = 0;
+            while (i + drop < self.count) : (i += 1) {
+                self.history[i] = self.history[i + drop];
+            }
+            self.count = self.max_entries;
+        }
     }
 
     /// Toggle keycast mode on/off
@@ -107,13 +129,13 @@ pub const KeycastState = struct {
             // If appending would overflow, fall through to create new entry
         }
 
-        // Shift history if full
-        if (self.count >= 8) {
+        // Shift history if full (respect configured max_entries)
+        if (self.count >= self.max_entries) {
             var i: u8 = 0;
-            while (i + 1 < 8) : (i += 1) {
+            while (i + 1 < self.max_entries) : (i += 1) {
                 self.history[i] = self.history[i + 1];
             }
-            self.count = 7;
+            self.count = self.max_entries - 1;
         }
 
         // Add new entry

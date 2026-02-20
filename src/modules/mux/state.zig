@@ -19,8 +19,7 @@ const ses_client = @import("ses_client.zig");
 const SesClient = ses_client.SesClient;
 const OrphanedPaneInfo = ses_client.OrphanedPaneInfo;
 
-const notification = @import("notification.zig");
-const NotificationManager = notification.NotificationManager;
+const NotificationManager = pop.notification.NotificationManager;
 
 const OverlayManager = pop.overlay.OverlayManager;
 
@@ -36,6 +35,7 @@ pub const FocusContext = enum { split, float };
 const state_tabs = @import("state_tabs.zig");
 const state_serialize = @import("state_serialize.zig");
 const state_sync = @import("state_sync.zig");
+const state_pulse = @import("state_pulse.zig");
 const mouse_selection = @import("mouse_selection.zig");
 
 pub const TabFocusKind = enum { split, float };
@@ -76,7 +76,6 @@ pub const PaneBounds = struct {
 };
 
 pub const State = struct {
-
     /// Get float definition by key from active layout
     pub fn getLayoutFloatByKey(self: *const State, key: u8) ?*const core.LayoutFloatDef {
         for (self.active_layout_floats) |*f| {
@@ -308,8 +307,8 @@ pub const State = struct {
             .layout_height = layout_h,
             .renderer = try Renderer.init(allocator, width, height),
             .ses_client = SesClient.init(allocator, uuid, session_name, true, debug, log_file),
-            .notifications = NotificationManager.initWithPopConfig(allocator, pop_cfg.carrier.notification),
-            .overlays = OverlayManager.init(allocator),
+            .notifications = NotificationManager.initWithConfig(allocator, pop_cfg.carrier.notification),
+            .overlays = OverlayManager.initWithConfig(allocator, pop_cfg.widgets.keycast),
             .popups = pop.PopupManager.init(allocator),
             .pending_action = null,
             .exit_from_shell_death = false,
@@ -602,101 +601,12 @@ pub const State = struct {
 
     /// Start winpulse animation for the currently focused pane
     pub fn startPulse(self: *State) void {
-        std.debug.print("startPulse called, enabled={}\n", .{self.config.winpulse_enabled});
-        if (!self.config.winpulse_enabled) return;
-
-        const PaneInfo = struct {
-            uuid: [32]u8,
-            x: u16,
-            y: u16,
-            width: u16,
-            height: u16,
-        };
-
-        // Get focused pane UUID and bounds
-        const pane_info: ?PaneInfo = blk: {
-            if (self.active_floating) |idx| {
-                if (idx < self.floats.items.len) {
-                    const pane = self.floats.items[idx];
-                    std.debug.print("Found float pane: {}x{} at {},{}\n", .{ pane.width, pane.height, pane.x, pane.y });
-                    break :blk PaneInfo{
-                        .uuid = pane.uuid,
-                        .x = pane.x,
-                        .y = pane.y,
-                        .width = pane.width,
-                        .height = pane.height,
-                    };
-                }
-            }
-            if (self.currentLayout().getFocusedPane()) |pane| {
-                std.debug.print("Found split pane: {}x{} at {},{}\n", .{ pane.width, pane.height, pane.x, pane.y });
-                break :blk PaneInfo{
-                    .uuid = pane.uuid,
-                    .x = pane.x,
-                    .y = pane.y,
-                    .width = pane.width,
-                    .height = pane.height,
-                };
-            }
-            std.debug.print("No pane found!\n", .{});
-            break :blk null;
-        };
-
-        if (pane_info) |info| {
-            std.debug.print("Setting pulse: bounds={}x{} at {},{}\n", .{ info.width, info.height, info.x, info.y });
-
-            // Clean up any previous pulse first
-            self.stopPulse();
-
-            // Now set up the new pulse
-            self.pulse_start_ms = std.time.milliTimestamp();
-            self.pulse_pane_uuid = info.uuid;
-            self.pulse_pane_bounds = PaneBounds{
-                .x = info.x,
-                .y = info.y,
-                .width = info.width,
-                .height = info.height,
-            };
-
-            // Save original colors
-            const size = @as(usize, info.width) * @as(usize, info.height);
-            std.debug.print("Allocating {} cells\n", .{size});
-            const saved = self.allocator.alloc(winpulse_mod.SavedCell, size) catch {
-                std.debug.print("Allocation failed!\n", .{});
-                return;
-            };
-            std.debug.print("Allocation succeeded\n", .{});
-
-            var idx: usize = 0;
-            var row: u16 = 0;
-            while (row < info.height) : (row += 1) {
-                var col: u16 = 0;
-                while (col < info.width) : (col += 1) {
-                    const cell = self.renderer.next.getConst(info.x + col, info.y + row);
-                    saved[idx] = winpulse_mod.SavedCell{
-                        .fg = cell.fg,
-                        .bg = cell.bg,
-                    };
-                    idx += 1;
-                }
-            }
-            self.pulse_saved_colors = saved;
-            self.needs_render = true;
-            std.debug.print("Pulse fully initialized! start_ms={}\n", .{self.pulse_start_ms});
-        } else {
-            std.debug.print("pane_info was null!\n", .{});
-        }
+        return state_pulse.startPulse(self);
     }
 
     /// Stop winpulse animation and restore original colors
     pub fn stopPulse(self: *State) void {
-        if (self.pulse_saved_colors) |saved| {
-            self.allocator.free(saved);
-            self.pulse_saved_colors = null;
-        }
-        self.pulse_start_ms = 0;
-        self.pulse_pane_uuid = null;
-        self.pulse_pane_bounds = null;
+        return state_pulse.stopPulse(self);
     }
 
     pub fn refreshPaneCwd(self: *State, pane: *Pane) ?[]const u8 {

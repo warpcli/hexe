@@ -261,22 +261,24 @@ pub const SesClient = struct {
         sticky_pwd: ?[]const u8,
         sticky_key: ?u8,
         _: ?[]const []const u8, // env (unused in binary protocol — pod inherits)
-        _: ?[]const []const u8, // extra_env (unused)
+        isolation_profile: ?[]const u8,
     ) !struct { uuid: [32]u8, pane_id: u16, pid: posix.pid_t } {
         const fd = self.ctl_fd orelse return error.NotConnected;
 
         const shell_bytes = shell orelse "";
         const cwd_bytes = cwd orelse "";
         const sticky_pwd_bytes = sticky_pwd orelse "";
+        const isolation_profile_bytes = isolation_profile orelse "";
 
         var msg: wire.CreatePane = .{
             .shell_len = @intCast(shell_bytes.len),
             .cwd_len = @intCast(cwd_bytes.len),
             .sticky_key = sticky_key orelse 0,
             .sticky_pwd_len = @intCast(sticky_pwd_bytes.len),
+            .isolation_profile_len = @intCast(isolation_profile_bytes.len),
         };
-        const trails: []const []const u8 = &.{ shell_bytes, cwd_bytes, sticky_pwd_bytes };
-        mux.debugLog("createPane: shell={s} cwd={s}", .{ shell_bytes, cwd_bytes });
+        const trails: []const []const u8 = &.{ shell_bytes, cwd_bytes, sticky_pwd_bytes, isolation_profile_bytes };
+        mux.debugLog("createPane: shell={s} cwd={s} isolation={s}", .{ shell_bytes, cwd_bytes, isolation_profile_bytes });
         try wire.writeControlMsg(fd, .create_pane, std.mem.asBytes(&msg), trails);
 
         // Read response.
@@ -415,6 +417,12 @@ pub const SesClient = struct {
     /// Pane type enum for auxiliary info.
     pub const PaneType = enum { split, float };
     pub const PaneAuxInfo = struct { created_from: ?[32]u8, focused_from: ?[32]u8 };
+    pub const PaneInfoSnapshot = struct {
+        name: ?[]u8,
+        cwd: ?[]u8,
+        fg_name: ?[]u8,
+        fg_pid: ?i32,
+    };
     pub const PaneProcessInfo = struct { name: ?[]u8 = null, pid: ?i32 = null };
 
     /// Update auxiliary pane info (synced from mux to ses).
@@ -530,6 +538,98 @@ pub const SesClient = struct {
             self.skipPayload(fd, @intCast(remaining));
         }
         return result;
+    }
+
+    /// Best-effort synchronous pane metadata snapshot.
+    /// Returns owned strings that caller must free.
+    pub fn getPaneInfoSnapshot(self: *SesClient, uuid: [32]u8) ?PaneInfoSnapshot {
+        const fd = self.ctl_fd orelse return null;
+        var msg: wire.PaneUuid = .{ .uuid = uuid };
+        wire.writeControl(fd, .pane_info, std.mem.asBytes(&msg)) catch return null;
+
+        const hdr = self.readSyncResponse(fd) catch return null;
+        const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+        if (resp_type != .pane_info or hdr.payload_len < @sizeOf(wire.PaneInfoResp)) {
+            self.skipPayload(fd, hdr.payload_len);
+            return null;
+        }
+
+        const resp = wire.readStruct(wire.PaneInfoResp, fd) catch return null;
+        const trail_total: usize = @as(usize, resp.name_len) + @as(usize, resp.fg_len) +
+            @as(usize, resp.cwd_len) + @as(usize, resp.tty_len) +
+            @as(usize, resp.socket_path_len) + @as(usize, resp.session_name_len) +
+            @as(usize, resp.layout_path_len) + @as(usize, resp.last_cmd_len) +
+            @as(usize, resp.base_process_len) + @as(usize, resp.sticky_pwd_len);
+
+        var consumed: usize = 0;
+        var name: ?[]u8 = null;
+        var fg_name: ?[]u8 = null;
+        var cwd: ?[]u8 = null;
+
+        if (resp.name_len > 0) {
+            const n = @as(usize, resp.name_len);
+            if (n <= 16 * 1024) {
+                const buf = self.allocator.alloc(u8, n) catch return null;
+                wire.readExact(fd, buf) catch {
+                    self.allocator.free(buf);
+                    return null;
+                };
+                name = buf;
+            } else {
+                self.skipPayloadU32(fd, resp.name_len);
+            }
+            consumed += n;
+        }
+
+        if (resp.fg_len > 0) {
+            const n = @as(usize, resp.fg_len);
+            if (n <= 16 * 1024) {
+                const buf = self.allocator.alloc(u8, n) catch {
+                    if (name) |s| self.allocator.free(s);
+                    return null;
+                };
+                wire.readExact(fd, buf) catch {
+                    self.allocator.free(buf);
+                    if (name) |s| self.allocator.free(s);
+                    return null;
+                };
+                fg_name = buf;
+            } else {
+                self.skipPayloadU32(fd, resp.fg_len);
+            }
+            consumed += n;
+        }
+
+        if (resp.cwd_len > 0) {
+            const n = @as(usize, resp.cwd_len);
+            if (n <= 64 * 1024) {
+                const buf = self.allocator.alloc(u8, n) catch {
+                    if (name) |s| self.allocator.free(s);
+                    if (fg_name) |s| self.allocator.free(s);
+                    return null;
+                };
+                wire.readExact(fd, buf) catch {
+                    self.allocator.free(buf);
+                    if (name) |s| self.allocator.free(s);
+                    if (fg_name) |s| self.allocator.free(s);
+                    return null;
+                };
+                cwd = buf;
+            } else {
+                self.skipPayloadU32(fd, resp.cwd_len);
+            }
+            consumed += n;
+        }
+
+        const remaining = trail_total -| consumed;
+        if (remaining > 0) self.skipPayload(fd, @intCast(remaining));
+
+        return .{
+            .name = name,
+            .cwd = cwd,
+            .fg_name = fg_name,
+            .fg_pid = if (resp.fg_pid != 0) resp.fg_pid else null,
+        };
     }
 
     /// Adopt an orphaned pane.
@@ -771,7 +871,7 @@ pub const SesClient = struct {
 
         var child = std.process.Child.init(args_list.items, std.heap.page_allocator);
         child.spawn() catch |err| {
-            std.debug.print("Failed to start ses daemon: {}\n", .{err});
+            mux.debugLog("failed to start ses daemon: {s}", .{@errorName(err)});
             return err;
         };
         _ = child.wait() catch {};
@@ -853,6 +953,10 @@ pub const SesClient = struct {
             wire.readExact(fd, buf[0..chunk]) catch return;
             remaining -= chunk;
         }
+    }
+
+    fn skipPayloadU32(self: *SesClient, fd: posix.fd_t, len: u32) void {
+        self.skipPayload(fd, len);
     }
 
     /// Send a ping to SES to check connection is alive.

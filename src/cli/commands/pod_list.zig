@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("core");
 const ipc = core.ipc;
 const pod_meta = core.pod_meta;
+const shared = @import("shared.zig");
 
 const print = std.debug.print;
 
@@ -180,11 +181,6 @@ fn scanMetaFiles(allocator: std.mem.Allocator, socket_dir: []const u8, out: *std
         if (!std.mem.startsWith(u8, line_raw, pod_meta.POD_META_PREFIX)) continue;
 
         const rec = parseMetaLine(allocator, line_raw) catch continue;
-        // Basic sanity.
-        if (rec.uuid.len != 32) {
-            freeRecord(allocator, rec);
-            continue;
-        }
         try out.append(allocator, rec);
     }
 }
@@ -199,12 +195,13 @@ fn freeRecord(allocator: std.mem.Allocator, rec: PodRecord) void {
 
 fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !PodRecord {
     // Format: HEXE_POD k=v k=v ... (single line)
-    var uuid: [32]u8 = undefined;
-    var name: []const u8 = "";
+    var uuid: [32]u8 = .{0} ** 32;
+    var has_uuid = false;
+    var name_raw: []const u8 = "";
     var pid: i64 = 0;
     var child_pid: i64 = 0;
-    var cwd: []const u8 = "";
-    var shell: []const u8 = "";
+    var cwd_raw: []const u8 = "";
+    var shell_raw: []const u8 = "";
     var isolated: bool = false;
     var created_at: i64 = 0;
     var labels_list: std.ArrayList([]const u8) = .empty;
@@ -222,17 +219,29 @@ fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !PodRecord {
         const val = part[eq + 1 ..];
 
         if (std.mem.eql(u8, key, "uuid")) {
-            if (val.len == 32) @memcpy(&uuid, val[0..32]);
+            if (val.len == 32) {
+                var valid_hex = true;
+                for (val) |c| {
+                    if (!std.ascii.isHex(c)) {
+                        valid_hex = false;
+                        break;
+                    }
+                }
+                if (valid_hex) {
+                    @memcpy(&uuid, val[0..32]);
+                    has_uuid = true;
+                }
+            }
         } else if (std.mem.eql(u8, key, "name")) {
-            name = val;
+            name_raw = val;
         } else if (std.mem.eql(u8, key, "pid")) {
             pid = std.fmt.parseInt(i64, val, 10) catch 0;
         } else if (std.mem.eql(u8, key, "child_pid")) {
             child_pid = std.fmt.parseInt(i64, val, 10) catch 0;
         } else if (std.mem.eql(u8, key, "cwd")) {
-            cwd = val;
+            cwd_raw = val;
         } else if (std.mem.eql(u8, key, "shell")) {
-            shell = val;
+            shell_raw = val;
         } else if (std.mem.eql(u8, key, "isolated")) {
             isolated = std.mem.eql(u8, val, "1");
         } else if (std.mem.eql(u8, key, "created_at")) {
@@ -247,13 +256,31 @@ fn parseMetaLine(allocator: std.mem.Allocator, line: []const u8) !PodRecord {
         }
     }
 
-    const owned_name = try allocator.dupe(u8, if (name.len > 0) name else "-");
+    const owned_name = if (name_raw.len > 0)
+        try shared.decodePercentAlloc(allocator, name_raw)
+    else
+        try allocator.dupe(u8, "-");
     errdefer allocator.free(owned_name);
-    const owned_cwd = try allocator.dupe(u8, if (cwd.len > 0) cwd else "-");
+    const owned_cwd = if (cwd_raw.len > 0)
+        try shared.decodePercentAlloc(allocator, cwd_raw)
+    else
+        try allocator.dupe(u8, "-");
     errdefer allocator.free(owned_cwd);
-    const owned_shell = try allocator.dupe(u8, shell);
+    const owned_shell = if (shell_raw.len > 0)
+        try shared.decodePercentAlloc(allocator, shell_raw)
+    else
+        try allocator.dupe(u8, "");
     errdefer allocator.free(owned_shell);
     const labels = try labels_list.toOwnedSlice(allocator);
+
+    if (!has_uuid) {
+        allocator.free(owned_name);
+        allocator.free(owned_cwd);
+        allocator.free(owned_shell);
+        for (labels) |lab| allocator.free(lab);
+        allocator.free(labels);
+        return error.InvalidMeta;
+    }
 
     return .{
         .uuid = uuid,

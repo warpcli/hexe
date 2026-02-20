@@ -353,39 +353,73 @@ fn evalPromptWhenClause(allocator: std.mem.Allocator, lua_rt: *?LuaRuntime, ctx:
 }
 
 fn convertSegments(segments: []const config_builder.ShpConfigBuilder.SegmentDef, allocator: std.mem.Allocator) []const ModuleDef {
-    // Allocate directly instead of using ArrayList
-    var modules = allocator.alloc(ModuleDef, segments.len) catch return &[_]ModuleDef{};
+    const modules = allocator.alloc(ModuleDef, segments.len) catch return &[_]ModuleDef{};
+    var built_count: usize = 0;
+    errdefer {
+        for (modules[0..built_count]) |m| deinitModuleDefOwned(m, allocator);
+        allocator.free(modules);
+    }
+
     for (segments, 0..) |seg, i| {
-        // Duplicate name since ConfigBuilder will be freed
-        const name_copy = allocator.dupe(u8, seg.name) catch seg.name;
+        const name_copy = allocator.dupe(u8, seg.name) catch return &[_]ModuleDef{};
+        errdefer allocator.free(name_copy);
 
-        // Duplicate command if present
-        const command_copy = if (seg.command) |cmd| allocator.dupe(u8, cmd) catch null else null;
+        const command_copy = if (seg.command) |cmd|
+            allocator.dupe(u8, cmd) catch return &[_]ModuleDef{}
+        else
+            null;
+        errdefer if (command_copy) |cmd| allocator.free(cmd);
 
-        // Convert outputs - duplicate strings since ConfigBuilder will be freed
-        const outputs = blk: {
-            if (seg.outputs.len == 0) break :blk &[_]OutputDef{};
-            var out_array = allocator.alloc(OutputDef, seg.outputs.len) catch break :blk &[_]OutputDef{};
+        const outputs = if (seg.outputs.len == 0)
+            &[_]OutputDef{}
+        else blk: {
+            const out_array = allocator.alloc(OutputDef, seg.outputs.len) catch return &[_]ModuleDef{};
+            var out_count: usize = 0;
+            errdefer {
+                for (out_array[0..out_count]) |o| {
+                    allocator.free(o.style);
+                    allocator.free(o.format);
+                }
+                allocator.free(out_array);
+            }
+
             for (seg.outputs, 0..) |out, j| {
-                const style_copy = allocator.dupe(u8, out.style) catch out.style;
-                const format_copy = allocator.dupe(u8, out.format) catch out.format;
-                out_array[j] = OutputDef{
+                const style_copy = allocator.dupe(u8, out.style) catch return &[_]ModuleDef{};
+                errdefer allocator.free(style_copy);
+
+                const format_copy = allocator.dupe(u8, out.format) catch return &[_]ModuleDef{};
+
+                out_array[j] = .{
                     .style = style_copy,
                     .format = format_copy,
                 };
+                out_count += 1;
             }
+
             break :blk out_array;
         };
 
-        modules[i] = ModuleDef{
+        modules[i] = .{
             .name = name_copy,
             .priority = seg.priority,
             .outputs = outputs,
             .command = command_copy,
             .when = seg.when,
         };
+        built_count += 1;
     }
+
     return modules;
+}
+
+fn deinitModuleDefOwned(m: ModuleDef, allocator: std.mem.Allocator) void {
+    allocator.free(m.name);
+    if (m.command) |c| allocator.free(c);
+    for (m.outputs) |o| {
+        allocator.free(o.style);
+        allocator.free(o.format);
+    }
+    if (m.outputs.len > 0) allocator.free(m.outputs);
 }
 
 fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
@@ -974,4 +1008,3 @@ fn writeFormat(stdout: std.fs.File, format: []const u8, output: []const u8) !voi
         }
     }
 }
-

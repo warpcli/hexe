@@ -5,7 +5,7 @@ const render = @import("render.zig");
 pub const Renderer = render.Renderer;
 
 /// Draw a blocking popup (confirm or picker) centered in bounds
-pub fn drawInBounds(renderer: *Renderer, popup: pop.Popup, cfg: *const pop.CarrierConfig, bounds_x: u16, bounds_y: u16, bounds_w: u16, bounds_h: u16) void {
+pub fn drawInBounds(renderer: *Renderer, popup: pop.Popup, cfg: anytype, bounds_x: u16, bounds_y: u16, bounds_w: u16, bounds_h: u16) void {
     switch (popup) {
         .confirm => |confirm| drawConfirmInBounds(renderer, confirm, cfg.confirm, bounds_x, bounds_y, bounds_w, bounds_h),
         .picker => |picker| drawPickerInBounds(renderer, picker, cfg.choose, bounds_x, bounds_y, bounds_w, bounds_h),
@@ -13,12 +13,42 @@ pub fn drawInBounds(renderer: *Renderer, popup: pop.Popup, cfg: *const pop.Carri
 }
 
 /// Draw a blocking popup centered on full screen
-pub fn draw(renderer: *Renderer, popup: pop.Popup, cfg: *const pop.CarrierConfig, term_width: u16, term_height: u16) void {
+pub fn draw(renderer: *Renderer, popup: pop.Popup, cfg: anytype, term_width: u16, term_height: u16) void {
     drawInBounds(renderer, popup, cfg, 0, 0, term_width, term_height);
 }
 
+fn confirmBoxDimensions(confirm: *pop.Confirm, cfg: pop.ConfirmStyle) struct { width: u16, height: u16 } {
+    const msg_width: u16 = @intCast(confirm.message.len);
+    const buttons_width: u16 = @intCast(confirm.yes_label.len + confirm.no_label.len + 14);
+    const content_width = @max(msg_width, buttons_width);
+    const box_width = content_width + cfg.padding_x * 2 + 2;
+    const box_height: u16 = 3 + cfg.padding_y * 2 + 2;
+    return .{ .width = box_width, .height = box_height };
+}
+
+fn pickerBoxDimensions(picker: *pop.Picker, cfg: pop.ChooseStyle) struct { width: u16, height: u16 } {
+    var max_item_width: usize = 0;
+    for (picker.items) |item| {
+        max_item_width = @max(max_item_width, item.len);
+    }
+
+    var title_width: usize = 0;
+    if (picker.title) |t| {
+        title_width = t.len + 4;
+    }
+
+    const content_width = @max(max_item_width + 2, title_width);
+    const box_width: u16 = @intCast(content_width + cfg.padding_x * 2);
+
+    var box_height: u16 = @intCast(picker.visible_count + cfg.padding_y * 2);
+    if (picker.title != null) {
+        box_height += 1;
+    }
+    return .{ .width = box_width, .height = box_height };
+}
+
 pub fn drawConfirmInBounds(renderer: *Renderer, confirm: *pop.Confirm, cfg: pop.ConfirmStyle, bounds_x: u16, bounds_y: u16, bounds_w: u16, bounds_h: u16) void {
-    const dims = confirm.getBoxDimensions();
+    const dims = confirmBoxDimensions(confirm, cfg);
 
     const min_width: u16 = 30;
     const box_width = @max(dims.width, min_width);
@@ -129,7 +159,7 @@ pub fn drawConfirmInBounds(renderer: *Renderer, confirm: *pop.Confirm, cfg: pop.
 }
 
 pub fn drawPickerInBounds(renderer: *Renderer, picker: *pop.Picker, cfg: pop.ChooseStyle, bounds_x: u16, bounds_y: u16, bounds_w: u16, bounds_h: u16) void {
-    const dims = picker.getBoxDimensions();
+    const dims = pickerBoxDimensions(picker, cfg);
 
     const min_width: u16 = 20;
     const box_width = @max(dims.width, min_width);

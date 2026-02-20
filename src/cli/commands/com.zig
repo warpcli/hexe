@@ -12,6 +12,16 @@ pub const runPodGc = @import("pod_gc.zig").runPodGc;
 
 const print = std.debug.print;
 
+fn parseUuid32Hex(text: []const u8) ?[32]u8 {
+    if (text.len != 32) return null;
+    var out: [32]u8 = undefined;
+    for (text, 0..) |ch, i| {
+        if (!std.ascii.isHex(ch)) return null;
+        out[i] = ch;
+    }
+    return out;
+}
+
 const ansi = struct {
     pub const RESET = "\x1b[0m";
     pub const DIM = "\x1b[2m";
@@ -258,12 +268,10 @@ pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator:
     var target_uuid: [32]u8 = undefined;
 
     if (uuid_arg.len > 0) {
-        if (uuid_arg.len >= 32) {
-            @memcpy(&target_uuid, uuid_arg[0..32]);
-        } else {
+        target_uuid = parseUuid32Hex(uuid_arg) orelse {
             print("Invalid UUID\n", .{});
             return;
-        }
+        };
     } else if (show_creator or show_last) {
         if (resolveRelatedPane(allocator, show_creator)) |resolved| {
             target_uuid = resolved;
@@ -273,12 +281,10 @@ pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator:
             print("Not inside a hexe mux session (use --uuid to query specific pane)\n", .{});
             return;
         };
-        if (env_uuid.len >= 32) {
-            @memcpy(&target_uuid, env_uuid[0..32]);
-        } else {
+        target_uuid = parseUuid32Hex(env_uuid) orelse {
             print("Invalid HEXE_PANE_UUID\n", .{});
             return;
-        }
+        };
     }
 
     // Query SES for pane info via binary protocol
@@ -313,24 +319,64 @@ pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator:
 
     // Parse trailing data in order: name, fg, cwd, tty, socket, session_name, layout, last_cmd, base_process, sticky_pwd
     var off: usize = 0;
+    if (off + resp.name_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const name = trail_buf[off .. off + resp.name_len];
     off += resp.name_len;
+    if (off + resp.fg_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const fg_process = trail_buf[off .. off + resp.fg_len];
     off += resp.fg_len;
+    if (off + resp.cwd_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const cwd_str = trail_buf[off .. off + resp.cwd_len];
     off += resp.cwd_len;
+    if (off + resp.tty_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const tty_str = trail_buf[off .. off + resp.tty_len];
     off += resp.tty_len;
+    if (off + resp.socket_path_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const socket_path = trail_buf[off .. off + resp.socket_path_len];
     off += resp.socket_path_len;
+    if (off + resp.session_name_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const session_name = trail_buf[off .. off + resp.session_name_len];
     off += resp.session_name_len;
+    if (off + resp.layout_path_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const layout_path = trail_buf[off .. off + resp.layout_path_len];
     off += resp.layout_path_len;
+    if (off + resp.last_cmd_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const last_cmd = trail_buf[off .. off + resp.last_cmd_len];
     off += resp.last_cmd_len;
+    if (off + resp.base_process_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     const base_process = trail_buf[off .. off + resp.base_process_len];
     off += resp.base_process_len;
+    if (off + resp.sticky_pwd_len > trail_len) {
+        print("Invalid response from daemon (malformed pane_info payload)\n", .{});
+        return;
+    }
     _ = trail_buf[off .. off + resp.sticky_pwd_len]; // sticky_pwd (not displayed currently)
 
     // Display
@@ -406,10 +452,11 @@ pub fn runNotify(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, 
     var has_target = false;
 
     if (uuid.len > 0) {
-        if (uuid.len >= 32) {
-            @memcpy(&target_uuid, uuid[0..32]);
-            has_target = true;
-        }
+        target_uuid = parseUuid32Hex(uuid) orelse {
+            print("Error: --uuid must be 32 hex chars\n", .{});
+            return;
+        };
+        has_target = true;
     } else if (creator or last) {
         if (resolveRelatedPane(allocator, creator)) |resolved| {
             target_uuid = resolved;
@@ -420,10 +467,11 @@ pub fn runNotify(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, 
             print("Error: no target (use --uuid, --creator, --last, --broadcast, or run inside mux)\n", .{});
             return;
         };
-        if (env_uuid.len >= 32) {
-            @memcpy(&target_uuid, env_uuid[0..32]);
-            has_target = true;
-        }
+        target_uuid = parseUuid32Hex(env_uuid) orelse {
+            print("Error: invalid HEXE_PANE_UUID\n", .{});
+            return;
+        };
+        has_target = true;
     }
 
     const fd = connectSesCliChannel(allocator) orelse return;
@@ -456,6 +504,13 @@ pub fn connectSesCliChannel(allocator: std.mem.Allocator) ?std.posix.fd_t {
         return null;
     };
     const fd = client.fd;
+
+    // Guard against stale/wrong listeners on ses.sock (e.g. inherited fd bugs).
+    // Without read/write timeouts, CLI commands can hang indefinitely.
+    const timeout = std.posix.timeval{ .sec = 3, .usec = 0 };
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
+
     wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch {
         client.close();
         return null;
@@ -473,13 +528,13 @@ fn resolveRelatedPane(allocator: std.mem.Allocator, want_creator: bool) ?[32]u8 
         print("Error: --creator/--last requires running inside hexe mux\n", .{});
         return null;
     };
-    if (current_uuid.len < 32) return null;
+    const parsed_current = parseUuid32Hex(current_uuid) orelse return null;
 
     const fd = connectSesCliChannel(allocator) orelse return null;
     defer posix.close(fd);
 
     var pu: wire.PaneUuid = undefined;
-    @memcpy(&pu.uuid, current_uuid[0..32]);
+    pu.uuid = parsed_current;
     wire.writeControl(fd, .pane_info, std.mem.asBytes(&pu)) catch return null;
 
     const hdr = wire.readControlHeader(fd) catch return null;
@@ -504,7 +559,6 @@ fn resolveRelatedPane(allocator: std.mem.Allocator, want_creator: bool) ?[32]u8 
 }
 
 // ─── End binary CLI helpers ────────────────────────────────────────────────
-
 
 pub fn printMuxTree(allocator: std.mem.Allocator, json: []const u8, indent: []const u8, pane_name_map: ?*const std.StringHashMap([]const u8)) void {
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, json, .{}) catch return;
@@ -651,7 +705,10 @@ pub fn runSend(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, la
     var target_uuid: [32]u8 = .{0} ** 32;
 
     if (uuid.len > 0) {
-        if (uuid.len >= 32) @memcpy(&target_uuid, uuid[0..32]);
+        target_uuid = parseUuid32Hex(uuid) orelse {
+            print("Error: --uuid must be 32 hex chars\n", .{});
+            return;
+        };
     } else if (creator or last) {
         if (resolveRelatedPane(allocator, creator)) |resolved| {
             target_uuid = resolved;
@@ -663,7 +720,10 @@ pub fn runSend(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, la
             print("Error: no target specified (use --uuid, --creator, --last, --broadcast, or run inside mux)\n", .{});
             return;
         };
-        if (env_uuid.len >= 32) @memcpy(&target_uuid, env_uuid[0..32]);
+        target_uuid = parseUuid32Hex(env_uuid) orelse {
+            print("Error: invalid HEXE_PANE_UUID\n", .{});
+            return;
+        };
     }
 
     const fd = connectSesCliChannel(allocator) orelse return;
@@ -717,10 +777,10 @@ pub fn runFocusMove(allocator: std.mem.Allocator, dir: []const u8) !void {
         print("Error: HEXE_PANE_UUID not set (not running inside mux?)\n", .{});
         return;
     };
-    if (pane_uuid.len != 32) {
+    const pane_uuid_arr = parseUuid32Hex(pane_uuid) orelse {
         print("Error: HEXE_PANE_UUID invalid length\n", .{});
         return;
-    }
+    };
 
     // Send versioned CLI handshake.
     wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch {
@@ -730,7 +790,7 @@ pub fn runFocusMove(allocator: std.mem.Allocator, dir: []const u8) !void {
 
     // Send focus_move message.
     var fm: wire.FocusMove = undefined;
-    @memcpy(&fm.uuid, pane_uuid[0..32]);
+    fm.uuid = pane_uuid_arr;
     fm.dir = dir_byte;
     wire.writeControl(fd, .focus_move, std.mem.asBytes(&fm)) catch {
         print("Error: failed to send focus_move\n", .{});
@@ -749,9 +809,9 @@ pub fn runExitIntent(allocator: std.mem.Allocator) !void {
     const pane_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
         std.process.exit(0);
     };
-    if (pane_uuid.len != 32) {
+    const pane_uuid_arr = parseUuid32Hex(pane_uuid) orelse {
         std.process.exit(0);
-    }
+    };
 
     const ses_path = ipc.getSesSocketPath(allocator) catch {
         std.process.exit(0);
@@ -772,7 +832,7 @@ pub fn runExitIntent(allocator: std.mem.Allocator) !void {
 
     // Send exit_intent message.
     var ei: wire.ExitIntent = undefined;
-    @memcpy(&ei.uuid, pane_uuid[0..32]);
+    ei.uuid = pane_uuid_arr;
     wire.writeControl(fd, .exit_intent, std.mem.asBytes(&ei)) catch {
         std.process.exit(0);
     };
@@ -805,6 +865,19 @@ pub fn runShellEvent(
     started_at_ms: i64,
 ) !void {
     const pod_socket = std.posix.getenv("HEXE_POD_SOCKET") orelse return;
+
+    if (status < std.math.minInt(i32) or status > std.math.maxInt(i32)) {
+        print("Error: status out of range for shell event\n", .{});
+        return;
+    }
+    if (jobs < 0 or jobs > std.math.maxInt(u16)) {
+        print("Error: jobs out of range for shell event\n", .{});
+        return;
+    }
+    if (cmd.len > std.math.maxInt(u16) or cwd.len > std.math.maxInt(u16)) {
+        print("Error: shell event payload too long\n", .{});
+        return;
+    }
 
     const wire = core.wire;
 
@@ -1103,17 +1176,17 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
         print("Error: not inside a hexe mux session (HEXE_PANE_UUID not set)\n", .{});
         return;
     };
-    if (uuid_str.len < 32) {
+    const uuid_arr = parseUuid32Hex(uuid_str) orelse {
         print("Error: invalid HEXE_PANE_UUID\n", .{});
         return;
-    }
+    };
 
     // Connect to SES and request mux state.
     const fd = connectSesCliChannel(allocator) orelse return;
     defer posix.close(fd);
 
     var pu: wire.PaneUuid = .{ .uuid = undefined };
-    @memcpy(&pu.uuid, uuid_str[0..32]);
+    pu.uuid = uuid_arr;
     wire.writeControl(fd, .get_layout, std.mem.asBytes(&pu)) catch {
         print("Error: failed to send request\n", .{});
         return;
@@ -1370,11 +1443,7 @@ fn serializeJsonValue(val: std.json.Value, writer: anytype) !void {
         .bool => |b| try writer.writeAll(if (b) "true" else "false"),
         .integer => |i| try writer.print("{d}", .{i}),
         .float => |f| try writer.print("{d}", .{f}),
-        .string => |s| {
-            try writer.writeAll("\"");
-            try writer.writeAll(s);
-            try writer.writeAll("\"");
-        },
+        .string => |s| try writeJsonString(writer, s),
         .array => |a| {
             try writer.writeAll("[");
             for (a.items, 0..) |item, idx| {
@@ -1390,15 +1459,37 @@ fn serializeJsonValue(val: std.json.Value, writer: anytype) !void {
             while (it.next()) |entry| {
                 if (!first) try writer.writeAll(",");
                 first = false;
-                try writer.writeAll("\"");
-                try writer.writeAll(entry.key_ptr.*);
-                try writer.writeAll("\":");
+                try writeJsonString(writer, entry.key_ptr.*);
+                try writer.writeAll(":");
                 try serializeJsonValue(entry.value_ptr.*, writer);
             }
             try writer.writeAll("}");
         },
         .number_string => |s| try writer.writeAll(s),
     }
+}
+
+fn writeJsonString(writer: anytype, s: []const u8) !void {
+    try writer.writeAll("\"");
+    for (s) |ch| {
+        switch (ch) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            0x08 => try writer.writeAll("\\b"),
+            0x0c => try writer.writeAll("\\f"),
+            else => {
+                if (ch < 0x20) {
+                    try writer.print("\\u00{X:0>2}", .{ch});
+                } else {
+                    try writer.writeByte(ch);
+                }
+            },
+        }
+    }
+    try writer.writeAll("\"");
 }
 
 pub fn runLayoutLoad(allocator: std.mem.Allocator, name: []const u8) !void {
@@ -1415,10 +1506,10 @@ pub fn runLayoutLoad(allocator: std.mem.Allocator, name: []const u8) !void {
         print("Error: not inside a hexe mux session (HEXE_PANE_UUID not set)\n", .{});
         return;
     };
-    if (uuid_str.len < 32) {
+    const uuid_arr = parseUuid32Hex(uuid_str) orelse {
         print("Error: invalid HEXE_PANE_UUID\n", .{});
         return;
-    }
+    };
 
     // Read layout file.
     const layout_dir = ipc.getLayoutDir(allocator) catch {
@@ -1481,7 +1572,7 @@ pub fn runLayoutLoad(allocator: std.mem.Allocator, name: []const u8) !void {
         .uuid = undefined,
         .tree_json_len = @intCast(tree_buf.items.len),
     };
-    @memcpy(&al.uuid, uuid_str[0..32]);
+    al.uuid = uuid_arr;
 
     wire.writeControlWithTrail(fd, .apply_layout, std.mem.asBytes(&al), tree_buf.items) catch {
         print("Error: failed to send layout\n", .{});
@@ -1520,4 +1611,3 @@ pub fn runLayoutList(allocator: std.mem.Allocator) !void {
         print("No saved layouts\n", .{});
     }
 }
-

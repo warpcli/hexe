@@ -67,6 +67,13 @@ pub const PopConfig = struct {
     status_message: ?[]const u8 = null,
 
     _allocator: ?std.mem.Allocator = null,
+    _owned_status_message: ?[]u8 = null,
+    _owned_carrier_notification_alignment: ?[]u8 = null,
+    _owned_pane_notification_alignment: ?[]u8 = null,
+    _owned_carrier_confirm_yes_label: ?[]u8 = null,
+    _owned_carrier_confirm_no_label: ?[]u8 = null,
+    _owned_pane_confirm_yes_label: ?[]u8 = null,
+    _owned_pane_confirm_no_label: ?[]u8 = null,
 
     pub fn load(allocator: std.mem.Allocator) PopConfig {
         var config = PopConfig{};
@@ -77,12 +84,12 @@ pub const PopConfig = struct {
 
         var runtime = LuaRuntime.init(allocator) catch {
             config.status = .@"error";
-            config.status_message = allocator.dupe(u8, "failed to initialize Lua") catch null;
+            config.setStatusMessage("failed to initialize Lua");
             return config;
         };
         defer runtime.deinit();
 
-        // Let a single config.lua avoid building other sections.
+        // Let a single config file avoid building other sections.
         runtime.setHexeSection("pop");
 
         // Load global config
@@ -94,7 +101,7 @@ pub const PopConfig = struct {
                 else => {
                     config.status = .@"error";
                     if (runtime.last_error) |msg| {
-                        config.status_message = allocator.dupe(u8, msg) catch null;
+                        config.setStatusMessage(msg);
                     }
                 },
             }
@@ -104,90 +111,7 @@ pub const PopConfig = struct {
         // Use ConfigBuilder API approach
         if (runtime.getBuilder()) |builder| {
             if (builder.pop) |pop_builder| {
-                // Build carrier notification config
-                if (pop_builder.carrier_notification) |notif| {
-                    if (notif.fg) |v| config.carrier.notification.fg = v;
-                    if (notif.bg) |v| config.carrier.notification.bg = v;
-                    if (notif.bold) |v| config.carrier.notification.bold = v;
-                    if (notif.padding_x) |v| config.carrier.notification.padding_x = v;
-                    if (notif.padding_y) |v| config.carrier.notification.padding_y = v;
-                    if (notif.offset) |v| config.carrier.notification.offset = v;
-                    if (notif.duration_ms) |v| config.carrier.notification.duration_ms = v;
-                    if (notif.alignment) |a| config.carrier.notification.alignment = a;
-                }
-
-                // Build pane notification config
-                if (pop_builder.pane_notification) |notif| {
-                    if (notif.fg) |v| config.pane.notification.fg = v;
-                    if (notif.bg) |v| config.pane.notification.bg = v;
-                    if (notif.bold) |v| config.pane.notification.bold = v;
-                    if (notif.padding_x) |v| config.pane.notification.padding_x = v;
-                    if (notif.padding_y) |v| config.pane.notification.padding_y = v;
-                    if (notif.offset) |v| config.pane.notification.offset = v;
-                    if (notif.duration_ms) |v| config.pane.notification.duration_ms = v;
-                    if (notif.alignment) |a| config.pane.notification.alignment = a;
-                }
-
-                // Build carrier confirm config
-                if (pop_builder.carrier_confirm) |conf| {
-                    if (conf.fg) |v| config.carrier.confirm.fg = v;
-                    if (conf.bg) |v| config.carrier.confirm.bg = v;
-                    if (conf.bold) |v| config.carrier.confirm.bold = v;
-                    if (conf.padding_x) |v| config.carrier.confirm.padding_x = v;
-                    if (conf.padding_y) |v| config.carrier.confirm.padding_y = v;
-                    if (conf.yes_label) |y| config.carrier.confirm.yes_label = y;
-                    if (conf.no_label) |n| config.carrier.confirm.no_label = n;
-                }
-
-                // Build pane confirm config
-                if (pop_builder.pane_confirm) |conf| {
-                    if (conf.fg) |v| config.pane.confirm.fg = v;
-                    if (conf.bg) |v| config.pane.confirm.bg = v;
-                    if (conf.bold) |v| config.pane.confirm.bold = v;
-                    if (conf.padding_x) |v| config.pane.confirm.padding_x = v;
-                    if (conf.padding_y) |v| config.pane.confirm.padding_y = v;
-                    if (conf.yes_label) |y| config.pane.confirm.yes_label = y;
-                    if (conf.no_label) |n| config.pane.confirm.no_label = n;
-                }
-
-                // Build carrier choose config
-                if (pop_builder.carrier_choose) |ch| {
-                    if (ch.fg) |v| config.carrier.choose.fg = v;
-                    if (ch.bg) |v| config.carrier.choose.bg = v;
-                    if (ch.highlight_fg) |v| config.carrier.choose.highlight_fg = v;
-                    if (ch.highlight_bg) |v| config.carrier.choose.highlight_bg = v;
-                    if (ch.bold) |v| config.carrier.choose.bold = v;
-                    if (ch.padding_x) |v| config.carrier.choose.padding_x = v;
-                    if (ch.padding_y) |v| config.carrier.choose.padding_y = v;
-                    if (ch.visible_count) |v| config.carrier.choose.visible_count = v;
-                }
-
-                // Build pane choose config
-                if (pop_builder.pane_choose) |ch| {
-                    if (ch.fg) |v| config.pane.choose.fg = v;
-                    if (ch.bg) |v| config.pane.choose.bg = v;
-                    if (ch.highlight_fg) |v| config.pane.choose.highlight_fg = v;
-                    if (ch.highlight_bg) |v| config.pane.choose.highlight_bg = v;
-                    if (ch.bold) |v| config.pane.choose.bold = v;
-                    if (ch.padding_x) |v| config.pane.choose.padding_x = v;
-                    if (ch.padding_y) |v| config.pane.choose.padding_y = v;
-                    if (ch.visible_count) |v| config.pane.choose.visible_count = v;
-                }
-
-                // Build widgets config
-                if (pop_builder.widgets.pokemon_enabled) |v| config.widgets.pokemon.enabled = v;
-                if (pop_builder.widgets.pokemon_position) |p| config.widgets.pokemon.position = parsePosition(p);
-                if (pop_builder.widgets.pokemon_shiny_chance) |f| config.widgets.pokemon.shiny_chance = f;
-                if (pop_builder.widgets.keycast_enabled) |v| config.widgets.keycast.enabled = v;
-                if (pop_builder.widgets.keycast_position) |p| config.widgets.keycast.position = parsePosition(p);
-                if (pop_builder.widgets.keycast_duration_ms) |t| config.widgets.keycast.duration_ms = t;
-                if (pop_builder.widgets.keycast_max_entries) |m| config.widgets.keycast.max_entries = m;
-                if (pop_builder.widgets.keycast_grouping_timeout_ms) |g| config.widgets.keycast.grouping_timeout_ms = g;
-                if (pop_builder.widgets.digits_enabled) |v| config.widgets.digits.enabled = v;
-                if (pop_builder.widgets.digits_position) |p| config.widgets.digits.position = parsePosition(p);
-                if (pop_builder.widgets.digits_size) |s| config.widgets.digits.size = parseDigitSize(s);
-
-                config._allocator = allocator;
+                config.applyBuilder(pop_builder);
             }
         }
 
@@ -213,88 +137,7 @@ pub const PopConfig = struct {
         // Use ConfigBuilder API approach for local config (merge/overwrite)
         if (runtime.getBuilder()) |builder| {
             if (builder.pop) |pop_builder| {
-                // Build carrier notification config
-                if (pop_builder.carrier_notification) |notif| {
-                    if (notif.fg) |v| config.carrier.notification.fg = v;
-                    if (notif.bg) |v| config.carrier.notification.bg = v;
-                    if (notif.bold) |v| config.carrier.notification.bold = v;
-                    if (notif.padding_x) |v| config.carrier.notification.padding_x = v;
-                    if (notif.padding_y) |v| config.carrier.notification.padding_y = v;
-                    if (notif.offset) |v| config.carrier.notification.offset = v;
-                    if (notif.duration_ms) |v| config.carrier.notification.duration_ms = v;
-                    if (notif.alignment) |a| config.carrier.notification.alignment = a;
-                }
-
-                // Build pane notification config
-                if (pop_builder.pane_notification) |notif| {
-                    if (notif.fg) |v| config.pane.notification.fg = v;
-                    if (notif.bg) |v| config.pane.notification.bg = v;
-                    if (notif.bold) |v| config.pane.notification.bold = v;
-                    if (notif.padding_x) |v| config.pane.notification.padding_x = v;
-                    if (notif.padding_y) |v| config.pane.notification.padding_y = v;
-                    if (notif.offset) |v| config.pane.notification.offset = v;
-                    if (notif.duration_ms) |v| config.pane.notification.duration_ms = v;
-                    if (notif.alignment) |a| config.pane.notification.alignment = a;
-                }
-
-                // Build carrier confirm config
-                if (pop_builder.carrier_confirm) |conf| {
-                    if (conf.fg) |v| config.carrier.confirm.fg = v;
-                    if (conf.bg) |v| config.carrier.confirm.bg = v;
-                    if (conf.bold) |v| config.carrier.confirm.bold = v;
-                    if (conf.padding_x) |v| config.carrier.confirm.padding_x = v;
-                    if (conf.padding_y) |v| config.carrier.confirm.padding_y = v;
-                    if (conf.yes_label) |y| config.carrier.confirm.yes_label = y;
-                    if (conf.no_label) |n| config.carrier.confirm.no_label = n;
-                }
-
-                // Build pane confirm config
-                if (pop_builder.pane_confirm) |conf| {
-                    if (conf.fg) |v| config.pane.confirm.fg = v;
-                    if (conf.bg) |v| config.pane.confirm.bg = v;
-                    if (conf.bold) |v| config.pane.confirm.bold = v;
-                    if (conf.padding_x) |v| config.pane.confirm.padding_x = v;
-                    if (conf.padding_y) |v| config.pane.confirm.padding_y = v;
-                    if (conf.yes_label) |y| config.pane.confirm.yes_label = y;
-                    if (conf.no_label) |n| config.pane.confirm.no_label = n;
-                }
-
-                // Build carrier choose config
-                if (pop_builder.carrier_choose) |ch| {
-                    if (ch.fg) |v| config.carrier.choose.fg = v;
-                    if (ch.bg) |v| config.carrier.choose.bg = v;
-                    if (ch.highlight_fg) |v| config.carrier.choose.highlight_fg = v;
-                    if (ch.highlight_bg) |v| config.carrier.choose.highlight_bg = v;
-                    if (ch.bold) |v| config.carrier.choose.bold = v;
-                    if (ch.padding_x) |v| config.carrier.choose.padding_x = v;
-                    if (ch.padding_y) |v| config.carrier.choose.padding_y = v;
-                    if (ch.visible_count) |v| config.carrier.choose.visible_count = v;
-                }
-
-                // Build pane choose config
-                if (pop_builder.pane_choose) |ch| {
-                    if (ch.fg) |v| config.pane.choose.fg = v;
-                    if (ch.bg) |v| config.pane.choose.bg = v;
-                    if (ch.highlight_fg) |v| config.pane.choose.highlight_fg = v;
-                    if (ch.highlight_bg) |v| config.pane.choose.highlight_bg = v;
-                    if (ch.bold) |v| config.pane.choose.bold = v;
-                    if (ch.padding_x) |v| config.pane.choose.padding_x = v;
-                    if (ch.padding_y) |v| config.pane.choose.padding_y = v;
-                    if (ch.visible_count) |v| config.pane.choose.visible_count = v;
-                }
-
-                // Build widgets config
-                if (pop_builder.widgets.pokemon_enabled) |v| config.widgets.pokemon.enabled = v;
-                if (pop_builder.widgets.pokemon_position) |p| config.widgets.pokemon.position = parsePosition(p);
-                if (pop_builder.widgets.pokemon_shiny_chance) |f| config.widgets.pokemon.shiny_chance = f;
-                if (pop_builder.widgets.keycast_enabled) |v| config.widgets.keycast.enabled = v;
-                if (pop_builder.widgets.keycast_position) |p| config.widgets.keycast.position = parsePosition(p);
-                if (pop_builder.widgets.keycast_duration_ms) |t| config.widgets.keycast.duration_ms = t;
-                if (pop_builder.widgets.keycast_max_entries) |m| config.widgets.keycast.max_entries = m;
-                if (pop_builder.widgets.keycast_grouping_timeout_ms) |g| config.widgets.keycast.grouping_timeout_ms = g;
-                if (pop_builder.widgets.digits_enabled) |v| config.widgets.digits.enabled = v;
-                if (pop_builder.widgets.digits_position) |p| config.widgets.digits.position = parsePosition(p);
-                if (pop_builder.widgets.digits_size) |s| config.widgets.digits.size = parseDigitSize(s);
+                config.applyBuilder(pop_builder);
             }
         }
 
@@ -305,8 +148,155 @@ pub const PopConfig = struct {
     }
 
     pub fn deinit(self: *PopConfig) void {
-        // Free any allocated strings if we had an allocator
-        _ = self;
+        const allocator = self._allocator orelse return;
+
+        if (self._owned_status_message) |v| allocator.free(v);
+        if (self._owned_carrier_notification_alignment) |v| allocator.free(v);
+        if (self._owned_pane_notification_alignment) |v| allocator.free(v);
+        if (self._owned_carrier_confirm_yes_label) |v| allocator.free(v);
+        if (self._owned_carrier_confirm_no_label) |v| allocator.free(v);
+        if (self._owned_pane_confirm_yes_label) |v| allocator.free(v);
+        if (self._owned_pane_confirm_no_label) |v| allocator.free(v);
+
+        self._owned_status_message = null;
+        self._owned_carrier_notification_alignment = null;
+        self._owned_pane_notification_alignment = null;
+        self._owned_carrier_confirm_yes_label = null;
+        self._owned_carrier_confirm_no_label = null;
+        self._owned_pane_confirm_yes_label = null;
+        self._owned_pane_confirm_no_label = null;
+        self.status_message = null;
+    }
+
+    fn applyBuilder(self: *PopConfig, pop_builder: anytype) void {
+        // Build carrier notification config
+        if (pop_builder.carrier_notification) |notif| {
+            if (notif.fg) |v| self.carrier.notification.fg = v;
+            if (notif.bg) |v| self.carrier.notification.bg = v;
+            if (notif.bold) |v| self.carrier.notification.bold = v;
+            if (notif.padding_x) |v| self.carrier.notification.padding_x = v;
+            if (notif.padding_y) |v| self.carrier.notification.padding_y = v;
+            if (notif.offset) |v| self.carrier.notification.offset = v;
+            if (notif.duration_ms) |v| self.carrier.notification.duration_ms = v;
+            if (notif.alignment) |a| self.setOwnedStringField(
+                &self.carrier.notification.alignment,
+                &self._owned_carrier_notification_alignment,
+                a,
+            );
+        }
+
+        // Build pane notification config
+        if (pop_builder.pane_notification) |notif| {
+            if (notif.fg) |v| self.pane.notification.fg = v;
+            if (notif.bg) |v| self.pane.notification.bg = v;
+            if (notif.bold) |v| self.pane.notification.bold = v;
+            if (notif.padding_x) |v| self.pane.notification.padding_x = v;
+            if (notif.padding_y) |v| self.pane.notification.padding_y = v;
+            if (notif.offset) |v| self.pane.notification.offset = v;
+            if (notif.duration_ms) |v| self.pane.notification.duration_ms = v;
+            if (notif.alignment) |a| self.setOwnedStringField(
+                &self.pane.notification.alignment,
+                &self._owned_pane_notification_alignment,
+                a,
+            );
+        }
+
+        // Build carrier confirm config
+        if (pop_builder.carrier_confirm) |conf| {
+            if (conf.fg) |v| self.carrier.confirm.fg = v;
+            if (conf.bg) |v| self.carrier.confirm.bg = v;
+            if (conf.bold) |v| self.carrier.confirm.bold = v;
+            if (conf.padding_x) |v| self.carrier.confirm.padding_x = v;
+            if (conf.padding_y) |v| self.carrier.confirm.padding_y = v;
+            if (conf.yes_label) |y| self.setOwnedStringField(
+                &self.carrier.confirm.yes_label,
+                &self._owned_carrier_confirm_yes_label,
+                y,
+            );
+            if (conf.no_label) |n| self.setOwnedStringField(
+                &self.carrier.confirm.no_label,
+                &self._owned_carrier_confirm_no_label,
+                n,
+            );
+        }
+
+        // Build pane confirm config
+        if (pop_builder.pane_confirm) |conf| {
+            if (conf.fg) |v| self.pane.confirm.fg = v;
+            if (conf.bg) |v| self.pane.confirm.bg = v;
+            if (conf.bold) |v| self.pane.confirm.bold = v;
+            if (conf.padding_x) |v| self.pane.confirm.padding_x = v;
+            if (conf.padding_y) |v| self.pane.confirm.padding_y = v;
+            if (conf.yes_label) |y| self.setOwnedStringField(
+                &self.pane.confirm.yes_label,
+                &self._owned_pane_confirm_yes_label,
+                y,
+            );
+            if (conf.no_label) |n| self.setOwnedStringField(
+                &self.pane.confirm.no_label,
+                &self._owned_pane_confirm_no_label,
+                n,
+            );
+        }
+
+        // Build carrier choose config
+        if (pop_builder.carrier_choose) |ch| {
+            if (ch.fg) |v| self.carrier.choose.fg = v;
+            if (ch.bg) |v| self.carrier.choose.bg = v;
+            if (ch.highlight_fg) |v| self.carrier.choose.highlight_fg = v;
+            if (ch.highlight_bg) |v| self.carrier.choose.highlight_bg = v;
+            if (ch.bold) |v| self.carrier.choose.bold = v;
+            if (ch.padding_x) |v| self.carrier.choose.padding_x = v;
+            if (ch.padding_y) |v| self.carrier.choose.padding_y = v;
+            if (ch.visible_count) |v| self.carrier.choose.visible_count = v;
+        }
+
+        // Build pane choose config
+        if (pop_builder.pane_choose) |ch| {
+            if (ch.fg) |v| self.pane.choose.fg = v;
+            if (ch.bg) |v| self.pane.choose.bg = v;
+            if (ch.highlight_fg) |v| self.pane.choose.highlight_fg = v;
+            if (ch.highlight_bg) |v| self.pane.choose.highlight_bg = v;
+            if (ch.bold) |v| self.pane.choose.bold = v;
+            if (ch.padding_x) |v| self.pane.choose.padding_x = v;
+            if (ch.padding_y) |v| self.pane.choose.padding_y = v;
+            if (ch.visible_count) |v| self.pane.choose.visible_count = v;
+        }
+
+        // Build widgets config
+        if (pop_builder.widgets.pokemon_enabled) |v| self.widgets.pokemon.enabled = v;
+        if (pop_builder.widgets.pokemon_position) |p| self.widgets.pokemon.position = parsePosition(p);
+        if (pop_builder.widgets.pokemon_shiny_chance) |f| self.widgets.pokemon.shiny_chance = f;
+        if (pop_builder.widgets.keycast_enabled) |v| self.widgets.keycast.enabled = v;
+        if (pop_builder.widgets.keycast_position) |p| self.widgets.keycast.position = parsePosition(p);
+        if (pop_builder.widgets.keycast_duration_ms) |t| self.widgets.keycast.duration_ms = t;
+        if (pop_builder.widgets.keycast_max_entries) |m| self.widgets.keycast.max_entries = m;
+        if (pop_builder.widgets.keycast_grouping_timeout_ms) |g| self.widgets.keycast.grouping_timeout_ms = g;
+        if (pop_builder.widgets.digits_enabled) |v| self.widgets.digits.enabled = v;
+        if (pop_builder.widgets.digits_position) |p| self.widgets.digits.position = parsePosition(p);
+        if (pop_builder.widgets.digits_size) |s| self.widgets.digits.size = parseDigitSize(s);
+    }
+
+    fn setStatusMessage(self: *PopConfig, msg: []const u8) void {
+        self.setOwnedOptionalStringField(&self.status_message, &self._owned_status_message, msg);
+    }
+
+    fn setOwnedStringField(self: *PopConfig, field: *[]const u8, owned_field: *?[]u8, value: []const u8) void {
+        const allocator = self._allocator orelse return;
+        const copy = allocator.dupe(u8, value) catch return;
+
+        if (owned_field.*) |prev| allocator.free(prev);
+        owned_field.* = copy;
+        field.* = copy;
+    }
+
+    fn setOwnedOptionalStringField(self: *PopConfig, field: *?[]const u8, owned_field: *?[]u8, value: []const u8) void {
+        const allocator = self._allocator orelse return;
+        const copy = allocator.dupe(u8, value) catch return;
+
+        if (owned_field.*) |prev| allocator.free(prev);
+        owned_field.* = copy;
+        field.* = copy;
     }
 };
 
@@ -325,4 +315,3 @@ fn parseDigitSize(size_str: []const u8) widgets.digits.Size {
     if (std.mem.eql(u8, size_str, "large")) return .large;
     return .small; // default
 }
-

@@ -187,6 +187,8 @@ pub const FloatDef = struct {
     color: ?BorderColor = null,
     // Border style and optional module
     style: ?FloatStyle = null,
+    // Per-float isolation config (null = use global isolation)
+    isolation: ?IsolationConfig = null,
 };
 
 /// Border color config (active/passive)
@@ -330,6 +332,7 @@ pub const LayoutFloatDef = struct {
     padding_y: ?u8 = null,
     color: ?BorderColor = null,
     style: ?FloatStyle = null,
+    isolation: ?IsolationConfig = null,
 
     pub fn deinit(self: *LayoutFloatDef, allocator: std.mem.Allocator) void {
         if (self.command) |c| allocator.free(@constCast(c));
@@ -364,6 +367,10 @@ pub const LayoutFloatDef = struct {
                 allocator.free(@constCast(module.right_arrow));
             }
         }
+        if (self.isolation) |*iso| {
+            var isolation = @constCast(iso);
+            isolation.deinit(allocator);
+        }
     }
 };
 
@@ -394,10 +401,31 @@ pub const LayoutDef = struct {
 };
 
 /// Ses configuration
+/// POD isolation configuration (voidbox settings)
+pub const IsolationConfig = struct {
+    /// Isolation profile: none, minimal, default, balanced, full
+    profile: []const u8 = "default",
+    /// Memory limit (e.g., "1G", "512M")
+    memory: ?[]const u8 = null,
+    /// CPU quota (e.g., "50000 100000")
+    cpu: ?[]const u8 = null,
+    /// Maximum PIDs
+    pids: ?[]const u8 = null,
+
+    pub fn deinit(self: *IsolationConfig, allocator: std.mem.Allocator) void {
+        allocator.free(self.profile);
+        if (self.memory) |m| allocator.free(@constCast(m));
+        if (self.cpu) |c| allocator.free(@constCast(c));
+        if (self.pids) |p| allocator.free(@constCast(p));
+    }
+};
+
 pub const SesConfig = struct {
     layouts: []LayoutDef = &[_]LayoutDef{},
+    isolation: IsolationConfig = .{},
 
     pub fn deinit(self: *SesConfig, allocator: std.mem.Allocator) void {
+        self.isolation.deinit(allocator);
         for (self.layouts) |*layout| {
             var l = @constCast(layout);
             l.deinit(allocator);
@@ -469,7 +497,6 @@ pub const Config = struct {
         shift,
         super,
     };
-
 
     pub const BindWhen = enum {
         press,
@@ -644,36 +671,28 @@ pub const Config = struct {
     _allocator: ?std.mem.Allocator = null,
 
     pub fn load(allocator: std.mem.Allocator) Config {
-        std.debug.print("DEBUG Config.load: STARTING\n", .{});
         var config = Config{};
         config._allocator = allocator;
 
         PARSE_ERROR = null;
 
         const path = lua_runtime.getConfigPath(allocator, "init.lua") catch {
-            std.debug.print("DEBUG Config.load: getConfigPath FAILED\n", .{});
             return config;
         };
         defer allocator.free(path);
 
         var runtime = LuaRuntime.init(allocator) catch {
-            std.debug.print("DEBUG Config.load: LuaRuntime.init FAILED\n", .{});
             config.status = .@"error";
             config.status_message = allocator.dupe(u8, "failed to initialize Lua") catch null;
             return config;
         };
         defer runtime.deinit();
-        std.debug.print("DEBUG Config.load: LuaRuntime initialized, loading config from: {s}\n", .{path});
 
-        // Let a single config.lua avoid building other sections.
+        // Let a single config file avoid building other sections.
         runtime.setHexeSection("mux");
 
         // Load global config
         runtime.loadConfig(path) catch |err| {
-            std.debug.print("DEBUG Config.load: loadConfig FAILED with error: {}\n", .{err});
-            if (runtime.last_error) |msg| {
-                std.debug.print("DEBUG Config.load: Lua error message: {s}\n", .{msg});
-            }
             switch (err) {
                 error.FileNotFound => {
                     config.status = .missing;
@@ -687,20 +706,6 @@ pub const Config = struct {
             }
             return config;
         };
-        std.debug.print("DEBUG Config.load: loadConfig SUCCESS\n", .{});
-
-        // Build config from ConfigBuilder (new API)
-        if (runtime.getBuilder()) |builder| {
-            if (builder.mux) |mux_builder| {
-                log.debug("building mux config from ConfigBuilder", .{});
-                std.debug.print("DEBUG Config.load: BEFORE build - mux_builder.tabs_config.segments_left.items.len={}\n", .{mux_builder.tabs_config.segments_left.items.len});
-                config = mux_builder.build() catch config;
-                std.debug.print("DEBUG Config.load: AFTER build - config.tabs.status.left.len={} left.ptr={*}\n", .{config.tabs.status.left.len, config.tabs.status.left.ptr});
-                config._allocator = allocator;
-            }
-        } else {
-            std.debug.print("DEBUG Config.load: NO BUILDER FOUND\n", .{});
-        }
 
         // Pop config return value (if any) from stack
         runtime.pop();
@@ -715,6 +720,7 @@ pub const Config = struct {
         std.fs.cwd().access(local_path, .{}) catch {
             // No local config, use global only
             log.debug("no local config found", .{});
+            applyBuilderConfig(&runtime, &config, allocator);
             if (config.status != .@"error") {
                 if (PARSE_ERROR) |msg| {
                     config.status = .@"error";
@@ -731,6 +737,7 @@ pub const Config = struct {
         runtime.loadConfig(local_path) catch |err| {
             // Failed to load local config, but global is already loaded
             log.warn("failed to load local config: {}", .{err});
+            applyBuilderConfig(&runtime, &config, allocator);
             if (config.status != .@"error") {
                 if (PARSE_ERROR) |msg| {
                     config.status = .@"error";
@@ -740,6 +747,10 @@ pub const Config = struct {
             }
             return config;
         };
+
+        // Rebuild from ConfigBuilder after local config load so local builder calls
+        // (hexe.mux.* API) are applied consistently with global config loading.
+        applyBuilderConfig(&runtime, &config, allocator);
 
         // Access the "mux" section of the local config table and merge
         if (runtime.pushTable(-1, "mux")) {
@@ -762,6 +773,16 @@ pub const Config = struct {
         }
 
         return config;
+    }
+
+    fn applyBuilderConfig(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocator) void {
+        if (runtime.getBuilder()) |builder| {
+            if (builder.mux) |mux_builder| {
+                log.debug("building mux config from ConfigBuilder", .{});
+                config.* = mux_builder.build() catch config.*;
+                config._allocator = allocator;
+            }
+        }
     }
 
     /// Parse config from an already-loaded Lua runtime.
@@ -918,7 +939,7 @@ fn parseInputConfig(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Al
     if (runtime.pushTable(-1, "binds")) {
         const old_count = config.input.binds.len;
         config.input.binds = parseBinds(runtime, allocator, config.input.binds);
-        log.info("parsed {} keybindings (was {})", .{config.input.binds.len, old_count});
+        log.info("parsed {} keybindings (was {})", .{ config.input.binds.len, old_count });
         runtime.pop();
     }
 }
@@ -1625,4 +1646,3 @@ fn constrainPercent(val: u8, min: u8, max: u8) u8 {
     if (val > max) return max;
     return val;
 }
-

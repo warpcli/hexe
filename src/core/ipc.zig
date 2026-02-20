@@ -7,6 +7,11 @@ const c = @cImport({
     @cInclude("unistd.h");
 });
 
+fn setCloexec(fd: posix.fd_t) void {
+    const flags = posix.fcntl(fd, posix.F.GETFD, 0) catch return;
+    _ = posix.fcntl(fd, posix.F.SETFD, flags | 1) catch {};
+}
+
 /// Unix domain socket server for IPC
 pub const Server = struct {
     fd: posix.fd_t,
@@ -53,6 +58,7 @@ pub const Server = struct {
         // Create socket
         const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
         errdefer posix.close(fd);
+        setCloexec(fd);
 
         // Ensure parent directory exists
         if (std.fs.path.dirname(path)) |dir| {
@@ -94,6 +100,7 @@ pub const Server = struct {
 
     pub fn accept(self: *Server) !Connection {
         const client_fd = try posix.accept(self.fd, null, null, 0);
+        setCloexec(client_fd);
         return Connection{ .fd = client_fd };
     }
 
@@ -111,6 +118,7 @@ pub const Server = struct {
             if (err == error.WouldBlock) return null;
             return err;
         };
+        setCloexec(client_fd);
         return Connection{ .fd = client_fd };
     }
 
@@ -128,6 +136,7 @@ pub const Client = struct {
         if (path.len >= 108) return error.NameTooLong; // sockaddr_un.path max
 
         const fd = try posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0);
+        setCloexec(fd);
         errdefer posix.close(fd);
 
         var addr: posix.sockaddr.un = .{
@@ -271,11 +280,11 @@ pub fn generateUuid() [32]u8 {
 
 /// Greek alphabet names for session naming
 const greek_alphabet_names = [_][]const u8{
-    "alpha",   "beta",    "gamma",   "delta",   "epsilon",
-    "zeta",    "eta",     "theta",   "iota",    "kappa",
-    "lambda",  "mu",      "nu",      "xi",      "omicron",
-    "pi",      "rho",     "sigma",   "tau",     "upsilon",
-    "phi",     "chi",     "psi",     "omega",
+    "alpha",  "beta", "gamma", "delta", "epsilon",
+    "zeta",   "eta",  "theta", "iota",  "kappa",
+    "lambda", "mu",   "nu",    "xi",    "omicron",
+    "pi",     "rho",  "sigma", "tau",   "upsilon",
+    "phi",    "chi",  "psi",   "omega",
 };
 
 // Pokemon names for pane naming (inspired by krabby - https://github.com/yannjor/krabby)

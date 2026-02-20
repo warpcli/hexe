@@ -256,35 +256,12 @@ pub const MuxConfigBuilder = struct {
         if (self.mouse_selection_override_mods) |v| result.mouse.selection_override_mods = v;
 
         // Apply binds (deep copy to prevent use-after-free)
-        std.debug.print("DEBUG MuxConfigBuilder.build: self.binds.items.len={}\n", .{self.binds.items.len});
         if (self.binds.items.len > 0) {
-            // Debug: check bindings 10-14 in builder (the arrow keys)
-            const start = @min(10, self.binds.items.len);
-            const end = @min(15, self.binds.items.len);
-            if (start < end) {
-                for (self.binds.items[start..end], start..) |b, i| {
-                    std.debug.print("  builder bind[{}]: mods={} key={s}\n", .{i, b.mods, @tagName(@as(config.Config.BindKeyKind, b.key))});
-                }
-            }
-
             var binds = try self.allocator.alloc(config.Config.Bind, self.binds.items.len);
             for (self.binds.items, 0..) |bind, i| {
                 binds[i] = try duplicateBind(bind, self.allocator);
             }
             result.input.binds = binds;
-
-            // Debug: check bindings 10-14 after copy (the arrow keys)
-            const start_c = @min(10, binds.len);
-            const end_c = @min(15, binds.len);
-            if (start_c < end_c) {
-                for (binds[start_c..end_c], start_c..) |b, i| {
-                    std.debug.print("  copied bind[{}]: mods={} key={s}\n", .{i, b.mods, @tagName(@as(config.Config.BindKeyKind, b.key))});
-                }
-            }
-
-            std.debug.print("DEBUG MuxConfigBuilder.build: copied {} bindings to result.input.binds\n", .{binds.len});
-        } else {
-            std.debug.print("DEBUG MuxConfigBuilder.build: NO BINDINGS IN BUILDER\n", .{});
         }
 
         // Apply float defaults
@@ -343,6 +320,12 @@ pub const SesConfigBuilder = struct {
     auto_restore: ?bool = null,
     save_on_detach: ?bool = null,
 
+    // Isolation config (voidbox)
+    isolation_profile: ?[]const u8 = null,
+    isolation_memory: ?[]const u8 = null,
+    isolation_cpu: ?[]const u8 = null,
+    isolation_pids: ?[]const u8 = null,
+
     pub fn init(allocator: std.mem.Allocator) !*SesConfigBuilder {
         const self = try allocator.create(SesConfigBuilder);
         self.* = .{
@@ -359,6 +342,12 @@ pub const SesConfigBuilder = struct {
             l.deinit(self.allocator);
         }
         self.layouts.deinit(self.allocator);
+
+        // Clean up isolation strings
+        if (self.isolation_profile) |p| self.allocator.free(p);
+        if (self.isolation_memory) |m| self.allocator.free(m);
+        if (self.isolation_cpu) |c| self.allocator.free(c);
+        if (self.isolation_pids) |p| self.allocator.free(p);
     }
 
     pub fn build(self: *SesConfigBuilder) !config.SesConfig {
@@ -368,6 +357,17 @@ pub const SesConfigBuilder = struct {
         if (self.layouts.items.len > 0) {
             result.layouts = try self.layouts.toOwnedSlice(self.allocator);
         }
+
+        // Build isolation config
+        result.isolation = .{
+            .profile = if (self.isolation_profile) |p|
+                try self.allocator.dupe(u8, p)
+            else
+                try self.allocator.dupe(u8, "default"),
+            .memory = if (self.isolation_memory) |m| try self.allocator.dupe(u8, m) else null,
+            .cpu = if (self.isolation_cpu) |c| try self.allocator.dupe(u8, c) else null,
+            .pids = if (self.isolation_pids) |p| try self.allocator.dupe(u8, p) else null,
+        };
 
         return result;
     }

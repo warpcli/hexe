@@ -2,6 +2,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const keycast = @import("keycast.zig");
 const pane_select = @import("pane_select.zig");
+const pokemon = @import("../widgets/pokemon.zig");
 
 pub const Overlay = types.Overlay;
 pub const Position = types.Position;
@@ -19,6 +20,7 @@ pub const OverlayManager = struct {
 
     /// Keycast display
     keycast: keycast.KeycastState,
+    keycast_position: pokemon.Position,
 
     /// Resize info overlay (shown during float resize)
     resize_info_active: bool,
@@ -34,6 +36,7 @@ pub const OverlayManager = struct {
             .overlays = .empty,
             .pane_select = pane_select.PaneSelectState.init(allocator),
             .keycast = keycast.KeycastState.init(),
+            .keycast_position = .bottomright,
             .resize_info_active = false,
             .resize_info_pane_uuid = undefined,
             .resize_info_width = 0,
@@ -41,6 +44,18 @@ pub const OverlayManager = struct {
             .resize_info_x = 0,
             .resize_info_y = 0,
         };
+    }
+
+    pub fn initWithConfig(allocator: std.mem.Allocator, cfg: anytype) OverlayManager {
+        var manager = init(allocator);
+        manager.keycast.setConfig(
+            cfg.enabled,
+            cfg.duration_ms,
+            cfg.grouping_timeout_ms,
+            cfg.max_entries,
+        );
+        manager.keycast_position = cfg.position;
+        return manager;
     }
 
     pub fn deinit(self: *OverlayManager) void {
