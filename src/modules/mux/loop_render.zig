@@ -10,6 +10,20 @@ const mouse_selection = @import("mouse_selection.zig");
 const float_title = @import("float_title.zig");
 const overlay_render = @import("overlay_render.zig");
 const notification = @import("notification.zig");
+const render_vx = @import("render_vx.zig");
+const vt_bridge = @import("vt_bridge.zig");
+const render_sprite = @import("render_sprite.zig");
+
+fn drawPaneRenderState(renderer: anytype, state: anytype, x: u16, y: u16, width: u16, height: u16) void {
+    const root = renderer.vx.window();
+    const win = root.child(.{
+        .x_off = @intCast(x),
+        .y_off = @intCast(y),
+        .width = width,
+        .height = height,
+    });
+    vt_bridge.drawRenderState(win, state, width, height, renderer.frame_arena.allocator());
+}
 
 fn sanitizeLabelUtf8(raw: []const u8, out: *[128]u8) []const u8 {
     var wi: usize = 0;
@@ -105,13 +119,13 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     const renderer = &state.renderer;
 
     // Begin a new frame.
-    renderer.beginFrame();
+    renderer.vx.screen.clear();
 
     // Draw splits into the cell buffer.
     var pane_it = state.currentLayout().splitIterator();
     while (pane_it.next()) |pane| {
         const render_state = pane.*.getRenderState() catch continue;
-        renderer.drawRenderState(render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height);
+        drawPaneRenderState(renderer, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height);
 
         if (state.mouse_selection.rangeForPane(state.active_tab, pane.*)) |range| {
             mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height, range, state.config.selection_color);
@@ -132,7 +146,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         // Draw sprite overlay if enabled
         if (pane.*.pokemon_initialized and pane.*.pokemon_state.show_sprite) {
             if (pane.*.pokemon_state.sprite_content) |content| {
-                renderer.drawSpriteOverlay(pane.*.x, pane.*.y, pane.*.width, pane.*.height, content, state.pop_config.widgets.pokemon);
+                render_sprite.drawSpriteOverlay(renderer, pane.*.x, pane.*.y, pane.*.width, pane.*.height, content, state.pop_config.widgets.pokemon);
             }
         }
     }
@@ -169,7 +183,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         }
 
         const render_state = pane.getRenderState() catch continue;
-        renderer.drawRenderState(render_state, pane.x, pane.y, pane.width, pane.height);
+        drawPaneRenderState(renderer, render_state, pane.x, pane.y, pane.width, pane.height);
 
         if (state.mouse_selection.rangeForPane(state.active_tab, pane)) |range| {
             mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range, state.config.selection_color);
@@ -187,7 +201,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         // Draw sprite overlay if enabled
         if (pane.pokemon_initialized and pane.pokemon_state.show_sprite) {
             if (pane.pokemon_state.sprite_content) |content| {
-                renderer.drawSpriteOverlay(pane.x, pane.y, pane.width, pane.height, content, state.pop_config.widgets.pokemon);
+                render_sprite.drawSpriteOverlay(renderer, pane.x, pane.y, pane.width, pane.height, content, state.pop_config.widgets.pokemon);
             }
         }
     }
@@ -217,7 +231,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             }
 
             if (pane.getRenderState()) |render_state| {
-                renderer.drawRenderState(render_state, pane.x, pane.y, pane.width, pane.height);
+                drawPaneRenderState(renderer, render_state, pane.x, pane.y, pane.width, pane.height);
 
                 if (state.mouse_selection.rangeForPane(state.active_tab, pane)) |range| {
                     mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range, state.config.selection_color);
@@ -236,7 +250,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             // Draw sprite overlay if enabled
             if (pane.pokemon_initialized and pane.pokemon_state.show_sprite) {
                 if (pane.pokemon_state.sprite_content) |content| {
-                    renderer.drawSpriteOverlay(pane.x, pane.y, pane.width, pane.height, content, state.pop_config.widgets.pokemon);
+                    render_sprite.drawSpriteOverlay(renderer, pane.x, pane.y, pane.width, pane.height, content, state.pop_config.widgets.pokemon);
                 }
             }
         }
@@ -345,6 +359,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     }
 
     // End frame: render current vaxis screen.
-    try renderer.endFrame(state.force_full_render, stdout, cursor);
+    try render_vx.renderFrame(&renderer.vx, stdout, cursor, state.force_full_render);
+    _ = renderer.frame_arena.reset(.retain_capacity);
     state.force_full_render = false;
 }
