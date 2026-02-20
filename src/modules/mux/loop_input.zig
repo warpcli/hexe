@@ -18,7 +18,6 @@ const statusbar = @import("statusbar.zig");
 const keybinds = @import("keybinds.zig");
 const loop_input_keys = @import("loop_input_keys.zig");
 const loop_mouse = @import("loop_mouse.zig");
-const main = @import("main.zig");
 
 const tab_switch = @import("tab_switch.zig");
 
@@ -256,6 +255,52 @@ fn stashFromIndex(state: *State, inp: []const u8, start: usize) []const u8 {
     return inp[0..start];
 }
 
+fn handleParsedScrollAction(state: *State, action: input.ScrollAction) bool {
+    const pane: ?*Pane = if (state.active_floating) |idx|
+        state.floats.items[idx]
+    else
+        state.currentLayout().getFocusedPane();
+    if (pane == null) return false;
+
+    const p = pane.?;
+    if (p.vt.inAltScreen()) return false;
+
+    const now = std.time.milliTimestamp();
+    const acceleration_timeout_ms: i64 = core.constants.Timing.mouse_acceleration_timeout;
+
+    switch (action) {
+        .page_up => {
+            if (state.last_scroll_key == 5 and (now - state.last_scroll_time_ms) < acceleration_timeout_ms) {
+                state.scroll_repeat_count = @min(state.scroll_repeat_count + 1, 20);
+            } else {
+                state.scroll_repeat_count = 0;
+            }
+            state.last_scroll_key = 5;
+            state.last_scroll_time_ms = now;
+            const scroll_amount: u32 = @min(5 + (@as(u32, state.scroll_repeat_count) * 3), 65);
+            p.scrollUp(scroll_amount);
+        },
+        .page_down => {
+            if (state.last_scroll_key == 6 and (now - state.last_scroll_time_ms) < acceleration_timeout_ms) {
+                state.scroll_repeat_count = @min(state.scroll_repeat_count + 1, 20);
+            } else {
+                state.scroll_repeat_count = 0;
+            }
+            state.last_scroll_key = 6;
+            state.last_scroll_time_ms = now;
+            const scroll_amount: u32 = @min(5 + (@as(u32, state.scroll_repeat_count) * 3), 65);
+            p.scrollDown(scroll_amount);
+        },
+        .home => p.scrollToTop(),
+        .end => p.scrollToBottom(),
+        .shift_up => p.scrollUp(1),
+        .shift_down => p.scrollDown(1),
+    }
+
+    state.needs_render = true;
+    return true;
+}
+
 pub fn handleInput(state: *State, input_bytes: []const u8) void {
     if (input_bytes.len == 0) return;
 
@@ -454,6 +499,13 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 continue;
             }
 
+            if (input.parseScrollEvent(inp[i..], state.allocator)) |sev| {
+                if (handleParsedScrollAction(state, sev.action)) {
+                    i += sev.consumed;
+                    continue;
+                }
+            }
+
             // Parse key events through libvaxis parser first.
             if (input.parseKeyEvent(inp[i..], state.allocator)) |ev| {
                 if (ev.when == .release) state.parser_key_release_seen = true;
@@ -488,72 +540,6 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 _ = loop_mouse.handle(state, ev);
                 i += ev.consumed;
                 continue;
-            }
-
-            // No kitty keyboard protocol support.
-            if (inp[i] == 0x1b and i + 1 < inp.len) {
-                const next = inp[i + 1];
-                // Check for CSI sequences (ESC [).
-                if (next == '[' and i + 2 < inp.len) {
-                    // If this looks like a kitty CSI-u key event and parsing didn't
-                    // handle it above, swallow it so it never leaks into the shell.
-                    // CSI-u format: ESC [ <digits> [:<digits>] [;<digits>[:<digits>]] u
-                    // Only swallow if ALL bytes between ESC[ and 'u' are valid CSI-u chars.
-                    if (inp[i + 2] >= '0' and inp[i + 2] <= '9') {
-                        var j: usize = i + 2;
-                        const end = @min(inp.len, i + 64);
-                        var valid_csi_u = true;
-                        while (j < end) : (j += 1) {
-                            const ch = inp[j];
-                            if (ch == 'u') break; // Found terminator
-                            // Valid CSI-u intermediate chars: digits, semicolon, colon
-                            if ((ch >= '0' and ch <= '9') or ch == ';' or ch == ':') continue;
-                            // Any other char means this is NOT a CSI-u sequence
-                            valid_csi_u = false;
-                            break;
-                        }
-                        if (valid_csi_u and j < end and inp[j] == 'u') {
-                            i = j + 1;
-                            continue;
-                        }
-                    }
-                    // Handle modified arrows for directional navigation.
-                    if (handleAltArrow(state, inp[i..])) |consumed| {
-                        i += consumed;
-                        continue;
-                    }
-                    // Handle scroll keys.
-                    if (handleScrollKeys(state, inp[i..])) |consumed| {
-                        i += consumed;
-                        continue;
-                    }
-                    // Swallow any CSI sequences ending with arrow terminators (A/B/C/D)
-                    // to prevent partial Kitty sequences from leaking to shell.
-                    if (swallowCsiArrow(inp[i..])) |consumed| {
-                        i += consumed;
-                        continue;
-                    }
-                }
-                // Make sure it's not an actual escape sequence (like arrow keys).
-                if (next != '[' and next != 'O') {
-                    // Check for Ctrl+Alt: ESC followed by control character (0x01-0x1a)
-                    if (next >= 0x01 and next <= 0x1a) {
-                        // Ctrl+Alt+letter: translate control char back to letter
-                        const letter = next + 'a' - 1;
-                        main.debugLog("legacy_mode: Ctrl+Alt+{c}", .{letter});
-                        if (keybinds.handleKeyEvent(state, 3, .{ .char = letter }, .press, false, false)) {
-                            i += 2;
-                            continue;
-                        }
-                    } else {
-                        // Plain Alt+key
-                        main.debugLog("legacy_mode: Alt+{c}", .{next});
-                        if (keybinds.handleKeyEvent(state, 1, .{ .char = next }, .press, false, false)) {
-                            i += 2;
-                            continue;
-                        }
-                    }
-                }
             }
 
             // Check for Ctrl+Q to quit.
@@ -690,245 +676,4 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) []const u8 {
 
     // Consumed everything into the pending reply buffer.
     return &[_]u8{};
-}
-
-/// Handle modified arrow keys (legacy and Kitty formats).
-/// Legacy: ESC [ 1 ; mods A/B/C/D
-/// Kitty:  ESC [ 1 ; mods : event A/B/C/D
-/// Returns number of bytes consumed, or null if not a modified arrow sequence.
-fn handleModifiedArrows(state: *State, inp: []const u8) ?usize {
-    // Must start with ESC [ 1 ;
-    if (inp.len < 6 or inp[0] != 0x1b or inp[1] != '[' or inp[2] != '1' or inp[3] != ';') return null;
-
-    var idx: usize = 4;
-
-    // Parse modifier value (one or more digits).
-    var mod_val: u32 = 0;
-    var have_mod = false;
-    while (idx < inp.len) : (idx += 1) {
-        const ch = inp[idx];
-        if (ch >= '0' and ch <= '9') {
-            have_mod = true;
-            mod_val = mod_val * 10 + @as(u32, ch - '0');
-            continue;
-        }
-        break;
-    }
-    if (!have_mod or idx >= inp.len) return null;
-
-    // Optional event type after ':'
-    var event_type: u8 = 1; // default to press
-    if (inp[idx] == ':') {
-        idx += 1;
-        var ev: u32 = 0;
-        var have_ev = false;
-        while (idx < inp.len) : (idx += 1) {
-            const ch = inp[idx];
-            if (ch >= '0' and ch <= '9') {
-                have_ev = true;
-                ev = ev * 10 + @as(u32, ch - '0');
-                continue;
-            }
-            break;
-        }
-        if (have_ev) event_type = @intCast(@min(ev, 255));
-    }
-
-    if (idx >= inp.len) return null;
-
-    // Check for arrow key terminator
-    const key: ?core.Config.BindKey = switch (inp[idx]) {
-        'A' => .up,
-        'B' => .down,
-        'C' => .right,
-        'D' => .left,
-        else => null,
-    };
-    if (key == null) return null;
-
-    // Convert modifier to our format (mask is mod_val - 1)
-    const mask: u32 = if (mod_val > 0) mod_val - 1 else 0;
-    var mods: u8 = 0;
-    if ((mask & 2) != 0) mods |= 1; // alt
-    if ((mask & 4) != 0) mods |= 2; // ctrl
-    if ((mask & 1) != 0) mods |= 4; // shift
-
-    // Handle press, repeat, and release events for arrow keys
-    // Release is needed for tap detection (modified keys defer until release)
-    if (event_type >= 1 and event_type <= 3) {
-        const when: keybinds.BindWhen = switch (event_type) {
-            1 => .press,
-            2 => .repeat,
-            3 => .release,
-            else => .press,
-        };
-        // Use kitty_mode=true since we have event type info from Kitty protocol
-        if (!keybinds.handleKeyEvent(state, mods, key.?, when, false, true)) {
-            // No keybind matched - forward arrow key to pane (but not release)
-            if (event_type == 1 or event_type == 2) {
-                keybinds.forwardKeyToPane(state, mods, key.?);
-            }
-        }
-    }
-
-    return idx + 1;
-}
-
-/// Handle Alt+Arrow for directional pane navigation (legacy wrapper).
-fn handleAltArrow(state: *State, inp: []const u8) ?usize {
-    return handleModifiedArrows(state, inp);
-}
-
-/// Swallow modified CSI arrow sequences (with parameters) ending with A/B/C/D.
-/// Only swallows sequences like ESC[1;3A, NOT plain ESC[A.
-fn swallowCsiArrow(inp: []const u8) ?usize {
-    // Must start with ESC [ followed by a digit (modified arrows start with ESC[1;...)
-    if (inp.len < 4 or inp[0] != 0x1b or inp[1] != '[') return null;
-    // Plain arrows (ESC[A) should NOT be swallowed - they go to the shell
-    if (inp[2] == 'A' or inp[2] == 'B' or inp[2] == 'C' or inp[2] == 'D') return null;
-    // Must start with a digit
-    if (inp[2] < '0' or inp[2] > '9') return null;
-
-    var j: usize = 2;
-    const end = @min(inp.len, 64);
-    while (j < end) : (j += 1) {
-        const ch = inp[j];
-        // Valid CSI intermediate chars for arrows: digits, semicolon, colon
-        if ((ch >= '0' and ch <= '9') or ch == ';' or ch == ':') continue;
-        // Arrow terminators
-        if (ch == 'A' or ch == 'B' or ch == 'C' or ch == 'D') {
-            return j + 1;
-        }
-        // Any other char - not an arrow sequence
-        break;
-    }
-    return null;
-}
-
-/// Handle scroll-related escape sequences.
-/// Returns number of bytes consumed, or null if not a scroll sequence.
-fn handleScrollKeys(state: *State, inp: []const u8) ?usize {
-    // Must start with ESC [
-    if (inp.len < 3 or inp[0] != 0x1b or inp[1] != '[') return null;
-
-    // Choose active pane (float or tiled)
-    const pane: ?*Pane = if (state.active_floating) |idx|
-        state.floats.items[idx]
-    else
-        state.currentLayout().getFocusedPane();
-    if (pane == null) return null;
-    const p = pane.?;
-
-    // Don't intercept scroll keys in alternate screen mode - let the app handle them
-    if (p.vt.inAltScreen()) return null;
-
-    const now = std.time.milliTimestamp();
-    const acceleration_timeout_ms: i64 = core.constants.Timing.mouse_acceleration_timeout;
-
-    // PageUp: ESC [ 5 ~ or ESC [ 5 ; <mod> [: <event>] ~
-    if (inp.len >= 4 and inp[2] == '5') {
-        var j: usize = 3;
-        const end = @min(inp.len, 16);
-        // Scan to tilde, extracting event type if present
-        var event_type: u8 = 1; // default to press
-        while (j < end) : (j += 1) {
-            if (inp[j] == '~') {
-                // Only scroll on press/repeat (not release)
-                if (event_type != 3) {
-                    // Update acceleration state
-                    if (state.last_scroll_key == 5 and (now - state.last_scroll_time_ms) < acceleration_timeout_ms) {
-                        state.scroll_repeat_count = @min(state.scroll_repeat_count + 1, 20);
-                    } else {
-                        state.scroll_repeat_count = 0;
-                    }
-                    state.last_scroll_key = 5;
-                    state.last_scroll_time_ms = now;
-
-                    // Calculate scroll amount with acceleration: 5 + (repeat * 3), max 65 lines
-                    const scroll_amount: u32 = @min(5 + (@as(u32, state.scroll_repeat_count) * 3), 65);
-                    p.scrollUp(scroll_amount);
-                    state.needs_render = true;
-                }
-                return j + 1;
-            }
-            if (inp[j] == ':' and j + 1 < end and inp[j + 1] >= '0' and inp[j + 1] <= '9') {
-                event_type = inp[j + 1] - '0';
-            }
-            // Allow digits, semicolon, colon
-            if ((inp[j] >= '0' and inp[j] <= '9') or inp[j] == ';' or inp[j] == ':') continue;
-            break; // Invalid char
-        }
-    }
-
-    // PageDown: ESC [ 6 ~ or ESC [ 6 ; <mod> [: <event>] ~
-    if (inp.len >= 4 and inp[2] == '6') {
-        var j: usize = 3;
-        const end = @min(inp.len, 16);
-        var event_type: u8 = 1;
-        while (j < end) : (j += 1) {
-            if (inp[j] == '~') {
-                if (event_type != 3) {
-                    // Update acceleration state
-                    if (state.last_scroll_key == 6 and (now - state.last_scroll_time_ms) < acceleration_timeout_ms) {
-                        state.scroll_repeat_count = @min(state.scroll_repeat_count + 1, 20);
-                    } else {
-                        state.scroll_repeat_count = 0;
-                    }
-                    state.last_scroll_key = 6;
-                    state.last_scroll_time_ms = now;
-
-                    // Calculate scroll amount with acceleration
-                    const scroll_amount: u32 = @min(5 + (@as(u32, state.scroll_repeat_count) * 3), 65);
-                    p.scrollDown(scroll_amount);
-                    state.needs_render = true;
-                }
-                return j + 1;
-            }
-            if (inp[j] == ':' and j + 1 < end and inp[j + 1] >= '0' and inp[j + 1] <= '9') {
-                event_type = inp[j + 1] - '0';
-            }
-            if ((inp[j] >= '0' and inp[j] <= '9') or inp[j] == ';' or inp[j] == ':') continue;
-            break;
-        }
-    }
-
-    // Home: ESC [ H or ESC [ 1 ~
-    if (inp.len >= 3 and inp[2] == 'H') {
-        p.scrollToTop();
-        state.needs_render = true;
-        return 3;
-    }
-    if (inp.len >= 4 and inp[2] == '1' and inp[3] == '~') {
-        p.scrollToTop();
-        state.needs_render = true;
-        return 4;
-    }
-
-    // End: ESC [ F or ESC [ 4 ~
-    if (inp.len >= 3 and inp[2] == 'F') {
-        p.scrollToBottom();
-        state.needs_render = true;
-        return 3;
-    }
-    if (inp.len >= 4 and inp[2] == '4' and inp[3] == '~') {
-        p.scrollToBottom();
-        state.needs_render = true;
-        return 4;
-    }
-
-    // Shift+Up: ESC [ 1 ; 2 A - scroll up one line
-    if (inp.len >= 6 and inp[2] == '1' and inp[3] == ';' and inp[4] == '2' and inp[5] == 'A') {
-        p.scrollUp(1);
-        state.needs_render = true;
-        return 6;
-    }
-
-    // Shift+Down: ESC [ 1 ; 2 B - scroll down one line
-    if (inp.len >= 6 and inp[2] == '1' and inp[3] == ';' and inp[4] == '2' and inp[5] == 'B') {
-        p.scrollDown(1);
-        state.needs_render = true;
-        return 6;
-    }
-
-    return null;
 }
