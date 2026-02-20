@@ -456,8 +456,10 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
         const current_tab = &state.tabs.items[state.active_tab];
         if (current_tab.popups.isBlocked()) {
             // Allow only tab switching while a tab popup is open.
-            if (inp.len >= 2 and inp[0] == 0x1b and inp[1] != '[' and inp[1] != 'O') {
-                if (keybinds.handleKeyEvent(state, 1, .{ .char = inp[1] }, .press, true, false)) {
+            if (input.parseKeyEvent(inp, state.allocator)) |ev| {
+                if (ev.when == .release) state.parser_key_release_seen = true;
+                const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
+                if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true, kitty_mode)) {
                     return;
                 }
             }
