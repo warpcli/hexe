@@ -19,6 +19,8 @@ const WhenCacheEntry = struct {
 threadlocal var when_bash_cache: ?std.AutoHashMap(usize, WhenCacheEntry) = null;
 threadlocal var when_lua_cache: ?std.AutoHashMap(usize, WhenCacheEntry) = null;
 threadlocal var when_lua_rt: ?LuaRuntime = null;
+threadlocal var status_print_screen: ?vaxis.Screen = null;
+threadlocal var status_print_screen_width: u16 = 0;
 
 const RandomdoState = struct {
     active: bool,
@@ -52,6 +54,33 @@ pub fn deinitThreadlocals() void {
         state.deinit();
         randomdo_state = null;
     }
+
+    if (status_print_screen) |*screen| {
+        screen.deinit(std.heap.page_allocator);
+        status_print_screen = null;
+        status_print_screen_width = 0;
+    }
+}
+
+fn getStatusPrintScreen(width: u16) ?*vaxis.Screen {
+    if (width == 0) return null;
+
+    if (status_print_screen == null or status_print_screen_width != width) {
+        if (status_print_screen) |*old| {
+            old.deinit(std.heap.page_allocator);
+            status_print_screen = null;
+        }
+        status_print_screen = vaxis.Screen.init(std.heap.page_allocator, .{
+            .cols = width,
+            .rows = 1,
+            .x_pixel = 0,
+            .y_pixel = 0,
+        }) catch return null;
+        status_print_screen_width = width;
+    }
+
+    status_print_screen.?.width_method = .unicode;
+    return &status_print_screen.?;
 }
 
 fn getRandomdoStateMap() *std.AutoHashMap(usize, RandomdoState) {
@@ -913,61 +942,94 @@ fn mergeStyle(base: shp.Style, override: shp.Style) shp.Style {
     return out;
 }
 
+fn shpStyleToVaxis(style: shp.Style) vaxis.Style {
+    var out: vaxis.Style = .{};
+    out.fg = switch (style.fg) {
+        .none => .default,
+        .palette => |p| .{ .index = p },
+        .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
+    };
+    out.bg = switch (style.bg) {
+        .none => .default,
+        .palette => |p| .{ .index = p },
+        .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
+    };
+    out.bold = style.bold;
+    out.italic = style.italic;
+    out.dim = style.dim;
+    out.ul_style = if (style.underline) .single else .off;
+    return out;
+}
+
+fn vaxisColorToRender(col: vaxis.Color) render.Color {
+    return switch (col) {
+        .default => .none,
+        .index => |idx| .{ .palette = idx },
+        .rgb => |rgb| .{ .rgb = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] } },
+    };
+}
+
+fn vaxisCellToRender(cell: vaxis.Cell) render.Cell {
+    var out: render.Cell = .{
+        .char = ' ',
+        .fg = vaxisColorToRender(cell.style.fg),
+        .bg = vaxisColorToRender(cell.style.bg),
+        .bold = cell.style.bold,
+        .italic = cell.style.italic,
+        .faint = cell.style.dim,
+        .strikethrough = cell.style.strikethrough,
+        .inverse = cell.style.reverse,
+    };
+    out.underline = switch (cell.style.ul_style) {
+        .off => .none,
+        .single => .single,
+        .double => .double,
+        .curly => .curly,
+        .dotted => .dotted,
+        .dashed => .dashed,
+    };
+
+    if (cell.char.width == 0 or cell.char.grapheme.len == 0) {
+        out.char = 0;
+        out.is_wide_spacer = true;
+        return out;
+    }
+
+    out.char = std.unicode.utf8Decode(cell.char.grapheme) catch ' ';
+    out.is_wide_char = cell.char.width == 2;
+    return out;
+}
+
 pub fn drawSegment(renderer: *Renderer, x: u16, y: u16, seg: shp.Segment, default_style: shp.Style) u16 {
     const style = if (seg.style.isEmpty()) default_style else mergeStyle(default_style, seg.style);
     return drawStyledText(renderer, x, y, seg.text, style);
 }
 
 pub fn drawStyledText(renderer: *Renderer, start_x: u16, y: u16, text: []const u8, style: shp.Style) u16 {
+    const screen = getStatusPrintScreen(renderer.next.width) orelse {
+        return start_x + measureText(text);
+    };
+    screen.clear();
+
+    const win: vaxis.Window = .{
+        .x_off = 0,
+        .y_off = 0,
+        .parent_x_off = 0,
+        .parent_y_off = 0,
+        .width = screen.width,
+        .height = 1,
+        .screen = screen,
+    };
+
+    const seg = vaxis.Segment{ .text = text, .style = shpStyleToVaxis(style) };
+    const res = win.print(&.{seg}, .{ .row_offset = 0, .col_offset = start_x, .wrap = .none, .commit = true });
+
+    const end_x = @min(res.col, screen.width);
     var x = start_x;
-    var i: usize = 0;
-
-    while (i < text.len) {
-        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-        const end = @min(i + len, text.len);
-        const glyph = text[i..end];
-        const codepoint = std.unicode.utf8Decode(glyph) catch ' ';
-        const glyph_width = vaxis.gwidth.gwidth(glyph, .unicode);
-        const width_cells: u16 = switch (glyph_width) {
-            0 => 0,
-            2...std.math.maxInt(u16) => 2,
-            else => 1,
-        };
-
-        if (width_cells == 0) {
-            i = end;
-            continue;
-        }
-
-        var cell = render.Cell{
-            .char = codepoint,
-            .bold = style.bold,
-            .italic = style.italic,
-            .is_wide_char = width_cells == 2,
-        };
-
-        switch (style.fg) {
-            .none => {},
-            .palette => |p| cell.fg = .{ .palette = p },
-            .rgb => |rgb| cell.fg = .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
-        }
-        switch (style.bg) {
-            .none => {},
-            .palette => |p| cell.bg = .{ .palette = p },
-            .rgb => |rgb| cell.bg = .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
-        }
-
-        renderer.setCell(x, y, cell);
-        if (width_cells == 2) {
-            var spacer = cell;
-            spacer.char = 0;
-            spacer.is_wide_char = false;
-            spacer.is_wide_spacer = true;
-            renderer.setCell(x + 1, y, spacer);
-        }
-        x += width_cells;
-        i = end;
+    while (x < end_x) : (x += 1) {
+        const vx_cell = screen.readCell(x, 0) orelse continue;
+        renderer.setCell(x, y, vaxisCellToRender(vx_cell));
     }
 
-    return x;
+    return end_x;
 }
