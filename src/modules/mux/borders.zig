@@ -385,9 +385,42 @@ pub fn drawFloatingBorder(
 
                 // Render styled output
                 const segments = statusbar.renderSegmentOutput(module, output);
+                const inner_w = w -| 4;
+                if (inner_w == 0) return;
+
+                // If module formatting produced no visible text, fallback to raw name.
+                if (segments.total_len == 0 and name.len > 0) {
+                    const fallback_style = if (module.outputs.len > 0)
+                        shp.Style.parse(module.outputs[0].style)
+                    else
+                        shp.Style{};
+
+                    var draw_x_fallback: u16 = x + 2;
+                    var draw_y_fallback: u16 = y;
+                    if (s.position) |pos2| {
+                        switch (pos2) {
+                            .topcenter => draw_x_fallback = x + (w -| @min(inner_w, statusbar.measureText(name))) / 2,
+                            .topright => draw_x_fallback = x + w -| 2 -| @min(inner_w, statusbar.measureText(name)),
+                            .bottomleft => draw_y_fallback = y + h - 1,
+                            .bottomcenter => {
+                                draw_x_fallback = x + (w -| @min(inner_w, statusbar.measureText(name))) / 2;
+                                draw_y_fallback = y + h - 1;
+                            },
+                            .bottomright => {
+                                draw_x_fallback = x + w -| 2 -| @min(inner_w, statusbar.measureText(name));
+                                draw_y_fallback = y + h - 1;
+                            },
+                            else => {},
+                        }
+                    }
+                    const clipped_name = text_width.clipTextToWidth(name, inner_w);
+                    _ = statusbar.drawStyledText(renderer, draw_x_fallback, draw_y_fallback, clipped_name, fallback_style);
+                    return;
+                }
 
                 // Calculate position based on style position
-                const total_len: u16 = @intCast(@min(segments.total_len, @as(usize, std.math.maxInt(u16))));
+                const unclamped_len: u16 = @intCast(@min(segments.total_len, @as(usize, std.math.maxInt(u16))));
+                const total_len: u16 = @min(unclamped_len, inner_w);
                 var draw_x: u16 = undefined;
                 var draw_y: u16 = undefined;
 

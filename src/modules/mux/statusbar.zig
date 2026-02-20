@@ -30,6 +30,13 @@ const RandomdoState = struct {
 
 threadlocal var randomdo_state: ?std.AutoHashMap(usize, RandomdoState) = null;
 
+fn spinnerAsciiFrame(now_ms: u64, started_at_ms: u64, step_ms: u64) []const u8 {
+    const frames = [_][]const u8{ "|", "/", "-", "\\" };
+    const step: u64 = if (step_ms == 0) 100 else step_ms;
+    const tick = (now_ms - started_at_ms) / step;
+    return frames[@intCast(tick % frames.len)];
+}
+
 /// Clean up all threadlocal resources. Call this on MUX shutdown.
 pub fn deinitThreadlocals() void {
     // Deinit when_bash_cache if it was initialized
@@ -808,6 +815,9 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                 output_segs = animations.renderSegments(ctx, cfg);
                 if (output_segs == null) {
                     output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
+                    if (output_text.len == 0) {
+                        output_text = spinnerAsciiFrame(ctx.now_ms, cfg.started_at_ms, cfg.step_ms);
+                    }
                 }
             }
         } else {
@@ -865,6 +875,9 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
                 output_segs = animations.renderSegments(ctx, cfg);
                 if (output_segs == null) {
                     output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
+                    if (output_text.len == 0) {
+                        output_text = spinnerAsciiFrame(ctx.now_ms, cfg.started_at_ms, cfg.step_ms);
+                    }
                 }
             }
         } else {
