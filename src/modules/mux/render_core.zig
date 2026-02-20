@@ -102,7 +102,7 @@ pub const Renderer = struct {
     }
 
     pub fn drawSpriteOverlay(self: *Renderer, pane_x: u16, pane_y: u16, pane_width: u16, pane_height: u16, sprite_content: []const u8, pokemon_config: pop.widgets.PokemonConfig) void {
-        render_sprite.drawSpriteOverlay(self, Cell, pane_x, pane_y, pane_width, pane_height, sprite_content, pokemon_config);
+        render_sprite.drawSpriteOverlay(self, pane_x, pane_y, pane_width, pane_height, sprite_content, pokemon_config);
     }
 };
 

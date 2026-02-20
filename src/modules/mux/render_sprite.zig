@@ -1,9 +1,9 @@
 const std = @import("std");
 const pop = @import("pop");
+const vaxis = @import("vaxis");
 
 pub fn drawSpriteOverlay(
     renderer: anytype,
-    comptime CellType: type,
     pane_x: u16,
     pane_y: u16,
     pane_width: u16,
@@ -53,7 +53,7 @@ pub fn drawSpriteOverlay(
         var in_escape = false;
         var escape_buf: [128]u8 = undefined;
         var escape_len: usize = 0;
-        var current_cell = CellType{};
+        var current_style: vaxis.Style = .{};
 
         while (j < line.len and x < pane_x + pane_width) {
             if (line[j] == 0x1b) {
@@ -68,7 +68,7 @@ pub fn drawSpriteOverlay(
                     escape_len += 1;
                 }
                 if (line[j] == 'm') {
-                    parseSGR(escape_buf[0..escape_len], &current_cell);
+                    parseSGR(escape_buf[0..escape_len], &current_style);
                     in_escape = false;
                 }
                 j += 1;
@@ -80,8 +80,10 @@ pub fn drawSpriteOverlay(
                         continue;
                     };
                     if (codepoint != ' ') {
-                        current_cell.char = codepoint;
-                        renderer.setCell(x, y, current_cell);
+                        renderer.setVaxisCell(x, y, .{
+                            .char = .{ .grapheme = line[j .. j + char_len], .width = 1 },
+                            .style = current_style,
+                        });
                     }
                     x += 1;
                     j += char_len;
@@ -93,7 +95,7 @@ pub fn drawSpriteOverlay(
     }
 }
 
-fn parseSGR(seq: []const u8, cell: anytype) void {
+fn parseSGR(seq: []const u8, style: *vaxis.Style) void {
     if (seq.len < 3) return;
     if (seq[0] != 0x1b or seq[1] != '[') return;
 
@@ -111,18 +113,10 @@ fn parseSGR(seq: []const u8, cell: anytype) void {
     }
 
     if (param_count >= 5 and param_list[0] == 38 and param_list[1] == 2) {
-        cell.fg = .{ .rgb = .{
-            .r = param_list[2],
-            .g = param_list[3],
-            .b = param_list[4],
-        } };
+        style.fg = .{ .rgb = .{ param_list[2], param_list[3], param_list[4] } };
     } else if (param_count >= 5 and param_list[0] == 48 and param_list[1] == 2) {
-        cell.bg = .{ .rgb = .{
-            .r = param_list[2],
-            .g = param_list[3],
-            .b = param_list[4],
-        } };
+        style.bg = .{ .rgb = .{ param_list[2], param_list[3], param_list[4] } };
     } else if (param_count >= 1 and param_list[0] == 0) {
-        cell.* = @TypeOf(cell.*){};
+        style.* = .{};
     }
 }
