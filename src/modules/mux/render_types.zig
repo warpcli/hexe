@@ -33,42 +33,6 @@ pub const Color = union(enum) {
     }
 };
 
-/// Represents a single rendered cell with style attributes.
-pub const Cell = struct {
-    char: u21 = ' ',
-    fg: Color = .none,
-    bg: Color = .none,
-    bold: bool = false,
-    italic: bool = false,
-    faint: bool = false,
-    underline: Underline = .none,
-    strikethrough: bool = false,
-    inverse: bool = false,
-    is_wide_spacer: bool = false,
-    is_wide_char: bool = false,
-
-    pub const Underline = enum(u3) {
-        none = 0,
-        single = 1,
-        double = 2,
-        curly = 3,
-        dotted = 4,
-        dashed = 5,
-    };
-
-    pub fn eql(self: Cell, other: Cell) bool {
-        return self.char == other.char and
-            self.fg.eql(other.fg) and
-            self.bg.eql(other.bg) and
-            self.bold == other.bold and
-            self.italic == other.italic and
-            self.faint == other.faint and
-            self.underline == other.underline and
-            self.strikethrough == other.strikethrough and
-            self.inverse == other.inverse;
-    }
-};
-
 /// Cursor information for rendering.
 pub const CursorInfo = struct {
     x: u16 = 0,
