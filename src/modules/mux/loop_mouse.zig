@@ -359,6 +359,18 @@ pub fn handle(state: *State, ev: input.MouseEvent) bool {
         }
     }
 
+    // While renaming a float title, consume clicks on the title itself so
+    // release events are not forwarded into the pane as raw mouse sequences.
+    if (state.float_rename_uuid) |uuid| {
+        if (is_left_btn) {
+            if (state.findPaneByUuid(uuid)) |pane| {
+                if (float_title.hitTestTitle(pane, ev.x, ev.y)) {
+                    return true;
+                }
+            }
+        }
+    }
+
     // Handle active drag modes.
     switch (state.mouse_drag) {
         .none => {},
