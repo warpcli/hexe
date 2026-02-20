@@ -7,6 +7,103 @@ const statusbar = @import("statusbar.zig");
 
 pub const Renderer = render.Renderer;
 
+fn toVaxisColor(c: render.Color) vaxis.Color {
+    return switch (c) {
+        .none => .default,
+        .palette => |idx| .{ .index = idx },
+        .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
+    };
+}
+
+fn toRenderCell(vx_cell: vaxis.Cell) render.Cell {
+    var out: render.Cell = .{
+        .char = ' ',
+        .bold = vx_cell.style.bold,
+        .italic = vx_cell.style.italic,
+        .faint = vx_cell.style.dim,
+        .strikethrough = vx_cell.style.strikethrough,
+        .inverse = vx_cell.style.reverse,
+    };
+
+    out.fg = switch (vx_cell.style.fg) {
+        .default => .none,
+        .index => |idx| .{ .palette = idx },
+        .rgb => |rgb| .{ .rgb = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] } },
+    };
+    out.bg = switch (vx_cell.style.bg) {
+        .default => .none,
+        .index => |idx| .{ .palette = idx },
+        .rgb => |rgb| .{ .rgb = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] } },
+    };
+    out.underline = switch (vx_cell.style.ul_style) {
+        .off => .none,
+        .single => .single,
+        .double => .double,
+        .curly => .curly,
+        .dotted => .dotted,
+        .dashed => .dashed,
+    };
+
+    if (vx_cell.char.width == 0 or vx_cell.char.grapheme.len == 0) {
+        out.char = 0;
+        out.is_wide_spacer = true;
+        return out;
+    }
+
+    out.char = std.unicode.utf8Decode(vx_cell.char.grapheme) catch ' ';
+    out.is_wide_char = vx_cell.char.width == 2;
+    return out;
+}
+
+fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: render.Color, bg: render.Color, title: ?[]const u8) void {
+    if (w == 0 or h == 0) return;
+
+    var screen = vaxis.Screen.init(std.heap.page_allocator, .{ .cols = w, .rows = h, .x_pixel = 0, .y_pixel = 0 }) catch return;
+    defer screen.deinit(std.heap.page_allocator);
+    screen.width_method = .unicode;
+
+    const root: vaxis.Window = .{
+        .x_off = 0,
+        .y_off = 0,
+        .parent_x_off = 0,
+        .parent_y_off = 0,
+        .width = w,
+        .height = h,
+        .screen = &screen,
+    };
+
+    const base_style: vaxis.Style = .{ .fg = toVaxisColor(fg), .bg = toVaxisColor(bg) };
+    root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = base_style });
+    _ = root.child(.{
+        .width = w,
+        .height = h,
+        .border = .{
+            .where = .all,
+            .glyphs = .single_square,
+            .style = base_style,
+        },
+    });
+
+    if (title) |t| {
+        if (h > 0 and w > 4) {
+            const clipped = clipTextToWidth(t, w - 4);
+            const title_segments = &[_]vaxis.Segment{
+                .{ .text = " ", .style = base_style },
+                .{ .text = clipped, .style = .{ .fg = toVaxisColor(fg), .bg = toVaxisColor(bg), .bold = true } },
+                .{ .text = " ", .style = base_style },
+            };
+            _ = root.print(title_segments, .{ .row_offset = 0, .col_offset = 2, .wrap = .none, .commit = true });
+        }
+    }
+
+    for (0..h) |ry| {
+        for (0..w) |rx| {
+            const vx_cell = screen.readCell(@intCast(rx), @intCast(ry)) orelse continue;
+            renderer.setCell(x + @as(u16, @intCast(rx)), y + @as(u16, @intCast(ry)), toRenderCell(vx_cell));
+        }
+    }
+}
+
 fn textWidth(text: []const u8) u16 {
     return statusbar.measureText(text);
 }
@@ -110,37 +207,7 @@ pub fn drawConfirmInBounds(renderer: *Renderer, confirm: *pop.Confirm, cfg: pop.
     const inner_width = box_width - 2;
     const inner_x = box_x + 1;
 
-    // Draw box background
-    var y: u16 = box_y;
-    while (y < box_y + box_height) : (y += 1) {
-        var x: u16 = box_x;
-        while (x < box_x + box_width) : (x += 1) {
-            renderer.setCell(x, y, .{ .char = ' ', .fg = fg, .bg = bg });
-        }
-    }
-
-    // Top border
-    renderer.setCell(box_x, box_y, .{ .char = '┌', .fg = fg, .bg = bg });
-    var x: u16 = box_x + 1;
-    while (x < box_x + box_width - 1) : (x += 1) {
-        renderer.setCell(x, box_y, .{ .char = '─', .fg = fg, .bg = bg });
-    }
-    renderer.setCell(box_x + box_width - 1, box_y, .{ .char = '┐', .fg = fg, .bg = bg });
-
-    // Bottom border
-    renderer.setCell(box_x, box_y + box_height - 1, .{ .char = '└', .fg = fg, .bg = bg });
-    x = box_x + 1;
-    while (x < box_x + box_width - 1) : (x += 1) {
-        renderer.setCell(x, box_y + box_height - 1, .{ .char = '─', .fg = fg, .bg = bg });
-    }
-    renderer.setCell(box_x + box_width - 1, box_y + box_height - 1, .{ .char = '┘', .fg = fg, .bg = bg });
-
-    // Side borders
-    y = box_y + 1;
-    while (y < box_y + box_height - 1) : (y += 1) {
-        renderer.setCell(box_x, y, .{ .char = '│', .fg = fg, .bg = bg });
-        renderer.setCell(box_x + box_width - 1, y, .{ .char = '│', .fg = fg, .bg = bg });
-    }
+    drawPopupFrame(renderer, box_x, box_y, box_width, box_height, fg, bg, null);
 
     // Draw message
     const msg_y = box_y + 1 + padding_y;
@@ -199,48 +266,7 @@ pub fn drawPickerInBounds(renderer: *Renderer, picker: *pop.Picker, cfg: pop.Cho
     const highlight_fg: render.Color = .{ .palette = cfg.highlight_fg };
     const highlight_bg: render.Color = .{ .palette = cfg.highlight_bg };
 
-    // Draw box background
-    var y: u16 = box_y;
-    while (y < box_y + box_height) : (y += 1) {
-        var x: u16 = box_x;
-        while (x < box_x + box_width) : (x += 1) {
-            renderer.setCell(x, y, .{ .char = ' ', .fg = fg, .bg = bg });
-        }
-    }
-
-    // Top border with optional title
-    renderer.setCell(box_x, box_y, .{ .char = '┌', .fg = fg, .bg = bg });
-    var x: u16 = box_x + 1;
-    if (picker.title) |title| {
-        renderer.setCell(x, box_y, .{ .char = '─', .fg = fg, .bg = bg });
-        x += 1;
-        renderer.setCell(x, box_y, .{ .char = ' ', .fg = fg, .bg = bg });
-        x += 1;
-        const title_max = (box_x + box_width - 2) -| x;
-        const clipped_title = clipTextToWidth(title, title_max);
-        x = statusbar.drawStyledText(renderer, x, box_y, clipped_title, popupTextStyle(fg, bg, true));
-        renderer.setCell(x, box_y, .{ .char = ' ', .fg = fg, .bg = bg });
-        x += 1;
-    }
-    while (x < box_x + box_width - 1) : (x += 1) {
-        renderer.setCell(x, box_y, .{ .char = '─', .fg = fg, .bg = bg });
-    }
-    renderer.setCell(box_x + box_width - 1, box_y, .{ .char = '┐', .fg = fg, .bg = bg });
-
-    // Bottom border
-    renderer.setCell(box_x, box_y + box_height - 1, .{ .char = '└', .fg = fg, .bg = bg });
-    x = box_x + 1;
-    while (x < box_x + box_width - 1) : (x += 1) {
-        renderer.setCell(x, box_y + box_height - 1, .{ .char = '─', .fg = fg, .bg = bg });
-    }
-    renderer.setCell(box_x + box_width - 1, box_y + box_height - 1, .{ .char = '┘', .fg = fg, .bg = bg });
-
-    // Side borders
-    y = box_y + 1;
-    while (y < box_y + box_height - 1) : (y += 1) {
-        renderer.setCell(box_x, y, .{ .char = '│', .fg = fg, .bg = bg });
-        renderer.setCell(box_x + box_width - 1, y, .{ .char = '│', .fg = fg, .bg = bg });
-    }
+    drawPopupFrame(renderer, box_x, box_y, box_width, box_height, fg, bg, picker.title);
 
     // Draw items
     const content_x = box_x + 2;
