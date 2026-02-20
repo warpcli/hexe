@@ -137,6 +137,64 @@ pub fn drawSplitBorders(
     term_width: u16,
     content_height: u16,
 ) void {
+    var split_screen_opt: ?vaxis.Screen = null;
+    var split_touched_opt: ?[]bool = null;
+    var split_win_opt: ?vaxis.Window = null;
+    const split_cell_count = @as(usize, term_width) * @as(usize, content_height);
+    if (split_cell_count > 0) {
+        if (vaxis.Screen.init(std.heap.page_allocator, .{ .cols = term_width, .rows = content_height, .x_pixel = 0, .y_pixel = 0 }) catch null) |screen| {
+            split_screen_opt = screen;
+            if (std.heap.page_allocator.alloc(bool, split_cell_count) catch null) |touched| {
+                @memset(touched, false);
+                split_touched_opt = touched;
+                split_screen_opt.?.width_method = .unicode;
+                split_win_opt = .{
+                    .x_off = 0,
+                    .y_off = 0,
+                    .parent_x_off = 0,
+                    .parent_y_off = 0,
+                    .width = term_width,
+                    .height = content_height,
+                    .screen = &split_screen_opt.?,
+                };
+            } else {
+                split_screen_opt.?.deinit(std.heap.page_allocator);
+                split_screen_opt = null;
+            }
+        }
+    }
+    defer {
+        if (split_touched_opt) |touched| std.heap.page_allocator.free(touched);
+        if (split_screen_opt) |*screen| screen.deinit(std.heap.page_allocator);
+    }
+
+    const write_split_cell = struct {
+        fn go(
+            renderer_in: *Renderer,
+            split_win: ?vaxis.Window,
+            touched: ?[]bool,
+            width: u16,
+            x: u16,
+            y: u16,
+            cp: u21,
+            color: u8,
+        ) void {
+            if (split_win) |win| {
+                var cp_buf: [4]u8 = undefined;
+                const cp_bytes = encodeCodepointUtf8(cp, &cp_buf);
+                win.writeCell(x, y, .{
+                    .char = .{ .grapheme = cp_bytes, .width = 1 },
+                    .style = .{ .fg = .{ .index = color } },
+                });
+                if (touched) |mask| {
+                    const idx = @as(usize, y) * @as(usize, width) + @as(usize, x);
+                    if (idx < mask.len) mask[idx] = true;
+                }
+                return;
+            }
+            renderer_in.setCell(x, y, .{ .char = cp, .fg = .{ .palette = color } });
+        }
+    }.go;
     // Get characters and color from config
     const v_char: u21 = if (splits_cfg.style) |s| s.vertical else splits_cfg.separator_v;
     const h_char: u21 = if (splits_cfg.style) |s| s.horizontal else splits_cfg.separator_h;
@@ -236,7 +294,7 @@ pub fn drawSplitBorders(
                 }
             }
 
-            renderer.setCell(x, y, .{ .char = char, .fg = .{ .palette = color } });
+            write_split_cell(renderer, split_win_opt, split_touched_opt, term_width, x, y, char, color);
         }
     }
 
@@ -286,7 +344,22 @@ pub fn drawSplitBorders(
                 }
             }
 
-            renderer.setCell(x, y, .{ .char = char, .fg = .{ .palette = color } });
+            write_split_cell(renderer, split_win_opt, split_touched_opt, term_width, x, y, char, color);
+        }
+    }
+
+    if (split_screen_opt) |*screen| {
+        if (split_touched_opt) |touched| {
+            for (0..content_height) |row| {
+                for (0..term_width) |col| {
+                    const x: u16 = @intCast(col);
+                    const y: u16 = @intCast(row);
+                    const idx = row * @as(usize, term_width) + col;
+                    if (idx >= touched.len or !touched[idx]) continue;
+                    const vx_cell = screen.readCell(x, y) orelse continue;
+                    renderer.setCell(x, y, toRenderCell(vx_cell));
+                }
+            }
         }
     }
 }
