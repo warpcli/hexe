@@ -2,154 +2,17 @@ const std = @import("std");
 const vaxis = @import("vaxis");
 const ghostty = @import("ghostty-vt");
 const pagepkg = ghostty.page;
-const colorpkg = ghostty.color;
 const pop = @import("pop");
 const vt_bridge = @import("vt_bridge.zig");
 const render_sprite = @import("render_sprite.zig");
 const render_bridge = @import("render_bridge.zig");
+const render_types = @import("render_types.zig");
+const render_buffer = @import("render_buffer.zig");
 
-/// Represents a single rendered cell with all its attributes
-pub const Cell = struct {
-    char: u21 = ' ',
-    fg: Color = .none,
-    bg: Color = .none,
-    bold: bool = false,
-    italic: bool = false,
-    faint: bool = false,
-    underline: Underline = .none,
-    strikethrough: bool = false,
-    inverse: bool = false,
-    is_wide_spacer: bool = false, // True if this cell is a spacer for a wide character
-    is_wide_char: bool = false, // True if this character is wide (takes 2 columns)
-
-    pub const Underline = enum(u3) {
-        none = 0,
-        single = 1,
-        double = 2,
-        curly = 3,
-        dotted = 4,
-        dashed = 5,
-    };
-
-    pub fn eql(self: Cell, other: Cell) bool {
-        return self.char == other.char and
-            self.fg.eql(other.fg) and
-            self.bg.eql(other.bg) and
-            self.bold == other.bold and
-            self.italic == other.italic and
-            self.faint == other.faint and
-            self.underline == other.underline and
-            self.strikethrough == other.strikethrough and
-            self.inverse == other.inverse;
-    }
-};
-
-/// Color representation
-pub const Color = union(enum) {
-    none,
-    palette: u8,
-    rgb: RGB,
-
-    pub const RGB = struct {
-        r: u8,
-        g: u8,
-        b: u8,
-
-        pub fn eql(self: RGB, other: RGB) bool {
-            return self.r == other.r and self.g == other.g and self.b == other.b;
-        }
-    };
-
-    pub fn eql(self: Color, other: Color) bool {
-        return switch (self) {
-            .none => other == .none,
-            .palette => |p| other == .palette and other.palette == p,
-            .rgb => |rgb| other == .rgb and rgb.eql(other.rgb),
-        };
-    }
-
-    /// Convert from ghostty style color
-    pub fn fromStyleColor(c: ghostty.Style.Color) Color {
-        return switch (c) {
-            .none => .none,
-            .palette => |p| .{ .palette = p },
-            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
-        };
-    }
-};
-
-/// Double-buffered cell grid for differential rendering
-pub const CellBuffer = struct {
-    cells: []Cell,
-    width: u16,
-    height: u16,
-
-    pub fn init(allocator: std.mem.Allocator, w: u16, h: u16) !CellBuffer {
-        const size = @as(usize, w) * @as(usize, h);
-        const cells = try allocator.alloc(Cell, size);
-        @memset(cells, Cell{});
-        return .{
-            .cells = cells,
-            .width = w,
-            .height = h,
-        };
-    }
-
-    pub fn deinit(self: *CellBuffer, allocator: std.mem.Allocator) void {
-        allocator.free(self.cells);
-    }
-
-    pub fn get(self: *CellBuffer, x: u16, y: u16) *Cell {
-        const idx = @as(usize, y) * @as(usize, self.width) + @as(usize, x);
-        return &self.cells[idx];
-    }
-
-    pub fn getConst(self: *const CellBuffer, x: u16, y: u16) Cell {
-        const idx = @as(usize, y) * @as(usize, self.width) + @as(usize, x);
-        return self.cells[idx];
-    }
-
-    pub fn clear(self: *CellBuffer) void {
-        @memset(self.cells, Cell{});
-    }
-
-    pub fn resize(self: *CellBuffer, allocator: std.mem.Allocator, w: u16, h: u16) !void {
-        if (w == self.width and h == self.height) return;
-
-        // Allocate new buffer
-        const new_size = @as(usize, w) * @as(usize, h);
-        const new_cells = try allocator.alloc(Cell, new_size);
-        @memset(new_cells, Cell{});
-
-        // Preserve overlapping content from old buffer
-        const copy_width = @min(w, self.width);
-        const copy_height = @min(h, self.height);
-
-        var y: u16 = 0;
-        while (y < copy_height) : (y += 1) {
-            const old_row_start = @as(usize, y) * @as(usize, self.width);
-            const new_row_start = @as(usize, y) * @as(usize, w);
-            const copy_len = @as(usize, copy_width);
-
-            // Copy row from old to new buffer
-            @memcpy(new_cells[new_row_start..][0..copy_len], self.cells[old_row_start..][0..copy_len]);
-        }
-
-        // Free old buffer and update to new
-        allocator.free(self.cells);
-        self.cells = new_cells;
-        self.width = w;
-        self.height = h;
-    }
-};
-
-/// Cursor information for rendering
-pub const CursorInfo = struct {
-    x: u16 = 0,
-    y: u16 = 0,
-    style: u8 = 0,
-    visible: bool = true,
-};
+pub const Cell = render_types.Cell;
+pub const Color = render_types.Color;
+pub const CursorInfo = render_types.CursorInfo;
+pub const CellBuffer = render_buffer.CellBuffer;
 
 /// Differential renderer that tracks state and only emits changed cells.
 /// Internally uses libvaxis for terminal output while maintaining a CellBuffer
