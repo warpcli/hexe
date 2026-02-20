@@ -1,7 +1,6 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const Renderer = @import("render_core.zig").Renderer;
-const vaxis_cell = @import("vaxis_cell.zig");
 
 threadlocal var pooled_screen: ?vaxis.Screen = null;
 threadlocal var pooled_cols: u16 = 0;
@@ -64,7 +63,7 @@ pub fn blitScreen(renderer: *Renderer, screen: *const vaxis.Screen, dst_x: u16, 
             const sx: u16 = @intCast(rx);
             const sy: u16 = @intCast(ry);
             const vx_cell = screen.readCell(sx, sy) orelse continue;
-            renderer.setCell(dst_x + sx, dst_y + sy, vaxis_cell.toRenderCell(vx_cell));
+            renderer.setVaxisCell(dst_x + sx, dst_y + sy, vx_cell);
         }
     }
 }
@@ -75,7 +74,7 @@ pub fn blitWindow(renderer: *Renderer, win: vaxis.Window, dst_x: u16, dst_y: u16
             const sx: u16 = @intCast(rx);
             const sy: u16 = @intCast(ry);
             const vx_cell = win.readCell(sx, sy) orelse continue;
-            renderer.setCell(dst_x + sx, dst_y + sy, vaxis_cell.toRenderCell(vx_cell));
+            renderer.setVaxisCell(dst_x + sx, dst_y + sy, vx_cell);
         }
     }
 }
@@ -95,7 +94,7 @@ pub fn blitTouched(
             const sx: u16 = @intCast(rx);
             const sy: u16 = @intCast(ry);
             const vx_cell = screen.readCell(sx, sy) orelse continue;
-            renderer.setCell(dst_x + sx, dst_y + sy, vaxis_cell.toRenderCell(vx_cell));
+            renderer.setVaxisCell(dst_x + sx, dst_y + sy, vx_cell);
         }
     }
 }

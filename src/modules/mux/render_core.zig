@@ -56,6 +56,11 @@ pub const Renderer = struct {
         self.vx.screen.writeCell(x, y, vx_cell);
     }
 
+    pub fn setVaxisCell(self: *Renderer, x: u16, y: u16, cell: vaxis.Cell) void {
+        if (x >= self.vx.screen.width or y >= self.vx.screen.height) return;
+        self.vx.screen.writeCell(x, y, cell);
+    }
+
     pub fn screenWidth(self: *const Renderer) u16 {
         return self.vx.screen.width;
     }
