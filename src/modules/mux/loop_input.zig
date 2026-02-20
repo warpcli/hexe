@@ -1,5 +1,6 @@
 const std = @import("std");
 const core = @import("core");
+const vaxis = @import("vaxis");
 
 const layout_mod = @import("layout.zig");
 
@@ -23,6 +24,30 @@ const main = @import("main.zig");
 const tab_switch = @import("tab_switch.zig");
 
 // Mouse helpers moved to loop_mouse.zig.
+
+// Transitional parser usage: start consuming structured events from libvaxis
+// while keeping the existing raw-byte input pipeline intact.
+var vaxis_parser: vaxis.Parser = .{};
+
+fn updateInputFlagsFromParser(state: *State, input_bytes: []const u8) void {
+    var offset: usize = 0;
+    while (offset < input_bytes.len) {
+        const result = vaxis_parser.parse(input_bytes[offset..], state.allocator) catch {
+            offset += 1;
+            continue;
+        };
+        if (result.n == 0) break;
+        offset += result.n;
+
+        if (result.event) |event| {
+            switch (event) {
+                .paste_start => state.in_bracketed_paste = true,
+                .paste_end => state.in_bracketed_paste = false,
+                else => {},
+            }
+        }
+    }
+}
 
 fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
     input_csi_u.forwardSanitizedToFocusedPane(state, bytes);
@@ -125,6 +150,9 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     // Don't process (or forward) partial escape sequences.
     const stable = stashIncompleteEscapeTail(state, slice);
     if (stable.len == 0) return;
+
+    // Keep bracketed-paste state synchronized from parsed terminal events.
+    updateInputFlagsFromParser(state, stable);
 
     // Record all input for keycast display (before any processing)
     loop_input_keys.recordKeycastInput(state, stable);
