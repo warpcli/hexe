@@ -56,7 +56,32 @@ pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
 
 /// Forward a key (with modifiers) to the focused pane as escape sequence.
 pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
+    forwardKeyToPaneWithText(state, mods, key, null);
+}
+
+/// Forward a key event to focused pane, preserving printable text codepoint
+/// when available (important for Shift punctuation in parser mode).
+pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_codepoint: ?u21) void {
     var out: [16]u8 = undefined;
+
+    if (@as(BindKeyKind, key) == .char) {
+        if (text_codepoint) |cp| {
+            // For text-producing keys, prefer forwarding the produced codepoint
+            // directly unless Ctrl/Super is involved.
+            if ((mods & 2) == 0 and (mods & 8) == 0) {
+                var n: usize = 0;
+                if ((mods & 1) != 0) {
+                    out[n] = 0x1b;
+                    n += 1;
+                }
+                n += std.unicode.utf8Encode(cp, out[n..]) catch 0;
+                if (n > 0) {
+                    forwardInputToFocusedPane(state, out[0..n]);
+                    return;
+                }
+            }
+        }
+    }
 
     const use_application_arrows = blk: {
         if (state.active_floating) |idx| {

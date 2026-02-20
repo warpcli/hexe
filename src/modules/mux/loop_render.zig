@@ -15,7 +15,71 @@ fn sanitizeLabelUtf8(raw: []const u8, out: *[128]u8) []const u8 {
     var wi: usize = 0;
     var i: usize = 0;
     while (i < raw.len and wi < out.len) {
-        const len = std.unicode.utf8ByteSequenceLength(raw[i]) catch 1;
+        const b = raw[i];
+
+        // Strip ANSI/VT escape sequences so raw terminal control bytes never
+        // leak into float titles.
+        if (b == 0x1b) {
+            i += 1;
+            if (i >= raw.len) break;
+            const esc = raw[i];
+
+            // CSI: ESC [ ... final
+            if (esc == '[') {
+                i += 1;
+                while (i < raw.len) : (i += 1) {
+                    const c = raw[i];
+                    if (c >= 0x40 and c <= 0x7e) {
+                        i += 1;
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            // OSC: ESC ] ... BEL or ST (ESC \)
+            if (esc == ']') {
+                i += 1;
+                while (i < raw.len) {
+                    const c = raw[i];
+                    if (c == 0x07) {
+                        i += 1;
+                        break;
+                    }
+                    if (c == 0x1b and i + 1 < raw.len and raw[i + 1] == '\\') {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+
+            // DCS/PM/APC: ESC P/^/_ ... ST (ESC \)
+            if (esc == 'P' or esc == '^' or esc == '_') {
+                i += 1;
+                while (i < raw.len) {
+                    if (raw[i] == 0x1b and i + 1 < raw.len and raw[i + 1] == '\\') {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+
+            // Other escape forms are 2-byte sequences.
+            i += 1;
+            continue;
+        }
+
+        // C1 controls (including 0x9B CSI) are never valid label content.
+        if (b >= 0x80 and b <= 0x9f) {
+            i += 1;
+            continue;
+        }
+
+        const len = std.unicode.utf8ByteSequenceLength(b) catch 1;
         const end = @min(i + len, raw.len);
         const chunk = raw[i..end];
         const cp = std.unicode.utf8Decode(chunk) catch {

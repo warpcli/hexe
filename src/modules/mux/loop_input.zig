@@ -478,7 +478,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 }
 
                 if (ev.when == .press) {
-                    keybinds.forwardKeyToPane(state, ev.mods, ev.key);
+                    keybinds.forwardKeyToPaneWithText(state, ev.mods, ev.key, ev.text_codepoint);
                 }
 
                 i += ev.consumed;

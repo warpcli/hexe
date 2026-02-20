@@ -2,8 +2,6 @@ const std = @import("std");
 const core = @import("core");
 const shp = @import("shp");
 const vaxis = @import("vaxis");
-const vaxis_surface = @import("vaxis_surface.zig");
-const vaxis_draw = @import("vaxis_draw.zig");
 const animations = core.segments.animations;
 const randomdo_mod = core.segments.randomdo;
 
@@ -62,8 +60,6 @@ pub fn deinitThreadlocals() void {
         state.deinit();
         randomdo_state = null;
     }
-
-    vaxis_surface.deinitThreadlocals(std.heap.page_allocator);
 }
 
 fn getRandomdoStateMap() *std.AutoHashMap(usize, RandomdoState) {
@@ -407,7 +403,10 @@ pub fn draw(
 
     // Clear status bar
     for (0..width) |xi| {
-        vaxis_draw.putChar(renderer, @intCast(xi), y, ' ', null, null, false);
+        renderer.setVaxisCell(@intCast(xi), y, .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{},
+        });
     }
 
     // Create shp context
@@ -815,7 +814,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                 }
             }
         } else if (std.mem.eql(u8, mod.name, "spinner")) {
-            output_text = spinnerAsciiFrame(ctx.now_ms, ctx.now_ms, 100);
+            output_text = spinnerAsciiFrame(ctx.now_ms, ctx.shell_started_at_ms orelse 0, 100);
         } else if (std.mem.eql(u8, mod.name, "session")) {
             output_text = ctx.session_name;
         } else if (std.mem.eql(u8, mod.name, "randomdo")) {
@@ -874,7 +873,7 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
                 }
             }
         } else if (std.mem.eql(u8, mod.name, "spinner")) {
-            output_text = spinnerAsciiFrame(ctx.now_ms, ctx.now_ms, 100);
+            output_text = spinnerAsciiFrame(ctx.now_ms, ctx.shell_started_at_ms orelse 0, 100);
         } else if (std.mem.eql(u8, mod.name, "session")) {
             output_text = ctx.session_name;
         } else if (std.mem.eql(u8, mod.name, "randomdo")) {
@@ -904,10 +903,6 @@ fn calcFormattedWidthMax(format: []const u8, output_max: u16) u16 {
         }
     }
     return width;
-}
-
-pub fn countDisplayWidth(text: []const u8) u16 {
-    return measureText(text);
 }
 
 // Measure text width in terminal cells (same logic as drawStyledText)
@@ -967,23 +962,17 @@ pub fn drawSegment(renderer: *Renderer, x: u16, y: u16, seg: shp.Segment, defaul
 }
 
 pub fn drawStyledText(renderer: *Renderer, start_x: u16, y: u16, text: []const u8, style: shp.Style) u16 {
-    const win = vaxis_surface.pooledWindow(std.heap.page_allocator, renderer.screenWidth(), 1) catch {
-        return start_x + measureText(text);
-    };
-    win.clear();
+    const screen_w = renderer.screenWidth();
+    if (start_x >= screen_w) return start_x;
+
+    const row = renderer.vx.window().child(.{
+        .x_off = @intCast(start_x),
+        .y_off = @intCast(y),
+        .width = screen_w - start_x,
+        .height = 1,
+    });
 
     const seg = vaxis.Segment{ .text = text, .style = shpStyleToVaxis(style) };
-    const res = win.print(&.{seg}, .{ .row_offset = 0, .col_offset = start_x, .wrap = .none, .commit = true });
-
-    const end_x = @min(res.col, win.width);
-    if (end_x > start_x) {
-        const clipped = win.child(.{
-            .x_off = @intCast(start_x),
-            .width = end_x - start_x,
-            .height = 1,
-        });
-        vaxis_surface.blitWindow(renderer, clipped, start_x, y);
-    }
-
-    return end_x;
+    const res = row.print(&.{seg}, .{ .row_offset = 0, .col_offset = 0, .wrap = .none, .commit = true });
+    return start_x + @min(res.col, row.width);
 }

@@ -6,9 +6,29 @@ const vaxis = @import("vaxis");
 const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
 const statusbar = @import("statusbar.zig");
-const vaxis_surface = @import("vaxis_surface.zig");
 const text_width = @import("text_width.zig");
-const vaxis_draw = @import("vaxis_draw.zig");
+
+fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: ?Color, bg: ?Color, bold: bool) void {
+    var buf: [4]u8 = undefined;
+    const grapheme: []const u8 = if (cp < 128)
+        buf[0..blk: {
+            buf[0] = @intCast(cp);
+            break :blk 1;
+        }]
+    else blk: {
+        const n = std.unicode.utf8Encode(cp, &buf) catch return;
+        break :blk buf[0..n];
+    };
+
+    var vx_style: vaxis.Style = .{ .bold = bold };
+    if (fg) |c| vx_style.fg = c.toVaxis();
+    if (bg) |c| vx_style.bg = c.toVaxis();
+
+    renderer.setVaxisCell(x, y, .{
+        .char = .{ .grapheme = grapheme, .width = 1 },
+        .style = vx_style,
+    });
+}
 
 fn textStyle(fg: Color, bg: Color, bold: bool) shp.Style {
     return .{
@@ -29,7 +49,12 @@ fn textStyle(fg: Color, bg: Color, bold: bool) shp.Style {
 fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Color, bg: Color, title: ?[]const u8) void {
     if (w == 0 or h == 0) return;
 
-    const root = vaxis_surface.pooledWindow(std.heap.page_allocator, w, h) catch return;
+    const root = renderer.vx.window().child(.{
+        .x_off = @intCast(x),
+        .y_off = @intCast(y),
+        .width = w,
+        .height = h,
+    });
 
     const base_style: vaxis.Style = .{ .fg = fg.toVaxis(), .bg = bg.toVaxis() };
     root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = base_style });
@@ -54,8 +79,6 @@ fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Color
             _ = root.print(title_segments, .{ .row_offset = 0, .col_offset = 2, .wrap = .none, .commit = true });
         }
     }
-
-    vaxis_surface.blitWindow(renderer, root, x, y);
 }
 
 fn textWidth(text: []const u8) u16 {
@@ -198,15 +221,15 @@ pub fn drawPickerInBounds(renderer: *Renderer, picker: *pop.Picker, cfg: pop.Cho
         const item_fg: Color = if (is_selected) highlight_fg else fg;
         const item_bg: Color = if (is_selected) highlight_bg else bg;
 
-        vaxis_draw.putChar(renderer, content_x, content_y, if (is_selected) '>' else ' ', item_fg, item_bg, false);
-        vaxis_draw.putChar(renderer, content_x + 1, content_y, ' ', item_fg, item_bg, false);
+        putChar(renderer, content_x, content_y, if (is_selected) '>' else ' ', item_fg, item_bg, false);
+        putChar(renderer, content_x + 1, content_y, ' ', item_fg, item_bg, false);
 
         var ix: u16 = content_x + 2;
         const item_width_max = (box_x + box_width - 2) -| ix;
         const clipped_item = text_width.clipTextToWidth(item, item_width_max);
         ix = statusbar.drawStyledText(renderer, ix, content_y, clipped_item, textStyle(item_fg, item_bg, is_selected));
         while (ix < box_x + box_width - 1) : (ix += 1) {
-            vaxis_draw.putChar(renderer, ix, content_y, ' ', item_fg, item_bg, false);
+            putChar(renderer, ix, content_y, ' ', item_fg, item_bg, false);
         }
 
         content_y += 1;
