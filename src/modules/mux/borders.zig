@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("core");
 const shp = @import("shp");
+const vaxis = @import("vaxis");
 const render = @import("render.zig");
 const statusbar = @import("statusbar.zig");
 const Pane = @import("pane.zig").Pane;
@@ -23,6 +24,109 @@ fn toShpStyle(seg: statusbar.RenderedSegment) shp.Style {
         .bold = seg.bold,
         .italic = seg.italic,
     };
+}
+
+fn toVaxisColor(c: render.Color) vaxis.Color {
+    return switch (c) {
+        .none => .default,
+        .palette => |idx| .{ .index = idx },
+        .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
+    };
+}
+
+fn toRenderCell(vx_cell: vaxis.Cell) render.Cell {
+    var out: render.Cell = .{
+        .char = ' ',
+        .bold = vx_cell.style.bold,
+        .italic = vx_cell.style.italic,
+        .faint = vx_cell.style.dim,
+        .strikethrough = vx_cell.style.strikethrough,
+        .inverse = vx_cell.style.reverse,
+    };
+
+    out.fg = switch (vx_cell.style.fg) {
+        .default => .none,
+        .index => |idx| .{ .palette = idx },
+        .rgb => |rgb| .{ .rgb = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] } },
+    };
+    out.bg = switch (vx_cell.style.bg) {
+        .default => .none,
+        .index => |idx| .{ .palette = idx },
+        .rgb => |rgb| .{ .rgb = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] } },
+    };
+    out.underline = switch (vx_cell.style.ul_style) {
+        .off => .none,
+        .single => .single,
+        .double => .double,
+        .curly => .curly,
+        .dotted => .dotted,
+        .dashed => .dashed,
+    };
+
+    if (vx_cell.char.width == 0 or vx_cell.char.grapheme.len == 0) {
+        out.char = 0;
+        out.is_wide_spacer = true;
+        return out;
+    }
+
+    out.char = std.unicode.utf8Decode(vx_cell.char.grapheme) catch ' ';
+    out.is_wide_char = vx_cell.char.width == 2;
+    return out;
+}
+
+fn encodeCodepointUtf8(cp: u21, out: *[4]u8) []const u8 {
+    const n = std.unicode.utf8Encode(cp, out) catch {
+        out[0] = '?';
+        return out[0..1];
+    };
+    return out[0..n];
+}
+
+fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: render.Color, bg: render.Color, glyph_chars: [6]u21) void {
+    if (w == 0 or h == 0) return;
+
+    var screen = vaxis.Screen.init(std.heap.page_allocator, .{ .cols = w, .rows = h, .x_pixel = 0, .y_pixel = 0 }) catch return;
+    defer screen.deinit(std.heap.page_allocator);
+    screen.width_method = .unicode;
+
+    const root: vaxis.Window = .{
+        .x_off = 0,
+        .y_off = 0,
+        .parent_x_off = 0,
+        .parent_y_off = 0,
+        .width = w,
+        .height = h,
+        .screen = &screen,
+    };
+
+    root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = .{ .bg = toVaxisColor(bg) } });
+
+    var glyph_bufs: [6][4]u8 = undefined;
+    const custom_glyphs: [6][]const u8 = .{
+        encodeCodepointUtf8(glyph_chars[0], &glyph_bufs[0]),
+        encodeCodepointUtf8(glyph_chars[1], &glyph_bufs[1]),
+        encodeCodepointUtf8(glyph_chars[2], &glyph_bufs[2]),
+        encodeCodepointUtf8(glyph_chars[3], &glyph_bufs[3]),
+        encodeCodepointUtf8(glyph_chars[4], &glyph_bufs[4]),
+        encodeCodepointUtf8(glyph_chars[5], &glyph_bufs[5]),
+    };
+
+    _ = root.child(.{
+        .width = w,
+        .height = h,
+        .border = .{
+            .where = .all,
+            .glyphs = .{ .custom = custom_glyphs },
+            .style = .{ .fg = toVaxisColor(fg), .bg = toVaxisColor(bg) },
+        },
+    });
+
+    for (0..h) |ry| {
+        for (0..w) |rx| {
+            const vx_cell = screen.readCell(@intCast(rx), @intCast(ry)) orelse continue;
+            renderer.setCell(x + @as(u16, @intCast(rx)), y + @as(u16, @intCast(ry)), toRenderCell(vx_cell));
+        }
+    }
 }
 
 /// Draw split borders between panes
@@ -270,44 +374,8 @@ pub fn drawFloatingBorder(
     const horizontal: u21 = if (style) |s| s.horizontal else 0x2500;
     const vertical: u21 = if (style) |s| s.vertical else 0x2502;
 
-    // Clear the interior with spaces first
-    for (1..h -| 1) |row| {
-        for (1..w -| 1) |col| {
-            renderer.setCell(x + @as(u16, @intCast(col)), y + @as(u16, @intCast(row)), .{
-                .char = ' ',
-            });
-        }
-    }
-
-    // Top-left corner
-    renderer.setCell(x, y, .{ .char = top_left, .fg = fg, .bold = bold });
-
-    // Top border (no built-in title).
-    // The float title should be rendered via the style module area so the
-    // user fully controls title placement and formatting.
-    for (0..w -| 2) |col| {
-        renderer.setCell(x + @as(u16, @intCast(col)) + 1, y, .{ .char = horizontal, .fg = fg, .bold = bold });
-    }
-
-    // Top-right corner
-    renderer.setCell(x + w - 1, y, .{ .char = top_right, .fg = fg, .bold = bold });
-
-    // Side borders
-    for (1..h -| 1) |row| {
-        renderer.setCell(x, y + @as(u16, @intCast(row)), .{ .char = vertical, .fg = fg, .bold = bold });
-        renderer.setCell(x + w - 1, y + @as(u16, @intCast(row)), .{ .char = vertical, .fg = fg, .bold = bold });
-    }
-
-    // Bottom-left corner
-    renderer.setCell(x, y + h - 1, .{ .char = bottom_left, .fg = fg, .bold = bold });
-
-    // Bottom border
-    for (0..w -| 2) |col| {
-        renderer.setCell(x + @as(u16, @intCast(col)) + 1, y + h - 1, .{ .char = horizontal, .fg = fg, .bold = bold });
-    }
-
-    // Bottom-right corner
-    renderer.setCell(x + w - 1, y + h - 1, .{ .char = bottom_right, .fg = fg, .bold = bold });
+    _ = bold;
+    drawBorderFrame(renderer, x, y, w, h, fg, .none, .{ top_left, horizontal, top_right, vertical, bottom_right, bottom_left });
 
     // Render module in border if present
     if (style) |s| {
