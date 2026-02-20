@@ -6,7 +6,6 @@ const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
 const statusbar = @import("statusbar.zig");
 const text_width = @import("text_width.zig");
-const vaxis_cell = @import("vaxis_cell.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
 const vaxis_draw = @import("vaxis_draw.zig");
 const Pane = @import("pane.zig").Pane;
@@ -42,7 +41,7 @@ fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Colo
 
     const root = vaxis_surface.pooledWindow(std.heap.page_allocator, w, h) catch return;
 
-    root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = .{ .bg = vaxis_cell.toVaxisColor(bg) } });
+    root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = .{ .bg = bg.toVaxis() } });
 
     var glyph_bufs: [6][4]u8 = undefined;
     const custom_glyphs: [6][]const u8 = .{
@@ -60,7 +59,7 @@ fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Colo
         .border = .{
             .where = .all,
             .glyphs = .{ .custom = custom_glyphs },
-            .style = .{ .fg = vaxis_cell.toVaxisColor(fg), .bg = vaxis_cell.toVaxisColor(bg) },
+            .style = .{ .fg = fg.toVaxis(), .bg = bg.toVaxis() },
         },
     });
 

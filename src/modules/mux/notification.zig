@@ -4,7 +4,6 @@ const core = @import("core");
 const vaxis = @import("vaxis");
 const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
-const vaxis_cell = @import("vaxis_cell.zig");
 const text_width = @import("text_width.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
 const vaxis_draw = @import("vaxis_draw.zig");
@@ -61,8 +60,16 @@ pub fn renderInBounds(
 
 fn toVaxisStyle(style: pop.notification.Style) vaxis.Style {
     return .{
-        .fg = vaxis_cell.toVaxisColor(style.fg),
-        .bg = vaxis_cell.toVaxisColor(style.bg),
+        .fg = switch (style.fg) {
+            .none => .default,
+            .palette => |idx| .{ .index = idx },
+            .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
+        },
+        .bg = switch (style.bg) {
+            .none => .default,
+            .palette => |idx| .{ .index = idx },
+            .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
+        },
         .bold = style.bold,
     };
 }

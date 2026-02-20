@@ -2,7 +2,6 @@ const std = @import("std");
 const core = @import("core");
 const shp = @import("shp");
 const vaxis = @import("vaxis");
-const vaxis_cell = @import("vaxis_cell.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
 const vaxis_draw = @import("vaxis_draw.zig");
 const animations = core.segments.animations;
@@ -953,8 +952,8 @@ fn mergeStyle(base: shp.Style, override: shp.Style) shp.Style {
 
 fn shpStyleToVaxis(style: shp.Style) vaxis.Style {
     var out: vaxis.Style = .{};
-    out.fg = vaxis_cell.toVaxisColor(style.fg);
-    out.bg = vaxis_cell.toVaxisColor(style.bg);
+    out.fg = style.fg.toVaxis();
+    out.bg = style.bg.toVaxis();
     out.bold = style.bold;
     out.italic = style.italic;
     out.dim = style.dim;

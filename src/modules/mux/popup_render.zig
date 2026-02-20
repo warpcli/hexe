@@ -6,7 +6,6 @@ const vaxis = @import("vaxis");
 const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
 const statusbar = @import("statusbar.zig");
-const vaxis_cell = @import("vaxis_cell.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
 const text_width = @import("text_width.zig");
 const vaxis_draw = @import("vaxis_draw.zig");
@@ -32,7 +31,7 @@ fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Color
 
     const root = vaxis_surface.pooledWindow(std.heap.page_allocator, w, h) catch return;
 
-    const base_style: vaxis.Style = .{ .fg = vaxis_cell.toVaxisColor(fg), .bg = vaxis_cell.toVaxisColor(bg) };
+    const base_style: vaxis.Style = .{ .fg = fg.toVaxis(), .bg = bg.toVaxis() };
     root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = base_style });
     _ = root.child(.{
         .width = w,
@@ -49,7 +48,7 @@ fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Color
             const clipped = text_width.clipTextToWidth(t, w - 4);
             const title_segments = &[_]vaxis.Segment{
                 .{ .text = " ", .style = base_style },
-                .{ .text = clipped, .style = .{ .fg = vaxis_cell.toVaxisColor(fg), .bg = vaxis_cell.toVaxisColor(bg), .bold = true } },
+                .{ .text = clipped, .style = .{ .fg = fg.toVaxis(), .bg = bg.toVaxis(), .bold = true } },
                 .{ .text = " ", .style = base_style },
             };
             _ = root.print(title_segments, .{ .row_offset = 0, .col_offset = 2, .wrap = .none, .commit = true });

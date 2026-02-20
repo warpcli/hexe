@@ -3,7 +3,6 @@ const vaxis = @import("vaxis");
 const core = @import("core");
 const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
-const vaxis_cell = @import("vaxis_cell.zig");
 
 pub fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: ?Color, bg: ?Color, bold: bool) void {
     var buf: [4]u8 = undefined;
@@ -18,8 +17,8 @@ pub fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: ?Color, bg: ?Co
     };
 
     var style: vaxis.Style = .{ .bold = bold };
-    if (fg) |c| style.fg = vaxis_cell.toVaxisColor(c);
-    if (bg) |c| style.bg = vaxis_cell.toVaxisColor(c);
+    if (fg) |c| style.fg = c.toVaxis();
+    if (bg) |c| style.bg = c.toVaxis();
 
     renderer.setVaxisCell(x, y, .{
         .char = .{ .grapheme = grapheme, .width = 1 },
