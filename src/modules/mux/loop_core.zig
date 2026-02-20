@@ -335,8 +335,9 @@ pub fn runMainLoop(state: *State) !void {
     try state.renderer.vx.enterAltScreen(&tty_init.interface);
     try tty_init.interface.writeAll("\x1b[2J\x1b[3J\x1b[H\x1b[0m\x1b(B\x1b)0\x0f\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h");
     try state.renderer.vx.setBracketedPaste(&tty_init.interface, true);
-    // kitty keyboard protocol (>3u with flags: 1=disambiguate + 2=report event types)
-    try tty_init.interface.writeAll("\x1b[>3u");
+    // kitty keyboard protocol with full reporting so modified combinations
+    // (e.g. Ctrl+Alt+digit) are delivered consistently.
+    try tty_init.interface.writeAll("\x1b[>31u");
     // Kick off terminal capability probing for libvaxis-managed features.
     try state.renderer.vx.queryTerminalSend(&tty_init.interface);
     state.terminal_features_enabled = false;
