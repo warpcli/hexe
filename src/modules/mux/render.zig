@@ -4,10 +4,10 @@ const ghostty = @import("ghostty-vt");
 const pop = @import("pop");
 const vt_bridge = @import("vt_bridge.zig");
 const render_sprite = @import("render_sprite.zig");
-const render_bridge = @import("render_bridge.zig");
 const render_types = @import("render_types.zig");
 const render_buffer = @import("render_buffer.zig");
 const render_state_blit = @import("render_state_blit.zig");
+const render_vx = @import("render_vx.zig");
 
 pub const Cell = render_types.Cell;
 pub const Color = render_types.Color;
@@ -28,18 +28,7 @@ pub const Renderer = struct {
 
     pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !Renderer {
         var vx = try vaxis.Vaxis.init(allocator, .{});
-        // Resize vaxis screens to match initial terminal size.
-        // We do this manually to avoid needing a tty writer at init time.
-        if (width > 0 and height > 0) {
-            vx.screen = try vaxis.Screen.init(allocator, .{
-                .rows = height,
-                .cols = width,
-                .x_pixel = 0,
-                .y_pixel = 0,
-            });
-            vx.screen_last.deinit(allocator);
-            vx.screen_last = try vaxis.AllocatingScreen.init(allocator, width, height);
-        }
+        try render_vx.initVaxisForSize(allocator, &vx, width, height);
 
         return .{
             .allocator = allocator,
@@ -63,17 +52,7 @@ pub const Renderer = struct {
     pub fn resize(self: *Renderer, width: u16, height: u16) !void {
         try self.current.resize(self.allocator, width, height);
         try self.next.resize(self.allocator, width, height);
-
-        // Resize vaxis screens to match new terminal dimensions.
-        self.vx.screen.deinit(self.allocator);
-        self.vx.screen = try vaxis.Screen.init(self.allocator, .{
-            .rows = height,
-            .cols = width,
-            .x_pixel = 0,
-            .y_pixel = 0,
-        });
-        self.vx.screen_last.deinit(self.allocator);
-        self.vx.screen_last = try vaxis.AllocatingScreen.init(self.allocator, width, height);
+        try render_vx.resizeVaxisForSize(self.allocator, &self.vx, width, height);
     }
 
     /// Begin a new frame - clear the next buffer and vaxis screen
@@ -107,58 +86,17 @@ pub const Renderer = struct {
         render_state_blit.drawRenderStateToBuffer(&self.next, state, offset_x, offset_y, width, height);
     }
 
-    /// Copy the CellBuffer contents to the vaxis screen for rendering.
-    /// Translates hexa Cell -> vaxis Cell types, using the frame arena for
-    /// non-ASCII grapheme string storage.
-    fn copyToVaxisScreen(self: *Renderer) void {
-        const width = self.next.width;
-        const height = self.next.height;
-        const arena = self.frame_arena.allocator();
-
-        for (0..height) |yi| {
-            const y: u16 = @intCast(yi);
-            for (0..width) |xi| {
-                const x: u16 = @intCast(xi);
-                const cell = self.next.getConst(x, y);
-
-                // Convert hexa Cell -> vaxis Cell
-                const vx_cell = render_bridge.cellToVaxis(cell, arena);
-                self.vx.screen.writeCell(x, y, vx_cell);
-            }
-        }
-    }
-
     /// End frame: copy CellBuffer to vaxis screen and render via libvaxis.
     /// Takes cursor info and the output file to write to.
     pub fn endFrame(self: *Renderer, force_full: bool, stdout: std.fs.File, cursor: CursorInfo) !void {
-        // Copy the CellBuffer to the vaxis screen
-        self.copyToVaxisScreen();
-
-        // Set cursor state on the vaxis screen
-        self.vx.screen.cursor_vis = cursor.visible;
-        if (cursor.visible) {
-            self.vx.screen.cursor = .{ .col = cursor.x, .row = cursor.y };
-            self.vx.screen.cursor_shape = render_bridge.mapCursorShape(cursor.style);
-        }
-
-        if (force_full) {
-            self.vx.refresh = true;
-        }
-
-        // Render via vaxis to stdout
-        var write_buf: [8192]u8 = undefined;
-        var writer = stdout.writer(&write_buf);
-        try self.vx.render(&writer.interface);
-        writer.interface.flush() catch {};
+        render_vx.copyBufferToVaxisScreen(&self.next, &self.vx, self.frame_arena.allocator());
+        try render_vx.renderFrame(&self.vx, stdout, cursor, force_full);
 
         // Free frame arena (grapheme strings are no longer needed after render)
         _ = self.frame_arena.reset(.retain_capacity);
 
         // Swap old CellBuffers so callers that read `current` see last frame
         std.mem.swap(CellBuffer, &self.current, &self.next);
-
-        // Clear force-refresh after rendering
-        self.vx.refresh = false;
     }
 
     /// Force full redraw on next frame
