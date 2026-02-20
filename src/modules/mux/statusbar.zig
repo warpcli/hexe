@@ -352,9 +352,13 @@ pub fn renderSegmentOutput(module: *const core.Segment, output: []const u8) Rend
                 text_len += copy_len;
                 i += 7;
             } else {
-                result.buffers[result.count][text_len] = out.format[i];
-                text_len += 1;
-                i += 1;
+                const cp_len = std.unicode.utf8ByteSequenceLength(out.format[i]) catch 1;
+                const end = @min(i + cp_len, out.format.len);
+                const token_len = end - i;
+                if (text_len + token_len > 64) break;
+                @memcpy(result.buffers[result.count][text_len .. text_len + token_len], out.format[i..end]);
+                text_len += token_len;
+                i = end;
             }
         }
 
