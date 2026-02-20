@@ -483,29 +483,35 @@ pub fn draw(
         }
     }
 
-    // Collect tab titles for center section
+    // Collect tab titles for center section.
+    // Keep active-tab mapping in display space (especially when clipped to 16).
     var tab_names: [16][]const u8 = undefined;
     var tab_count: usize = 0;
-    for (tabs.items) |*tab| {
-        if (tab_count < 16) {
-            if (use_basename) {
-                if (tab.layout.getFocusedPane()) |pane| {
-                    const pwd = pane.getRealCwd();
-                    tab_names[tab_count] = if (pwd) |p| blk: {
-                        const base = std.fs.path.basename(p);
-                        break :blk if (base.len == 0) "/" else base;
-                    } else tab.name;
-                } else {
-                    tab_names[tab_count] = tab.name;
-                }
-            } else {
-                tab_names[tab_count] = tab.name;
-            }
+    var active_display_tab: ?usize = null;
+    for (tabs.items, 0..) |*tab, ti| {
+        const tab_name = if (use_basename)
+            if (tab.layout.getFocusedPane()) |pane|
+                if (pane.getRealCwd()) |p| blk: {
+                    const base = std.fs.path.basename(p);
+                    break :blk if (base.len == 0) "/" else base;
+                } else tab.name
+            else
+                tab.name
+        else
+            tab.name;
+
+        if (tab_count < tab_names.len) {
+            tab_names[tab_count] = tab_name;
+            if (ti == active_tab) active_display_tab = tab_count;
             tab_count += 1;
+        } else if (ti == active_tab) {
+            // Keep active tab visible when list is clipped.
+            tab_names[tab_names.len - 1] = tab_name;
+            active_display_tab = tab_names.len - 1;
         }
     }
     ctx.tab_names = tab_names[0..tab_count];
-    ctx.active_tab = active_tab;
+    ctx.active_tab = active_display_tab orelse 0;
     ctx.session_name = session_name;
 
     // Build PaneQuery for condition evaluation
@@ -705,27 +711,32 @@ pub fn hitTestTab(
 
     var tab_names: [16][]const u8 = undefined;
     var tab_count: usize = 0;
-    for (tabs.items) |*tab| {
-        if (tab_count >= tab_names.len) break;
-        if (use_basename) {
-            if (tab.layout.getFocusedPane()) |pane| {
-                const pwd = pane.getRealCwd();
-                tab_names[tab_count] = if (pwd) |p| blk: {
+    var active_display_tab: ?usize = null;
+    for (tabs.items, 0..) |*tab, ti| {
+        const tab_name = if (use_basename)
+            if (tab.layout.getFocusedPane()) |pane|
+                if (pane.getRealCwd()) |p| blk: {
                     const base = std.fs.path.basename(p);
                     break :blk if (base.len == 0) "/" else base;
-                } else tab.name;
-            } else {
-                tab_names[tab_count] = tab.name;
-            }
-        } else {
-            tab_names[tab_count] = tab.name;
+                } else tab.name
+            else
+                tab.name
+        else
+            tab.name;
+
+        if (tab_count < tab_names.len) {
+            tab_names[tab_count] = tab_name;
+            if (ti == active_tab) active_display_tab = tab_count;
+            tab_count += 1;
+        } else if (ti == active_tab) {
+            tab_names[tab_names.len - 1] = tab_name;
+            active_display_tab = tab_names.len - 1;
         }
-        tab_count += 1;
     }
     if (tab_count == 0) return null;
 
     ctx.tab_names = tab_names[0..tab_count];
-    ctx.active_tab = active_tab;
+    ctx.active_tab = active_display_tab orelse 0;
     ctx.session_name = session_name;
 
     const mod = tabs_mod.?;

@@ -502,17 +502,27 @@ pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, all
         // Keys without bindings should pass through raw to preserve escape sequences.
         if (mods_eff != 0) {
             // Check if ANY binding exists for this key+mods combo
-            const has_press = findBestBind(state, mods_eff, key, .press, false, &query) != null;
-            const has_hold = findBestBind(state, mods_eff, key, .hold, false, &query) != null;
-            const has_release = findBestBind(state, mods_eff, key, .release, false, &query) != null;
+            const press_bind = findBestBind(state, mods_eff, key, .press, allow_only_tabs, &query);
+            const has_press = press_bind != null;
+            const has_hold = findBestBind(state, mods_eff, key, .hold, allow_only_tabs, &query) != null;
+            const has_release = findBestBind(state, mods_eff, key, .release, allow_only_tabs, &query) != null;
 
             if (!has_press and !has_hold and !has_release) {
                 // No bindings - don't consume, let raw input pass through
                 return false;
             }
 
+            // If this key only has a press binding, fire immediately.
+            // Deferring until release requires robust release delivery, which
+            // some terminals/modifier combos still do not guarantee.
+            if (press_bind) |pb| {
+                if (!has_hold and !has_release) {
+                    return dispatchBindWithMode(state, pb, mods_eff, key);
+                }
+            }
+
             main.debugLog("press defer: mods_eff={d} key={any}", .{ mods_eff, key });
-            if (findBestBind(state, mods_eff, key, .hold, false, &query)) |hb| {
+            if (findBestBind(state, mods_eff, key, .hold, allow_only_tabs, &query)) |hb| {
                 const hold_ms = hb.hold_ms orelse cfg.input.hold_ms;
                 cancelTimer(state, .hold, mods_eff, key);
                 cancelTimer(state, .hold_fired, mods_eff, key);
