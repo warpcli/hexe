@@ -36,28 +36,26 @@ pub fn applyDimEffect(renderer: *Renderer, width: u16, height: u16, exclude: ?Bo
                 if (bounds.contains(x, y)) continue;
             }
 
-            var cell = renderer.getCell(x, y) orelse continue;
-            cell.faint = true;
+            var cell = renderer.getVaxisCell(x, y) orelse continue;
+            cell.style.dim = true;
 
             // Dim background while preserving its original color model.
-            switch (cell.bg) {
-                .none => {},
-                .palette => |p| {
-                    // Keep pure black untouched; nudge other palette backgrounds toward
-                    // darker mid-range indices for a consistent dim layer.
+            switch (cell.style.bg) {
+                .default => {},
+                .index => |p| {
                     if (p != 0 and p != 236 and p != 238) {
-                        cell.bg = .{ .palette = if (p >= 8) 238 else 236 };
+                        cell.style.bg = .{ .index = if (p >= 8) 238 else 236 };
                     }
                 },
                 .rgb => |rgb| {
-                    cell.bg = .{ .rgb = .{
-                        .r = @intCast((@as(u16, rgb.r) * 70) / 100),
-                        .g = @intCast((@as(u16, rgb.g) * 70) / 100),
-                        .b = @intCast((@as(u16, rgb.b) * 70) / 100),
+                    cell.style.bg = .{ .rgb = .{
+                        @intCast((@as(u16, rgb[0]) * 70) / 100),
+                        @intCast((@as(u16, rgb[1]) * 70) / 100),
+                        @intCast((@as(u16, rgb[2]) * 70) / 100),
                     } };
                 },
             }
-            renderer.setCell(x, y, cell);
+            renderer.setVaxisCell(x, y, cell);
         }
     }
 }
