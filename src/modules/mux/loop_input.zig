@@ -290,11 +290,16 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
         const current_tab = &state.tabs.items[state.active_tab];
         if (current_tab.popups.isBlocked()) {
             // Allow only tab switching while a tab popup is open.
-            if (input.parseKeyEvent(inp, state.allocator)) |ev| {
-                if (ev.when == .release) state.parser_key_release_seen = true;
-                const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
-                if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true, kitty_mode)) {
-                    return;
+            const parsed = vaxis_parser.parse(inp, state.allocator) catch null;
+            if (parsed) |res| {
+                if (res.n > 0 and res.event != null) {
+                    if (input.keyEventFromVaxisEvent(res.event.?, res.n)) |ev| {
+                        if (ev.when == .release) state.parser_key_release_seen = true;
+                        const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
+                        if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true, kitty_mode)) {
+                            return;
+                        }
+                    }
                 }
             }
             // Block everything else - handle popup input.
@@ -372,100 +377,102 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 continue;
             }
 
-            if (input.parseScrollEvent(inp[i..], state.allocator)) |sev| {
-                if (handleParsedScrollAction(state, sev.action)) {
-                    i += sev.consumed;
-                    continue;
-                }
-            }
-
-            // Parse key events through libvaxis parser first.
-            if (input.parseKeyEvent(inp[i..], state.allocator)) |ev| {
-                if (loop_input_keys.checkExitKeyEvent(state, ev.mods, ev.key, ev.when)) {
-                    i += ev.consumed;
+            const parsed = vaxis_parser.parse(inp[i..], state.allocator) catch null;
+            if (parsed) |res| {
+                if (res.n == 0) {
+                    i += 1;
                     continue;
                 }
 
-                if (ev.when == .press and ev.mods == 2 and @as(core.Config.BindKeyKind, ev.key) == .char and ev.key.char == 'q') {
-                    state.running = false;
-                    return;
-                }
-
-                if (ev.when == .release) state.parser_key_release_seen = true;
-                const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
-                if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, false, kitty_mode)) {
-                    i += ev.consumed;
-                    continue;
-                }
-
-                // Some terminals collapse Ctrl+Alt+letter into Alt+letter.
-                // If Alt variant didn't match, retry as Ctrl+Alt for ASCII letters.
-                if (ev.mods == 1 and @as(core.Config.BindKeyKind, ev.key) == .char and ev.when == .press) {
-                    const ch = ev.key.char;
-                    if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9')) {
-                        if (keybinds.handleKeyEvent(state, ev.mods | 2, ev.key, ev.when, false, kitty_mode)) {
-                            i += ev.consumed;
+                if (res.event) |event| {
+                    if (input.scrollActionFromVaxisEvent(event)) |action| {
+                        if (handleParsedScrollAction(state, action)) {
+                            i += res.n;
                             continue;
                         }
                     }
-                }
 
-                if (ev.when == .press) {
-                    keybinds.forwardKeyToPaneWithText(state, ev.mods, ev.key, ev.text_codepoint);
-                }
-
-                i += ev.consumed;
-                continue;
-            }
-
-            // Parse and consume non-key parser events (mouse/transport/control)
-            // so escape/control bytes never leak into pane stdin.
-            const parsed = vaxis_parser.parse(inp[i..], state.allocator) catch null;
-            if (parsed) |res| {
-                if (res.n > 0) {
-                    if (res.event) |ev| {
-                        switch (ev) {
-                            .mouse => |m| {
-                                _ = loop_mouse.handle(state, input.mouseEventFromVaxis(m, res.n));
-                                i += res.n;
-                                continue;
-                            },
-                            .key_press => |k| {
-                                if (isModifierOnlyKey(k.codepoint)) {
-                                    i += res.n;
-                                    continue;
-                                }
-                            },
-                            .key_release => |k| {
-                                if (isModifierOnlyKey(k.codepoint)) {
-                                    i += res.n;
-                                    continue;
-                                }
-                            },
-                            .paste_start,
-                            .paste_end,
-                            .focus_in,
-                            .focus_out,
-                            .winsize,
-                            .color_scheme,
-                            .cap_kitty_keyboard,
-                            .cap_kitty_graphics,
-                            .cap_rgb,
-                            .cap_unicode,
-                            .cap_sgr_pixels,
-                            .cap_color_scheme_updates,
-                            .cap_multi_cursor,
-                            .cap_da1,
-                            => {
-                                i += res.n;
-                                continue;
-                            },
-                            else => {},
+                    if (input.keyEventFromVaxisEvent(event, res.n)) |ev| {
+                        if (loop_input_keys.checkExitKeyEvent(state, ev.mods, ev.key, ev.when)) {
+                            i += ev.consumed;
+                            continue;
                         }
-                    } else {
-                        i += res.n;
+
+                        if (ev.when == .press and ev.mods == 2 and @as(core.Config.BindKeyKind, ev.key) == .char and ev.key.char == 'q') {
+                            state.running = false;
+                            return;
+                        }
+
+                        if (ev.when == .release) state.parser_key_release_seen = true;
+                        const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
+                        if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, false, kitty_mode)) {
+                            i += ev.consumed;
+                            continue;
+                        }
+
+                        // Some terminals collapse Ctrl+Alt+letter into Alt+letter.
+                        // If Alt variant didn't match, retry as Ctrl+Alt for ASCII letters.
+                        if (ev.mods == 1 and @as(core.Config.BindKeyKind, ev.key) == .char and ev.when == .press) {
+                            const ch = ev.key.char;
+                            if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9')) {
+                                if (keybinds.handleKeyEvent(state, ev.mods | 2, ev.key, ev.when, false, kitty_mode)) {
+                                    i += ev.consumed;
+                                    continue;
+                                }
+                            }
+                        }
+
+                        if (ev.when == .press) {
+                            keybinds.forwardKeyToPaneWithText(state, ev.mods, ev.key, ev.text_codepoint);
+                        }
+
+                        i += ev.consumed;
                         continue;
                     }
+
+                    // Parse and consume non-key parser events (mouse/transport/control)
+                    // so escape/control bytes never leak into pane stdin.
+                    switch (event) {
+                        .mouse => |m| {
+                            _ = loop_mouse.handle(state, input.mouseEventFromVaxis(m, res.n));
+                            i += res.n;
+                            continue;
+                        },
+                        .key_press => |k| {
+                            if (isModifierOnlyKey(k.codepoint)) {
+                                i += res.n;
+                                continue;
+                            }
+                        },
+                        .key_release => |k| {
+                            if (isModifierOnlyKey(k.codepoint)) {
+                                i += res.n;
+                                continue;
+                            }
+                        },
+                        .paste_start,
+                        .paste_end,
+                        .focus_in,
+                        .focus_out,
+                        .winsize,
+                        .color_scheme,
+                        .cap_kitty_keyboard,
+                        .cap_kitty_graphics,
+                        .cap_rgb,
+                        .cap_unicode,
+                        .cap_sgr_pixels,
+                        .cap_color_scheme_updates,
+                        .cap_multi_cursor,
+                        .cap_da1,
+                        => {
+                            i += res.n;
+                            continue;
+                        },
+                        else => {},
+                    }
+                } else {
+                    i += res.n;
+                    continue;
                 }
             }
 
