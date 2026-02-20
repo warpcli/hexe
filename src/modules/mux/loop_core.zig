@@ -333,7 +333,8 @@ pub fn runMainLoop(state: *State) !void {
     var tty_init_buf: [1024]u8 = undefined;
     var tty_init = stdout.writer(&tty_init_buf);
     try state.renderer.vx.enterAltScreen(&tty_init.interface);
-    try tty_init.interface.writeAll("\x1b[2J\x1b[3J\x1b[H\x1b[0m\x1b(B\x1b)0\x0f\x1b[?25l\x1b[?1000h\x1b[?1002h\x1b[?1006h");
+    try tty_init.interface.writeAll("\x1b[2J\x1b[3J\x1b[H\x1b[0m\x1b(B\x1b)0\x0f\x1b[?25l");
+    try state.renderer.vx.setMouseMode(&tty_init.interface, true);
     try state.renderer.vx.setBracketedPaste(&tty_init.interface, true);
     // kitty keyboard protocol (>3u with flags: 1=disambiguate + 2=report event types)
     try tty_init.interface.writeAll("\x1b[>3u");
@@ -344,7 +345,8 @@ pub fn runMainLoop(state: *State) !void {
     defer {
         var tty_restore_buf: [512]u8 = undefined;
         var tty_restore = stdout.writer(&tty_restore_buf);
-        tty_restore.interface.writeAll("\x1b[<u\x1b[?1006l\x1b[?1002l\x1b[?1000l\x1b[0m\x1b[?25h") catch {};
+        tty_restore.interface.writeAll("\x1b[<u\x1b[0m\x1b[?25h") catch {};
+        state.renderer.vx.setMouseMode(&tty_restore.interface, false) catch {};
         state.renderer.vx.setBracketedPaste(&tty_restore.interface, false) catch {};
         state.renderer.vx.exitAltScreen(&tty_restore.interface) catch {};
         tty_restore.interface.flush() catch {};
