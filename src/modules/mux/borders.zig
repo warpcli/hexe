@@ -1,11 +1,29 @@
 const std = @import("std");
 const core = @import("core");
+const shp = @import("shp");
 const render = @import("render.zig");
 const statusbar = @import("statusbar.zig");
 const Pane = @import("pane.zig").Pane;
 const Layout = @import("layout.zig").Layout;
 
 pub const Renderer = render.Renderer;
+
+fn toShpColor(c: render.Color) shp.Color {
+    return switch (c) {
+        .none => .none,
+        .palette => |idx| .{ .palette = idx },
+        .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
+    };
+}
+
+fn toShpStyle(seg: statusbar.RenderedSegment) shp.Style {
+    return .{
+        .fg = toShpColor(seg.fg),
+        .bg = toShpColor(seg.bg),
+        .bold = seg.bold,
+        .italic = seg.italic,
+    };
+}
 
 /// Draw split borders between panes
 pub fn drawSplitBorders(
@@ -252,7 +270,6 @@ pub fn drawFloatingBorder(
     const horizontal: u21 = if (style) |s| s.horizontal else 0x2500;
     const vertical: u21 = if (style) |s| s.vertical else 0x2502;
 
-
     // Clear the interior with spaces first
     for (1..h -| 1) |row| {
         for (1..w -| 1) |col| {
@@ -309,7 +326,7 @@ pub fn drawFloatingBorder(
                 const segments = statusbar.renderSegmentOutput(module, output);
 
                 // Calculate position based on style position
-                const total_len = segments.total_len;
+                const total_len: u16 = @intCast(@min(segments.total_len, @as(usize, std.math.maxInt(u16))));
                 var draw_x: u16 = undefined;
                 var draw_y: u16 = undefined;
 
@@ -319,11 +336,11 @@ pub fn drawFloatingBorder(
                         draw_y = y;
                     },
                     .topcenter => {
-                        draw_x = x + @as(u16, @intCast((w -| total_len) / 2));
+                        draw_x = x + (w -| total_len) / 2;
                         draw_y = y;
                     },
                     .topright => {
-                        draw_x = x + w -| 2 -| @as(u16, @intCast(total_len));
+                        draw_x = x + w -| 2 -| total_len;
                         draw_y = y;
                     },
                     .bottomleft => {
@@ -331,11 +348,11 @@ pub fn drawFloatingBorder(
                         draw_y = y + h - 1;
                     },
                     .bottomcenter => {
-                        draw_x = x + @as(u16, @intCast((w -| total_len) / 2));
+                        draw_x = x + (w -| total_len) / 2;
                         draw_y = y + h - 1;
                     },
                     .bottomright => {
-                        draw_x = x + w -| 2 -| @as(u16, @intCast(total_len));
+                        draw_x = x + w -| 2 -| total_len;
                         draw_y = y + h - 1;
                     },
                 }
@@ -343,16 +360,7 @@ pub fn drawFloatingBorder(
                 // Draw each segment with its style
                 var cur_x = draw_x;
                 for (segments.items[0..segments.count]) |seg| {
-                    for (seg.text) |ch| {
-                        renderer.setCell(cur_x, draw_y, .{
-                            .char = ch,
-                            .fg = seg.fg,
-                            .bg = seg.bg,
-                            .bold = seg.bold,
-                            .italic = seg.italic,
-                        });
-                        cur_x += 1;
-                    }
+                    cur_x = statusbar.drawStyledText(renderer, cur_x, draw_y, seg.text, toShpStyle(seg));
                 }
             }
         }

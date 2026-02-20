@@ -367,7 +367,7 @@ pub fn renderSegmentOutput(module: *const core.Segment, output: []const u8) Rend
             .bold = style.bold,
             .italic = style.italic,
         };
-        result.total_len += text_len;
+        result.total_len += measureText(result.items[result.count].text);
         result.count += 1;
     }
 
