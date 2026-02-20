@@ -122,7 +122,12 @@ pub fn drawSplitBorders(
                 }
                 return;
             }
-            renderer_in.setCell(x, y, .{ .char = cp, .fg = .{ .palette = color } });
+            var cp_buf: [4]u8 = undefined;
+            const cp_bytes = encodeCodepointUtf8(cp, &cp_buf);
+            renderer_in.setVaxisCell(x, y, .{
+                .char = .{ .grapheme = cp_bytes, .width = 1 },
+                .style = .{ .fg = .{ .index = color } },
+            });
         }
     }.go;
     // Get characters and color from config

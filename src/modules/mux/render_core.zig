@@ -3,13 +3,10 @@ const vaxis = @import("vaxis");
 const ghostty = @import("ghostty-vt");
 const pop = @import("pop");
 
-const Cell = @import("render_types.zig").Cell;
 const CursorInfo = @import("render_types.zig").CursorInfo;
 
 const vt_bridge = @import("vt_bridge.zig");
 const render_sprite = @import("render_sprite.zig");
-const render_bridge = @import("render_bridge.zig");
-const vaxis_cell = @import("vaxis_cell.zig");
 const render_vx = @import("render_vx.zig");
 
 /// Differential renderer that tracks state and only emits changed cells.
@@ -44,16 +41,9 @@ pub const Renderer = struct {
     }
 
     pub fn invertCell(self: *Renderer, x: u16, y: u16) void {
-        const cell = self.getCell(x, y) orelse return;
-        var m = cell;
-        m.inverse = !m.inverse;
-        self.setCell(x, y, m);
-    }
-
-    pub fn setCell(self: *Renderer, x: u16, y: u16, cell: Cell) void {
-        if (x >= self.vx.screen.width or y >= self.vx.screen.height) return;
-        const vx_cell = render_bridge.cellToVaxis(cell, self.frame_arena.allocator());
-        self.vx.screen.writeCell(x, y, vx_cell);
+        var cell = self.getVaxisCell(x, y) orelse return;
+        cell.style.reverse = !cell.style.reverse;
+        self.setVaxisCell(x, y, cell);
     }
 
     pub fn setVaxisCell(self: *Renderer, x: u16, y: u16, cell: vaxis.Cell) void {
@@ -77,12 +67,6 @@ pub const Renderer = struct {
 
     pub fn screenHeight(self: *const Renderer) u16 {
         return self.vx.screen.height;
-    }
-
-    pub fn getCell(self: *const Renderer, x: u16, y: u16) ?Cell {
-        if (x >= self.vx.screen.width or y >= self.vx.screen.height) return null;
-        const vx_cell = self.vx.screen.readCell(x, y) orelse return null;
-        return vaxis_cell.toRenderCell(vx_cell);
     }
 
     pub fn drawRenderState(self: *Renderer, state: *const ghostty.RenderState, offset_x: u16, offset_y: u16, width: u16, height: u16) void {

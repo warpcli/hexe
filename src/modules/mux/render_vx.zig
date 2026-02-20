@@ -1,9 +1,20 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
-const render_bridge = @import("render_bridge.zig");
 const render_types = @import("render_types.zig");
 
 const CursorInfo = render_types.CursorInfo;
+
+fn mapCursorShape(style: u8) vaxis.Cell.CursorShape {
+    return switch (style) {
+        1 => .block_blink,
+        2 => .block,
+        3 => .underline_blink,
+        4 => .underline,
+        5 => .beam_blink,
+        6 => .beam,
+        else => .default,
+    };
+}
 
 pub fn initVaxisForSize(allocator: std.mem.Allocator, vx: *vaxis.Vaxis, width: u16, height: u16) !void {
     if (width == 0 or height == 0) return;
@@ -33,7 +44,7 @@ pub fn renderFrame(vx: *vaxis.Vaxis, stdout: std.fs.File, cursor: CursorInfo, fo
     vx.screen.cursor_vis = cursor.visible;
     if (cursor.visible) {
         vx.screen.cursor = .{ .col = cursor.x, .row = cursor.y };
-        vx.screen.cursor_shape = render_bridge.mapCursorShape(cursor.style);
+        vx.screen.cursor_shape = mapCursorShape(cursor.style);
     }
 
     if (force_full) {
