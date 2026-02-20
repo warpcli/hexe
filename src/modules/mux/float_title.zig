@@ -1,4 +1,6 @@
 const std = @import("std");
+const shp = @import("shp");
+const vaxis = @import("vaxis");
 
 const core = @import("core");
 
@@ -12,6 +14,26 @@ pub const TitleRect = struct {
     y: u16,
     w: u16,
 };
+
+fn clipTextToWidth(text: []const u8, max_width: u16) []const u8 {
+    if (text.len == 0 or max_width == 0) return "";
+
+    var used: u16 = 0;
+    var end: usize = 0;
+    var it = vaxis.unicode.graphemeIterator(text);
+    while (it.next()) |g| {
+        const bytes = g.bytes(text);
+        const w = vaxis.gwidth.gwidth(bytes, .unicode);
+        if (w == 0) {
+            end = g.start + g.len;
+            continue;
+        }
+        if (used + w > max_width) break;
+        used += w;
+        end = g.start + g.len;
+    }
+    return text[0..end];
+}
 
 pub fn getTitleRect(pane: *const Pane) ?TitleRect {
     const title = pane.float_title orelse return null;
@@ -88,7 +110,7 @@ pub fn drawTitleEditor(renderer: *Renderer, pane: *const Pane, buf: []const u8) 
     const max_w: u16 = outer_w -| 4;
     if (max_w == 0) return;
 
-    const want_w: u16 = @intCast(@min(@as(usize, max_w), @max(@as(usize, 1), buf.len + 1)));
+    const want_w: u16 = @min(max_w, @max(@as(u16, 1), statusbar.measureText(buf) + 1));
 
     var draw_x: u16 = undefined;
     var draw_y: u16 = undefined;
@@ -121,6 +143,7 @@ pub fn drawTitleEditor(renderer: *Renderer, pane: *const Pane, buf: []const u8) 
 
     const bg: render.Color = .{ .palette = pane.border_color.active };
     const fg: render.Color = .{ .palette = 0 };
+    const text_style = shp.Style{ .fg = .{ .palette = 0 }, .bg = .{ .palette = pane.border_color.active }, .bold = true };
 
     // Background box.
     var i: u16 = 0;
@@ -129,10 +152,8 @@ pub fn drawTitleEditor(renderer: *Renderer, pane: *const Pane, buf: []const u8) 
     }
 
     // Text + cursor.
-    const text_len: u16 = @intCast(@min(@as(usize, want_w - 1), buf.len));
-    for (buf[0..text_len], 0..) |ch, idx| {
-        renderer.setCell(draw_x + @as(u16, @intCast(idx)), draw_y, .{ .char = ch, .fg = fg, .bg = bg, .bold = true });
-    }
+    const clipped = clipTextToWidth(buf, want_w - 1);
+    const cursor_x = statusbar.drawStyledText(renderer, draw_x, draw_y, clipped, text_style);
     // Cursor marker at end (ASCII for portability).
-    renderer.setCell(draw_x + text_len, draw_y, .{ .char = '|', .fg = fg, .bg = bg, .bold = true });
+    renderer.setCell(cursor_x, draw_y, .{ .char = '|', .fg = fg, .bg = bg, .bold = true });
 }
