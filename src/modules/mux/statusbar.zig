@@ -21,8 +21,6 @@ const WhenCacheEntry = struct {
 threadlocal var when_bash_cache: ?std.AutoHashMap(usize, WhenCacheEntry) = null;
 threadlocal var when_lua_cache: ?std.AutoHashMap(usize, WhenCacheEntry) = null;
 threadlocal var when_lua_rt: ?LuaRuntime = null;
-threadlocal var status_print_screen: ?vaxis.Screen = null;
-threadlocal var status_print_screen_width: u16 = 0;
 
 const RandomdoState = struct {
     active: bool,
@@ -57,34 +55,7 @@ pub fn deinitThreadlocals() void {
         randomdo_state = null;
     }
 
-    if (status_print_screen) |*screen| {
-        screen.deinit(std.heap.page_allocator);
-        status_print_screen = null;
-        status_print_screen_width = 0;
-    }
-
     vaxis_surface.deinitThreadlocals(std.heap.page_allocator);
-}
-
-fn getStatusPrintScreen(width: u16) ?*vaxis.Screen {
-    if (width == 0) return null;
-
-    if (status_print_screen == null or status_print_screen_width != width) {
-        if (status_print_screen) |*old| {
-            old.deinit(std.heap.page_allocator);
-            status_print_screen = null;
-        }
-        status_print_screen = vaxis.Screen.init(std.heap.page_allocator, .{
-            .cols = width,
-            .rows = 1,
-            .x_pixel = 0,
-            .y_pixel = 0,
-        }) catch return null;
-        status_print_screen_width = width;
-    }
-
-    status_print_screen.?.width_method = .unicode;
-    return &status_print_screen.?;
 }
 
 fn getRandomdoStateMap() *std.AutoHashMap(usize, RandomdoState) {
@@ -967,29 +938,22 @@ pub fn drawSegment(renderer: *Renderer, x: u16, y: u16, seg: shp.Segment, defaul
 }
 
 pub fn drawStyledText(renderer: *Renderer, start_x: u16, y: u16, text: []const u8, style: shp.Style) u16 {
-    const screen = getStatusPrintScreen(renderer.next.width) orelse {
+    const win = vaxis_surface.pooledWindow(std.heap.page_allocator, renderer.next.width, 1) catch {
         return start_x + measureText(text);
     };
-    screen.clear();
-
-    const win: vaxis.Window = .{
-        .x_off = 0,
-        .y_off = 0,
-        .parent_x_off = 0,
-        .parent_y_off = 0,
-        .width = screen.width,
-        .height = 1,
-        .screen = screen,
-    };
+    win.clear();
 
     const seg = vaxis.Segment{ .text = text, .style = shpStyleToVaxis(style) };
     const res = win.print(&.{seg}, .{ .row_offset = 0, .col_offset = start_x, .wrap = .none, .commit = true });
 
-    const end_x = @min(res.col, screen.width);
-    var x = start_x;
-    while (x < end_x) : (x += 1) {
-        const vx_cell = screen.readCell(x, 0) orelse continue;
-        renderer.setCell(x, y, vaxis_cell.toRenderCell(vx_cell));
+    const end_x = @min(res.col, win.width);
+    if (end_x > start_x) {
+        const clipped = win.child(.{
+            .x_off = @intCast(start_x),
+            .width = end_x - start_x,
+            .height = 1,
+        });
+        vaxis_surface.blitWindow(renderer, clipped, start_x, y);
     }
 
     return end_x;
