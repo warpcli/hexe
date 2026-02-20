@@ -5,6 +5,7 @@ const pagepkg = ghostty.page;
 const colorpkg = ghostty.color;
 const pop = @import("pop");
 const vt_bridge = @import("vt_bridge.zig");
+const render_sprite = @import("render_sprite.zig");
 
 /// Represents a single rendered cell with all its attributes
 pub const Cell = struct {
@@ -18,7 +19,7 @@ pub const Cell = struct {
     strikethrough: bool = false,
     inverse: bool = false,
     is_wide_spacer: bool = false, // True if this cell is a spacer for a wide character
-    is_wide_char: bool = false,   // True if this character is wide (takes 2 columns)
+    is_wide_char: bool = false, // True if this character is wide (takes 2 columns)
 
     pub const Underline = enum(u3) {
         none = 0,
@@ -426,94 +427,7 @@ pub const Renderer = struct {
 
     /// Draw a sprite overlay centered in the given pane bounds
     pub fn drawSpriteOverlay(self: *Renderer, pane_x: u16, pane_y: u16, pane_width: u16, pane_height: u16, sprite_content: []const u8, pokemon_config: pop.widgets.PokemonConfig) void {
-        const widgets = pop.widgets;
-        // Render sprite directly to the next buffer
-        // We'll parse the ANSI codes and set cells accordingly
-        var lines = std.mem.splitScalar(u8, sprite_content, '\n');
-        var max_visual_width: usize = 0;
-        var line_count: usize = 0;
-
-        // First pass: count lines and find max width
-        var temp_lines: std.ArrayList([]const u8) = .empty;
-        defer temp_lines.deinit(self.allocator);
-
-        while (lines.next()) |line| {
-            temp_lines.append(self.allocator, line) catch continue;
-            const visual_width = widgets.pokemon.estimateVisualWidth(line);
-            if (visual_width > max_visual_width) {
-                max_visual_width = visual_width;
-            }
-            line_count += 1;
-        }
-
-        const sprite_width: u16 = @intCast(@min(max_visual_width, pane_width));
-        const sprite_height: u16 = @intCast(line_count);
-
-        // Calculate position based on widget config
-        const pos = widgets.pokemon.calculatePosition(
-            pokemon_config,
-            pane_x,
-            pane_y,
-            pane_width,
-            pane_height,
-            sprite_width,
-            sprite_height,
-        );
-        const start_x = pos.x;
-        const start_y = pos.y;
-
-        // Second pass: render lines
-        for (temp_lines.items, 0..) |line, i| {
-            const y = start_y + @as(u16, @intCast(i));
-            if (y >= pane_y + pane_height) break;
-
-            // Parse ANSI codes and render to cells
-            var x = start_x;
-            var j: usize = 0;
-            var in_escape = false;
-            var escape_buf: [128]u8 = undefined;
-            var escape_len: usize = 0;
-            var current_cell = Cell{};
-
-            while (j < line.len and x < pane_x + pane_width) {
-                if (line[j] == 0x1b) { // ESC
-                    in_escape = true;
-                    escape_len = 0;
-                    escape_buf[escape_len] = line[j];
-                    escape_len += 1;
-                    j += 1;
-                } else if (in_escape) {
-                    if (escape_len < escape_buf.len) {
-                        escape_buf[escape_len] = line[j];
-                        escape_len += 1;
-                    }
-                    if (line[j] == 'm') {
-                        // End of SGR sequence - parse it
-                        parseSGR(escape_buf[0..escape_len], &current_cell);
-                        in_escape = false;
-                    }
-                    j += 1;
-                } else {
-                    // Regular character - decode UTF-8
-                    const char_len = std.unicode.utf8ByteSequenceLength(line[j]) catch 1;
-                    if (j + char_len <= line.len) {
-                        const codepoint = std.unicode.utf8Decode(line[j..][0..char_len]) catch {
-                            j += 1;
-                            continue;
-                        };
-                        // Only render non-space characters to make background transparent
-                        if (codepoint != ' ') {
-                            current_cell.char = codepoint;
-                            self.setCell(x, y, current_cell);
-                        }
-                        x += 1;
-                        j += char_len;
-                    } else {
-                        j += 1;
-                    }
-                }
-            }
-        }
+        render_sprite.drawSpriteOverlay(self, Cell, pane_x, pane_y, pane_width, pane_height, sprite_content, pokemon_config);
     }
 };
 
@@ -580,47 +494,4 @@ fn mapCursorShape(style: u8) vaxis.Cell.CursorShape {
         6 => .beam,
         else => .default,
     };
-}
-
-/// Parse SGR (Select Graphic Rendition) escape sequence
-fn parseSGR(seq: []const u8, cell: *Cell) void {
-    // Parse SGR sequences like ESC[38;2;R;G;Bm or ESC[48;2;R;G;Bm
-    if (seq.len < 3) return;
-    if (seq[0] != 0x1b or seq[1] != '[') return;
-
-    // Extract params between '[' and 'm'
-    const params_end = std.mem.indexOfScalar(u8, seq, 'm') orelse return;
-    const params = seq[2..params_end];
-
-    // Parse semicolon-separated params
-    var params_iter = std.mem.splitScalar(u8, params, ';');
-    var param_list: [8]u8 = undefined;
-    var param_count: usize = 0;
-
-    while (params_iter.next()) |param_str| {
-        if (param_count >= param_list.len) break;
-        param_list[param_count] = std.fmt.parseInt(u8, param_str, 10) catch continue;
-        param_count += 1;
-    }
-
-    // Check for 38;2;R;G;B (foreground RGB)
-    if (param_count >= 5 and param_list[0] == 38 and param_list[1] == 2) {
-        cell.fg = .{ .rgb = .{
-            .r = param_list[2],
-            .g = param_list[3],
-            .b = param_list[4],
-        } };
-    }
-    // Check for 48;2;R;G;B (background RGB)
-    else if (param_count >= 5 and param_list[0] == 48 and param_list[1] == 2) {
-        cell.bg = .{ .rgb = .{
-            .r = param_list[2],
-            .g = param_list[3],
-            .b = param_list[4],
-        } };
-    }
-    // Check for reset
-    else if (param_count >= 1 and param_list[0] == 0) {
-        cell.* = Cell{};
-    }
 }

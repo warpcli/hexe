@@ -188,13 +188,3 @@ fn applyDirectColor(style: *vaxis.Style, raw: pagepkg.Cell) void {
         style.bg = .{ .index = raw.content.color_palette };
     }
 }
-
-/// Convert a hexa-style Color union to vaxis Color.
-/// Used during the migration period while some code still uses the old Color type.
-pub fn colorToVaxis(c: anytype) vaxis.Cell.Color {
-    return switch (c) {
-        .none => .default,
-        .palette => |p| .{ .index = p },
-        .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
-    };
-}
