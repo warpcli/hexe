@@ -1,4 +1,5 @@
 const std = @import("std");
+const vaxis = @import("vaxis");
 
 /// Color representation - compatible with mux/render.zig Color
 pub const Color = union(enum) {
@@ -107,6 +108,15 @@ pub const Color = union(enum) {
             .rgb => |rgb| try writer.print("\x1b[48;2;{d};{d};{d}m", .{ rgb.r, rgb.g, rgb.b }),
         }
     }
+
+    /// Convert to libvaxis color representation.
+    pub fn toVaxis(self: Color) vaxis.Color {
+        return switch (self) {
+            .none => .default,
+            .palette => |idx| .{ .index = idx },
+            .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
+        };
+    }
 };
 
 /// Style with foreground, background, and attributes
@@ -174,5 +184,17 @@ pub const Style = struct {
     pub fn isEmpty(self: Style) bool {
         return self.fg == .none and self.bg == .none and
             !self.bold and !self.italic and !self.underline and !self.dim;
+    }
+
+    /// Convert to libvaxis style representation.
+    pub fn toVaxis(self: Style) vaxis.Style {
+        return .{
+            .fg = self.fg.toVaxis(),
+            .bg = self.bg.toVaxis(),
+            .bold = self.bold,
+            .italic = self.italic,
+            .dim = self.dim,
+            .ul_style = if (self.underline) .single else .off,
+        };
     }
 };

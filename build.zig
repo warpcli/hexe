@@ -57,6 +57,9 @@ pub fn build(b: *std.Build) void {
     if (voidbox_mod) |vb| {
         core_module.addImport("voidbox", vb);
     }
+    if (vaxis_mod) |vx| {
+        core_module.addImport("vaxis", vx);
+    }
     core_module.addImport("xev", xev_mod);
 
     // Create shp module (shell prompt/status bar segments)
