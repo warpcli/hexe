@@ -6,23 +6,16 @@ const render = @import("render.zig");
 const statusbar = @import("statusbar.zig");
 const vaxis_cell = @import("vaxis_cell.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
+const style_bridge = @import("style_bridge.zig");
 const Pane = @import("pane.zig").Pane;
 const Layout = @import("layout.zig").Layout;
 
 pub const Renderer = render.Renderer;
 
-fn toShpColor(c: render.Color) shp.Color {
-    return switch (c) {
-        .none => .none,
-        .palette => |idx| .{ .palette = idx },
-        .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
-    };
-}
-
 fn toShpStyle(seg: statusbar.RenderedSegment) shp.Style {
     return .{
-        .fg = toShpColor(seg.fg),
-        .bg = toShpColor(seg.bg),
+        .fg = style_bridge.renderColorToShp(seg.fg),
+        .bg = style_bridge.renderColorToShp(seg.bg),
         .bold = seg.bold,
         .italic = seg.italic,
     };

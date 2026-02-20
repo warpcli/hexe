@@ -1,32 +1,15 @@
 const std = @import("std");
-const shp = @import("shp");
 const render = @import("render.zig");
 const Renderer = render.Renderer;
-const Color = render.Color;
 const statusbar = @import("statusbar.zig");
 const text_width = @import("text_width.zig");
+const style_bridge = @import("style_bridge.zig");
 
 const pop = @import("pop");
 const overlay = pop.overlay;
 const OverlayManager = overlay.OverlayManager;
 
 const Pos = struct { x: u16, y: u16 };
-
-fn textStyle(fg: Color, bg: Color, bold: bool) shp.Style {
-    return .{
-        .fg = switch (fg) {
-            .none => .none,
-            .palette => |idx| .{ .palette = idx },
-            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
-        },
-        .bg = switch (bg) {
-            .none => .none,
-            .palette => |idx| .{ .palette = idx },
-            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
-        },
-        .bold = bold,
-    };
-}
 
 /// Bounds of a rectangular area to exclude from dimming
 pub const Bounds = struct {
@@ -211,7 +194,7 @@ fn renderResizeInfo(renderer: *Renderer, overlays: *OverlayManager) void {
     }
 
     // Draw text
-    _ = statusbar.drawStyledText(renderer, box_x + padding, box_y, text, textStyle(.{ .palette = 0 }, .{ .palette = 1 }, false));
+    _ = statusbar.drawStyledText(renderer, box_x + padding, box_y, text, style_bridge.textStyle(.{ .palette = 0 }, .{ .palette = 1 }, false));
 }
 
 /// Render keycast history in bottom-right corner
@@ -250,7 +233,7 @@ fn renderKeycast(renderer: *Renderer, overlays: *const OverlayManager, screen_wi
         }
 
         // Draw text
-        _ = statusbar.drawStyledText(renderer, box_x + padding, y, text, textStyle(.{ .palette = 15 }, .{ .palette = 238 }, true));
+        _ = statusbar.drawStyledText(renderer, box_x + padding, y, text, style_bridge.textStyle(.{ .palette = 15 }, .{ .palette = 238 }, true));
 
         y += 1;
     }
@@ -287,7 +270,7 @@ fn renderOverlay(renderer: *Renderer, ov: overlay.Overlay, screen_width: u16, sc
     // Draw text
     const text_x = pos.x + ov.padding_x;
     const text_y = pos.y + ov.padding_y;
-    _ = statusbar.drawStyledText(renderer, text_x, text_y, clipped, textStyle(.{ .palette = ov.fg }, .{ .palette = ov.bg }, ov.bold));
+    _ = statusbar.drawStyledText(renderer, text_x, text_y, clipped, style_bridge.textStyle(.{ .palette = ov.fg }, .{ .palette = ov.bg }, ov.bold));
 }
 
 fn calculateCornerPosition(
