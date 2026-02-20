@@ -547,6 +547,11 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
             // Parse key events through libvaxis parser first.
             if (input.parseKeyEvent(inp[i..], state.allocator)) |ev| {
+                if (ev.when == .press and ev.mods == 2 and @as(core.Config.BindKeyKind, ev.key) == .char and ev.key.char == 'q') {
+                    state.running = false;
+                    return;
+                }
+
                 if (ev.when == .release) state.parser_key_release_seen = true;
                 const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
                 if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, false, kitty_mode)) {
@@ -579,12 +584,6 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 _ = loop_mouse.handle(state, ev);
                 i += ev.consumed;
                 continue;
-            }
-
-            // Check for Ctrl+Q to quit.
-            if (inp[i] == 0x11) {
-                state.running = false;
-                return;
             }
 
             // ==========================================================================
