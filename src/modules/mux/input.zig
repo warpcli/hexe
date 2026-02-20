@@ -99,6 +99,8 @@ pub fn parseTransportSequence(input_bytes: []const u8, allocator: std.mem.Alloca
     if (parsed.event == null) return parsed.n;
 
     return switch (parsed.event.?) {
+        .key_press => |k| if (isModifierOnlyKey(k.codepoint)) parsed.n else null,
+        .key_release => |k| if (isModifierOnlyKey(k.codepoint)) parsed.n else null,
         .paste_start,
         .paste_end,
         .focus_in,
@@ -116,6 +118,12 @@ pub fn parseTransportSequence(input_bytes: []const u8, allocator: std.mem.Alloca
         => parsed.n,
         else => null,
     };
+}
+
+fn isModifierOnlyKey(cp: u21) bool {
+    return cp == vaxis.Key.left_shift or cp == vaxis.Key.left_control or cp == vaxis.Key.left_alt or cp == vaxis.Key.left_super or
+        cp == vaxis.Key.right_shift or cp == vaxis.Key.right_control or cp == vaxis.Key.right_alt or cp == vaxis.Key.right_super or
+        cp == vaxis.Key.iso_level_3_shift or cp == vaxis.Key.iso_level_5_shift;
 }
 
 pub fn parseScrollEvent(input_bytes: []const u8, allocator: std.mem.Allocator) ?ScrollEvent {
