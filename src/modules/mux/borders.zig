@@ -3,6 +3,7 @@ const core = @import("core");
 const shp = @import("shp");
 const vaxis = @import("vaxis");
 const render = @import("render.zig");
+const Color = @import("render_types.zig").Color;
 const statusbar = @import("statusbar.zig");
 const vaxis_cell = @import("vaxis_cell.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
@@ -29,7 +30,7 @@ fn encodeCodepointUtf8(cp: u21, out: *[4]u8) []const u8 {
     return out[0..n];
 }
 
-fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: render.Color, bg: render.Color, glyph_chars: [6]u21) void {
+fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Color, bg: Color, glyph_chars: [6]u21) void {
     if (w == 0 or h == 0) return;
 
     const root = vaxis_surface.pooledWindow(std.heap.page_allocator, w, h) catch return;
@@ -318,8 +319,8 @@ pub fn drawFloatingBorder(
     // Optional shadow (draw first so border overlays it)
     if (style) |s| {
         if (s.shadow_color) |sc| {
-            const shadow_bg: render.Color = .{ .palette = sc };
-            const shadow_fg: render.Color = .{ .palette = sc };
+            const shadow_bg: Color = .{ .palette = sc };
+            const shadow_fg: Color = .{ .palette = sc };
             const sx: u16 = x + w;
             const sy: u16 = y + h;
 
@@ -352,7 +353,7 @@ pub fn drawFloatingBorder(
     }
 
     const color = if (active) border_color.active else border_color.passive;
-    const fg: render.Color = .{ .palette = color };
+    const fg: Color = .{ .palette = color };
     // Do not rely on SGR bold for active borders.
     // Many terminals render bold + low palette indices as the "bright" variant
     // (e.g. palette 1 looks like palette 9). We want the configured palette

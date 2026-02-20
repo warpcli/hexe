@@ -5,6 +5,7 @@ const core = @import("core");
 
 const Pane = @import("pane.zig").Pane;
 const render = @import("render.zig");
+const Color = @import("render_types.zig").Color;
 const Renderer = render.Renderer;
 const statusbar = @import("statusbar.zig");
 
@@ -120,8 +121,8 @@ pub fn drawTitleEditor(renderer: *Renderer, pane: *const Pane, buf: []const u8) 
         },
     }
 
-    const bg: render.Color = .{ .palette = pane.border_color.active };
-    const fg: render.Color = .{ .palette = 0 };
+    const bg: Color = .{ .palette = pane.border_color.active };
+    const fg: Color = .{ .palette = 0 };
     const text_style = shp.Style{ .fg = .{ .palette = 0 }, .bg = .{ .palette = pane.border_color.active }, .bold = true };
 
     // Background box.

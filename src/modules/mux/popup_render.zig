@@ -2,6 +2,7 @@ const std = @import("std");
 const pop = @import("pop");
 const vaxis = @import("vaxis");
 const render = @import("render.zig");
+const Color = @import("render_types.zig").Color;
 const statusbar = @import("statusbar.zig");
 const vaxis_cell = @import("vaxis_cell.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
@@ -10,7 +11,7 @@ const style_bridge = @import("style_bridge.zig");
 
 pub const Renderer = render.Renderer;
 
-fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: render.Color, bg: render.Color, title: ?[]const u8) void {
+fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Color, bg: Color, title: ?[]const u8) void {
     if (w == 0 or h == 0) return;
 
     const root = vaxis_surface.pooledWindow(std.heap.page_allocator, w, h) catch return;
@@ -101,8 +102,8 @@ pub fn drawConfirmInBounds(renderer: *Renderer, confirm: *pop.Confirm, cfg: pop.
     const box_x = center_x -| (box_width / 2);
     const box_y = center_y -| (box_height / 2);
 
-    const fg: render.Color = .{ .palette = cfg.fg };
-    const bg: render.Color = .{ .palette = cfg.bg };
+    const fg: Color = .{ .palette = cfg.fg };
+    const bg: Color = .{ .palette = cfg.bg };
     const padding_x = cfg.padding_x;
     const padding_y = cfg.padding_y;
 
@@ -131,8 +132,8 @@ pub fn drawConfirmInBounds(renderer: *Renderer, confirm: *pop.Confirm, cfg: pop.
 
     // Yes button
     const yes_selected = confirm.selected == .yes;
-    const yes_fg: render.Color = if (yes_selected) bg else fg;
-    const yes_bg: render.Color = if (yes_selected) fg else bg;
+    const yes_fg: Color = if (yes_selected) bg else fg;
+    const yes_bg: Color = if (yes_selected) fg else bg;
     var bx = buttons_start_x;
     const yes_style = style_bridge.textStyle(yes_fg, yes_bg, yes_selected);
     bx = statusbar.drawStyledText(renderer, bx, buttons_y, "[ ", yes_style);
@@ -143,8 +144,8 @@ pub fn drawConfirmInBounds(renderer: *Renderer, confirm: *pop.Confirm, cfg: pop.
 
     // No button
     const no_selected = confirm.selected == .no;
-    const no_fg: render.Color = if (no_selected) bg else fg;
-    const no_bg: render.Color = if (no_selected) fg else bg;
+    const no_fg: Color = if (no_selected) bg else fg;
+    const no_bg: Color = if (no_selected) fg else bg;
     const no_style = style_bridge.textStyle(no_fg, no_bg, no_selected);
     bx = statusbar.drawStyledText(renderer, bx, buttons_y, "[ ", no_style);
     bx = statusbar.drawStyledText(renderer, bx, buttons_y, no_label, no_style);
@@ -163,10 +164,10 @@ pub fn drawPickerInBounds(renderer: *Renderer, picker: *pop.Picker, cfg: pop.Cho
     const box_x = center_x -| (box_width / 2);
     const box_y = center_y -| (box_height / 2);
 
-    const fg: render.Color = .{ .palette = cfg.fg };
-    const bg: render.Color = .{ .palette = cfg.bg };
-    const highlight_fg: render.Color = .{ .palette = cfg.highlight_fg };
-    const highlight_bg: render.Color = .{ .palette = cfg.highlight_bg };
+    const fg: Color = .{ .palette = cfg.fg };
+    const bg: Color = .{ .palette = cfg.bg };
+    const highlight_fg: Color = .{ .palette = cfg.highlight_fg };
+    const highlight_bg: Color = .{ .palette = cfg.highlight_bg };
 
     drawPopupFrame(renderer, box_x, box_y, box_width, box_height, fg, bg, picker.title);
 
@@ -179,8 +180,8 @@ pub fn drawPickerInBounds(renderer: *Renderer, picker: *pop.Picker, cfg: pop.Cho
     while (i < visible_end) : (i += 1) {
         const item = picker.items[i];
         const is_selected = i == picker.selected;
-        const item_fg: render.Color = if (is_selected) highlight_fg else fg;
-        const item_bg: render.Color = if (is_selected) highlight_bg else bg;
+        const item_fg: Color = if (is_selected) highlight_fg else fg;
+        const item_bg: Color = if (is_selected) highlight_bg else bg;
 
         renderer.setCell(content_x, content_y, .{ .char = if (is_selected) '>' else ' ', .fg = item_fg, .bg = item_bg });
         renderer.setCell(content_x + 1, content_y, .{ .char = ' ', .fg = item_fg, .bg = item_bg });

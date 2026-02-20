@@ -2,6 +2,7 @@ const std = @import("std");
 const pop = @import("pop");
 const vaxis = @import("vaxis");
 const render = @import("render.zig");
+const Color = @import("render_types.zig").Color;
 const vaxis_cell = @import("vaxis_cell.zig");
 const text_width = @import("text_width.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
@@ -86,7 +87,7 @@ fn renderTextWithVaxis(renderer: *Renderer, start_x: u16, y: u16, text: []const 
     }
 }
 
-fn toRenderColor(c: pop.notification.Color) render.Color {
+fn toRenderColor(c: pop.notification.Color) Color {
     return switch (c) {
         .none => .none,
         .palette => |idx| .{ .palette = idx },

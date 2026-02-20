@@ -11,6 +11,7 @@ const LuaRuntime = core.LuaRuntime;
 
 const State = @import("state.zig").State;
 const render = @import("render.zig");
+const Color = @import("render_types.zig").Color;
 const Pane = @import("pane.zig").Pane;
 
 const WhenCacheEntry = struct {
@@ -294,8 +295,8 @@ pub const Renderer = render.Renderer;
 
 pub const RenderedSegment = struct {
     text: []const u8,
-    fg: render.Color,
-    bg: render.Color,
+    fg: Color,
+    bg: Color,
     bold: bool,
     italic: bool,
 };
@@ -353,7 +354,7 @@ pub fn renderSegmentOutput(module: *const core.Segment, output: []const u8) Rend
     return result;
 }
 
-pub fn styleColorToRender(col: shp.Color) render.Color {
+pub fn styleColorToRender(col: shp.Color) Color {
     return switch (col) {
         .none => .none,
         .palette => |p| .{ .palette = p },
@@ -938,7 +939,7 @@ pub fn drawSegment(renderer: *Renderer, x: u16, y: u16, seg: shp.Segment, defaul
 }
 
 pub fn drawStyledText(renderer: *Renderer, start_x: u16, y: u16, text: []const u8, style: shp.Style) u16 {
-    const win = vaxis_surface.pooledWindow(std.heap.page_allocator, renderer.next.width, 1) catch {
+    const win = vaxis_surface.pooledWindow(std.heap.page_allocator, renderer.screenWidth(), 1) catch {
         return start_x + measureText(text);
     };
     win.clear();
