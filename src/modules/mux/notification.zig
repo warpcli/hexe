@@ -1,4 +1,6 @@
+const std = @import("std");
 const pop = @import("pop");
+const vaxis = @import("vaxis");
 const render = @import("render.zig");
 
 const Renderer = render.Renderer;
@@ -19,11 +21,14 @@ pub fn renderInBounds(
     const notif = self.current orelse return;
     const style = notif.style;
 
-    const max_msg_len = bounds_width -| style.padding_x * 2;
-    const msg_len: u16 = @intCast(@min(notif.message.len, max_msg_len));
-    if (msg_len == 0) return;
+    const max_msg_width = bounds_width -| style.padding_x * 2;
+    if (max_msg_width == 0) return;
 
-    const box_width = msg_len + style.padding_x * 2;
+    const clipped = clipTextToWidth(notif.message, max_msg_width);
+    const msg_width = vaxis.gwidth.gwidth(clipped, .unicode);
+    if (msg_width == 0) return;
+
+    const box_width = msg_width + style.padding_x * 2;
     const box_height: u16 = 1 + style.padding_y * 2;
 
     const x: u16 = switch (style.alignment) {
@@ -51,13 +56,111 @@ pub fn renderInBounds(
 
     const text_y = y + style.padding_y;
     const text_x = x + style.padding_x;
-    for (0..msg_len) |i| {
-        renderer.setCell(text_x + @as(u16, @intCast(i)), text_y, .{
-            .char = notif.message[i],
-            .fg = toRenderColor(style.fg),
-            .bg = toRenderColor(style.bg),
-            .bold = style.bold,
-        });
+    renderTextWithVaxis(renderer, text_x, text_y, clipped, style);
+}
+
+fn clipTextToWidth(text: []const u8, max_width: u16) []const u8 {
+    if (text.len == 0 or max_width == 0) return "";
+
+    var used: u16 = 0;
+    var end: usize = 0;
+    var it = vaxis.unicode.graphemeIterator(text);
+    while (it.next()) |g| {
+        const bytes = g.bytes(text);
+        const w = vaxis.gwidth.gwidth(bytes, .unicode);
+        if (w == 0) {
+            end = g.start + g.len;
+            continue;
+        }
+        if (used + w > max_width) break;
+        used += w;
+        end = g.start + g.len;
+    }
+    return text[0..end];
+}
+
+fn toVaxisColor(c: pop.notification.Color) vaxis.Color {
+    return switch (c) {
+        .none => .default,
+        .palette => |idx| .{ .index = idx },
+        .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
+    };
+}
+
+fn toVaxisStyle(style: pop.notification.Style) vaxis.Style {
+    return .{
+        .fg = toVaxisColor(style.fg),
+        .bg = toVaxisColor(style.bg),
+        .bold = style.bold,
+    };
+}
+
+fn toRenderCell(vx_cell: vaxis.Cell) render.Cell {
+    var out: render.Cell = .{
+        .char = ' ',
+        .bold = vx_cell.style.bold,
+        .italic = vx_cell.style.italic,
+        .faint = vx_cell.style.dim,
+        .strikethrough = vx_cell.style.strikethrough,
+        .inverse = vx_cell.style.reverse,
+    };
+
+    out.fg = switch (vx_cell.style.fg) {
+        .default => .none,
+        .index => |idx| .{ .palette = idx },
+        .rgb => |rgb| .{ .rgb = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] } },
+    };
+    out.bg = switch (vx_cell.style.bg) {
+        .default => .none,
+        .index => |idx| .{ .palette = idx },
+        .rgb => |rgb| .{ .rgb = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] } },
+    };
+    out.underline = switch (vx_cell.style.ul_style) {
+        .off => .none,
+        .single => .single,
+        .double => .double,
+        .curly => .curly,
+        .dotted => .dotted,
+        .dashed => .dashed,
+    };
+
+    if (vx_cell.char.width == 0 or vx_cell.char.grapheme.len == 0) {
+        out.char = 0;
+        out.is_wide_spacer = true;
+        return out;
+    }
+
+    out.char = std.unicode.utf8Decode(vx_cell.char.grapheme) catch ' ';
+    out.is_wide_char = vx_cell.char.width == 2;
+    return out;
+}
+
+fn renderTextWithVaxis(renderer: *Renderer, start_x: u16, y: u16, text: []const u8, style: pop.notification.Style) void {
+    const width = vaxis.gwidth.gwidth(text, .unicode);
+    if (width == 0) return;
+
+    var screen = vaxis.Screen.init(std.heap.page_allocator, .{ .cols = width, .rows = 1, .x_pixel = 0, .y_pixel = 0 }) catch return;
+    defer screen.deinit(std.heap.page_allocator);
+    screen.width_method = .unicode;
+
+    const win: vaxis.Window = .{
+        .x_off = 0,
+        .y_off = 0,
+        .parent_x_off = 0,
+        .parent_y_off = 0,
+        .width = screen.width,
+        .height = 1,
+        .screen = &screen,
+    };
+
+    const seg = vaxis.Segment{ .text = text, .style = toVaxisStyle(style) };
+    const res = win.print(&.{seg}, .{ .wrap = .none, .commit = true });
+    const end_col = @min(res.col, screen.width);
+
+    var x: u16 = 0;
+    while (x < end_col) : (x += 1) {
+        const vx_cell = screen.readCell(x, 0) orelse continue;
+        renderer.setCell(start_x + x, y, toRenderCell(vx_cell));
     }
 }
 
