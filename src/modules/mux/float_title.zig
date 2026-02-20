@@ -7,6 +7,7 @@ const Pane = @import("pane.zig").Pane;
 const Renderer = @import("render_core.zig").Renderer;
 const Color = @import("render_types.zig").Color;
 const statusbar = @import("statusbar.zig");
+const vaxis_draw = @import("vaxis_draw.zig");
 
 pub const TitleRect = struct {
     x: u16,
@@ -127,12 +128,12 @@ pub fn drawTitleEditor(renderer: *Renderer, pane: *const Pane, buf: []const u8) 
     // Background box.
     var i: u16 = 0;
     while (i < want_w) : (i += 1) {
-        renderer.setCell(draw_x + i, draw_y, .{ .char = ' ', .fg = fg, .bg = bg });
+        vaxis_draw.putChar(renderer, draw_x + i, draw_y, ' ', fg, bg, false);
     }
 
     // Text + cursor.
     const clipped = text_width.clipTextToWidth(buf, want_w - 1);
     const cursor_x = statusbar.drawStyledText(renderer, draw_x, draw_y, clipped, text_style);
     // Cursor marker at end (ASCII for portability).
-    renderer.setCell(cursor_x, draw_y, .{ .char = '|', .fg = fg, .bg = bg, .bold = true });
+    vaxis_draw.putChar(renderer, cursor_x, draw_y, '|', fg, bg, true);
 }

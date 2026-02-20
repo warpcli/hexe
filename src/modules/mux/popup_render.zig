@@ -8,6 +8,7 @@ const vaxis_cell = @import("vaxis_cell.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
 const text_width = @import("text_width.zig");
 const style_bridge = @import("style_bridge.zig");
+const vaxis_draw = @import("vaxis_draw.zig");
 
 fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Color, bg: Color, title: ?[]const u8) void {
     if (w == 0 or h == 0) return;
@@ -181,15 +182,15 @@ pub fn drawPickerInBounds(renderer: *Renderer, picker: *pop.Picker, cfg: pop.Cho
         const item_fg: Color = if (is_selected) highlight_fg else fg;
         const item_bg: Color = if (is_selected) highlight_bg else bg;
 
-        renderer.setCell(content_x, content_y, .{ .char = if (is_selected) '>' else ' ', .fg = item_fg, .bg = item_bg });
-        renderer.setCell(content_x + 1, content_y, .{ .char = ' ', .fg = item_fg, .bg = item_bg });
+        vaxis_draw.putChar(renderer, content_x, content_y, if (is_selected) '>' else ' ', item_fg, item_bg, false);
+        vaxis_draw.putChar(renderer, content_x + 1, content_y, ' ', item_fg, item_bg, false);
 
         var ix: u16 = content_x + 2;
         const item_width_max = (box_x + box_width - 2) -| ix;
         const clipped_item = text_width.clipTextToWidth(item, item_width_max);
         ix = statusbar.drawStyledText(renderer, ix, content_y, clipped_item, style_bridge.textStyle(item_fg, item_bg, is_selected));
         while (ix < box_x + box_width - 1) : (ix += 1) {
-            renderer.setCell(ix, content_y, .{ .char = ' ', .fg = item_fg, .bg = item_bg });
+            vaxis_draw.putChar(renderer, ix, content_y, ' ', item_fg, item_bg, false);
         }
 
         content_y += 1;

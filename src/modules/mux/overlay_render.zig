@@ -3,6 +3,7 @@ const Renderer = @import("render_core.zig").Renderer;
 const statusbar = @import("statusbar.zig");
 const text_width = @import("text_width.zig");
 const style_bridge = @import("style_bridge.zig");
+const vaxis_draw = @import("vaxis_draw.zig");
 
 const pop = @import("pop");
 const overlay = pop.overlay;
@@ -114,12 +115,7 @@ fn renderPaneSelectLabels(renderer: *Renderer, overlays: *OverlayManager) void {
             // Fall back to single character for small panes
             const cx = pl.x + pl.width / 2;
             const cy = pl.y + pl.height / 2;
-            renderer.setCell(cx, cy, .{
-                .char = pl.label,
-                .fg = .{ .palette = 0 },
-                .bg = .{ .palette = 1 },
-                .bold = true,
-            });
+            vaxis_draw.putChar(renderer, cx, cy, pl.label, .{ .palette = 0 }, .{ .palette = 1 }, true);
             continue;
         }
 
@@ -132,11 +128,7 @@ fn renderPaneSelectLabels(renderer: *Renderer, overlays: *OverlayManager) void {
             for (0..box_w) |dx| {
                 const x = box_x + @as(u16, @intCast(dx));
                 const y = box_y + @as(u16, @intCast(dy));
-                renderer.setCell(x, y, .{
-                    .char = ' ',
-                    .fg = .{ .palette = 0 },
-                    .bg = .{ .palette = 1 }, // red background
-                });
+                vaxis_draw.putChar(renderer, x, y, ' ', .{ .palette = 0 }, .{ .palette = 1 }, false);
             }
         }
 
@@ -149,11 +141,7 @@ fn renderPaneSelectLabels(renderer: *Renderer, overlays: *OverlayManager) void {
                 if (ch != ' ') {
                     const x = digit_x + @as(u16, @intCast(dx));
                     const y = digit_y + @as(u16, @intCast(dy));
-                    renderer.setCell(x, y, .{
-                        .char = ch,
-                        .fg = .{ .palette = 0 }, // black blocks
-                        .bg = .{ .palette = 1 }, // red background
-                    });
+                    vaxis_draw.putChar(renderer, x, y, ch, .{ .palette = 0 }, .{ .palette = 1 }, false);
                 }
             }
         }
@@ -184,11 +172,7 @@ fn renderResizeInfo(renderer: *Renderer, overlays: *OverlayManager) void {
     // Draw background
     for (0..box_width) |dx| {
         const x = box_x + @as(u16, @intCast(dx));
-        renderer.setCell(x, box_y, .{
-            .char = ' ',
-            .fg = .{ .palette = 0 },
-            .bg = .{ .palette = 1 }, // red
-        });
+        vaxis_draw.putChar(renderer, x, box_y, ' ', .{ .palette = 0 }, .{ .palette = 1 }, false);
     }
 
     // Draw text
@@ -223,11 +207,7 @@ fn renderKeycast(renderer: *Renderer, overlays: *const OverlayManager, screen_wi
         // Draw background
         for (0..box_width) |dx| {
             const x = box_x + @as(u16, @intCast(dx));
-            renderer.setCell(x, y, .{
-                .char = ' ',
-                .fg = .{ .palette = 15 },
-                .bg = .{ .palette = 238 }, // dark gray
-            });
+            vaxis_draw.putChar(renderer, x, y, ' ', .{ .palette = 15 }, .{ .palette = 238 }, false);
         }
 
         // Draw text
@@ -257,11 +237,7 @@ fn renderOverlay(renderer: *Renderer, ov: overlay.Overlay, screen_width: u16, sc
         for (0..box_width) |dx| {
             const x = pos.x + @as(u16, @intCast(dx));
             const y = pos.y + @as(u16, @intCast(dy));
-            renderer.setCell(x, y, .{
-                .char = ' ',
-                .fg = .{ .palette = ov.fg },
-                .bg = .{ .palette = ov.bg },
-            });
+            vaxis_draw.putChar(renderer, x, y, ' ', .{ .palette = ov.fg }, .{ .palette = ov.bg }, false);
         }
     }
 

@@ -8,6 +8,7 @@ const statusbar = @import("statusbar.zig");
 const text_width = @import("text_width.zig");
 const vaxis_cell = @import("vaxis_cell.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
+const vaxis_draw = @import("vaxis_draw.zig");
 const style_bridge = @import("style_bridge.zig");
 const Pane = @import("pane.zig").Pane;
 const Layout = @import("layout.zig").Layout;
@@ -295,11 +296,7 @@ pub fn drawScrollIndicator(renderer: *Renderer, pane_x: u16, pane_y: u16, pane_w
 
     // Yellow background (palette 3), black text (palette 0)
     for (indicator_chars, 0..) |char, i| {
-        renderer.setCell(x_pos + @as(u16, @intCast(i)), pane_y, .{
-            .char = char,
-            .fg = .{ .palette = 0 }, // black
-            .bg = .{ .palette = 3 }, // yellow
-        });
+        vaxis_draw.putChar(renderer, x_pos + @as(u16, @intCast(i)), pane_y, char, .{ .palette = 0 }, .{ .palette = 3 }, false);
     }
 }
 
@@ -329,14 +326,14 @@ pub fn drawFloatingBorder(
             if (h > 2) {
                 var row: u16 = 1;
                 while (row < h - 1) : (row += 1) {
-                    renderer.setCell(sx, y + row, .{ .char = ' ', .bg = shadow_bg });
+                    vaxis_draw.putChar(renderer, sx, y + row, ' ', null, shadow_bg, false);
                 }
             }
 
             // Add a small "cap" next to the bottom border so there is no
             // visible gap between the side shadow and the bottom shadow.
             if (h > 1) {
-                renderer.setCell(sx, y + h - 1, .{ .char = ' ', .bg = shadow_bg });
+                vaxis_draw.putChar(renderer, sx, y + h - 1, ' ', null, shadow_bg, false);
             }
 
             // Bottom shadow: start 1 col after left border, and include the
@@ -345,7 +342,7 @@ pub fn drawFloatingBorder(
             while (col <= w) : (col += 1) {
                 // Use upper-half block for bottom shadow so it feels visually
                 // closer in "weight" to the 1-col side shadow.
-                renderer.setCell(x + col, sy, .{ .char = 0x2580, .fg = shadow_fg });
+                vaxis_draw.putChar(renderer, x + col, sy, 0x2580, shadow_fg, null, false);
             }
             // Corner is already drawn by the bottom shadow (col == w).
         }

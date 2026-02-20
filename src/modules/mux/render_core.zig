@@ -58,7 +58,12 @@ pub const Renderer = struct {
 
     pub fn setVaxisCell(self: *Renderer, x: u16, y: u16, cell: vaxis.Cell) void {
         if (x >= self.vx.screen.width or y >= self.vx.screen.height) return;
-        self.vx.screen.writeCell(x, y, cell);
+
+        var stable = cell;
+        if (cell.char.grapheme.len > 0) {
+            stable.char.grapheme = self.frame_arena.allocator().dupe(u8, cell.char.grapheme) catch cell.char.grapheme;
+        }
+        self.vx.screen.writeCell(x, y, stable);
     }
 
     pub fn getVaxisCell(self: *const Renderer, x: u16, y: u16) ?vaxis.Cell {

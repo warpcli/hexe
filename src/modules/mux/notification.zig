@@ -6,6 +6,7 @@ const Color = @import("render_types.zig").Color;
 const vaxis_cell = @import("vaxis_cell.zig");
 const text_width = @import("text_width.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
+const vaxis_draw = @import("vaxis_draw.zig");
 
 pub fn renderFull(self: *pop.notification.NotificationManager, renderer: *Renderer, screen_width: u16, screen_height: u16) void {
     renderInBounds(self, renderer, 0, 0, screen_width, screen_height, true);
@@ -48,11 +49,7 @@ pub fn renderInBounds(
     while (yi < box_height) : (yi += 1) {
         var xi: u16 = 0;
         while (xi < box_width) : (xi += 1) {
-            renderer.setCell(x + xi, y + yi, .{
-                .char = ' ',
-                .fg = toRenderColor(style.fg),
-                .bg = toRenderColor(style.bg),
-            });
+            vaxis_draw.putChar(renderer, x + xi, y + yi, ' ', toRenderColor(style.fg), toRenderColor(style.bg), false);
         }
     }
 
