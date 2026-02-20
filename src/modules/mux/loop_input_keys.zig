@@ -1,8 +1,6 @@
 const std = @import("std");
-const core = @import("core");
 
 const State = @import("state.zig").State;
-const input_csi_u = @import("input_csi_u.zig");
 const actions = @import("loop_actions.zig");
 const main = @import("main.zig");
 
@@ -142,24 +140,6 @@ fn matchCtrlChar(actual: u8, expected: u8) bool {
         ctrl_char = expected - 'A' + 1;
     }
     return ctrl_char != 0 and actual == ctrl_char;
-}
-
-/// Check if a CSI-u event matches focused float exit key and close float.
-pub fn checkCsiUExitKey(state: *State, ev: input_csi_u.CsiUEvent) bool {
-    if (getFocusedFloatExitKey(state)) |exit_key| {
-        if (matchesCsiUExitKey(ev, exit_key)) {
-            main.debugLog("exit_key matched (CSI-u): key={s}", .{exit_key});
-            if (state.active_floating) |idx| {
-                if (idx < state.floats.items.len) {
-                    state.floats.items[idx].closed_by_exit_key = true;
-                }
-            }
-            actions.performClose(state);
-            state.needs_render = true;
-            return true;
-        }
-    }
-    return false;
 }
 
 /// Format raw input bytes for keycast display.
@@ -428,20 +408,4 @@ fn getKeyChar(key: []const u8) ?u8 {
     if (std.ascii.eqlIgnoreCase(key, "Space")) return ' ';
     if (std.ascii.eqlIgnoreCase(key, "Tab")) return 0x09;
     return null;
-}
-
-fn matchesCsiUExitKey(ev: input_csi_u.CsiUEvent, exit_key: []const u8) bool {
-    if (ev.event_type != 1) return false;
-    if (exit_key.len == 0) return false;
-
-    const parsed = parseExitKeySpec(exit_key);
-    if (ev.mods != parsed.mods) return false;
-
-    const key_char = getKeyChar(parsed.key) orelse return false;
-    const key_kind = @as(core.Config.BindKeyKind, ev.key);
-
-    if (key_char == ' ') {
-        return key_kind == .space;
-    }
-    return key_kind == .char and ev.key.char == key_char;
 }
