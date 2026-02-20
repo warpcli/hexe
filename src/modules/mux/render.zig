@@ -6,6 +6,7 @@ const colorpkg = ghostty.color;
 const pop = @import("pop");
 const vt_bridge = @import("vt_bridge.zig");
 const render_sprite = @import("render_sprite.zig");
+const render_bridge = @import("render_bridge.zig");
 
 /// Represents a single rendered cell with all its attributes
 pub const Cell = struct {
@@ -141,17 +142,6 @@ pub const CellBuffer = struct {
         self.height = h;
     }
 };
-
-/// Static ASCII lookup table for u21 -> []const u8 conversion.
-/// Each byte position i contains the byte value i, so ascii_lut[ch..][0..1]
-/// is a valid single-byte slice for any ASCII codepoint.
-const ascii_lut: [128]u8 = initAsciiLut();
-
-fn initAsciiLut() [128]u8 {
-    var table: [128]u8 = undefined;
-    for (0..128) |i| table[i] = @intCast(i);
-    return table;
-}
 
 /// Cursor information for rendering
 pub const CursorInfo = struct {
@@ -380,7 +370,7 @@ pub const Renderer = struct {
                 const cell = self.next.getConst(x, y);
 
                 // Convert hexa Cell -> vaxis Cell
-                const vx_cell = cellToVaxis(cell, arena);
+                const vx_cell = render_bridge.cellToVaxis(cell, arena);
                 self.vx.screen.writeCell(x, y, vx_cell);
             }
         }
@@ -396,7 +386,7 @@ pub const Renderer = struct {
         self.vx.screen.cursor_vis = cursor.visible;
         if (cursor.visible) {
             self.vx.screen.cursor = .{ .col = cursor.x, .row = cursor.y };
-            self.vx.screen.cursor_shape = mapCursorShape(cursor.style);
+            self.vx.screen.cursor_shape = render_bridge.mapCursorShape(cursor.style);
         }
 
         if (force_full) {
@@ -430,68 +420,3 @@ pub const Renderer = struct {
         render_sprite.drawSpriteOverlay(self, Cell, pane_x, pane_y, pane_width, pane_height, sprite_content, pokemon_config);
     }
 };
-
-/// Convert a hexa Cell to a vaxis Cell.
-/// `arena` is used for non-ASCII grapheme string storage; must remain valid until
-/// after vx.render() completes for this frame.
-fn cellToVaxis(cell: Cell, arena: std.mem.Allocator) vaxis.Cell {
-    // Convert character: u21 -> grapheme string
-    const grapheme: []const u8 = if (cell.is_wide_spacer)
-        // Vaxis-style spacer: empty grapheme with width 0
-        ""
-    else if (cell.char == 0 or cell.char == ' ')
-        " "
-    else if (cell.char < 128)
-        ascii_lut[@intCast(cell.char)..][0..1]
-    else blk: {
-        // Non-ASCII: encode u21 codepoint to UTF-8 via frame arena.
-        var utf8_buf: [4]u8 = undefined;
-        const len = std.unicode.utf8Encode(cell.char, &utf8_buf) catch break :blk " ";
-        break :blk arena.dupe(u8, utf8_buf[0..len]) catch " ";
-    };
-
-    const char_width: u8 = if (cell.is_wide_spacer) 0 else if (cell.is_wide_char) 2 else 1;
-
-    return .{
-        .char = .{ .grapheme = grapheme, .width = char_width },
-        .style = .{
-            .fg = colorToVaxis(cell.fg),
-            .bg = colorToVaxis(cell.bg),
-            .bold = cell.bold,
-            .dim = cell.faint,
-            .italic = cell.italic,
-            .reverse = cell.inverse,
-            .strikethrough = cell.strikethrough,
-            .ul_style = switch (cell.underline) {
-                .none => .off,
-                .single => .single,
-                .double => .double,
-                .curly => .curly,
-                .dotted => .dotted,
-                .dashed => .dashed,
-            },
-        },
-    };
-}
-
-/// Convert a hexa Color to a vaxis Color.
-pub fn colorToVaxis(c: Color) vaxis.Cell.Color {
-    return switch (c) {
-        .none => .default,
-        .palette => |p| .{ .index = p },
-        .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
-    };
-}
-
-/// Map DECSCUSR cursor style (0-6) to vaxis CursorShape.
-fn mapCursorShape(style: u8) vaxis.Cell.CursorShape {
-    return switch (style) {
-        1 => .block_blink,
-        2 => .block,
-        3 => .underline_blink,
-        4 => .underline,
-        5 => .beam_blink,
-        6 => .beam,
-        else => .default,
-    };
-}
