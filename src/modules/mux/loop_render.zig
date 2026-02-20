@@ -1,8 +1,10 @@
 const std = @import("std");
+const vaxis = @import("vaxis");
 
 const State = @import("state.zig").State;
 const winpulse = @import("winpulse.zig");
 const render_mod = @import("render.zig");
+const vt_bridge = @import("vt_bridge.zig");
 
 const statusbar = @import("statusbar.zig");
 const popup_render = @import("popup_render.zig");
