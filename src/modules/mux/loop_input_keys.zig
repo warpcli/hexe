@@ -25,27 +25,6 @@ pub fn recordKeycastInput(state: *State, inp: []const u8) void {
 
     var i: usize = 0;
     while (i < inp.len) {
-        // Check for bracketed paste start: ESC[200~
-        if (i + 5 < inp.len and
-            inp[i] == 0x1b and inp[i + 1] == '[' and
-            inp[i + 2] == '2' and inp[i + 3] == '0' and
-            inp[i + 4] == '0' and inp[i + 5] == '~')
-        {
-            state.in_bracketed_paste = true;
-            return; // Stop recording for the rest of this input
-        }
-
-        // Check for bracketed paste end: ESC[201~
-        if (i + 5 < inp.len and
-            inp[i] == 0x1b and inp[i + 1] == '[' and
-            inp[i + 2] == '2' and inp[i + 3] == '0' and
-            inp[i + 4] == '1' and inp[i + 5] == '~')
-        {
-            state.in_bracketed_paste = false;
-            i += 6;
-            continue;
-        }
-
         var buf: [32]u8 = undefined;
         const result = formatKeycastInput(inp[i..], &buf);
         if (result.text.len > 0) {
