@@ -11,6 +11,32 @@ const float_title = @import("float_title.zig");
 const overlay_render = @import("overlay_render.zig");
 const notification = @import("notification.zig");
 
+fn sanitizeLabelUtf8(raw: []const u8, out: *[128]u8) []const u8 {
+    var wi: usize = 0;
+    var i: usize = 0;
+    while (i < raw.len and wi < out.len) {
+        const len = std.unicode.utf8ByteSequenceLength(raw[i]) catch 1;
+        const end = @min(i + len, raw.len);
+        const chunk = raw[i..end];
+        const cp = std.unicode.utf8Decode(chunk) catch {
+            i = end;
+            continue;
+        };
+
+        // Skip control characters.
+        if (cp < 32 or cp == 127) {
+            i = end;
+            continue;
+        }
+
+        if (wi + chunk.len > out.len) break;
+        @memcpy(out[wi .. wi + chunk.len], chunk);
+        wi += chunk.len;
+        i = end;
+    }
+    return out[0..wi];
+}
+
 pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     const renderer = &state.renderer;
 
@@ -63,12 +89,14 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             if (parent != state.active_tab) continue;
         }
 
-        const float_label = if (pane.float_title) |t|
+        const float_label_raw = if (pane.float_title) |t|
             t
         else if (state.pane_names.get(pane.uuid)) |n|
             n
         else
             "";
+        var float_label_buf: [128]u8 = undefined;
+        const float_label = sanitizeLabelUtf8(float_label_raw, &float_label_buf);
         borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, false, float_label, pane.border_color, pane.float_style);
         if (state.float_rename_uuid) |uuid| {
             if (std.mem.eql(u8, &uuid, &pane.uuid)) {
@@ -109,12 +137,14 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         else
             true;
         if (pane.isVisibleOnTab(state.active_tab) and can_render) {
-            const active_float_label = if (pane.float_title) |t|
+            const active_float_label_raw = if (pane.float_title) |t|
                 t
             else if (state.pane_names.get(pane.uuid)) |n|
                 n
             else
                 "";
+            var active_float_label_buf: [128]u8 = undefined;
+            const active_float_label = sanitizeLabelUtf8(active_float_label_raw, &active_float_label_buf);
             borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, true, active_float_label, pane.border_color, pane.float_style);
             if (state.float_rename_uuid) |uuid| {
                 if (std.mem.eql(u8, &uuid, &pane.uuid)) {
@@ -250,7 +280,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         state.cursor_needs_restore = false;
     }
 
-    // End frame: copy CellBuffer to vaxis screen and render via libvaxis.
+    // End frame: render current vaxis screen.
     try renderer.endFrame(state.force_full_render, stdout, cursor);
     state.force_full_render = false;
 }

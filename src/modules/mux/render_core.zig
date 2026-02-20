@@ -5,18 +5,16 @@ const pop = @import("pop");
 
 const Cell = @import("render_types.zig").Cell;
 const CursorInfo = @import("render_types.zig").CursorInfo;
-const CellBuffer = @import("render_buffer.zig").CellBuffer;
 
 const vt_bridge = @import("vt_bridge.zig");
 const render_sprite = @import("render_sprite.zig");
-const render_state_blit = @import("render_state_blit.zig");
+const render_bridge = @import("render_bridge.zig");
+const vaxis_cell = @import("vaxis_cell.zig");
 const render_vx = @import("render_vx.zig");
 
 /// Differential renderer that tracks state and only emits changed cells.
 pub const Renderer = struct {
     allocator: std.mem.Allocator,
-    current: CellBuffer,
-    next: CellBuffer,
     vx: vaxis.Vaxis,
     frame_arena: std.heap.ArenaAllocator,
 
@@ -26,71 +24,70 @@ pub const Renderer = struct {
 
         return .{
             .allocator = allocator,
-            .current = try CellBuffer.init(allocator, width, height),
-            .next = try CellBuffer.init(allocator, width, height),
             .vx = vx,
             .frame_arena = .init(allocator),
         };
     }
 
     pub fn deinit(self: *Renderer) void {
-        self.current.deinit(self.allocator);
-        self.next.deinit(self.allocator);
         self.frame_arena.deinit();
         self.vx.screen.deinit(self.allocator);
         self.vx.screen_last.deinit(self.allocator);
     }
 
     pub fn resize(self: *Renderer, width: u16, height: u16) !void {
-        try self.current.resize(self.allocator, width, height);
-        try self.next.resize(self.allocator, width, height);
         try render_vx.resizeVaxisForSize(self.allocator, &self.vx, width, height);
     }
 
     pub fn beginFrame(self: *Renderer) void {
-        self.next.clear();
         self.vx.screen.clear();
     }
 
     pub fn invertCell(self: *Renderer, x: u16, y: u16) void {
-        if (x >= self.next.width or y >= self.next.height) return;
-        const cell = self.next.get(x, y);
-        cell.inverse = !cell.inverse;
+        const cell = self.getCell(x, y) orelse return;
+        var m = cell;
+        m.inverse = !m.inverse;
+        self.setCell(x, y, m);
     }
 
     pub fn setCell(self: *Renderer, x: u16, y: u16, cell: Cell) void {
-        if (x >= self.next.width or y >= self.next.height) return;
-        self.next.get(x, y).* = cell;
+        if (x >= self.vx.screen.width or y >= self.vx.screen.height) return;
+        const vx_cell = render_bridge.cellToVaxis(cell, self.frame_arena.allocator());
+        self.vx.screen.writeCell(x, y, vx_cell);
     }
 
     pub fn screenWidth(self: *const Renderer) u16 {
-        return self.next.width;
+        return self.vx.screen.width;
     }
 
     pub fn screenHeight(self: *const Renderer) u16 {
-        return self.next.height;
+        return self.vx.screen.height;
     }
 
-    /// Mutable access to a cell in the next-frame buffer.
-    /// Returns null when coordinates are out of bounds.
-    pub fn getCellMutable(self: *Renderer, x: u16, y: u16) ?*Cell {
-        if (x >= self.next.width or y >= self.next.height) return null;
-        return self.next.get(x, y);
+    pub fn getCell(self: *const Renderer, x: u16, y: u16) ?Cell {
+        if (x >= self.vx.screen.width or y >= self.vx.screen.height) return null;
+        const vx_cell = self.vx.screen.readCell(x, y) orelse return null;
+        return vaxis_cell.toRenderCell(vx_cell);
     }
 
     pub fn drawRenderState(self: *Renderer, state: *const ghostty.RenderState, offset_x: u16, offset_y: u16, width: u16, height: u16) void {
-        render_state_blit.drawRenderStateToBuffer(&self.next, state, offset_x, offset_y, width, height);
+        const root = self.vx.window();
+        const win = root.child(.{
+            .x_off = @intCast(offset_x),
+            .y_off = @intCast(offset_y),
+            .width = width,
+            .height = height,
+        });
+        vt_bridge.drawRenderState(win, state, width, height, self.frame_arena.allocator());
     }
 
     pub fn endFrame(self: *Renderer, force_full: bool, stdout: std.fs.File, cursor: CursorInfo) !void {
-        render_vx.copyBufferToVaxisScreen(&self.next, &self.vx, self.frame_arena.allocator());
         try render_vx.renderFrame(&self.vx, stdout, cursor, force_full);
         _ = self.frame_arena.reset(.retain_capacity);
-        std.mem.swap(CellBuffer, &self.current, &self.next);
     }
 
     pub fn invalidate(self: *Renderer) void {
-        self.current.clear();
+        self.vx.screen.clear();
         self.vx.refresh = true;
     }
 

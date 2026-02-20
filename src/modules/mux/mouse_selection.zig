@@ -197,8 +197,9 @@ pub fn applyOverlay(renderer: *Renderer, pane_x: u16, pane_y: u16, pane_w: u16, 
         const end_x: u16 = if (y == norm.end.y) norm.end.x else (pane_w - 1);
         var x: u16 = start_x;
         while (x <= end_x) : (x += 1) {
-            const cell = renderer.getCellMutable(pane_x + x, pane_y + y) orelse continue;
+            var cell = renderer.getCell(pane_x + x, pane_y + y) orelse continue;
             cell.bg = .{ .palette = selection_color };
+            renderer.setCell(pane_x + x, pane_y + y, cell);
         }
     }
 }
@@ -266,8 +267,9 @@ pub fn applyOverlayTrimmed(renderer: *Renderer, render_state: *const ghostty.Ren
 
         var x: u16 = start_x;
         while (x <= end_x) : (x += 1) {
-            const cell = renderer.getCellMutable(pane_x + x, pane_y + y) orelse continue;
+            var cell = renderer.getCell(pane_x + x, pane_y + y) orelse continue;
             cell.bg = .{ .palette = selection_color };
+            renderer.setCell(pane_x + x, pane_y + y, cell);
         }
     }
 }
