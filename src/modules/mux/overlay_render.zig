@@ -62,7 +62,7 @@ pub const Bounds = struct {
 };
 
 /// Apply dimming effect to the entire screen, except the focused pane.
-/// Sets foreground to 238 (dark gray) and background to 235 (darker gray).
+/// Preserve existing colors and reduce contrast instead of forcing fixed palette colors.
 pub fn applyDimEffect(renderer: *Renderer, width: u16, height: u16, exclude: ?Bounds) void {
     for (0..height) |yi| {
         for (0..width) |xi| {
@@ -75,14 +75,25 @@ pub fn applyDimEffect(renderer: *Renderer, width: u16, height: u16, exclude: ?Bo
             }
 
             const cell = renderer.next.get(x, y);
-            cell.fg = .{ .palette = 238 }; // dark gray text
-            // Only dim bg if it's not already the default (none or black)
+            cell.faint = true;
+
+            // Dim background while preserving its original color model.
             switch (cell.bg) {
                 .none => {},
                 .palette => |p| {
-                    if (p != 0) cell.bg = .{ .palette = 236 }; // dim colored backgrounds
+                    // Keep pure black untouched; nudge other palette backgrounds toward
+                    // darker mid-range indices for a consistent dim layer.
+                    if (p != 0 and p != 236 and p != 238) {
+                        cell.bg = .{ .palette = if (p >= 8) 238 else 236 };
+                    }
                 },
-                .rgb => cell.bg = .{ .palette = 236 },
+                .rgb => |rgb| {
+                    cell.bg = .{ .rgb = .{
+                        .r = @intCast((@as(u16, rgb.r) * 70) / 100),
+                        .g = @intCast((@as(u16, rgb.g) * 70) / 100),
+                        .b = @intCast((@as(u16, rgb.b) * 70) / 100),
+                    } };
+                },
             }
         }
     }
