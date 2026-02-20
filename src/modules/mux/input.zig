@@ -53,6 +53,7 @@ pub const MouseEvent = struct {
 pub const KeyEvent = struct {
     mods: u8,
     key: core.Config.BindKey,
+    text_codepoint: ?u21,
     when: core.Config.BindWhen,
     consumed: usize,
 };
@@ -115,12 +116,22 @@ pub fn parseScrollEvent(input_bytes: []const u8, allocator: std.mem.Allocator) ?
 fn parseVaxisKey(vk: vaxis.Key, when: core.Config.BindWhen, consumed: usize) ?KeyEvent {
     var mods = modsMaskFromVaxis(vk.mods);
     const bind_key = vaxisKeyToBindKey(vk, &mods) orelse return null;
+    const text_cp = textCodepointForForwarding(vk);
     return .{
         .mods = mods,
         .key = bind_key,
+        .text_codepoint = text_cp,
         .when = when,
         .consumed = consumed,
     };
+}
+
+fn textCodepointForForwarding(vk: vaxis.Key) ?u21 {
+    const cp = vk.codepoint;
+    if (cp < 0x20 or cp == 0x7f) return null;
+    if (cp >= 0x80 and cp <= 0x9f) return null;
+    if (cp > 0x10ffff) return null;
+    return cp;
 }
 
 fn modsMaskFromVaxis(mods: vaxis.Key.Modifiers) u8 {
