@@ -1,13 +1,13 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const ghostty = @import("ghostty-vt");
-const pagepkg = ghostty.page;
 const pop = @import("pop");
 const vt_bridge = @import("vt_bridge.zig");
 const render_sprite = @import("render_sprite.zig");
 const render_bridge = @import("render_bridge.zig");
 const render_types = @import("render_types.zig");
 const render_buffer = @import("render_buffer.zig");
+const render_state_blit = @import("render_state_blit.zig");
 
 pub const Cell = render_types.Cell;
 pub const Color = render_types.Color;
@@ -104,118 +104,7 @@ pub const Renderer = struct {
     /// This renders from ghostty's `RenderState` snapshot, which is safe to read
     /// even when the terminal is actively scrolling or updating pages.
     pub fn drawRenderState(self: *Renderer, state: *const ghostty.RenderState, offset_x: u16, offset_y: u16, width: u16, height: u16) void {
-        // Validate RenderState dimensions to prevent corruption from large scrollback
-        // Ghostty's state.rows/cols can become very large when scrollback is huge
-        // We must clamp to reasonable values to avoid buffer overruns
-        const MAX_REASONABLE_ROWS: usize = 10000;
-        const MAX_REASONABLE_COLS: usize = 1000;
-
-        const row_slice = state.row_data.slice();
-
-        // Clamp state dimensions to reasonable maximums to prevent corruption
-        const safe_state_rows = @min(@as(usize, state.rows), MAX_REASONABLE_ROWS);
-        const safe_state_cols = @min(@as(usize, state.cols), MAX_REASONABLE_COLS);
-
-        // Also clamp to requested dimensions
-        const rows = @min(@as(usize, height), safe_state_rows);
-        const cols = @min(@as(usize, width), safe_state_cols);
-
-        // Validate we're not reading beyond row_data bounds
-        const available_rows = @min(rows, row_slice.len);
-        if (available_rows == 0) return;
-
-        const row_cells = row_slice.items(.cells);
-
-        // Calculate maximum safe write position in the renderer's cell buffer
-        const max_write_x = self.next.width;
-        const max_write_y = self.next.height;
-
-        for (0..available_rows) |yi| {
-            const y: u16 = @intCast(yi);
-
-            // Skip writing if we're beyond the renderer's Y bounds
-            if (offset_y + y >= max_write_y) break;
-
-            const cells_slice = row_cells[yi].slice();
-            const raw_cells = cells_slice.items(.raw);
-            const styles = cells_slice.items(.style);
-
-            for (0..cols) |xi| {
-                const x: u16 = @intCast(xi);
-
-                // Skip writing if we're beyond the renderer's X bounds
-                if (offset_x + x >= max_write_x) break;
-
-                const raw = raw_cells[xi];
-
-                var render_cell = Cell{};
-                render_cell.char = raw.codepoint();
-
-                // Ghostty uses codepoint 0 to represent an empty cell.
-                // We render that as a space so it actively clears old content.
-                if (render_cell.char == 0) {
-                    render_cell.char = ' ';
-                }
-
-                // Filter out control characters (including ESC).
-                if (render_cell.char < 32 or render_cell.char == 127) {
-                    render_cell.char = ' ';
-                }
-
-                // Ghostty uses spacer cells for wide characters.
-                // These should not be rendered at all, since the wide character
-                // already consumes their terminal column(s).
-                if (raw.wide == .spacer_tail) {
-                    // Tail cell of a wide character: do not overwrite.
-                    // We advance the cursor during rendering.
-                    render_cell.char = 0;
-                    render_cell.is_wide_spacer = true;
-                    self.setCell(offset_x + x, offset_y + y, render_cell);
-                    continue;
-                }
-
-                if (raw.wide == .spacer_head) {
-                    // Spacer cell at end-of-line for a wide character wrap.
-                    // Render as a normal blank so we still clear any prior
-                    // screen contents in that column.
-                    render_cell.char = ' ';
-                }
-
-                // Mark wide characters (emoji, CJK, etc.)
-                if (raw.wide == .wide) {
-                    render_cell.is_wide_char = true;
-                }
-
-                // RenderState's per-cell `style` is only valid when `style_id != 0`.
-                // For default-style cells, the contents of `styles[xi]` are undefined.
-                if (raw.style_id != 0) {
-                    const style = styles[xi];
-                    render_cell.fg = Color.fromStyleColor(style.fg_color);
-                    render_cell.bg = Color.fromStyleColor(style.bg_color);
-                    render_cell.bold = style.flags.bold;
-                    render_cell.italic = style.flags.italic;
-                    render_cell.faint = style.flags.faint;
-                    render_cell.underline = @enumFromInt(@intFromEnum(style.flags.underline));
-                    render_cell.strikethrough = style.flags.strikethrough;
-                    render_cell.inverse = style.flags.inverse;
-                }
-
-                // Background-only cells can exist with default style.
-                switch (raw.content_tag) {
-                    .bg_color_palette => {
-                        render_cell.bg = .{ .palette = raw.content.color_palette };
-                    },
-
-                    .bg_color_rgb => {
-                        const rgb = raw.content.color_rgb;
-                        render_cell.bg = .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } };
-                    },
-                    else => {},
-                }
-
-                self.setCell(offset_x + x, offset_y + y, render_cell);
-            }
-        }
+        render_state_blit.drawRenderStateToBuffer(&self.next, state, offset_x, offset_y, width, height);
     }
 
     /// Copy the CellBuffer contents to the vaxis screen for rendering.
