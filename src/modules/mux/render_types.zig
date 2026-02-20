@@ -1,5 +1,3 @@
-const ghostty = @import("ghostty-vt");
-
 /// Color representation used by mux rendering paths.
 pub const Color = union(enum) {
     none,
@@ -21,14 +19,6 @@ pub const Color = union(enum) {
             .none => other == .none,
             .palette => |p| other == .palette and other.palette == p,
             .rgb => |rgb| other == .rgb and rgb.eql(other.rgb),
-        };
-    }
-
-    pub fn fromStyleColor(c: ghostty.Style.Color) Color {
-        return switch (c) {
-            .none => .none,
-            .palette => |p| .{ .palette = p },
-            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
         };
     }
 };
