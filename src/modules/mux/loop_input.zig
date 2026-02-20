@@ -454,10 +454,21 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 continue;
             }
 
-            // NOTE: parser-based key routing is temporarily disabled because it
-            // regressed user keybind matching in real-world configs.
-            // Keep parser for capability/paste tracking, but use the legacy
-            // byte path below for key dispatch until key parity is restored.
+            // Parse key events through libvaxis parser first.
+            if (input.parseKeyEvent(inp[i..], state.allocator)) |ev| {
+                if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, false, true)) {
+                    i += ev.consumed;
+                    continue;
+                }
+
+                if (ev.when == .press) {
+                    keybinds.forwardKeyToPane(state, ev.mods, ev.key);
+                }
+
+                i += ev.consumed;
+                continue;
+            }
+
             // Mouse events (SGR): click-to-focus and status-bar tab switching.
             if (input.parseMouseEvent(inp[i..])) |ev| {
                 _ = loop_mouse.handle(state, ev);

@@ -71,9 +71,10 @@ pub fn parseKeyEvent(input_bytes: []const u8, allocator: std.mem.Allocator) ?Key
 }
 
 fn parseVaxisKey(vk: vaxis.Key, when: core.Config.BindWhen, consumed: usize) ?KeyEvent {
-    const bind_key = vaxisKeyToBindKey(vk) orelse return null;
+    var mods = modsMaskFromVaxis(vk.mods);
+    const bind_key = vaxisKeyToBindKey(vk, &mods) orelse return null;
     return .{
-        .mods = modsMaskFromVaxis(vk.mods),
+        .mods = mods,
         .key = bind_key,
         .when = when,
         .consumed = consumed,
@@ -89,7 +90,7 @@ fn modsMaskFromVaxis(mods: vaxis.Key.Modifiers) u8 {
     return out;
 }
 
-fn vaxisKeyToBindKey(vk: vaxis.Key) ?core.Config.BindKey {
+fn vaxisKeyToBindKey(vk: vaxis.Key, mods_inout: *u8) ?core.Config.BindKey {
     return switch (vk.codepoint) {
         vaxis.Key.up => .up,
         vaxis.Key.down => .down,
@@ -97,8 +98,22 @@ fn vaxisKeyToBindKey(vk: vaxis.Key) ?core.Config.BindKey {
         vaxis.Key.right => .right,
         vaxis.Key.space => .space,
         else => blk: {
-            if (vk.codepoint > 0xFF) break :blk null;
-            break :blk .{ .char = @intCast(vk.codepoint) };
+            var cp: u21 = vk.base_layout_codepoint orelse vk.codepoint;
+
+            // Normalize Ctrl+letter control bytes (0x01..0x1A) to a-z.
+            if (cp >= 1 and cp <= 26) {
+                cp = 'a' + (cp - 1);
+                mods_inout.* |= 2;
+            }
+
+            // Match config key style: use lowercase alpha key + shift mod.
+            if (cp >= 'A' and cp <= 'Z') {
+                cp = std.ascii.toLower(@intCast(cp));
+                mods_inout.* |= 4;
+            }
+
+            if (cp > 0xFF) break :blk null;
+            break :blk .{ .char = @intCast(cp) };
         },
     };
 }
