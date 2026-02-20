@@ -1,6 +1,5 @@
-const std = @import("std");
 const shp = @import("shp");
-const vaxis = @import("vaxis");
+const text_width = @import("text_width.zig");
 
 const core = @import("core");
 
@@ -14,26 +13,6 @@ pub const TitleRect = struct {
     y: u16,
     w: u16,
 };
-
-fn clipTextToWidth(text: []const u8, max_width: u16) []const u8 {
-    if (text.len == 0 or max_width == 0) return "";
-
-    var used: u16 = 0;
-    var end: usize = 0;
-    var it = vaxis.unicode.graphemeIterator(text);
-    while (it.next()) |g| {
-        const bytes = g.bytes(text);
-        const w = vaxis.gwidth.gwidth(bytes, .unicode);
-        if (w == 0) {
-            end = g.start + g.len;
-            continue;
-        }
-        if (used + w > max_width) break;
-        used += w;
-        end = g.start + g.len;
-    }
-    return text[0..end];
-}
 
 pub fn getTitleRect(pane: *const Pane) ?TitleRect {
     const title = pane.float_title orelse return null;
@@ -152,7 +131,7 @@ pub fn drawTitleEditor(renderer: *Renderer, pane: *const Pane, buf: []const u8) 
     }
 
     // Text + cursor.
-    const clipped = clipTextToWidth(buf, want_w - 1);
+    const clipped = text_width.clipTextToWidth(buf, want_w - 1);
     const cursor_x = statusbar.drawStyledText(renderer, draw_x, draw_y, clipped, text_style);
     // Cursor marker at end (ASCII for portability).
     renderer.setCell(cursor_x, draw_y, .{ .char = '|', .fg = fg, .bg = bg, .bold = true });

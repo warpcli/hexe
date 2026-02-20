@@ -1,36 +1,16 @@
 const std = @import("std");
 const shp = @import("shp");
-const vaxis = @import("vaxis");
 const render = @import("render.zig");
 const Renderer = render.Renderer;
 const Color = render.Color;
 const statusbar = @import("statusbar.zig");
+const text_width = @import("text_width.zig");
 
 const pop = @import("pop");
 const overlay = pop.overlay;
 const OverlayManager = overlay.OverlayManager;
 
 const Pos = struct { x: u16, y: u16 };
-
-fn clipTextToWidth(text: []const u8, max_width: u16) []const u8 {
-    if (text.len == 0 or max_width == 0) return "";
-
-    var used: u16 = 0;
-    var end: usize = 0;
-    var it = vaxis.unicode.graphemeIterator(text);
-    while (it.next()) |g| {
-        const bytes = g.bytes(text);
-        const w = vaxis.gwidth.gwidth(bytes, .unicode);
-        if (w == 0) {
-            end = g.start + g.len;
-            continue;
-        }
-        if (used + w > max_width) break;
-        used += w;
-        end = g.start + g.len;
-    }
-    return text[0..end];
-}
 
 fn textStyle(fg: Color, bg: Color, bold: bool) shp.Style {
     return .{
@@ -278,7 +258,7 @@ fn renderKeycast(renderer: *Renderer, overlays: *const OverlayManager, screen_wi
 
 /// Render a generic overlay
 fn renderOverlay(renderer: *Renderer, ov: overlay.Overlay, screen_width: u16, screen_height: u16) void {
-    const clipped = clipTextToWidth(ov.text, 80);
+    const clipped = text_width.clipTextToWidth(ov.text, 80);
     const text_len: u16 = statusbar.measureText(clipped);
     if (text_len == 0) return;
 

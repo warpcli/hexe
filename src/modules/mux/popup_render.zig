@@ -5,6 +5,7 @@ const vaxis = @import("vaxis");
 const render = @import("render.zig");
 const statusbar = @import("statusbar.zig");
 const vaxis_cell = @import("vaxis_cell.zig");
+const text_width = @import("text_width.zig");
 
 pub const Renderer = render.Renderer;
 
@@ -39,7 +40,7 @@ fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: rende
 
     if (title) |t| {
         if (h > 0 and w > 4) {
-            const clipped = clipTextToWidth(t, w - 4);
+            const clipped = text_width.clipTextToWidth(t, w - 4);
             const title_segments = &[_]vaxis.Segment{
                 .{ .text = " ", .style = base_style },
                 .{ .text = clipped, .style = .{ .fg = vaxis_cell.toVaxisColor(fg), .bg = vaxis_cell.toVaxisColor(bg), .bold = true } },
@@ -59,26 +60,6 @@ fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: rende
 
 fn textWidth(text: []const u8) u16 {
     return statusbar.measureText(text);
-}
-
-fn clipTextToWidth(text: []const u8, max_width: u16) []const u8 {
-    if (text.len == 0 or max_width == 0) return "";
-
-    var used: u16 = 0;
-    var end: usize = 0;
-    var it = vaxis.unicode.graphemeIterator(text);
-    while (it.next()) |g| {
-        const bytes = g.bytes(text);
-        const w = vaxis.gwidth.gwidth(bytes, .unicode);
-        if (w == 0) {
-            end = g.start + g.len;
-            continue;
-        }
-        if (used + w > max_width) break;
-        used += w;
-        end = g.start + g.len;
-    }
-    return text[0..end];
 }
 
 fn popupTextStyle(fg: render.Color, bg: render.Color, bold: bool) shp.Style {
@@ -165,7 +146,7 @@ pub fn drawConfirmInBounds(renderer: *Renderer, confirm: *pop.Confirm, cfg: pop.
     // Draw message
     const msg_y = box_y + 1 + padding_y;
     const max_msg_width = inner_width -| padding_x * 2;
-    const msg = clipTextToWidth(confirm.message, max_msg_width);
+    const msg = text_width.clipTextToWidth(confirm.message, max_msg_width);
     const msg_len: u16 = textWidth(msg);
     const msg_x = inner_x + padding_x + (max_msg_width -| msg_len) / 2;
     _ = statusbar.drawStyledText(renderer, msg_x, msg_y, msg, popupTextStyle(fg, bg, cfg.bold));
@@ -238,7 +219,7 @@ pub fn drawPickerInBounds(renderer: *Renderer, picker: *pop.Picker, cfg: pop.Cho
 
         var ix: u16 = content_x + 2;
         const item_width_max = (box_x + box_width - 2) -| ix;
-        const clipped_item = clipTextToWidth(item, item_width_max);
+        const clipped_item = text_width.clipTextToWidth(item, item_width_max);
         ix = statusbar.drawStyledText(renderer, ix, content_y, clipped_item, popupTextStyle(item_fg, item_bg, is_selected));
         while (ix < box_x + box_width - 1) : (ix += 1) {
             renderer.setCell(ix, content_y, .{ .char = ' ', .fg = item_fg, .bg = item_bg });

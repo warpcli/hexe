@@ -3,6 +3,7 @@ const pop = @import("pop");
 const vaxis = @import("vaxis");
 const render = @import("render.zig");
 const vaxis_cell = @import("vaxis_cell.zig");
+const text_width = @import("text_width.zig");
 
 const Renderer = render.Renderer;
 
@@ -25,7 +26,7 @@ pub fn renderInBounds(
     const max_msg_width = bounds_width -| style.padding_x * 2;
     if (max_msg_width == 0) return;
 
-    const clipped = clipTextToWidth(notif.message, max_msg_width);
+    const clipped = text_width.clipTextToWidth(notif.message, max_msg_width);
     const msg_width = vaxis.gwidth.gwidth(clipped, .unicode);
     if (msg_width == 0) return;
 
@@ -58,26 +59,6 @@ pub fn renderInBounds(
     const text_y = y + style.padding_y;
     const text_x = x + style.padding_x;
     renderTextWithVaxis(renderer, text_x, text_y, clipped, style);
-}
-
-fn clipTextToWidth(text: []const u8, max_width: u16) []const u8 {
-    if (text.len == 0 or max_width == 0) return "";
-
-    var used: u16 = 0;
-    var end: usize = 0;
-    var it = vaxis.unicode.graphemeIterator(text);
-    while (it.next()) |g| {
-        const bytes = g.bytes(text);
-        const w = vaxis.gwidth.gwidth(bytes, .unicode);
-        if (w == 0) {
-            end = g.start + g.len;
-            continue;
-        }
-        if (used + w > max_width) break;
-        used += w;
-        end = g.start + g.len;
-    }
-    return text[0..end];
 }
 
 fn toVaxisStyle(style: pop.notification.Style) vaxis.Style {
