@@ -63,6 +63,13 @@ pub const Renderer = struct {
         self.next.get(x, y).* = cell;
     }
 
+    /// Mutable access to a cell in the next-frame buffer.
+    /// Returns null when coordinates are out of bounds.
+    pub fn getCellMutable(self: *Renderer, x: u16, y: u16) ?*Cell {
+        if (x >= self.next.width or y >= self.next.height) return null;
+        return self.next.get(x, y);
+    }
+
     pub fn drawRenderState(self: *Renderer, state: *const ghostty.RenderState, offset_x: u16, offset_y: u16, width: u16, height: u16) void {
         render_state_blit.drawRenderStateToBuffer(&self.next, state, offset_x, offset_y, width, height);
     }

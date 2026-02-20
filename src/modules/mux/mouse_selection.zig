@@ -198,7 +198,7 @@ pub fn applyOverlay(renderer: *Renderer, pane_x: u16, pane_y: u16, pane_w: u16, 
         const end_x: u16 = if (y == norm.end.y) norm.end.x else (pane_w - 1);
         var x: u16 = start_x;
         while (x <= end_x) : (x += 1) {
-            const cell = renderer.next.get(pane_x + x, pane_y + y);
+            const cell = renderer.getCellMutable(pane_x + x, pane_y + y) orelse continue;
             cell.bg = .{ .palette = selection_color };
         }
     }
@@ -267,7 +267,7 @@ pub fn applyOverlayTrimmed(renderer: *Renderer, render_state: *const ghostty.Ren
 
         var x: u16 = start_x;
         while (x <= end_x) : (x += 1) {
-            const cell = renderer.next.get(pane_x + x, pane_y + y);
+            const cell = renderer.getCellMutable(pane_x + x, pane_y + y) orelse continue;
             cell.bg = .{ .palette = selection_color };
         }
     }
@@ -295,12 +295,12 @@ pub fn extractText(allocator: std.mem.Allocator, pane: *Pane, range: BufRange) !
 
 /// Standard word separators for terminal word selection
 const word_separators = [_]u21{
-    ' ',  '\t', '\n', '\r', // Whitespace
-    '\'', '"',  '`',        // Quotes
-    '(',  ')',  '[',  ']', '{', '}', '<', '>', // Brackets
-    ',',  ';',  ':',  '!', '?', '.', // Punctuation
-    '/',  '\\', '|',  '&', // Path/operators
-    '=',  '+',  '-',  '*', '%', '^', '~', '#', '@', '$', // Operators/special
+    ' ', '\t', '\n', '\r', // Whitespace
+    '\'', '"', '`', // Quotes
+    '(', ')', '[', ']', '{', '}', '<', '>', // Brackets
+    ',', ';', ':', '!', '?', '.', // Punctuation
+    '/', '\\', '|', '&', // Path/operators
+    '=', '+', '-', '*', '%', '^', '~', '#', '@', '$', // Operators/special
 };
 
 /// Select the word under the given viewport-local coordinate.

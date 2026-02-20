@@ -37,7 +37,7 @@ pub fn applyDimEffect(renderer: *Renderer, width: u16, height: u16, exclude: ?Bo
                 if (bounds.contains(x, y)) continue;
             }
 
-            const cell = renderer.next.get(x, y);
+            const cell = renderer.getCellMutable(x, y) orelse continue;
             cell.faint = true;
 
             // Dim background while preserving its original color model.
