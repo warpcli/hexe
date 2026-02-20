@@ -1,7 +1,7 @@
 const shp = @import("shp");
-const render = @import("render.zig");
+const render_types = @import("render_types.zig");
 
-pub fn renderColorToShp(c: render.Color) shp.Color {
+pub fn renderColorToShp(c: render_types.Color) shp.Color {
     return switch (c) {
         .none => .none,
         .palette => |idx| .{ .palette = idx },
@@ -9,7 +9,7 @@ pub fn renderColorToShp(c: render.Color) shp.Color {
     };
 }
 
-pub fn textStyle(fg: render.Color, bg: render.Color, bold: bool) shp.Style {
+pub fn textStyle(fg: render_types.Color, bg: render_types.Color, bold: bool) shp.Style {
     return .{
         .fg = renderColorToShp(fg),
         .bg = renderColorToShp(bg),

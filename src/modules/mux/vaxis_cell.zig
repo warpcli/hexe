@@ -1,6 +1,6 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
-const render = @import("render.zig");
+const render_types = @import("render_types.zig");
 
 pub fn toVaxisColor(c: anytype) vaxis.Color {
     return switch (c) {
@@ -10,7 +10,7 @@ pub fn toVaxisColor(c: anytype) vaxis.Color {
     };
 }
 
-pub fn toRenderColor(col: vaxis.Color) render.Color {
+pub fn toRenderColor(col: vaxis.Color) render_types.Color {
     return switch (col) {
         .default => .none,
         .index => |idx| .{ .palette = idx },
@@ -18,8 +18,8 @@ pub fn toRenderColor(col: vaxis.Color) render.Color {
     };
 }
 
-pub fn toRenderCell(cell: vaxis.Cell) render.Cell {
-    var out: render.Cell = .{
+pub fn toRenderCell(cell: vaxis.Cell) render_types.Cell {
+    var out: render_types.Cell = .{
         .char = ' ',
         .fg = toRenderColor(cell.style.fg),
         .bg = toRenderColor(cell.style.bg),
