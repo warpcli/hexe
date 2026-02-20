@@ -11,6 +11,26 @@ const vaxis_draw = @import("vaxis_draw.zig");
 const Pane = @import("pane.zig").Pane;
 const Layout = @import("layout.zig").Layout;
 
+pub const TitlePlacement = struct {
+    x: u16,
+    y: u16,
+};
+
+pub fn floatTitleInnerWidth(w: u16) u16 {
+    return w -| 4;
+}
+
+pub fn floatTitlePlacement(x: u16, y: u16, w: u16, h: u16, pos: core.FloatStylePosition, total_len: u16) TitlePlacement {
+    return switch (pos) {
+        .topleft => .{ .x = x + 2, .y = y },
+        .topcenter => .{ .x = x + (w -| total_len) / 2, .y = y },
+        .topright => .{ .x = x + w -| 2 -| total_len, .y = y },
+        .bottomleft => .{ .x = x + 2, .y = y + h - 1 },
+        .bottomcenter => .{ .x = x + (w -| total_len) / 2, .y = y + h - 1 },
+        .bottomright => .{ .x = x + w -| 2 -| total_len, .y = y + h - 1 },
+    };
+}
+
 fn toShpStyle(seg: statusbar.RenderedSegment) shp.Style {
     return .{
         .fg = switch (seg.fg) {
@@ -393,7 +413,7 @@ pub fn drawFloatingBorder(
 
                 // Render styled output
                 const segments = statusbar.renderSegmentOutput(module, output);
-                const inner_w = w -| 4;
+                const inner_w = floatTitleInnerWidth(w);
                 if (inner_w == 0) return;
 
                 // If module formatting produced no visible text, fallback to raw name.
@@ -403,71 +423,27 @@ pub fn drawFloatingBorder(
                     else
                         shp.Style{};
 
-                    var draw_x_fallback: u16 = x + 2;
-                    var draw_y_fallback: u16 = y;
-                    if (s.position) |pos2| {
-                        switch (pos2) {
-                            .topcenter => draw_x_fallback = x + (w -| @min(inner_w, statusbar.measureText(name))) / 2,
-                            .topright => draw_x_fallback = x + w -| 2 -| @min(inner_w, statusbar.measureText(name)),
-                            .bottomleft => draw_y_fallback = y + h - 1,
-                            .bottomcenter => {
-                                draw_x_fallback = x + (w -| @min(inner_w, statusbar.measureText(name))) / 2;
-                                draw_y_fallback = y + h - 1;
-                            },
-                            .bottomright => {
-                                draw_x_fallback = x + w -| 2 -| @min(inner_w, statusbar.measureText(name));
-                                draw_y_fallback = y + h - 1;
-                            },
-                            else => {},
-                        }
-                    }
+                    const fallback_len = @min(inner_w, statusbar.measureText(name));
+                    const fallback_place = floatTitlePlacement(x, y, w, h, pos, fallback_len);
                     const clipped_name = text_width.clipTextToWidth(name, inner_w);
-                    _ = statusbar.drawStyledText(renderer, draw_x_fallback, draw_y_fallback, clipped_name, fallback_style);
+                    _ = statusbar.drawStyledText(renderer, fallback_place.x, fallback_place.y, clipped_name, fallback_style);
                     return;
                 }
 
                 // Calculate position based on style position
                 const unclamped_len: u16 = @intCast(@min(segments.total_len, @as(usize, std.math.maxInt(u16))));
                 const total_len: u16 = @min(unclamped_len, inner_w);
-                var draw_x: u16 = undefined;
-                var draw_y: u16 = undefined;
-
-                switch (pos) {
-                    .topleft => {
-                        draw_x = x + 2;
-                        draw_y = y;
-                    },
-                    .topcenter => {
-                        draw_x = x + (w -| total_len) / 2;
-                        draw_y = y;
-                    },
-                    .topright => {
-                        draw_x = x + w -| 2 -| total_len;
-                        draw_y = y;
-                    },
-                    .bottomleft => {
-                        draw_x = x + 2;
-                        draw_y = y + h - 1;
-                    },
-                    .bottomcenter => {
-                        draw_x = x + (w -| total_len) / 2;
-                        draw_y = y + h - 1;
-                    },
-                    .bottomright => {
-                        draw_x = x + w -| 2 -| total_len;
-                        draw_y = y + h - 1;
-                    },
-                }
+                const place = floatTitlePlacement(x, y, w, h, pos, total_len);
 
                 // Draw each segment with its style
-                var cur_x = draw_x;
+                var cur_x = place.x;
                 const max_x = x + w -| 2;
                 for (segments.items[0..segments.count]) |seg| {
                     if (cur_x >= max_x) break;
                     const remain = max_x - cur_x;
                     const clipped = text_width.clipTextToWidth(seg.text, remain);
                     if (clipped.len == 0) continue;
-                    cur_x = statusbar.drawStyledText(renderer, cur_x, draw_y, clipped, toShpStyle(seg));
+                    cur_x = statusbar.drawStyledText(renderer, cur_x, place.y, clipped, toShpStyle(seg));
                 }
             }
         }

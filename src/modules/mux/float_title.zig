@@ -8,6 +8,7 @@ const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
 const statusbar = @import("statusbar.zig");
 const vaxis_draw = @import("vaxis_draw.zig");
+const borders = @import("borders.zig");
 
 pub const TitleRect = struct {
     x: u16,
@@ -29,41 +30,16 @@ pub fn getTitleRect(pane: *const Pane) ?TitleRect {
     const outer_h = pane.border_h;
     if (outer_w < 3 or outer_h < 3) return null;
 
+    const inner_w = borders.floatTitleInnerWidth(outer_w);
+    if (inner_w == 0) return null;
+
     const segments = statusbar.renderSegmentOutput(&module, title);
-    const total_len: u16 = @intCast(@min(@as(usize, outer_w -| 2), segments.total_len));
+    const total_len: u16 = @intCast(@min(@as(usize, inner_w), segments.total_len));
     if (total_len == 0) return null;
 
-    var draw_x: u16 = undefined;
-    var draw_y: u16 = undefined;
+    const place = borders.floatTitlePlacement(outer_x, outer_y, outer_w, outer_h, pos, total_len);
 
-    switch (pos) {
-        .topleft => {
-            draw_x = outer_x + 2;
-            draw_y = outer_y;
-        },
-        .topcenter => {
-            draw_x = outer_x + @as(u16, @intCast((outer_w -| total_len) / 2));
-            draw_y = outer_y;
-        },
-        .topright => {
-            draw_x = outer_x + outer_w -| 2 -| total_len;
-            draw_y = outer_y;
-        },
-        .bottomleft => {
-            draw_x = outer_x + 2;
-            draw_y = outer_y + outer_h - 1;
-        },
-        .bottomcenter => {
-            draw_x = outer_x + @as(u16, @intCast((outer_w -| total_len) / 2));
-            draw_y = outer_y + outer_h - 1;
-        },
-        .bottomright => {
-            draw_x = outer_x + outer_w -| 2 -| total_len;
-            draw_y = outer_y + outer_h - 1;
-        },
-    }
-
-    return .{ .x = draw_x, .y = draw_y, .w = total_len };
+    return .{ .x = place.x, .y = place.y, .w = total_len };
 }
 
 pub fn hitTestTitle(pane: *const Pane, x: u16, y: u16) bool {
@@ -87,39 +63,12 @@ pub fn drawTitleEditor(renderer: *Renderer, pane: *const Pane, buf: []const u8) 
     if (outer_w < 3 or outer_h < 3) return;
 
     // Cap edit box to fit inside the border.
-    const max_w: u16 = outer_w -| 4;
+    const max_w: u16 = borders.floatTitleInnerWidth(outer_w);
     if (max_w == 0) return;
 
     const want_w: u16 = @min(max_w, @max(@as(u16, 1), statusbar.measureText(buf) + 1));
 
-    var draw_x: u16 = undefined;
-    var draw_y: u16 = undefined;
-    switch (pos) {
-        .topleft => {
-            draw_x = outer_x + 2;
-            draw_y = outer_y;
-        },
-        .topcenter => {
-            draw_x = outer_x + @as(u16, @intCast((outer_w -| want_w) / 2));
-            draw_y = outer_y;
-        },
-        .topright => {
-            draw_x = outer_x + outer_w -| 2 -| want_w;
-            draw_y = outer_y;
-        },
-        .bottomleft => {
-            draw_x = outer_x + 2;
-            draw_y = outer_y + outer_h - 1;
-        },
-        .bottomcenter => {
-            draw_x = outer_x + @as(u16, @intCast((outer_w -| want_w) / 2));
-            draw_y = outer_y + outer_h - 1;
-        },
-        .bottomright => {
-            draw_x = outer_x + outer_w -| 2 -| want_w;
-            draw_y = outer_y + outer_h - 1;
-        },
-    }
+    const place = borders.floatTitlePlacement(outer_x, outer_y, outer_w, outer_h, pos, want_w);
 
     const bg: Color = .{ .palette = pane.border_color.active };
     const fg: Color = .{ .palette = 0 };
@@ -128,12 +77,12 @@ pub fn drawTitleEditor(renderer: *Renderer, pane: *const Pane, buf: []const u8) 
     // Background box.
     var i: u16 = 0;
     while (i < want_w) : (i += 1) {
-        vaxis_draw.putChar(renderer, draw_x + i, draw_y, ' ', fg, bg, false);
+        vaxis_draw.putChar(renderer, place.x + i, place.y, ' ', fg, bg, false);
     }
 
     // Text + cursor.
     const clipped = text_width.clipTextToWidth(buf, want_w - 1);
-    const cursor_x = statusbar.drawStyledText(renderer, draw_x, draw_y, clipped, text_style);
+    const cursor_x = statusbar.drawStyledText(renderer, place.x, place.y, clipped, text_style);
     // Cursor marker at end (ASCII for portability).
-    vaxis_draw.putChar(renderer, cursor_x, draw_y, '|', fg, bg, true);
+    vaxis_draw.putChar(renderer, cursor_x, place.y, '|', fg, bg, true);
 }
