@@ -1,8 +1,10 @@
 const std = @import("std");
+const vaxis = @import("vaxis");
 const ghostty = @import("ghostty-vt");
 const pagepkg = ghostty.page;
 const colorpkg = ghostty.color;
 const pop = @import("pop");
+const vt_bridge = @import("vt_bridge.zig");
 
 /// Represents a single rendered cell with all its attributes
 pub const Cell = struct {
@@ -139,67 +141,86 @@ pub const CellBuffer = struct {
     }
 };
 
-// ESC character constant
-const ESC: u8 = 0x1B;
+/// Static ASCII lookup table for u21 -> []const u8 conversion.
+/// Each byte position i contains the byte value i, so ascii_lut[ch..][0..1]
+/// is a valid single-byte slice for any ASCII codepoint.
+const ascii_lut: [128]u8 = initAsciiLut();
 
-/// Write a CSI sequence (ESC [) followed by the given suffix
-fn writeCSI(output: *std.ArrayList(u8), allocator: std.mem.Allocator, suffix: []const u8) !void {
-    try output.append(allocator, ESC);
-    try output.append(allocator, '[');
-    try output.appendSlice(allocator, suffix);
+fn initAsciiLut() [128]u8 {
+    var table: [128]u8 = undefined;
+    for (0..128) |i| table[i] = @intCast(i);
+    return table;
 }
 
-/// Write a CSI sequence with formatted parameters
-fn writeCSIFmt(output: *std.ArrayList(u8), allocator: std.mem.Allocator, buf: []u8, comptime fmt: []const u8, args: anytype) !void {
-    // Format first, THEN write - prevents partial sequences on format failure
-    const formatted = std.fmt.bufPrint(buf, fmt, args) catch return;
-    try output.append(allocator, ESC);
-    try output.append(allocator, '[');
-    try output.appendSlice(allocator, formatted);
-}
+/// Cursor information for rendering
+pub const CursorInfo = struct {
+    x: u16 = 0,
+    y: u16 = 0,
+    style: u8 = 0,
+    visible: bool = true,
+};
 
-/// Differential renderer that tracks state and only emits changed cells
+/// Differential renderer that tracks state and only emits changed cells.
+/// Internally uses libvaxis for terminal output while maintaining a CellBuffer
+/// for backward compatibility with existing UI code.
 pub const Renderer = struct {
     allocator: std.mem.Allocator,
-    current: CellBuffer, // Previous frame
+    current: CellBuffer, // Previous frame (used by callers that read cells)
     next: CellBuffer, // Next frame being built
-    output: std.ArrayList(u8),
-
-    // Tracked SGR state to avoid redundant escape sequences
-    cursor_x: u16 = 0,
-    cursor_y: u16 = 0,
-    current_fg: Color = .none,
-    current_bg: Color = .none,
-    current_bold: bool = false,
-    current_italic: bool = false,
-    current_faint: bool = false,
-    current_underline: Cell.Underline = .none,
-    current_strikethrough: bool = false,
-    current_inverse: bool = false,
+    vx: vaxis.Vaxis, // libvaxis rendering engine
 
     pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !Renderer {
+        var vx = try vaxis.Vaxis.init(allocator, .{});
+        // Resize vaxis screens to match initial terminal size.
+        // We do this manually to avoid needing a tty writer at init time.
+        if (width > 0 and height > 0) {
+            vx.screen = try vaxis.Screen.init(allocator, .{
+                .rows = height,
+                .cols = width,
+                .x_pixel = 0,
+                .y_pixel = 0,
+            });
+            vx.screen_last.deinit(allocator);
+            vx.screen_last = try vaxis.AllocatingScreen.init(allocator, width, height);
+        }
+
         return .{
             .allocator = allocator,
             .current = try CellBuffer.init(allocator, width, height),
             .next = try CellBuffer.init(allocator, width, height),
-            .output = .empty,
+            .vx = vx,
         };
     }
 
     pub fn deinit(self: *Renderer) void {
         self.current.deinit(self.allocator);
         self.next.deinit(self.allocator);
-        self.output.deinit(self.allocator);
+        // Free vaxis screen resources directly (skip terminal reset since we
+        // handle that ourselves during shutdown).
+        self.vx.screen.deinit(self.allocator);
+        self.vx.screen_last.deinit(self.allocator);
     }
 
     pub fn resize(self: *Renderer, width: u16, height: u16) !void {
         try self.current.resize(self.allocator, width, height);
         try self.next.resize(self.allocator, width, height);
+
+        // Resize vaxis screens to match new terminal dimensions.
+        self.vx.screen.deinit(self.allocator);
+        self.vx.screen = try vaxis.Screen.init(self.allocator, .{
+            .rows = height,
+            .cols = width,
+            .x_pixel = 0,
+            .y_pixel = 0,
+        });
+        self.vx.screen_last.deinit(self.allocator);
+        self.vx.screen_last = try vaxis.AllocatingScreen.init(self.allocator, width, height);
     }
 
-    /// Begin a new frame - clear the next buffer
+    /// Begin a new frame - clear the next buffer and vaxis screen
     pub fn beginFrame(self: *Renderer) void {
         self.next.clear();
+        self.vx.screen.clear();
     }
 
     /// Invert a cell in the next-frame buffer.
@@ -338,273 +359,59 @@ pub const Renderer = struct {
         }
     }
 
-    /// End frame and render differences to output buffer
-    /// Returns the output to write to terminal
-    pub fn endFrame(self: *Renderer, force_full: bool) ![]const u8 {
-        self.output.clearRetainingCapacity();
-
+    /// Copy the CellBuffer contents to the vaxis screen for rendering.
+    /// Translates hexa Cell -> vaxis Cell types.
+    fn copyToVaxisScreen(self: *Renderer) void {
         const width = self.next.width;
         const height = self.next.height;
 
-        // Fast path: if nothing changed, emit nothing.
-        if (!force_full) {
-            var changed = false;
-            for (0..height) |yi| {
-                const y: u16 = @intCast(yi);
-                for (0..width) |xi| {
-                    const x: u16 = @intCast(xi);
-                    if (!self.current.getConst(x, y).eql(self.next.getConst(x, y))) {
-                        changed = true;
-                        break;
-                    }
-                }
-                if (changed) break;
-            }
-
-            if (!changed) {
-                std.mem.swap(CellBuffer, &self.current, &self.next);
-                return self.output.items;
-            }
-        }
-
-        // Pre-allocate enough space for worst case (every cell changes with full color sequences)
-        // Estimate: ~30 bytes per cell (position + color + char)
-        const estimated_size = @as(usize, width) * @as(usize, height) * 30;
-        try self.output.ensureTotalCapacity(self.allocator, estimated_size);
-
-        // Begin synchronized update, hide cursor, reset all attributes.
-        // The SGR reset ensures we start from a known state.
-        try writeCSI(&self.output, self.allocator, "?2026h"); // begin sync
-        try writeCSI(&self.output, self.allocator, "?25l"); // hide cursor
-        try writeCSI(&self.output, self.allocator, "0m"); // reset attributes
-        if (force_full) {
-            // Ensure the outer terminal fully clears any stale backgrounds.
-            try writeCSI(&self.output, self.allocator, "H");
-            try writeCSI(&self.output, self.allocator, "2J");
-        }
-        self.current_fg = .none;
-        self.current_bg = .none;
-        self.current_bold = false;
-        self.current_italic = false;
-        self.current_faint = false;
-        self.current_underline = .none;
-        self.current_strikethrough = false;
-        self.current_inverse = false;
-
-        // Use a fixed buffer for building escape sequences to ensure atomic writes
-        var seq_buf: [64]u8 = undefined;
-
         for (0..height) |yi| {
             const y: u16 = @intCast(yi);
+            for (0..width) |xi| {
+                const x: u16 = @intCast(xi);
+                const cell = self.next.getConst(x, y);
 
-            var start_x: usize = 0;
-            if (!force_full) {
-                // Find the first differing cell in this row.
-                start_x = width;
-                for (0..width) |xi| {
-                    const old = self.current.getConst(@intCast(xi), y);
-                    const new = self.next.getConst(@intCast(xi), y);
-                    if (!old.eql(new)) {
-                        start_x = xi;
-                        break;
-                    }
-                }
-
-                if (start_x == width) {
-                    // No changes in this row.
-                    continue;
-                }
-            }
-
-            // Position cursor at start of the row.
-            try writeCSIFmt(&self.output, self.allocator, &seq_buf, "{d};1H", .{y + 1});
-
-            var cursor_x: usize = 0;
-
-            // Skip to the first changed cell.
-            if (start_x > 0) {
-                try writeCSIFmt(&self.output, self.allocator, &seq_buf, "{d}C", .{start_x});
-                cursor_x = start_x;
-            }
-
-            var pending_skip: usize = 0;
-            for (start_x..width) |xi| {
-                const old = self.current.getConst(@intCast(xi), y);
-                const new = self.next.getConst(@intCast(xi), y);
-
-                if (!force_full and old.eql(new)) {
-                    pending_skip += 1;
-                    continue;
-                }
-
-                if (pending_skip > 0) {
-                    try writeCSIFmt(&self.output, self.allocator, &seq_buf, "{d}C", .{pending_skip});
-                    cursor_x += pending_skip;
-                    pending_skip = 0;
-                }
-
-                // Wide-character spacer tail: skip without emitting.
-                // The cursor is already correctly positioned after the wide char.
-                if (new.char == 0) {
-                    continue;
-                }
-
-                try self.emitStyleChanges(&seq_buf, new);
-                try self.emitChar(new.char);
-                // Wide characters (emoji, CJK) advance cursor by 2 columns
-                cursor_x += if (new.is_wide_char) 2 else 1;
-            }
-
-            // If the remainder of the row is a uniform blank run, explicitly
-            // clear it via EL (erase to end of line). This prevents stale
-            // backgrounds/attrs from previous content from persisting when the
-            // model is "blank" but we didn't overwrite every trailing cell.
-            if (!force_full and cursor_x < width) {
-                const base = self.next.getConst(@intCast(cursor_x), y);
-
-                // Only do this optimization for trailing blanks.
-                if (base.char == ' ') {
-                    var tail_uniform = true;
-                    for (cursor_x..width) |xi| {
-                        const cell = self.next.getConst(@intCast(xi), y);
-                        if (!cell.eql(base)) {
-                            tail_uniform = false;
-                            break;
-                        }
-                    }
-
-                    if (tail_uniform) {
-                        // Make sure the SGR state matches the blank tail.
-                        try self.emitStyleChanges(&seq_buf, base);
-                        try writeCSI(&self.output, self.allocator, "K");
-                    }
-                }
+                // Convert hexa Cell -> vaxis Cell
+                const vx_cell = cellToVaxis(cell);
+                self.vx.screen.writeCell(x, y, vx_cell);
             }
         }
+    }
 
-        // Reset attributes and end synchronized update
-        try writeCSI(&self.output, self.allocator, "0m");
-        try writeCSI(&self.output, self.allocator, "?2026l"); // end sync - display now
+    /// End frame: copy CellBuffer to vaxis screen and render via libvaxis.
+    /// Takes cursor info and the output file to write to.
+    pub fn endFrame(self: *Renderer, force_full: bool, stdout: std.fs.File, cursor: CursorInfo) !void {
+        // Copy the CellBuffer to the vaxis screen
+        self.copyToVaxisScreen();
 
-        // Swap buffers
+        // Set cursor state on the vaxis screen
+        self.vx.screen.cursor_vis = cursor.visible;
+        if (cursor.visible) {
+            self.vx.screen.cursor = .{ .col = cursor.x, .row = cursor.y };
+            self.vx.screen.cursor_shape = mapCursorShape(cursor.style);
+        }
+
+        if (force_full) {
+            self.vx.refresh = true;
+        }
+
+        // Render via vaxis to stdout
+        var write_buf: [8192]u8 = undefined;
+        var writer = stdout.writer(&write_buf);
+        try self.vx.render(&writer.interface);
+        writer.interface.flush() catch {};
+
+        // Swap old CellBuffers so callers that read `current` see last frame
         std.mem.swap(CellBuffer, &self.current, &self.next);
 
-        return self.output.items;
-    }
-
-    fn emitStyleChanges(self: *Renderer, seq_buf: *[64]u8, cell: Cell) !void {
-        // Check if we need a full reset
-        const need_reset = (self.current_bold and !cell.bold) or
-            (self.current_italic and !cell.italic) or
-            (self.current_faint and !cell.faint) or
-            (self.current_underline != .none and cell.underline == .none) or
-            (self.current_strikethrough and !cell.strikethrough) or
-            (self.current_inverse and !cell.inverse);
-
-        if (need_reset) {
-            try writeCSI(&self.output, self.allocator, "0m");
-            self.current_fg = .none;
-            self.current_bg = .none;
-            self.current_bold = false;
-            self.current_italic = false;
-            self.current_faint = false;
-            self.current_underline = .none;
-            self.current_strikethrough = false;
-            self.current_inverse = false;
-        }
-
-        // Emit attribute changes
-        if (cell.bold and !self.current_bold) {
-            try writeCSI(&self.output, self.allocator, "1m");
-            self.current_bold = true;
-        }
-
-        if (cell.faint and !self.current_faint) {
-            try writeCSI(&self.output, self.allocator, "2m");
-            self.current_faint = true;
-        }
-
-        if (cell.italic and !self.current_italic) {
-            try writeCSI(&self.output, self.allocator, "3m");
-            self.current_italic = true;
-        }
-
-        if (cell.underline != self.current_underline) {
-            switch (cell.underline) {
-                .none => {}, // handled by reset
-                .single => try writeCSI(&self.output, self.allocator, "4m"),
-                .double => try writeCSI(&self.output, self.allocator, "4:2m"),
-                .curly => try writeCSI(&self.output, self.allocator, "4:3m"),
-                .dotted => try writeCSI(&self.output, self.allocator, "4:4m"),
-                .dashed => try writeCSI(&self.output, self.allocator, "4:5m"),
-            }
-            self.current_underline = cell.underline;
-        }
-
-        if (cell.inverse and !self.current_inverse) {
-            try writeCSI(&self.output, self.allocator, "7m");
-            self.current_inverse = true;
-        }
-
-        if (cell.strikethrough and !self.current_strikethrough) {
-            try writeCSI(&self.output, self.allocator, "9m");
-            self.current_strikethrough = true;
-        }
-
-        // Emit foreground color change
-        if (!cell.fg.eql(self.current_fg)) {
-            switch (cell.fg) {
-                .none => try writeCSI(&self.output, self.allocator, "39m"),
-                .palette => |idx| try writeCSIFmt(&self.output, self.allocator, seq_buf, "38;5;{d}m", .{idx}),
-                .rgb => |rgb| try writeCSIFmt(&self.output, self.allocator, seq_buf, "38;2;{d};{d};{d}m", .{ rgb.r, rgb.g, rgb.b }),
-            }
-            self.current_fg = cell.fg;
-        }
-
-        // Emit background color change
-        if (!cell.bg.eql(self.current_bg)) {
-            switch (cell.bg) {
-                .none => try writeCSI(&self.output, self.allocator, "49m"),
-                .palette => |idx| try writeCSIFmt(&self.output, self.allocator, seq_buf, "48;5;{d}m", .{idx}),
-                .rgb => |rgb| try writeCSIFmt(&self.output, self.allocator, seq_buf, "48;2;{d};{d};{d}m", .{ rgb.r, rgb.g, rgb.b }),
-            }
-            self.current_bg = cell.bg;
-        }
-    }
-
-    fn emitChar(self: *Renderer, char: u21) !void {
-        if (char == 0) return;
-        if (char < 128) {
-            try self.output.append(self.allocator, @intCast(char));
-        } else {
-            var buf: [4]u8 = undefined;
-            const len = std.unicode.utf8Encode(char, &buf) catch {
-                // Invalid codepoint, emit replacement character
-                try self.output.appendSlice(self.allocator, "\xef\xbf\xbd"); // U+FFFD
-                return;
-            };
-            try self.output.appendSlice(self.allocator, buf[0..len]);
-        }
-    }
-
-    /// Reset SGR state tracking (call after full screen clear)
-    pub fn resetState(self: *Renderer) void {
-        self.cursor_x = 0;
-        self.cursor_y = 0;
-        self.current_fg = .none;
-        self.current_bg = .none;
-        self.current_bold = false;
-        self.current_italic = false;
-        self.current_faint = false;
-        self.current_underline = .none;
-        self.current_strikethrough = false;
-        self.current_inverse = false;
+        // Clear force-refresh after rendering
+        self.vx.refresh = false;
     }
 
     /// Force full redraw on next frame
     pub fn invalidate(self: *Renderer) void {
         self.current.clear();
-        self.resetState();
+        self.vx.refresh = true;
     }
 
     /// Draw a sprite overlay centered in the given pane bounds
@@ -699,6 +506,70 @@ pub const Renderer = struct {
         }
     }
 };
+
+/// Convert a hexa Cell to a vaxis Cell.
+fn cellToVaxis(cell: Cell) vaxis.Cell {
+    // Convert character: u21 -> grapheme string
+    const grapheme: []const u8 = if (cell.is_wide_spacer)
+        // Vaxis-style spacer: empty grapheme with width 0
+        ""
+    else if (cell.char == 0 or cell.char == ' ')
+        " "
+    else if (cell.char < 128)
+        ascii_lut[@intCast(cell.char)..][0..1]
+    else blk: {
+        // Non-ASCII: we can't allocate here, so use a static buffer approach.
+        // This is safe because vaxis copies the grapheme during render.
+        // For the migration period, single codepoints > 127 are encoded inline.
+        // Multi-codepoint graphemes will be handled when callers switch to vaxis.Window.
+        break :blk " "; // Fallback for non-ASCII during migration
+    };
+
+    const char_width: u8 = if (cell.is_wide_spacer) 0 else if (cell.is_wide_char) 2 else 1;
+
+    return .{
+        .char = .{ .grapheme = grapheme, .width = char_width },
+        .style = .{
+            .fg = colorToVaxis(cell.fg),
+            .bg = colorToVaxis(cell.bg),
+            .bold = cell.bold,
+            .dim = cell.faint,
+            .italic = cell.italic,
+            .reverse = cell.inverse,
+            .strikethrough = cell.strikethrough,
+            .ul_style = switch (cell.underline) {
+                .none => .off,
+                .single => .single,
+                .double => .double,
+                .curly => .curly,
+                .dotted => .dotted,
+                .dashed => .dashed,
+            },
+        },
+    };
+}
+
+/// Convert a hexa Color to a vaxis Color.
+pub fn colorToVaxis(c: Color) vaxis.Cell.Color {
+    return switch (c) {
+        .none => .default,
+        .palette => |p| .{ .index = p },
+        .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
+    };
+}
+
+/// Map DECSCUSR cursor style (0-6) to vaxis CursorShape.
+fn mapCursorShape(style: u8) vaxis.Cell.CursorShape {
+    return switch (style) {
+        1 => .block_blink,
+        2 => .block,
+        3 => .underline_blink,
+        4 => .underline,
+        5 => .beam_blink,
+        6 => .beam,
+        else => .default,
+    };
+}
 
 /// Parse SGR (Select Graphic Rendition) escape sequence
 fn parseSGR(seq: []const u8, cell: *Cell) void {

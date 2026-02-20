@@ -1,10 +1,8 @@
 const std = @import("std");
-const vaxis = @import("vaxis");
 
 const State = @import("state.zig").State;
 const winpulse = @import("winpulse.zig");
 const render_mod = @import("render.zig");
-const vt_bridge = @import("vt_bridge.zig");
 
 const statusbar = @import("statusbar.zig");
 const popup_render = @import("popup_render.zig");
@@ -287,52 +285,31 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         popup_render.draw(renderer, popup, &state.pop_config.carrier, state.term_width, state.term_height);
     }
 
-    // End frame with differential render.
-    const output = try renderer.endFrame(state.force_full_render);
-
-    // Get cursor info.
-    var cursor_x: u16 = 1;
-    var cursor_y: u16 = 1;
-    var cursor_style: u8 = 0;
-    var cursor_visible: bool = true;
+    // Gather cursor info.
+    var cursor = render_mod.CursorInfo{};
 
     if (state.active_floating) |idx| {
         const pane = state.floats.items[idx];
         const pos = pane.getCursorPos();
-        cursor_x = pos.x + 1;
-        cursor_y = pos.y + 1;
-        cursor_style = pane.getCursorStyle();
-        cursor_visible = pane.isCursorVisible();
+        cursor.x = pos.x;
+        cursor.y = pos.y;
+        cursor.style = pane.getCursorStyle();
+        cursor.visible = pane.isCursorVisible();
     } else if (state.currentLayout().getFocusedPane()) |pane| {
         const pos = pane.getCursorPos();
-        cursor_x = pos.x + 1;
-        cursor_y = pos.y + 1;
-        cursor_style = pane.getCursorStyle();
-        cursor_visible = pane.isCursorVisible();
+        cursor.x = pos.x;
+        cursor.y = pos.y;
+        cursor.style = pane.getCursorStyle();
+        cursor.visible = pane.isCursorVisible();
     }
 
-    // Build cursor sequences.
-    var cursor_buf: [64]u8 = undefined;
-    var cursor_len: usize = 0;
-
-    const style_seq = std.fmt.bufPrint(cursor_buf[cursor_len..], "\x1b[{d} q", .{cursor_style}) catch "";
-    cursor_len += style_seq.len;
-
-    const pos_seq = std.fmt.bufPrint(cursor_buf[cursor_len..], "\x1b[{d};{d}H", .{ cursor_y, cursor_x }) catch "";
-    cursor_len += pos_seq.len;
-
-    // Always output cursor visibility state to ensure correct terminal state
     // If cursor_needs_restore is set (e.g., after float death), force cursor visible
-    const should_show = cursor_visible or state.cursor_needs_restore;
-    const vis_seq = if (should_show) "\x1b[?25h" else "\x1b[?25l";
-    @memcpy(cursor_buf[cursor_len..][0..vis_seq.len], vis_seq);
-    cursor_len += vis_seq.len;
-    state.cursor_needs_restore = false;
+    if (state.cursor_needs_restore) {
+        cursor.visible = true;
+        state.cursor_needs_restore = false;
+    }
 
-    // Write everything as a single iovec list.
-    var iovecs = [_]std.posix.iovec_const{
-        .{ .base = output.ptr, .len = output.len },
-        .{ .base = &cursor_buf, .len = cursor_len },
-    };
-    try stdout.writevAll(iovecs[0..]);
+    // End frame: copy CellBuffer to vaxis screen and render via libvaxis.
+    try renderer.endFrame(state.force_full_render, stdout, cursor);
+    state.force_full_render = false;
 }

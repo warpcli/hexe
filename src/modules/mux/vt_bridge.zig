@@ -9,11 +9,13 @@ const RenderState = ghostty.RenderState;
 /// Static ASCII lookup table -- avoids arena allocation for 95%+ of cells.
 /// Each byte position i contains the byte value i, so ascii_lut[ch..][0..1]
 /// is a valid single-byte slice for any ASCII codepoint.
-const ascii_lut: *const [128]u8 = blk: {
+const ascii_lut: [128]u8 = initAsciiLut();
+
+fn initAsciiLut() [128]u8 {
     var table: [128]u8 = undefined;
     for (0..128) |i| table[i] = @intCast(i);
-    break :blk &table;
-};
+    return table;
+}
 
 /// Blit ghostty RenderState into a vaxis Window.
 ///
