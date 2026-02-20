@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("core");
 const shp = @import("shp");
+const vaxis = @import("vaxis");
 const animations = core.segments.animations;
 const randomdo_mod = core.segments.randomdo;
 
@@ -860,8 +861,9 @@ fn calcFormattedWidthMax(format: []const u8, output_max: u16) u16 {
             i += 7;
         } else {
             const len = std.unicode.utf8ByteSequenceLength(format[i]) catch 1;
-            i += len;
-            width += 1;
+            const end = @min(i + len, format.len);
+            width += vaxis.gwidth.gwidth(format[i..end], .unicode);
+            i = end;
         }
     }
     return width;
@@ -873,15 +875,7 @@ pub fn countDisplayWidth(text: []const u8) u16 {
 
 // Measure text width in terminal cells (same logic as drawStyledText)
 pub fn measureText(text: []const u8) u16 {
-    var width: u16 = 0;
-    var i: usize = 0;
-    while (i < text.len) {
-        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-        const end = @min(i + len, text.len);
-        i = end;
-        width += 1;
-    }
-    return width;
+    return vaxis.gwidth.gwidth(text, .unicode);
 }
 
 pub fn calcFormattedWidth(format: []const u8, output: []const u8, output_segs: ?[]const shp.Segment) u16 {
@@ -900,8 +894,9 @@ pub fn calcFormattedWidth(format: []const u8, output: []const u8, output_segs: ?
             i += 7;
         } else {
             const len = std.unicode.utf8ByteSequenceLength(format[i]) catch 1;
-            i += len;
-            width += 1;
+            const end = @min(i + len, format.len);
+            width += vaxis.gwidth.gwidth(format[i..end], .unicode);
+            i = end;
         }
     }
     return width;
@@ -929,12 +924,26 @@ pub fn drawStyledText(renderer: *Renderer, start_x: u16, y: u16, text: []const u
 
     while (i < text.len) {
         const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-        const codepoint = std.unicode.utf8Decode(text[i..][0..len]) catch ' ';
+        const end = @min(i + len, text.len);
+        const glyph = text[i..end];
+        const codepoint = std.unicode.utf8Decode(glyph) catch ' ';
+        const glyph_width = vaxis.gwidth.gwidth(glyph, .unicode);
+        const width_cells: u16 = switch (glyph_width) {
+            0 => 0,
+            2...std.math.maxInt(u16) => 2,
+            else => 1,
+        };
+
+        if (width_cells == 0) {
+            i = end;
+            continue;
+        }
 
         var cell = render.Cell{
             .char = codepoint,
             .bold = style.bold,
             .italic = style.italic,
+            .is_wide_char = width_cells == 2,
         };
 
         switch (style.fg) {
@@ -949,8 +958,15 @@ pub fn drawStyledText(renderer: *Renderer, start_x: u16, y: u16, text: []const u
         }
 
         renderer.setCell(x, y, cell);
-        x += 1;
-        i += len;
+        if (width_cells == 2) {
+            var spacer = cell;
+            spacer.char = 0;
+            spacer.is_wide_char = false;
+            spacer.is_wide_spacer = true;
+            renderer.setCell(x + 1, y, spacer);
+        }
+        x += width_cells;
+        i = end;
     }
 
     return x;
