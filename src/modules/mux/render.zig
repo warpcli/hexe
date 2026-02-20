@@ -168,6 +168,9 @@ pub const Renderer = struct {
     current: CellBuffer, // Previous frame (used by callers that read cells)
     next: CellBuffer, // Next frame being built
     vx: vaxis.Vaxis, // libvaxis rendering engine
+    /// Frame-scoped arena for temporary grapheme UTF-8 strings.
+    /// Allocated during copyToVaxisScreen, freed after vx.render() completes.
+    frame_arena: std.heap.ArenaAllocator,
 
     pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !Renderer {
         var vx = try vaxis.Vaxis.init(allocator, .{});
@@ -189,12 +192,14 @@ pub const Renderer = struct {
             .current = try CellBuffer.init(allocator, width, height),
             .next = try CellBuffer.init(allocator, width, height),
             .vx = vx,
+            .frame_arena = .init(allocator),
         };
     }
 
     pub fn deinit(self: *Renderer) void {
         self.current.deinit(self.allocator);
         self.next.deinit(self.allocator);
+        self.frame_arena.deinit();
         // Free vaxis screen resources directly (skip terminal reset since we
         // handle that ourselves during shutdown).
         self.vx.screen.deinit(self.allocator);
@@ -360,10 +365,12 @@ pub const Renderer = struct {
     }
 
     /// Copy the CellBuffer contents to the vaxis screen for rendering.
-    /// Translates hexa Cell -> vaxis Cell types.
+    /// Translates hexa Cell -> vaxis Cell types, using the frame arena for
+    /// non-ASCII grapheme string storage.
     fn copyToVaxisScreen(self: *Renderer) void {
         const width = self.next.width;
         const height = self.next.height;
+        const arena = self.frame_arena.allocator();
 
         for (0..height) |yi| {
             const y: u16 = @intCast(yi);
@@ -372,7 +379,7 @@ pub const Renderer = struct {
                 const cell = self.next.getConst(x, y);
 
                 // Convert hexa Cell -> vaxis Cell
-                const vx_cell = cellToVaxis(cell);
+                const vx_cell = cellToVaxis(cell, arena);
                 self.vx.screen.writeCell(x, y, vx_cell);
             }
         }
@@ -400,6 +407,9 @@ pub const Renderer = struct {
         var writer = stdout.writer(&write_buf);
         try self.vx.render(&writer.interface);
         writer.interface.flush() catch {};
+
+        // Free frame arena (grapheme strings are no longer needed after render)
+        _ = self.frame_arena.reset(.retain_capacity);
 
         // Swap old CellBuffers so callers that read `current` see last frame
         std.mem.swap(CellBuffer, &self.current, &self.next);
@@ -508,7 +518,9 @@ pub const Renderer = struct {
 };
 
 /// Convert a hexa Cell to a vaxis Cell.
-fn cellToVaxis(cell: Cell) vaxis.Cell {
+/// `arena` is used for non-ASCII grapheme string storage; must remain valid until
+/// after vx.render() completes for this frame.
+fn cellToVaxis(cell: Cell, arena: std.mem.Allocator) vaxis.Cell {
     // Convert character: u21 -> grapheme string
     const grapheme: []const u8 = if (cell.is_wide_spacer)
         // Vaxis-style spacer: empty grapheme with width 0
@@ -518,11 +530,10 @@ fn cellToVaxis(cell: Cell) vaxis.Cell {
     else if (cell.char < 128)
         ascii_lut[@intCast(cell.char)..][0..1]
     else blk: {
-        // Non-ASCII: we can't allocate here, so use a static buffer approach.
-        // This is safe because vaxis copies the grapheme during render.
-        // For the migration period, single codepoints > 127 are encoded inline.
-        // Multi-codepoint graphemes will be handled when callers switch to vaxis.Window.
-        break :blk " "; // Fallback for non-ASCII during migration
+        // Non-ASCII: encode u21 codepoint to UTF-8 via frame arena.
+        var utf8_buf: [4]u8 = undefined;
+        const len = std.unicode.utf8Encode(cell.char, &utf8_buf) catch break :blk " ";
+        break :blk arena.dupe(u8, utf8_buf[0..len]) catch " ";
     };
 
     const char_width: u8 = if (cell.is_wide_spacer) 0 else if (cell.is_wide_char) 2 else 1;
