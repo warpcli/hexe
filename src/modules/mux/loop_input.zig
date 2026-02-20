@@ -42,6 +42,27 @@ fn updateInputFlagsFromParser(state: *State, input_bytes: []const u8) void {
             switch (event) {
                 .paste_start => state.in_bracketed_paste = true,
                 .paste_end => state.in_bracketed_paste = false,
+                .cap_kitty_keyboard => state.renderer.vx.caps.kitty_keyboard = true,
+                .cap_kitty_graphics => state.renderer.vx.caps.kitty_graphics = true,
+                .cap_rgb => state.renderer.vx.caps.rgb = true,
+                .cap_unicode => {
+                    state.renderer.vx.caps.unicode = .unicode;
+                    state.renderer.vx.screen.width_method = .unicode;
+                },
+                .cap_sgr_pixels => state.renderer.vx.caps.sgr_pixels = true,
+                .cap_color_scheme_updates => state.renderer.vx.caps.color_scheme_updates = true,
+                .cap_multi_cursor => state.renderer.vx.caps.multi_cursor = true,
+                .cap_da1 => {
+                    state.renderer.vx.queries_done.store(true, .unordered);
+                    if (!state.terminal_features_enabled) {
+                        const stdout = std.fs.File.stdout();
+                        var buf: [512]u8 = undefined;
+                        var writer = stdout.writer(&buf);
+                        state.renderer.vx.enableDetectedFeatures(&writer.interface) catch {};
+                        writer.interface.flush() catch {};
+                        state.terminal_features_enabled = true;
+                    }
+                },
                 else => {},
             }
         }

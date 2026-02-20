@@ -337,6 +337,9 @@ pub fn runMainLoop(state: *State) !void {
     try state.renderer.vx.setBracketedPaste(&tty_init.interface, true);
     // kitty keyboard protocol (>3u with flags: 1=disambiguate + 2=report event types)
     try tty_init.interface.writeAll("\x1b[>3u");
+    // Kick off terminal capability probing for libvaxis-managed features.
+    try state.renderer.vx.queryTerminalSend(&tty_init.interface);
+    state.terminal_features_enabled = false;
     try tty_init.interface.flush();
     defer {
         var tty_restore_buf: [512]u8 = undefined;

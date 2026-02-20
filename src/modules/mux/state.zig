@@ -186,6 +186,9 @@ pub const State = struct {
     // Track bracketed paste mode to suppress keycast during paste
     in_bracketed_paste: bool = false,
 
+    // Terminal feature probing state (libvaxis query/enable cycle).
+    terminal_features_enabled: bool = false,
+
     pending_float_requests: std.AutoHashMap([32]u8, PendingFloatRequest),
 
     mouse_selection: mouse_selection.MouseSelection,
