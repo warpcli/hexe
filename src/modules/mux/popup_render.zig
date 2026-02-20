@@ -1,8 +1,51 @@
 const std = @import("std");
 const pop = @import("pop");
+const shp = @import("shp");
+const vaxis = @import("vaxis");
 const render = @import("render.zig");
+const statusbar = @import("statusbar.zig");
 
 pub const Renderer = render.Renderer;
+
+fn textWidth(text: []const u8) u16 {
+    return statusbar.measureText(text);
+}
+
+fn clipTextToWidth(text: []const u8, max_width: u16) []const u8 {
+    if (text.len == 0 or max_width == 0) return "";
+
+    var used: u16 = 0;
+    var end: usize = 0;
+    var it = vaxis.unicode.graphemeIterator(text);
+    while (it.next()) |g| {
+        const bytes = g.bytes(text);
+        const w = vaxis.gwidth.gwidth(bytes, .unicode);
+        if (w == 0) {
+            end = g.start + g.len;
+            continue;
+        }
+        if (used + w > max_width) break;
+        used += w;
+        end = g.start + g.len;
+    }
+    return text[0..end];
+}
+
+fn popupTextStyle(fg: render.Color, bg: render.Color, bold: bool) shp.Style {
+    return .{
+        .fg = switch (fg) {
+            .none => .none,
+            .palette => |idx| .{ .palette = idx },
+            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
+        },
+        .bg = switch (bg) {
+            .none => .none,
+            .palette => |idx| .{ .palette = idx },
+            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
+        },
+        .bold = bold,
+    };
+}
 
 /// Draw a blocking popup (confirm or picker) centered in bounds
 pub fn drawInBounds(renderer: *Renderer, popup: pop.Popup, cfg: anytype, bounds_x: u16, bounds_y: u16, bounds_w: u16, bounds_h: u16) void {
@@ -18,8 +61,8 @@ pub fn draw(renderer: *Renderer, popup: pop.Popup, cfg: anytype, term_width: u16
 }
 
 fn confirmBoxDimensions(confirm: *pop.Confirm, cfg: pop.ConfirmStyle) struct { width: u16, height: u16 } {
-    const msg_width: u16 = @intCast(confirm.message.len);
-    const buttons_width: u16 = @intCast(confirm.yes_label.len + confirm.no_label.len + 14);
+    const msg_width: u16 = textWidth(confirm.message);
+    const buttons_width: u16 = textWidth(confirm.yes_label) + textWidth(confirm.no_label) + 14;
     const content_width = @max(msg_width, buttons_width);
     const box_width = content_width + cfg.padding_x * 2 + 2;
     const box_height: u16 = 3 + cfg.padding_y * 2 + 2;
@@ -29,12 +72,12 @@ fn confirmBoxDimensions(confirm: *pop.Confirm, cfg: pop.ConfirmStyle) struct { w
 fn pickerBoxDimensions(picker: *pop.Picker, cfg: pop.ChooseStyle) struct { width: u16, height: u16 } {
     var max_item_width: usize = 0;
     for (picker.items) |item| {
-        max_item_width = @max(max_item_width, item.len);
+        max_item_width = @max(max_item_width, textWidth(item));
     }
 
     var title_width: usize = 0;
     if (picker.title) |t| {
-        title_width = t.len + 4;
+        title_width = textWidth(t) + 4;
     }
 
     const content_width = @max(max_item_width + 2, title_width);
@@ -101,23 +144,19 @@ pub fn drawConfirmInBounds(renderer: *Renderer, confirm: *pop.Confirm, cfg: pop.
 
     // Draw message
     const msg_y = box_y + 1 + padding_y;
-    const msg = confirm.message;
-    const msg_len: u16 = @intCast(@min(msg.len, inner_width - padding_x * 2));
-    const msg_x = inner_x + padding_x + (inner_width - padding_x * 2 -| msg_len) / 2;
-    for (msg[0..msg_len], 0..) |char, i| {
-        const cx = msg_x + @as(u16, @intCast(i));
-        if (cx < box_x + box_width - 1) {
-            renderer.setCell(cx, msg_y, .{ .char = char, .fg = fg, .bg = bg, .bold = cfg.bold });
-        }
-    }
+    const max_msg_width = inner_width -| padding_x * 2;
+    const msg = clipTextToWidth(confirm.message, max_msg_width);
+    const msg_len: u16 = textWidth(msg);
+    const msg_x = inner_x + padding_x + (max_msg_width -| msg_len) / 2;
+    _ = statusbar.drawStyledText(renderer, msg_x, msg_y, msg, popupTextStyle(fg, bg, cfg.bold));
 
     // Draw buttons
     const buttons_y = msg_y + 2;
     const yes_label = confirm.yes_label;
     const no_label = confirm.no_label;
 
-    const yes_text_len: u16 = @intCast(yes_label.len + 4);
-    const no_text_len: u16 = @intCast(no_label.len + 4);
+    const yes_text_len: u16 = textWidth(yes_label) + 4;
+    const no_text_len: u16 = textWidth(no_label) + 4;
     const total_buttons_width = yes_text_len + 4 + no_text_len;
     const buttons_start_x = inner_x + (inner_width -| total_buttons_width) / 2;
 
@@ -126,18 +165,10 @@ pub fn drawConfirmInBounds(renderer: *Renderer, confirm: *pop.Confirm, cfg: pop.
     const yes_fg: render.Color = if (yes_selected) bg else fg;
     const yes_bg: render.Color = if (yes_selected) fg else bg;
     var bx = buttons_start_x;
-    renderer.setCell(bx, buttons_y, .{ .char = '[', .fg = yes_fg, .bg = yes_bg });
-    bx += 1;
-    renderer.setCell(bx, buttons_y, .{ .char = ' ', .fg = yes_fg, .bg = yes_bg });
-    bx += 1;
-    for (yes_label) |char| {
-        renderer.setCell(bx, buttons_y, .{ .char = char, .fg = yes_fg, .bg = yes_bg, .bold = yes_selected });
-        bx += 1;
-    }
-    renderer.setCell(bx, buttons_y, .{ .char = ' ', .fg = yes_fg, .bg = yes_bg });
-    bx += 1;
-    renderer.setCell(bx, buttons_y, .{ .char = ']', .fg = yes_fg, .bg = yes_bg });
-    bx += 1;
+    const yes_style = popupTextStyle(yes_fg, yes_bg, yes_selected);
+    bx = statusbar.drawStyledText(renderer, bx, buttons_y, "[ ", yes_style);
+    bx = statusbar.drawStyledText(renderer, bx, buttons_y, yes_label, yes_style);
+    bx = statusbar.drawStyledText(renderer, bx, buttons_y, " ]", yes_style);
 
     bx += 4; // spacing
 
@@ -145,17 +176,10 @@ pub fn drawConfirmInBounds(renderer: *Renderer, confirm: *pop.Confirm, cfg: pop.
     const no_selected = confirm.selected == .no;
     const no_fg: render.Color = if (no_selected) bg else fg;
     const no_bg: render.Color = if (no_selected) fg else bg;
-    renderer.setCell(bx, buttons_y, .{ .char = '[', .fg = no_fg, .bg = no_bg });
-    bx += 1;
-    renderer.setCell(bx, buttons_y, .{ .char = ' ', .fg = no_fg, .bg = no_bg });
-    bx += 1;
-    for (no_label) |char| {
-        renderer.setCell(bx, buttons_y, .{ .char = char, .fg = no_fg, .bg = no_bg, .bold = no_selected });
-        bx += 1;
-    }
-    renderer.setCell(bx, buttons_y, .{ .char = ' ', .fg = no_fg, .bg = no_bg });
-    bx += 1;
-    renderer.setCell(bx, buttons_y, .{ .char = ']', .fg = no_fg, .bg = no_bg });
+    const no_style = popupTextStyle(no_fg, no_bg, no_selected);
+    bx = statusbar.drawStyledText(renderer, bx, buttons_y, "[ ", no_style);
+    bx = statusbar.drawStyledText(renderer, bx, buttons_y, no_label, no_style);
+    _ = statusbar.drawStyledText(renderer, bx, buttons_y, " ]", no_style);
 }
 
 pub fn drawPickerInBounds(renderer: *Renderer, picker: *pop.Picker, cfg: pop.ChooseStyle, bounds_x: u16, bounds_y: u16, bounds_w: u16, bounds_h: u16) void {
@@ -192,12 +216,9 @@ pub fn drawPickerInBounds(renderer: *Renderer, picker: *pop.Picker, cfg: pop.Cho
         x += 1;
         renderer.setCell(x, box_y, .{ .char = ' ', .fg = fg, .bg = bg });
         x += 1;
-        for (title) |char| {
-            if (x < box_x + box_width - 2) {
-                renderer.setCell(x, box_y, .{ .char = char, .fg = fg, .bg = bg, .bold = true });
-                x += 1;
-            }
-        }
+        const title_max = (box_x + box_width - 2) -| x;
+        const clipped_title = clipTextToWidth(title, title_max);
+        x = statusbar.drawStyledText(renderer, x, box_y, clipped_title, popupTextStyle(fg, bg, true));
         renderer.setCell(x, box_y, .{ .char = ' ', .fg = fg, .bg = bg });
         x += 1;
     }
@@ -237,12 +258,9 @@ pub fn drawPickerInBounds(renderer: *Renderer, picker: *pop.Picker, cfg: pop.Cho
         renderer.setCell(content_x + 1, content_y, .{ .char = ' ', .fg = item_fg, .bg = item_bg });
 
         var ix: u16 = content_x + 2;
-        for (item) |char| {
-            if (ix < box_x + box_width - 2) {
-                renderer.setCell(ix, content_y, .{ .char = char, .fg = item_fg, .bg = item_bg, .bold = is_selected });
-                ix += 1;
-            }
-        }
+        const item_width_max = (box_x + box_width - 2) -| ix;
+        const clipped_item = clipTextToWidth(item, item_width_max);
+        ix = statusbar.drawStyledText(renderer, ix, content_y, clipped_item, popupTextStyle(item_fg, item_bg, is_selected));
         while (ix < box_x + box_width - 1) : (ix += 1) {
             renderer.setCell(ix, content_y, .{ .char = ' ', .fg = item_fg, .bg = item_bg });
         }
