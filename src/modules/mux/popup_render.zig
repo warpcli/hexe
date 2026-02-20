@@ -13,9 +13,8 @@ pub const Renderer = render.Renderer;
 fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: render.Color, bg: render.Color, title: ?[]const u8) void {
     if (w == 0 or h == 0) return;
 
-    var screen = vaxis.Screen.init(std.heap.page_allocator, .{ .cols = w, .rows = h, .x_pixel = 0, .y_pixel = 0 }) catch return;
+    var screen = vaxis_surface.initUnicodeScreen(std.heap.page_allocator, w, h) catch return;
     defer screen.deinit(std.heap.page_allocator);
-    screen.width_method = .unicode;
 
     const root = vaxis_surface.rootWindow(&screen);
 

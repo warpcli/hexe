@@ -1,8 +1,20 @@
+const std = @import("std");
 const vaxis = @import("vaxis");
 const render = @import("render.zig");
 const vaxis_cell = @import("vaxis_cell.zig");
 
 pub const Renderer = render.Renderer;
+
+pub fn initUnicodeScreen(allocator: std.mem.Allocator, cols: u16, rows: u16) !vaxis.Screen {
+    var screen = try vaxis.Screen.init(allocator, .{
+        .cols = cols,
+        .rows = rows,
+        .x_pixel = 0,
+        .y_pixel = 0,
+    });
+    screen.width_method = .unicode;
+    return screen;
+}
 
 pub fn rootWindow(screen: *vaxis.Screen) vaxis.Window {
     return .{

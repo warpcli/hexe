@@ -74,9 +74,8 @@ fn renderTextWithVaxis(renderer: *Renderer, start_x: u16, y: u16, text: []const 
     const width = vaxis.gwidth.gwidth(text, .unicode);
     if (width == 0) return;
 
-    var screen = vaxis.Screen.init(std.heap.page_allocator, .{ .cols = width, .rows = 1, .x_pixel = 0, .y_pixel = 0 }) catch return;
+    var screen = vaxis_surface.initUnicodeScreen(std.heap.page_allocator, width, 1) catch return;
     defer screen.deinit(std.heap.page_allocator);
-    screen.width_method = .unicode;
 
     const win = vaxis_surface.rootWindow(&screen);
 

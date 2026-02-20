@@ -39,9 +39,8 @@ fn encodeCodepointUtf8(cp: u21, out: *[4]u8) []const u8 {
 fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: render.Color, bg: render.Color, glyph_chars: [6]u21) void {
     if (w == 0 or h == 0) return;
 
-    var screen = vaxis.Screen.init(std.heap.page_allocator, .{ .cols = w, .rows = h, .x_pixel = 0, .y_pixel = 0 }) catch return;
+    var screen = vaxis_surface.initUnicodeScreen(std.heap.page_allocator, w, h) catch return;
     defer screen.deinit(std.heap.page_allocator);
-    screen.width_method = .unicode;
 
     const root = vaxis_surface.rootWindow(&screen);
 
@@ -83,12 +82,11 @@ pub fn drawSplitBorders(
     var split_win_opt: ?vaxis.Window = null;
     const split_cell_count = @as(usize, term_width) * @as(usize, content_height);
     if (split_cell_count > 0) {
-        if (vaxis.Screen.init(std.heap.page_allocator, .{ .cols = term_width, .rows = content_height, .x_pixel = 0, .y_pixel = 0 }) catch null) |screen| {
+        if (vaxis_surface.initUnicodeScreen(std.heap.page_allocator, term_width, content_height) catch null) |screen| {
             split_screen_opt = screen;
             if (std.heap.page_allocator.alloc(bool, split_cell_count) catch null) |touched| {
                 @memset(touched, false);
                 split_touched_opt = touched;
-                split_screen_opt.?.width_method = .unicode;
                 split_win_opt = .{
                     .x_off = 0,
                     .y_off = 0,
