@@ -456,7 +456,8 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
             // Parse key events through libvaxis parser first.
             if (input.parseKeyEvent(inp[i..], state.allocator)) |ev| {
-                if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, false, true)) {
+                const kitty_mode = state.renderer.vx.caps.kitty_keyboard;
+                if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, false, kitty_mode)) {
                     i += ev.consumed;
                     continue;
                 }
