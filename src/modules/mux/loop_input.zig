@@ -68,12 +68,6 @@ fn updateInputFlagsFromParser(state: *State, input_bytes: []const u8) void {
     }
 }
 
-fn isModifierOnlyKey(cp: u21) bool {
-    return cp == vaxis.Key.left_shift or cp == vaxis.Key.left_control or cp == vaxis.Key.left_alt or cp == vaxis.Key.left_super or
-        cp == vaxis.Key.right_shift or cp == vaxis.Key.right_control or cp == vaxis.Key.right_alt or cp == vaxis.Key.right_super or
-        cp == vaxis.Key.iso_level_3_shift or cp == vaxis.Key.iso_level_5_shift;
-}
-
 fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
     keybinds.forwardInputToFocusedPane(state, bytes);
 }
@@ -94,20 +88,59 @@ fn mergeStdinTail(state: *State, input_bytes: []const u8) struct { merged: []con
     return .{ .merged = tmp, .owned = tmp };
 }
 
-fn stashIncompleteParserTail(state: *State, inp: []const u8) []const u8 {
-    var i: usize = 0;
-    while (i < inp.len) {
-        const res = vaxis_parser.parse(inp[i..], state.allocator) catch {
-            i += 1;
-            continue;
-        };
+fn stashIncompleteEscapeTail(state: *State, inp: []const u8) []const u8 {
+    const ESC: u8 = 0x1b;
+    const BEL: u8 = 0x07;
 
-        if (res.n == 0) {
-            return stashFromIndex(state, inp, i);
+    // Find the last ESC in the buffer.
+    var last_esc: ?usize = null;
+    var i: usize = inp.len;
+    while (i > 0) {
+        i -= 1;
+        if (inp[i] == ESC) {
+            last_esc = i;
+            break;
         }
-        i += res.n;
+    }
+    if (last_esc == null) return inp;
+    const esc_i = last_esc.?;
+
+    // If ESC is the last byte, it's definitely incomplete.
+    if (esc_i + 1 >= inp.len) {
+        return stashFromIndex(state, inp, esc_i);
     }
 
+    const next = inp[esc_i + 1];
+    // CSI: ESC [ ... <final>
+    if (next == '[') {
+        var j: usize = esc_i + 2;
+        while (j < inp.len) : (j += 1) {
+            const b = inp[j];
+            // CSI final byte is 0x40..0x7E
+            if (b >= 0x40 and b <= 0x7e) return inp;
+        }
+        return stashFromIndex(state, inp, esc_i);
+    }
+
+    // SS3: ESC O <final>
+    if (next == 'O') {
+        if (esc_i + 2 >= inp.len) return stashFromIndex(state, inp, esc_i);
+        return inp;
+    }
+
+    // OSC: ESC ] ... (BEL or ESC \\)
+    if (next == ']') {
+        var j: usize = esc_i + 2;
+        while (j < inp.len) : (j += 1) {
+            const b = inp[j];
+            if (b == BEL) return inp;
+            if (b == ESC and j + 1 < inp.len and inp[j + 1] == '\\') return inp;
+        }
+        return stashFromIndex(state, inp, esc_i);
+    }
+
+    // Alt/meta: ESC <byte>
+    // If we have the byte, it's complete.
     return inp;
 }
 
@@ -121,6 +154,40 @@ fn stashFromIndex(state: *State, inp: []const u8, start: usize) []const u8 {
     @memcpy(state.stdin_tail[0..tail.len], tail);
     state.stdin_tail_len = @intCast(tail.len);
     return inp[0..start];
+}
+
+fn consumeLeadingTerminalQueryReplies(inp: []const u8) []const u8 {
+    const ESC: u8 = 0x1b;
+
+    var i: usize = 0;
+    while (i + 2 < inp.len and inp[i] == ESC and inp[i + 1] == '[') {
+        var j: usize = i + 2;
+        while (j < inp.len) : (j += 1) {
+            const b = inp[j];
+            if (b >= 0x40 and b <= 0x7e) break;
+        }
+        if (j >= inp.len) break;
+
+        const seq = inp[i .. j + 1];
+        const final = seq[seq.len - 1];
+
+        const has_question = std.mem.indexOfScalar(u8, seq, '?') != null;
+        const has_semicolon = std.mem.indexOfScalar(u8, seq, ';') != null;
+        const has_dollar_y = std.mem.indexOf(u8, seq, "$y") != null;
+
+        // Swallow known terminal probe replies only:
+        // - DEC mode reports: ESC[?...$y
+        // - CPR replies:       ESC[<row>;<col>R
+        // - Kitty/DA replies:  ESC[?...u / ESC[?...c
+        const is_query_reply = has_dollar_y or
+            (final == 'R' and has_semicolon) or
+            (has_question and (final == 'u' or final == 'c'));
+
+        if (!is_query_reply) break;
+        i = j + 1;
+    }
+
+    return inp[i..];
 }
 
 fn handleParsedScrollAction(state: *State, action: input.ScrollAction) bool {
@@ -179,11 +246,11 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     const slice = consumeOscReplyFromTerminal(state, merged_res.merged);
     if (slice.len == 0) return;
 
-    // Don't process (or forward) partial parser events.
-    const stable = stashIncompleteParserTail(state, slice);
+    // Don't process (or forward) partial escape sequences.
+    const stable = stashIncompleteEscapeTail(state, slice);
     if (stable.len == 0) return;
 
-    const cleaned = stable;
+    const cleaned = consumeLeadingTerminalQueryReplies(stable);
     if (cleaned.len == 0) return;
 
     // Keep bracketed-paste state synchronized from parsed terminal events.
@@ -418,55 +485,18 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 continue;
             }
 
-            // Parse and consume non-key parser events (mouse/transport/control)
-            // so escape/control bytes never leak into pane stdin.
-            const parsed = vaxis_parser.parse(inp[i..], state.allocator) catch null;
-            if (parsed) |res| {
-                if (res.n > 0) {
-                    if (res.event) |ev| {
-                        switch (ev) {
-                            .mouse => |m| {
-                                _ = loop_mouse.handle(state, input.mouseEventFromVaxis(m, res.n));
-                                i += res.n;
-                                continue;
-                            },
-                            .key_press => |k| {
-                                if (isModifierOnlyKey(k.codepoint)) {
-                                    i += res.n;
-                                    continue;
-                                }
-                            },
-                            .key_release => |k| {
-                                if (isModifierOnlyKey(k.codepoint)) {
-                                    i += res.n;
-                                    continue;
-                                }
-                            },
-                            .paste_start,
-                            .paste_end,
-                            .focus_in,
-                            .focus_out,
-                            .winsize,
-                            .color_scheme,
-                            .cap_kitty_keyboard,
-                            .cap_kitty_graphics,
-                            .cap_rgb,
-                            .cap_unicode,
-                            .cap_sgr_pixels,
-                            .cap_color_scheme_updates,
-                            .cap_multi_cursor,
-                            .cap_da1,
-                            => {
-                                i += res.n;
-                                continue;
-                            },
-                            else => {},
-                        }
-                    } else {
-                        i += res.n;
-                        continue;
-                    }
-                }
+            // Mouse events (SGR): click-to-focus and status-bar tab switching.
+            if (input.parseMouseEvent(inp[i..])) |ev| {
+                _ = loop_mouse.handle(state, ev);
+                i += ev.consumed;
+                continue;
+            }
+
+            // Swallow parser transport/control sequences so they never leak
+            // through to pane stdin as visible CSI text.
+            if (input.parseTransportSequence(inp[i..], state.allocator)) |consumed| {
+                i += consumed;
+                continue;
             }
 
             // ==========================================================================
