@@ -87,46 +87,6 @@ pub fn parseKeyEvent(input_bytes: []const u8, allocator: std.mem.Allocator) ?Key
     };
 }
 
-/// Consume non-key parser transport/control sequences so they don't leak to pane stdin.
-/// Returns consumed byte count when sequence should be swallowed.
-pub fn parseTransportSequence(input_bytes: []const u8, allocator: std.mem.Allocator) ?usize {
-    if (input_bytes.len == 0) return null;
-    if (input_bytes[0] != 0x1b) return null;
-
-    var parser: vaxis.Parser = .{};
-    const parsed = parser.parse(input_bytes, allocator) catch return null;
-    if (parsed.n == 0) return null;
-
-    if (parsed.event == null) return parsed.n;
-
-    return switch (parsed.event.?) {
-        .key_press => |k| if (isModifierOnlyKey(k.codepoint)) parsed.n else null,
-        .key_release => |k| if (isModifierOnlyKey(k.codepoint)) parsed.n else null,
-        .paste_start,
-        .paste_end,
-        .focus_in,
-        .focus_out,
-        .winsize,
-        .color_scheme,
-        .cap_kitty_keyboard,
-        .cap_kitty_graphics,
-        .cap_rgb,
-        .cap_unicode,
-        .cap_sgr_pixels,
-        .cap_color_scheme_updates,
-        .cap_multi_cursor,
-        .cap_da1,
-        => parsed.n,
-        else => null,
-    };
-}
-
-fn isModifierOnlyKey(cp: u21) bool {
-    return cp == vaxis.Key.left_shift or cp == vaxis.Key.left_control or cp == vaxis.Key.left_alt or cp == vaxis.Key.left_super or
-        cp == vaxis.Key.right_shift or cp == vaxis.Key.right_control or cp == vaxis.Key.right_alt or cp == vaxis.Key.right_super or
-        cp == vaxis.Key.iso_level_3_shift or cp == vaxis.Key.iso_level_5_shift;
-}
-
 pub fn parseScrollEvent(input_bytes: []const u8, allocator: std.mem.Allocator) ?ScrollEvent {
     if (input_bytes.len == 0) return null;
 
@@ -213,22 +173,7 @@ fn vaxisKeyToBindKey(vk: vaxis.Key, mods_inout: *u8) ?core.Config.BindKey {
     };
 }
 
-pub fn parseMouseEvent(input: []const u8) ?MouseEvent {
-    // Fast gate: SGR mouse sequences start with ESC [ <
-    if (input.len < 4 or input[0] != 0x1b or input[1] != '[' or input[2] != '<') return null;
-
-    var parser: vaxis.Parser = .{};
-    const parsed = parser.parse(input, std.heap.page_allocator) catch return null;
-    if (parsed.n == 0) return null;
-    const event = parsed.event orelse return null;
-
-    return switch (event) {
-        .mouse => |mouse| mouseEventFromVaxis(mouse, parsed.n),
-        else => null,
-    };
-}
-
-fn mouseEventFromVaxis(mouse: vaxis.Mouse, consumed: usize) MouseEvent {
+pub fn mouseEventFromVaxis(mouse: vaxis.Mouse, consumed: usize) MouseEvent {
     var btn: u16 = switch (mouse.button) {
         .left => 0,
         .middle => 1,
