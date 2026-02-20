@@ -5,6 +5,7 @@ const vaxis = @import("vaxis");
 const Renderer = @import("render_core.zig").Renderer;
 const Color = @import("render_types.zig").Color;
 const statusbar = @import("statusbar.zig");
+const text_width = @import("text_width.zig");
 const vaxis_cell = @import("vaxis_cell.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
 const style_bridge = @import("style_bridge.zig");
@@ -419,8 +420,13 @@ pub fn drawFloatingBorder(
 
                 // Draw each segment with its style
                 var cur_x = draw_x;
+                const max_x = x + w -| 2;
                 for (segments.items[0..segments.count]) |seg| {
-                    cur_x = statusbar.drawStyledText(renderer, cur_x, draw_y, seg.text, toShpStyle(seg));
+                    if (cur_x >= max_x) break;
+                    const remain = max_x - cur_x;
+                    const clipped = text_width.clipTextToWidth(seg.text, remain);
+                    if (clipped.len == 0) continue;
+                    cur_x = statusbar.drawStyledText(renderer, cur_x, draw_y, clipped, toShpStyle(seg));
                 }
             }
         }

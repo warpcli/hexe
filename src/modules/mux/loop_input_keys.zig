@@ -1,4 +1,5 @@
 const std = @import("std");
+const core = @import("core");
 
 const State = @import("state.zig").State;
 const actions = @import("loop_actions.zig");
@@ -123,6 +124,42 @@ pub fn checkExitKey(state: *State, inp: []const u8) usize {
     }
 
     return 0;
+}
+
+/// Check parser-decoded key event against focused float exit_key.
+/// Returns true when it consumed the event by closing the float.
+pub fn checkExitKeyEvent(state: *State, mods: u8, key: core.Config.BindKey, when: core.Config.BindWhen) bool {
+    if (when != .press) return false;
+    const exit_key = getFocusedFloatExitKey(state) orelse return false;
+    if (exit_key.len == 0) return false;
+
+    const parsed = parseExitKeySpec(exit_key);
+    if (mods != parsed.mods) return false;
+
+    const expected = getKeyChar(parsed.key) orelse return false;
+
+    const matched = switch (@as(core.Config.BindKeyKind, key)) {
+        .space => expected == ' ',
+        .char => blk: {
+            var got = key.char;
+            if (got >= 'A' and got <= 'Z') got = std.ascii.toLower(got);
+            var exp = expected;
+            if (exp >= 'A' and exp <= 'Z') exp = std.ascii.toLower(exp);
+            break :blk got == exp;
+        },
+        else => false,
+    };
+
+    if (!matched) return false;
+
+    if (state.active_floating) |idx| {
+        if (idx < state.floats.items.len) {
+            state.floats.items[idx].closed_by_exit_key = true;
+        }
+    }
+    actions.performClose(state);
+    state.needs_render = true;
+    return true;
 }
 
 fn matchAltChar(actual: u8, expected: u8) bool {

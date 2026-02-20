@@ -806,6 +806,9 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                 var cfg = cfg_in;
                 cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
                 output_segs = animations.renderSegments(ctx, cfg);
+                if (output_segs == null) {
+                    output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
+                }
             }
         } else {
             output_segs = ctx.renderSegment(mod.name);
@@ -860,6 +863,9 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
                 var cfg = cfg_in;
                 cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
                 output_segs = animations.renderSegments(ctx, cfg);
+                if (output_segs == null) {
+                    output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
+                }
             }
         } else {
             output_segs = ctx.renderSegment(mod.name);

@@ -448,6 +448,11 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
             // Parse key events through libvaxis parser first.
             if (input.parseKeyEvent(inp[i..], state.allocator)) |ev| {
+                if (loop_input_keys.checkExitKeyEvent(state, ev.mods, ev.key, ev.when)) {
+                    i += ev.consumed;
+                    continue;
+                }
+
                 if (ev.when == .press and ev.mods == 2 and @as(core.Config.BindKeyKind, ev.key) == .char and ev.key.char == 'q') {
                     state.running = false;
                     return;
