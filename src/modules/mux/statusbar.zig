@@ -804,22 +804,20 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
 
         var output_segs: ?[]const shp.Segment = null;
         var output_text: []const u8 = "";
-        if (std.mem.eql(u8, mod.name, "session")) {
+        if (mod.spinner) |cfg_in| {
+            var cfg = cfg_in;
+            cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
+            output_segs = animations.renderSegments(ctx, cfg);
+            if (output_segs == null) {
+                output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
+                if (output_text.len == 0) {
+                    output_text = spinnerAsciiFrame(ctx.now_ms, cfg.started_at_ms, cfg.step_ms);
+                }
+            }
+        } else if (std.mem.eql(u8, mod.name, "session")) {
             output_text = ctx.session_name;
         } else if (std.mem.eql(u8, mod.name, "randomdo")) {
             output_text = randomdoTextFor(ctx, mod, true);
-        } else if (std.mem.eql(u8, mod.name, "spinner")) {
-            if (mod.spinner) |cfg_in| {
-                var cfg = cfg_in;
-                cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
-                output_segs = animations.renderSegments(ctx, cfg);
-                if (output_segs == null) {
-                    output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
-                    if (output_text.len == 0) {
-                        output_text = spinnerAsciiFrame(ctx.now_ms, cfg.started_at_ms, cfg.step_ms);
-                    }
-                }
-            }
         } else {
             output_segs = ctx.renderSegment(mod.name);
         }
@@ -863,23 +861,21 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
 
         var output_segs: ?[]const shp.Segment = null;
         var output_text: []const u8 = "";
-        if (std.mem.eql(u8, mod.name, "session")) {
+        if (mod.spinner) |cfg_in| {
+            var cfg = cfg_in;
+            cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
+            output_segs = animations.renderSegments(ctx, cfg);
+            if (output_segs == null) {
+                output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
+                if (output_text.len == 0) {
+                    output_text = spinnerAsciiFrame(ctx.now_ms, cfg.started_at_ms, cfg.step_ms);
+                }
+            }
+        } else if (std.mem.eql(u8, mod.name, "session")) {
             output_text = ctx.session_name;
         } else if (std.mem.eql(u8, mod.name, "randomdo")) {
             width += calcFormattedWidthMax(out.format, randomdo_mod.MAX_LEN);
             continue;
-        } else if (std.mem.eql(u8, mod.name, "spinner")) {
-            if (mod.spinner) |cfg_in| {
-                var cfg = cfg_in;
-                cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
-                output_segs = animations.renderSegments(ctx, cfg);
-                if (output_segs == null) {
-                    output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
-                    if (output_text.len == 0) {
-                        output_text = spinnerAsciiFrame(ctx.now_ms, cfg.started_at_ms, cfg.step_ms);
-                    }
-                }
-            }
         } else {
             output_segs = ctx.renderSegment(mod.name);
         }

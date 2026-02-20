@@ -63,7 +63,13 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             if (parent != state.active_tab) continue;
         }
 
-        borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, false, if (pane.float_title) |t| t else "", pane.border_color, pane.float_style);
+        const float_label = if (pane.float_title) |t|
+            t
+        else if (state.pane_names.get(pane.uuid)) |n|
+            n
+        else
+            "";
+        borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, false, float_label, pane.border_color, pane.float_style);
         if (state.float_rename_uuid) |uuid| {
             if (std.mem.eql(u8, &uuid, &pane.uuid)) {
                 float_title.drawTitleEditor(renderer, pane, state.float_rename_buf.items);
@@ -103,7 +109,13 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         else
             true;
         if (pane.isVisibleOnTab(state.active_tab) and can_render) {
-            borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, true, if (pane.float_title) |t| t else "", pane.border_color, pane.float_style);
+            const active_float_label = if (pane.float_title) |t|
+                t
+            else if (state.pane_names.get(pane.uuid)) |n|
+                n
+            else
+                "";
+            borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, true, active_float_label, pane.border_color, pane.float_style);
             if (state.float_rename_uuid) |uuid| {
                 if (std.mem.eql(u8, &uuid, &pane.uuid)) {
                     float_title.drawTitleEditor(renderer, pane, state.float_rename_buf.items);
