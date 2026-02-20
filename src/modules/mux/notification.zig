@@ -4,6 +4,7 @@ const vaxis = @import("vaxis");
 const render = @import("render.zig");
 const vaxis_cell = @import("vaxis_cell.zig");
 const text_width = @import("text_width.zig");
+const vaxis_surface = @import("vaxis_surface.zig");
 
 const Renderer = render.Renderer;
 
@@ -77,24 +78,18 @@ fn renderTextWithVaxis(renderer: *Renderer, start_x: u16, y: u16, text: []const 
     defer screen.deinit(std.heap.page_allocator);
     screen.width_method = .unicode;
 
-    const win: vaxis.Window = .{
-        .x_off = 0,
-        .y_off = 0,
-        .parent_x_off = 0,
-        .parent_y_off = 0,
-        .width = screen.width,
-        .height = 1,
-        .screen = &screen,
-    };
+    const win = vaxis_surface.rootWindow(&screen);
 
     const seg = vaxis.Segment{ .text = text, .style = toVaxisStyle(style) };
     const res = win.print(&.{seg}, .{ .wrap = .none, .commit = true });
     const end_col = @min(res.col, screen.width);
 
-    var x: u16 = 0;
-    while (x < end_col) : (x += 1) {
-        const vx_cell = screen.readCell(x, 0) orelse continue;
-        renderer.setCell(start_x + x, y, vaxis_cell.toRenderCell(vx_cell));
+    if (end_col > 0) {
+        // Only blit the range that print() actually touched.
+        const touched = std.heap.page_allocator.alloc(bool, end_col) catch return;
+        defer std.heap.page_allocator.free(touched);
+        @memset(touched, true);
+        vaxis_surface.blitTouched(renderer, &screen, touched, end_col, start_x, y);
     }
 }
 

@@ -5,6 +5,7 @@ const vaxis = @import("vaxis");
 const render = @import("render.zig");
 const statusbar = @import("statusbar.zig");
 const vaxis_cell = @import("vaxis_cell.zig");
+const vaxis_surface = @import("vaxis_surface.zig");
 const Pane = @import("pane.zig").Pane;
 const Layout = @import("layout.zig").Layout;
 
@@ -42,15 +43,7 @@ fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: rend
     defer screen.deinit(std.heap.page_allocator);
     screen.width_method = .unicode;
 
-    const root: vaxis.Window = .{
-        .x_off = 0,
-        .y_off = 0,
-        .parent_x_off = 0,
-        .parent_y_off = 0,
-        .width = w,
-        .height = h,
-        .screen = &screen,
-    };
+    const root = vaxis_surface.rootWindow(&screen);
 
     root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = .{ .bg = vaxis_cell.toVaxisColor(bg) } });
 
@@ -74,12 +67,7 @@ fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: rend
         },
     });
 
-    for (0..h) |ry| {
-        for (0..w) |rx| {
-            const vx_cell = screen.readCell(@intCast(rx), @intCast(ry)) orelse continue;
-            renderer.setCell(x + @as(u16, @intCast(rx)), y + @as(u16, @intCast(ry)), vaxis_cell.toRenderCell(vx_cell));
-        }
-    }
+    vaxis_surface.blitScreen(renderer, &screen, x, y);
 }
 
 /// Draw split borders between panes
@@ -303,16 +291,7 @@ pub fn drawSplitBorders(
 
     if (split_screen_opt) |*screen| {
         if (split_touched_opt) |touched| {
-            for (0..content_height) |row| {
-                for (0..term_width) |col| {
-                    const x: u16 = @intCast(col);
-                    const y: u16 = @intCast(row);
-                    const idx = row * @as(usize, term_width) + col;
-                    if (idx >= touched.len or !touched[idx]) continue;
-                    const vx_cell = screen.readCell(x, y) orelse continue;
-                    renderer.setCell(x, y, vaxis_cell.toRenderCell(vx_cell));
-                }
-            }
+            vaxis_surface.blitTouched(renderer, screen, touched, term_width, 0, 0);
         }
     }
 }

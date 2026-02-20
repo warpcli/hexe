@@ -5,6 +5,7 @@ const vaxis = @import("vaxis");
 const render = @import("render.zig");
 const statusbar = @import("statusbar.zig");
 const vaxis_cell = @import("vaxis_cell.zig");
+const vaxis_surface = @import("vaxis_surface.zig");
 const text_width = @import("text_width.zig");
 
 pub const Renderer = render.Renderer;
@@ -16,15 +17,7 @@ fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: rende
     defer screen.deinit(std.heap.page_allocator);
     screen.width_method = .unicode;
 
-    const root: vaxis.Window = .{
-        .x_off = 0,
-        .y_off = 0,
-        .parent_x_off = 0,
-        .parent_y_off = 0,
-        .width = w,
-        .height = h,
-        .screen = &screen,
-    };
+    const root = vaxis_surface.rootWindow(&screen);
 
     const base_style: vaxis.Style = .{ .fg = vaxis_cell.toVaxisColor(fg), .bg = vaxis_cell.toVaxisColor(bg) };
     root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = base_style });
@@ -50,12 +43,7 @@ fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: rende
         }
     }
 
-    for (0..h) |ry| {
-        for (0..w) |rx| {
-            const vx_cell = screen.readCell(@intCast(rx), @intCast(ry)) orelse continue;
-            renderer.setCell(x + @as(u16, @intCast(rx)), y + @as(u16, @intCast(ry)), vaxis_cell.toRenderCell(vx_cell));
-        }
-    }
+    vaxis_surface.blitScreen(renderer, &screen, x, y);
 }
 
 fn textWidth(text: []const u8) u16 {
