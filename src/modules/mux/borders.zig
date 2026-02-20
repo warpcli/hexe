@@ -4,6 +4,7 @@ const shp = @import("shp");
 const vaxis = @import("vaxis");
 const render = @import("render.zig");
 const statusbar = @import("statusbar.zig");
+const vaxis_cell = @import("vaxis_cell.zig");
 const Pane = @import("pane.zig").Pane;
 const Layout = @import("layout.zig").Layout;
 
@@ -24,54 +25,6 @@ fn toShpStyle(seg: statusbar.RenderedSegment) shp.Style {
         .bold = seg.bold,
         .italic = seg.italic,
     };
-}
-
-fn toVaxisColor(c: render.Color) vaxis.Color {
-    return switch (c) {
-        .none => .default,
-        .palette => |idx| .{ .index = idx },
-        .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
-    };
-}
-
-fn toRenderCell(vx_cell: vaxis.Cell) render.Cell {
-    var out: render.Cell = .{
-        .char = ' ',
-        .bold = vx_cell.style.bold,
-        .italic = vx_cell.style.italic,
-        .faint = vx_cell.style.dim,
-        .strikethrough = vx_cell.style.strikethrough,
-        .inverse = vx_cell.style.reverse,
-    };
-
-    out.fg = switch (vx_cell.style.fg) {
-        .default => .none,
-        .index => |idx| .{ .palette = idx },
-        .rgb => |rgb| .{ .rgb = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] } },
-    };
-    out.bg = switch (vx_cell.style.bg) {
-        .default => .none,
-        .index => |idx| .{ .palette = idx },
-        .rgb => |rgb| .{ .rgb = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] } },
-    };
-    out.underline = switch (vx_cell.style.ul_style) {
-        .off => .none,
-        .single => .single,
-        .double => .double,
-        .curly => .curly,
-        .dotted => .dotted,
-        .dashed => .dashed,
-    };
-
-    if (vx_cell.char.width == 0 or vx_cell.char.grapheme.len == 0) {
-        out.char = 0;
-        out.is_wide_spacer = true;
-        return out;
-    }
-
-    out.char = std.unicode.utf8Decode(vx_cell.char.grapheme) catch ' ';
-    out.is_wide_char = vx_cell.char.width == 2;
-    return out;
 }
 
 fn encodeCodepointUtf8(cp: u21, out: *[4]u8) []const u8 {
@@ -99,7 +52,7 @@ fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: rend
         .screen = &screen,
     };
 
-    root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = .{ .bg = toVaxisColor(bg) } });
+    root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = .{ .bg = vaxis_cell.toVaxisColor(bg) } });
 
     var glyph_bufs: [6][4]u8 = undefined;
     const custom_glyphs: [6][]const u8 = .{
@@ -117,14 +70,14 @@ fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: rend
         .border = .{
             .where = .all,
             .glyphs = .{ .custom = custom_glyphs },
-            .style = .{ .fg = toVaxisColor(fg), .bg = toVaxisColor(bg) },
+            .style = .{ .fg = vaxis_cell.toVaxisColor(fg), .bg = vaxis_cell.toVaxisColor(bg) },
         },
     });
 
     for (0..h) |ry| {
         for (0..w) |rx| {
             const vx_cell = screen.readCell(@intCast(rx), @intCast(ry)) orelse continue;
-            renderer.setCell(x + @as(u16, @intCast(rx)), y + @as(u16, @intCast(ry)), toRenderCell(vx_cell));
+            renderer.setCell(x + @as(u16, @intCast(rx)), y + @as(u16, @intCast(ry)), vaxis_cell.toRenderCell(vx_cell));
         }
     }
 }
@@ -357,7 +310,7 @@ pub fn drawSplitBorders(
                     const idx = row * @as(usize, term_width) + col;
                     if (idx >= touched.len or !touched[idx]) continue;
                     const vx_cell = screen.readCell(x, y) orelse continue;
-                    renderer.setCell(x, y, toRenderCell(vx_cell));
+                    renderer.setCell(x, y, vaxis_cell.toRenderCell(vx_cell));
                 }
             }
         }

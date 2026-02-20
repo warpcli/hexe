@@ -4,56 +4,9 @@ const shp = @import("shp");
 const vaxis = @import("vaxis");
 const render = @import("render.zig");
 const statusbar = @import("statusbar.zig");
+const vaxis_cell = @import("vaxis_cell.zig");
 
 pub const Renderer = render.Renderer;
-
-fn toVaxisColor(c: render.Color) vaxis.Color {
-    return switch (c) {
-        .none => .default,
-        .palette => |idx| .{ .index = idx },
-        .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
-    };
-}
-
-fn toRenderCell(vx_cell: vaxis.Cell) render.Cell {
-    var out: render.Cell = .{
-        .char = ' ',
-        .bold = vx_cell.style.bold,
-        .italic = vx_cell.style.italic,
-        .faint = vx_cell.style.dim,
-        .strikethrough = vx_cell.style.strikethrough,
-        .inverse = vx_cell.style.reverse,
-    };
-
-    out.fg = switch (vx_cell.style.fg) {
-        .default => .none,
-        .index => |idx| .{ .palette = idx },
-        .rgb => |rgb| .{ .rgb = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] } },
-    };
-    out.bg = switch (vx_cell.style.bg) {
-        .default => .none,
-        .index => |idx| .{ .palette = idx },
-        .rgb => |rgb| .{ .rgb = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] } },
-    };
-    out.underline = switch (vx_cell.style.ul_style) {
-        .off => .none,
-        .single => .single,
-        .double => .double,
-        .curly => .curly,
-        .dotted => .dotted,
-        .dashed => .dashed,
-    };
-
-    if (vx_cell.char.width == 0 or vx_cell.char.grapheme.len == 0) {
-        out.char = 0;
-        out.is_wide_spacer = true;
-        return out;
-    }
-
-    out.char = std.unicode.utf8Decode(vx_cell.char.grapheme) catch ' ';
-    out.is_wide_char = vx_cell.char.width == 2;
-    return out;
-}
 
 fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: render.Color, bg: render.Color, title: ?[]const u8) void {
     if (w == 0 or h == 0) return;
@@ -72,7 +25,7 @@ fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: rende
         .screen = &screen,
     };
 
-    const base_style: vaxis.Style = .{ .fg = toVaxisColor(fg), .bg = toVaxisColor(bg) };
+    const base_style: vaxis.Style = .{ .fg = vaxis_cell.toVaxisColor(fg), .bg = vaxis_cell.toVaxisColor(bg) };
     root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = base_style });
     _ = root.child(.{
         .width = w,
@@ -89,7 +42,7 @@ fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: rende
             const clipped = clipTextToWidth(t, w - 4);
             const title_segments = &[_]vaxis.Segment{
                 .{ .text = " ", .style = base_style },
-                .{ .text = clipped, .style = .{ .fg = toVaxisColor(fg), .bg = toVaxisColor(bg), .bold = true } },
+                .{ .text = clipped, .style = .{ .fg = vaxis_cell.toVaxisColor(fg), .bg = vaxis_cell.toVaxisColor(bg), .bold = true } },
                 .{ .text = " ", .style = base_style },
             };
             _ = root.print(title_segments, .{ .row_offset = 0, .col_offset = 2, .wrap = .none, .commit = true });
@@ -99,7 +52,7 @@ fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: rende
     for (0..h) |ry| {
         for (0..w) |rx| {
             const vx_cell = screen.readCell(@intCast(rx), @intCast(ry)) orelse continue;
-            renderer.setCell(x + @as(u16, @intCast(rx)), y + @as(u16, @intCast(ry)), toRenderCell(vx_cell));
+            renderer.setCell(x + @as(u16, @intCast(rx)), y + @as(u16, @intCast(ry)), vaxis_cell.toRenderCell(vx_cell));
         }
     }
 }

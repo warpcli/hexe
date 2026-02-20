@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("core");
 const shp = @import("shp");
 const vaxis = @import("vaxis");
+const vaxis_cell = @import("vaxis_cell.zig");
 const animations = core.segments.animations;
 const randomdo_mod = core.segments.randomdo;
 
@@ -948,59 +949,12 @@ fn mergeStyle(base: shp.Style, override: shp.Style) shp.Style {
 
 fn shpStyleToVaxis(style: shp.Style) vaxis.Style {
     var out: vaxis.Style = .{};
-    out.fg = switch (style.fg) {
-        .none => .default,
-        .palette => |p| .{ .index = p },
-        .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
-    };
-    out.bg = switch (style.bg) {
-        .none => .default,
-        .palette => |p| .{ .index = p },
-        .rgb => |rgb| .{ .rgb = .{ rgb.r, rgb.g, rgb.b } },
-    };
+    out.fg = vaxis_cell.toVaxisColor(style.fg);
+    out.bg = vaxis_cell.toVaxisColor(style.bg);
     out.bold = style.bold;
     out.italic = style.italic;
     out.dim = style.dim;
     out.ul_style = if (style.underline) .single else .off;
-    return out;
-}
-
-fn vaxisColorToRender(col: vaxis.Color) render.Color {
-    return switch (col) {
-        .default => .none,
-        .index => |idx| .{ .palette = idx },
-        .rgb => |rgb| .{ .rgb = .{ .r = rgb[0], .g = rgb[1], .b = rgb[2] } },
-    };
-}
-
-fn vaxisCellToRender(cell: vaxis.Cell) render.Cell {
-    var out: render.Cell = .{
-        .char = ' ',
-        .fg = vaxisColorToRender(cell.style.fg),
-        .bg = vaxisColorToRender(cell.style.bg),
-        .bold = cell.style.bold,
-        .italic = cell.style.italic,
-        .faint = cell.style.dim,
-        .strikethrough = cell.style.strikethrough,
-        .inverse = cell.style.reverse,
-    };
-    out.underline = switch (cell.style.ul_style) {
-        .off => .none,
-        .single => .single,
-        .double => .double,
-        .curly => .curly,
-        .dotted => .dotted,
-        .dashed => .dashed,
-    };
-
-    if (cell.char.width == 0 or cell.char.grapheme.len == 0) {
-        out.char = 0;
-        out.is_wide_spacer = true;
-        return out;
-    }
-
-    out.char = std.unicode.utf8Decode(cell.char.grapheme) catch ' ';
-    out.is_wide_char = cell.char.width == 2;
     return out;
 }
 
@@ -1032,7 +986,7 @@ pub fn drawStyledText(renderer: *Renderer, start_x: u16, y: u16, text: []const u
     var x = start_x;
     while (x < end_x) : (x += 1) {
         const vx_cell = screen.readCell(x, 0) orelse continue;
-        renderer.setCell(x, y, vaxisCellToRender(vx_cell));
+        renderer.setCell(x, y, vaxis_cell.toRenderCell(vx_cell));
     }
 
     return end_x;
