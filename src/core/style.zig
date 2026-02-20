@@ -1,7 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 
-/// Color representation - compatible with mux/render.zig Color
+/// Color representation - compatible with mux/render_types.zig Color
 pub const Color = union(enum) {
     none,
     palette: u8, // 0-255
