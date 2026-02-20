@@ -1,7 +1,6 @@
 const std = @import("std");
 
 const State = @import("state.zig").State;
-const winpulse = @import("winpulse.zig");
 const render_mod = @import("render.zig");
 
 const statusbar = @import("statusbar.zig");
@@ -11,73 +10,6 @@ const mouse_selection = @import("mouse_selection.zig");
 const float_title = @import("float_title.zig");
 const overlay_render = @import("overlay_render.zig");
 const notification = @import("notification.zig");
-
-/// Apply winpulse brightness effect to a pane area
-fn applyPulseEffect(state: *State) void {
-    if (!state.config.winpulse_enabled) {
-        return;
-    }
-    if (state.pulse_start_ms == 0) {
-        return;
-    }
-    const bounds = state.pulse_pane_bounds orelse {
-        return;
-    };
-
-    const now_ms = std.time.milliTimestamp();
-    const elapsed_ms = now_ms - state.pulse_start_ms;
-    if (elapsed_ms >= state.config.winpulse_duration_ms) {
-        // Animation finished - restore colors
-        restorePulseColors(state);
-        state.stopPulse();
-        return;
-    }
-
-    // Calculate brightness intensity (fade out: 1.0 -> 0.0)
-    const progress = @as(f32, @floatFromInt(elapsed_ms)) / @as(f32, @floatFromInt(state.config.winpulse_duration_ms));
-    const intensity = 1.0 - progress;
-
-    // Brighten factor decreases over time
-    const brighten_factor = 1.0 + (state.config.winpulse_brighten_factor - 1.0) * intensity;
-
-    // Apply brightening to all cells in the pane
-    var row: u16 = 0;
-    while (row < bounds.height) : (row += 1) {
-        var col: u16 = 0;
-        while (col < bounds.width) : (col += 1) {
-            const cell = state.renderer.next.get(bounds.x + col, bounds.y + row);
-
-            // Brighten foreground
-            cell.fg = winpulse.brightenColor(cell.fg, brighten_factor);
-
-            // Brighten background
-            cell.bg = winpulse.brightenColor(cell.bg, brighten_factor);
-        }
-    }
-
-    // Keep rendering during animation
-    state.needs_render = true;
-}
-
-/// Restore original colors from saved state
-fn restorePulseColors(state: *State) void {
-    const saved = state.pulse_saved_colors orelse return;
-    const bounds = state.pulse_pane_bounds orelse return;
-
-    var idx: usize = 0;
-    var row: u16 = 0;
-    while (row < bounds.height) : (row += 1) {
-        var col: u16 = 0;
-        while (col < bounds.width) : (col += 1) {
-            if (idx < saved.len) {
-                const cell = state.renderer.next.get(bounds.x + col, bounds.y + row);
-                cell.fg = saved[idx].fg;
-                cell.bg = saved[idx].bg;
-                idx += 1;
-            }
-        }
-    }
-}
 
 pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     const renderer = &state.renderer;
@@ -208,9 +140,6 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     if (state.config.tabs.status.enabled) {
         statusbar.draw(renderer, state, state.allocator, &state.config, state.term_width, state.term_height, state.tabs, state.active_tab, state.session_name);
     }
-
-    // Apply winpulse brightness effect if active
-    applyPulseEffect(state);
 
     // Check if active float has dim_background set (focus mode)
     const float_dim = if (state.active_floating) |idx| blk: {

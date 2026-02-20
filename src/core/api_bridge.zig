@@ -391,8 +391,6 @@ pub fn hexe_mux_config_set(L: ?*LuaState) callconv(.c) c_int {
             mux.confirm_on_disown = val;
         } else if (std.mem.eql(u8, key, "confirm_on_close")) {
             mux.confirm_on_close = val;
-        } else if (std.mem.eql(u8, key, "winpulse_enabled")) {
-            mux.winpulse_enabled = val;
         } else {
             const msg = std.fmt.allocPrint(mux.allocator, "config.set: unknown boolean key '{s}'", .{key}) catch "config.set: unknown key";
             _ = lua.pushString(msg);
@@ -408,11 +406,7 @@ pub fn hexe_mux_config_set(L: ?*LuaState) callconv(.c) c_int {
             lua.raiseError();
         };
 
-        if (std.mem.eql(u8, key, "winpulse_duration_ms")) {
-            mux.winpulse_duration_ms = @intFromFloat(val_f64);
-        } else if (std.mem.eql(u8, key, "winpulse_brighten_factor")) {
-            mux.winpulse_brighten_factor = @floatCast(val_f64);
-        } else if (std.mem.eql(u8, key, "selection_color")) {
+        if (std.mem.eql(u8, key, "selection_color")) {
             mux.selection_color = @intFromFloat(val_f64);
         } else if (std.mem.eql(u8, key, "mouse_selection_override_mods")) {
             mux.mouse_selection_override_mods = @intFromFloat(val_f64);
@@ -469,18 +463,12 @@ pub export fn hexe_mux_config_setup(L: ?*LuaState) callconv(.c) c_int {
                 mux.confirm_on_disown = val;
             } else if (std.mem.eql(u8, key, "confirm_on_close")) {
                 mux.confirm_on_close = val;
-            } else if (std.mem.eql(u8, key, "winpulse_enabled")) {
-                mux.winpulse_enabled = val;
             }
         }
         // Number options
         else if (val_type == .number) {
             const val_f64 = lua.toNumber(-1) catch 0;
-            if (std.mem.eql(u8, key, "winpulse_duration_ms")) {
-                mux.winpulse_duration_ms = @intFromFloat(val_f64);
-            } else if (std.mem.eql(u8, key, "winpulse_brighten_factor")) {
-                mux.winpulse_brighten_factor = @floatCast(val_f64);
-            } else if (std.mem.eql(u8, key, "selection_color")) {
+            if (std.mem.eql(u8, key, "selection_color")) {
                 mux.selection_color = @intFromFloat(val_f64);
             }
         }

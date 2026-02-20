@@ -25,8 +25,6 @@ const OverlayManager = pop.overlay.OverlayManager;
 
 const Pane = @import("pane.zig").Pane;
 
-const winpulse_mod = @import("winpulse.zig");
-
 const BindKey = core.Config.BindKey;
 const BindAction = core.Config.BindAction;
 /// Simple focus context for timer storage (float vs split).
@@ -35,7 +33,6 @@ pub const FocusContext = enum { split, float };
 const state_tabs = @import("state_tabs.zig");
 const state_serialize = @import("state_serialize.zig");
 const state_sync = @import("state_sync.zig");
-const state_pulse = @import("state_pulse.zig");
 const mouse_selection = @import("mouse_selection.zig");
 
 pub const TabFocusKind = enum { split, float };
@@ -139,11 +136,6 @@ pub const State = struct {
     force_full_render: bool,
     /// When true, force cursor visible on next render (set after float death)
     cursor_needs_restore: bool,
-    /// Winpulse state tracking
-    pulse_start_ms: i64 = 0,
-    pulse_pane_uuid: ?[32]u8 = null,
-    pulse_saved_colors: ?[]winpulse_mod.SavedCell = null,
-    pulse_pane_bounds: ?PaneBounds = null,
     term_width: u16,
     term_height: u16,
     status_height: u16,
@@ -446,9 +438,6 @@ pub const State = struct {
 
         self.key_timers.deinit(self.allocator);
 
-        // Clean up pulse state
-        self.stopPulse();
-
         // Deinit floats.
         for (self.floats.items) |pane| {
             pane.deinit();
@@ -597,16 +586,6 @@ pub const State = struct {
 
     pub fn syncPaneUnfocus(self: *State, pane: *Pane) void {
         return state_sync.syncPaneUnfocus(self, pane);
-    }
-
-    /// Start winpulse animation for the currently focused pane
-    pub fn startPulse(self: *State) void {
-        return state_pulse.startPulse(self);
-    }
-
-    /// Stop winpulse animation and restore original colors
-    pub fn stopPulse(self: *State) void {
-        return state_pulse.stopPulse(self);
     }
 
     pub fn refreshPaneCwd(self: *State, pane: *Pane) ?[]const u8 {
