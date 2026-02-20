@@ -5,37 +5,39 @@ const vaxis = @import("vaxis");
 
 const Pane = @import("pane.zig").Pane;
 
-/// Convert arrow key escape sequences to vim-style keys for popup navigation
-pub fn convertArrowKey(input: []const u8) u8 {
-    if (input.len == 0) return 0;
-    // Check for ESC sequences
-    if (input[0] == 0x1b) {
-        // Arrow keys: ESC [ A/B/C/D
-        if (input.len >= 3 and input[1] == '[') {
-            return switch (input[2]) {
-                'C' => 'l', // Right arrow -> toggle
-                'D' => 'h', // Left arrow -> toggle
-                'A' => 'k', // Up arrow -> up (picker)
-                'B' => 'j', // Down arrow -> down (picker)
-                else => 0, // Ignore other CSI sequences
-            };
-        }
-        // Alt+key: ESC followed by printable char (not '[' or 'O')
-        // Ignore these - return 0
-        if (input.len >= 2 and input[1] != '[' and input[1] != 'O') {
-            return 0; // Ignore Alt+key
-        }
-        // Bare ESC key (no following char, or timeout)
-        return 27; // ESC to cancel
-    }
-    return input[0];
-}
-
 /// Handle popup input and return true if popup was dismissed
 pub fn handlePopupInput(popups: *pop.PopupManager, input: []const u8) bool {
-    const key = convertArrowKey(input);
+    const key = parsePopupKey(input) orelse return false;
     const result = popups.handleInput(key);
     return result == .dismissed;
+}
+
+fn parsePopupKey(input: []const u8) ?u8 {
+    if (input.len == 0) return null;
+
+    var parser: vaxis.Parser = .{};
+    const parsed = parser.parse(input, std.heap.page_allocator) catch return null;
+    if (parsed.n == 0) return null;
+    const event = parsed.event orelse return null;
+
+    const key = switch (event) {
+        .key_press => |k| k,
+        else => return null,
+    };
+
+    return switch (key.codepoint) {
+        vaxis.Key.up => 'k',
+        vaxis.Key.down => 'j',
+        vaxis.Key.left => 'h',
+        vaxis.Key.right => 'l',
+        vaxis.Key.enter => '\r',
+        vaxis.Key.escape => 27,
+        else => blk: {
+            const cp = key.base_layout_codepoint orelse key.codepoint;
+            if (cp > 0xFF) break :blk null;
+            break :blk @intCast(cp);
+        },
+    };
 }
 
 /// Parse SGR mouse event from input
