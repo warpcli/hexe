@@ -119,45 +119,50 @@ fn vaxisKeyToBindKey(vk: vaxis.Key, mods_inout: *u8) ?core.Config.BindKey {
 }
 
 pub fn parseMouseEvent(input: []const u8) ?MouseEvent {
-    // Must start with ESC [ <
+    // Fast gate: SGR mouse sequences start with ESC [ <
     if (input.len < 4 or input[0] != 0x1b or input[1] != '[' or input[2] != '<') return null;
 
-    // Find the 'M' or 'm' terminator
-    var end: usize = 3;
-    while (end < input.len and input[end] != 'M' and input[end] != 'm') : (end += 1) {}
-    if (end >= input.len) return null;
+    var parser: vaxis.Parser = .{};
+    const parsed = parser.parse(input, std.heap.page_allocator) catch return null;
+    if (parsed.n == 0) return null;
+    const event = parsed.event orelse return null;
 
-    const is_release = input[end] == 'm';
+    return switch (event) {
+        .mouse => |mouse| mouseEventFromVaxis(mouse, parsed.n),
+        else => null,
+    };
+}
 
-    // Parse: btn ; x ; y
-    var btn: u16 = 0;
-    var mouse_x: u16 = 0;
-    var mouse_y: u16 = 0;
-    var field: u8 = 0;
-    var i: usize = 3;
-    while (i < end) : (i += 1) {
-        if (input[i] == ';') {
-            field += 1;
-        } else if (input[i] >= '0' and input[i] <= '9') {
-            const digit = input[i] - '0';
-            switch (field) {
-                0 => btn = btn * 10 + digit,
-                1 => mouse_x = mouse_x * 10 + digit,
-                2 => mouse_y = mouse_y * 10 + digit,
-                else => {},
-            }
-        }
-    }
+fn mouseEventFromVaxis(mouse: vaxis.Mouse, consumed: usize) MouseEvent {
+    var btn: u16 = switch (mouse.button) {
+        .left => 0,
+        .middle => 1,
+        .right => 2,
+        .none => 3,
+        .wheel_up => 64,
+        .wheel_down => 65,
+        .wheel_right => 66,
+        .wheel_left => 67,
+        .button_8 => 128,
+        .button_9 => 129,
+        .button_10 => 130,
+        .button_11 => 131,
+    };
 
-    // Convert from 1-based to 0-based coordinates
-    if (mouse_x > 0) mouse_x -= 1;
-    if (mouse_y > 0) mouse_y -= 1;
+    if (mouse.mods.shift) btn |= 4;
+    if (mouse.mods.alt) btn |= 8;
+    if (mouse.mods.ctrl) btn |= 16;
 
-    return MouseEvent{
+    if (mouse.type == .motion or mouse.type == .drag) btn |= 32;
+
+    const x: u16 = if (mouse.col <= 0) 0 else @intCast(mouse.col);
+    const y: u16 = if (mouse.row <= 0) 0 else @intCast(mouse.row);
+
+    return .{
         .btn = btn,
-        .x = mouse_x,
-        .y = mouse_y,
-        .is_release = is_release,
-        .consumed = end + 1,
+        .x = x,
+        .y = y,
+        .is_release = mouse.type == .release,
+        .consumed = consumed,
     };
 }
