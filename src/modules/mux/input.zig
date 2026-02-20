@@ -127,6 +127,25 @@ fn parseVaxisKey(vk: vaxis.Key, when: core.Config.BindWhen, consumed: usize) ?Ke
 }
 
 fn textCodepointForForwarding(vk: vaxis.Key) ?u21 {
+    // Prefer parser-provided text when available. This preserves shifted
+    // punctuation (e.g. ':' vs ';') and non-ASCII text input.
+    if (vk.text) |txt| {
+        var view = std.unicode.Utf8View.init(txt) catch return null;
+        var it = view.iterator();
+        const cp = it.nextCodepoint() orelse return null;
+        if (it.nextCodepoint() != null) return null;
+        if (cp < 0x20 or cp == 0x7f) return null;
+        if (cp >= 0x80 and cp <= 0x9f) return null;
+        if (cp <= 0x10ffff) return cp;
+    }
+
+    // Fallback to shifted codepoint when available.
+    if (vk.shifted_codepoint) |cp_shifted| {
+        if (cp_shifted >= 0x20 and cp_shifted != 0x7f and !(cp_shifted >= 0x80 and cp_shifted <= 0x9f) and cp_shifted <= 0x10ffff) {
+            return cp_shifted;
+        }
+    }
+
     const cp = vk.codepoint;
     if (cp < 0x20 or cp == 0x7f) return null;
     if (cp >= 0x80 and cp <= 0x9f) return null;
