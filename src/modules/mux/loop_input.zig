@@ -462,6 +462,18 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                     continue;
                 }
 
+                // Some terminals collapse Ctrl+Alt+letter into Alt+letter.
+                // If Alt variant didn't match, retry as Ctrl+Alt for ASCII letters.
+                if (ev.mods == 1 and @as(core.Config.BindKeyKind, ev.key) == .char and ev.when == .press) {
+                    const ch = ev.key.char;
+                    if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z')) {
+                        if (keybinds.handleKeyEvent(state, ev.mods | 2, ev.key, ev.when, false, kitty_mode)) {
+                            i += ev.consumed;
+                            continue;
+                        }
+                    }
+                }
+
                 if (ev.when == .press) {
                     keybinds.forwardKeyToPane(state, ev.mods, ev.key);
                 }
