@@ -335,44 +335,25 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 continue;
             }
 
-            // Kitty keyboard protocol: CSI-u key events with explicit event types.
-            // kitty_mode=true enables full press/hold/repeat/release support.
-            if (input_csi_u.parse(inp[i..])) |ev| {
-                // Check for exit_key on focused float (close float if matched).
-                if (loop_input_keys.checkCsiUExitKey(state, ev)) {
+            // Parse key events through libvaxis parser first.
+            if (input.parseKeyEvent(inp[i..], state.allocator)) |ev| {
+                const event_name: []const u8 = switch (ev.when) {
+                    .press => "press",
+                    .release => "release",
+                    .repeat => "repeat",
+                    .hold => "hold",
+                };
+                main.debugLog("vaxis_mode: key event={s} mods={d}", .{ event_name, ev.mods });
+
+                if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, false, true)) {
                     i += ev.consumed;
                     continue;
                 }
 
-                const bind_when: keybinds.BindWhen = switch (ev.event_type) {
-                    1 => .press,
-                    2 => .repeat,
-                    3 => .release,
-                    else => .press,
-                };
-
-                const event_name: []const u8 = switch (ev.event_type) {
-                    1 => "press",
-                    2 => "repeat",
-                    3 => "release",
-                    else => "unknown",
-                };
-                main.debugLog("kitty_mode: CSI-u event={s} mods={d}", .{ event_name, ev.mods });
-
-                // kitty_mode=true for full event handling with modifier latching
-                if (keybinds.handleKeyEvent(state, ev.mods, ev.key, bind_when, false, true)) {
-                    i += ev.consumed;
-                    continue;
+                if (ev.when == .press) {
+                    keybinds.forwardKeyToPane(state, ev.mods, ev.key);
                 }
 
-                // Forward unhandled press AND repeat events to pane (not release)
-                // Repeat events are essential for key repeat (e.g., holding arrow keys)
-                if (ev.event_type == 1 or ev.event_type == 2) {
-                    var out: [8]u8 = undefined;
-                    if (input_csi_u.translateToLegacy(&out, ev)) |out_len| {
-                        keybinds.forwardInputToFocusedPane(state, out[0..out_len]);
-                    }
-                }
                 i += ev.consumed;
                 continue;
             }

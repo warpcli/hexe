@@ -1,4 +1,5 @@
 const std = @import("std");
+const core = @import("core");
 const pop = @import("pop");
 const vaxis = @import("vaxis");
 
@@ -46,6 +47,61 @@ pub const MouseEvent = struct {
     is_release: bool,
     consumed: usize,
 };
+
+pub const KeyEvent = struct {
+    mods: u8,
+    key: core.Config.BindKey,
+    when: core.Config.BindWhen,
+    consumed: usize,
+};
+
+pub fn parseKeyEvent(input_bytes: []const u8, allocator: std.mem.Allocator) ?KeyEvent {
+    if (input_bytes.len == 0) return null;
+
+    var parser: vaxis.Parser = .{};
+    const parsed = parser.parse(input_bytes, allocator) catch return null;
+    if (parsed.n == 0) return null;
+    const event = parsed.event orelse return null;
+
+    return switch (event) {
+        .key_press => |key| parseVaxisKey(key, .press, parsed.n),
+        .key_release => |key| parseVaxisKey(key, .release, parsed.n),
+        else => null,
+    };
+}
+
+fn parseVaxisKey(vk: vaxis.Key, when: core.Config.BindWhen, consumed: usize) ?KeyEvent {
+    const bind_key = vaxisKeyToBindKey(vk) orelse return null;
+    return .{
+        .mods = modsMaskFromVaxis(vk.mods),
+        .key = bind_key,
+        .when = when,
+        .consumed = consumed,
+    };
+}
+
+fn modsMaskFromVaxis(mods: vaxis.Key.Modifiers) u8 {
+    var out: u8 = 0;
+    if (mods.alt) out |= 1;
+    if (mods.ctrl) out |= 2;
+    if (mods.shift) out |= 4;
+    if (mods.super) out |= 8;
+    return out;
+}
+
+fn vaxisKeyToBindKey(vk: vaxis.Key) ?core.Config.BindKey {
+    return switch (vk.codepoint) {
+        vaxis.Key.up => .up,
+        vaxis.Key.down => .down,
+        vaxis.Key.left => .left,
+        vaxis.Key.right => .right,
+        vaxis.Key.space => .space,
+        else => blk: {
+            if (vk.codepoint > 0xFF) break :blk null;
+            break :blk .{ .char = @intCast(vk.codepoint) };
+        },
+    };
+}
 
 pub fn parseMouseEvent(input: []const u8) ?MouseEvent {
     // Fast gate: SGR mouse sequences start with ESC [ <
