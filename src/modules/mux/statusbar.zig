@@ -3,6 +3,7 @@ const core = @import("core");
 const shp = @import("shp");
 const vaxis = @import("vaxis");
 const vaxis_cell = @import("vaxis_cell.zig");
+const vaxis_surface = @import("vaxis_surface.zig");
 const animations = core.segments.animations;
 const randomdo_mod = core.segments.randomdo;
 
@@ -61,6 +62,8 @@ pub fn deinitThreadlocals() void {
         status_print_screen = null;
         status_print_screen_width = 0;
     }
+
+    vaxis_surface.deinitThreadlocals(std.heap.page_allocator);
 }
 
 fn getStatusPrintScreen(width: u16) ?*vaxis.Screen {

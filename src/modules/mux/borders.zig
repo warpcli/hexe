@@ -39,10 +39,7 @@ fn encodeCodepointUtf8(cp: u21, out: *[4]u8) []const u8 {
 fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: render.Color, bg: render.Color, glyph_chars: [6]u21) void {
     if (w == 0 or h == 0) return;
 
-    var screen = vaxis_surface.initUnicodeScreen(std.heap.page_allocator, w, h) catch return;
-    defer screen.deinit(std.heap.page_allocator);
-
-    const root = vaxis_surface.rootWindow(&screen);
+    const root = vaxis_surface.pooledWindow(std.heap.page_allocator, w, h) catch return;
 
     root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = .{ .bg = vaxis_cell.toVaxisColor(bg) } });
 
@@ -66,7 +63,7 @@ fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: rend
         },
     });
 
-    vaxis_surface.blitScreen(renderer, &screen, x, y);
+    vaxis_surface.blitWindow(renderer, root, x, y);
 }
 
 /// Draw split borders between panes

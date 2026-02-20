@@ -13,10 +13,7 @@ pub const Renderer = render.Renderer;
 fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: render.Color, bg: render.Color, title: ?[]const u8) void {
     if (w == 0 or h == 0) return;
 
-    var screen = vaxis_surface.initUnicodeScreen(std.heap.page_allocator, w, h) catch return;
-    defer screen.deinit(std.heap.page_allocator);
-
-    const root = vaxis_surface.rootWindow(&screen);
+    const root = vaxis_surface.pooledWindow(std.heap.page_allocator, w, h) catch return;
 
     const base_style: vaxis.Style = .{ .fg = vaxis_cell.toVaxisColor(fg), .bg = vaxis_cell.toVaxisColor(bg) };
     root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = base_style });
@@ -42,7 +39,7 @@ fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: rende
         }
     }
 
-    vaxis_surface.blitScreen(renderer, &screen, x, y);
+    vaxis_surface.blitWindow(renderer, root, x, y);
 }
 
 fn textWidth(text: []const u8) u16 {

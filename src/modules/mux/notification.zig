@@ -74,21 +74,15 @@ fn renderTextWithVaxis(renderer: *Renderer, start_x: u16, y: u16, text: []const 
     const width = vaxis.gwidth.gwidth(text, .unicode);
     if (width == 0) return;
 
-    var screen = vaxis_surface.initUnicodeScreen(std.heap.page_allocator, width, 1) catch return;
-    defer screen.deinit(std.heap.page_allocator);
-
-    const win = vaxis_surface.rootWindow(&screen);
+    const win = vaxis_surface.pooledWindow(std.heap.page_allocator, width, 1) catch return;
 
     const seg = vaxis.Segment{ .text = text, .style = toVaxisStyle(style) };
     const res = win.print(&.{seg}, .{ .wrap = .none, .commit = true });
-    const end_col = @min(res.col, screen.width);
+    const end_col = @min(res.col, win.width);
 
     if (end_col > 0) {
-        // Only blit the range that print() actually touched.
-        const touched = std.heap.page_allocator.alloc(bool, end_col) catch return;
-        defer std.heap.page_allocator.free(touched);
-        @memset(touched, true);
-        vaxis_surface.blitTouched(renderer, &screen, touched, end_col, start_x, y);
+        const clipped = win.child(.{ .width = end_col, .height = 1 });
+        vaxis_surface.blitWindow(renderer, clipped, start_x, y);
     }
 }
 
