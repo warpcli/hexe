@@ -3,6 +3,18 @@ const core = @import("core");
 const BindKey = core.Config.BindKey;
 const BindKeyKind = core.Config.BindKeyKind;
 
+/// Convert kitty CSI-u modifiers value (modifiers field before -1) to mux mod mask.
+/// Output bitmask: alt=1, ctrl=2, shift=4, super=8.
+pub fn decodeKittyMods(mod_val: u32) u8 {
+    const mask: u32 = if (mod_val > 0) mod_val - 1 else 0;
+    var mods: u8 = 0;
+    if ((mask & 2) != 0) mods |= 1; // alt
+    if ((mask & 4) != 0) mods |= 2; // ctrl
+    if ((mask & 1) != 0) mods |= 4; // shift
+    if ((mask & 8) != 0) mods |= 8; // super
+    return mods;
+}
+
 /// Encode a key + modifiers into legacy byte sequences for pane input.
 /// Returns encoded length or null if output buffer is too small.
 pub fn encodeLegacyKey(out: []u8, mods: u8, key: BindKey, use_application_arrows: bool) ?usize {

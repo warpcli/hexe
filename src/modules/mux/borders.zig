@@ -6,28 +6,10 @@ const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
 const statusbar = @import("statusbar.zig");
 const text_width = @import("text_width.zig");
+const vaxis_surface = @import("vaxis_surface.zig");
+const vaxis_draw = @import("vaxis_draw.zig");
 const Pane = @import("pane.zig").Pane;
 const Layout = @import("layout.zig").Layout;
-
-pub const TitlePlacement = struct {
-    x: u16,
-    y: u16,
-};
-
-pub fn floatTitleInnerWidth(w: u16) u16 {
-    return w -| 4;
-}
-
-pub fn floatTitlePlacement(x: u16, y: u16, w: u16, h: u16, pos: core.FloatStylePosition, total_len: u16) TitlePlacement {
-    return switch (pos) {
-        .topleft => .{ .x = x + 2, .y = y },
-        .topcenter => .{ .x = x + (w -| total_len) / 2, .y = y },
-        .topright => .{ .x = x + w -| 2 -| total_len, .y = y },
-        .bottomleft => .{ .x = x + 2, .y = y + h - 1 },
-        .bottomcenter => .{ .x = x + (w -| total_len) / 2, .y = y + h - 1 },
-        .bottomright => .{ .x = x + w -| 2 -| total_len, .y = y + h - 1 },
-    };
-}
 
 fn toShpStyle(seg: statusbar.RenderedSegment) shp.Style {
     return .{
@@ -54,27 +36,10 @@ fn encodeCodepointUtf8(cp: u21, out: *[4]u8) []const u8 {
     return out[0..n];
 }
 
-fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: ?Color, bg: ?Color, bold: bool) void {
-    var cp_buf: [4]u8 = undefined;
-    const cp_bytes = encodeCodepointUtf8(cp, &cp_buf);
-    var style: vaxis.Style = .{ .bold = bold };
-    if (fg) |c| style.fg = c.toVaxis();
-    if (bg) |c| style.bg = c.toVaxis();
-    renderer.setVaxisCell(x, y, .{
-        .char = .{ .grapheme = cp_bytes, .width = 1 },
-        .style = style,
-    });
-}
-
 fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Color, bg: Color, glyph_chars: [6]u21) void {
     if (w == 0 or h == 0) return;
 
-    const root = renderer.vx.window().child(.{
-        .x_off = @intCast(x),
-        .y_off = @intCast(y),
-        .width = w,
-        .height = h,
-    });
+    const root = vaxis_surface.pooledWindow(std.heap.page_allocator, w, h) catch return;
 
     root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = .{ .bg = bg.toVaxis() } });
 
@@ -97,6 +62,8 @@ fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Colo
             .style = .{ .fg = fg.toVaxis(), .bg = bg.toVaxis() },
         },
     });
+
+    vaxis_surface.blitWindow(renderer, root, x, y);
 }
 
 /// Draw split borders between panes
@@ -107,14 +74,60 @@ pub fn drawSplitBorders(
     term_width: u16,
     content_height: u16,
 ) void {
+    var split_screen_opt: ?vaxis.Screen = null;
+    var split_touched_opt: ?[]bool = null;
+    var split_win_opt: ?vaxis.Window = null;
+    const split_cell_count = @as(usize, term_width) * @as(usize, content_height);
+    if (split_cell_count > 0) {
+        if (vaxis_surface.initUnicodeScreen(std.heap.page_allocator, term_width, content_height) catch null) |screen| {
+            split_screen_opt = screen;
+            if (std.heap.page_allocator.alloc(bool, split_cell_count) catch null) |touched| {
+                @memset(touched, false);
+                split_touched_opt = touched;
+                split_win_opt = .{
+                    .x_off = 0,
+                    .y_off = 0,
+                    .parent_x_off = 0,
+                    .parent_y_off = 0,
+                    .width = term_width,
+                    .height = content_height,
+                    .screen = &split_screen_opt.?,
+                };
+            } else {
+                split_screen_opt.?.deinit(std.heap.page_allocator);
+                split_screen_opt = null;
+            }
+        }
+    }
+    defer {
+        if (split_touched_opt) |touched| std.heap.page_allocator.free(touched);
+        if (split_screen_opt) |*screen| screen.deinit(std.heap.page_allocator);
+    }
+
     const write_split_cell = struct {
         fn go(
             renderer_in: *Renderer,
+            split_win: ?vaxis.Window,
+            touched: ?[]bool,
+            width: u16,
             x: u16,
             y: u16,
             cp: u21,
             color: u8,
         ) void {
+            if (split_win) |win| {
+                var cp_buf: [4]u8 = undefined;
+                const cp_bytes = encodeCodepointUtf8(cp, &cp_buf);
+                win.writeCell(x, y, .{
+                    .char = .{ .grapheme = cp_bytes, .width = 1 },
+                    .style = .{ .fg = .{ .index = color } },
+                });
+                if (touched) |mask| {
+                    const idx = @as(usize, y) * @as(usize, width) + @as(usize, x);
+                    if (idx < mask.len) mask[idx] = true;
+                }
+                return;
+            }
             var cp_buf: [4]u8 = undefined;
             const cp_bytes = encodeCodepointUtf8(cp, &cp_buf);
             renderer_in.setVaxisCell(x, y, .{
@@ -222,7 +235,7 @@ pub fn drawSplitBorders(
                 }
             }
 
-            write_split_cell(renderer, x, y, char, color);
+            write_split_cell(renderer, split_win_opt, split_touched_opt, term_width, x, y, char, color);
         }
     }
 
@@ -272,7 +285,13 @@ pub fn drawSplitBorders(
                 }
             }
 
-            write_split_cell(renderer, x, y, char, color);
+            write_split_cell(renderer, split_win_opt, split_touched_opt, term_width, x, y, char, color);
+        }
+    }
+
+    if (split_screen_opt) |*screen| {
+        if (split_touched_opt) |touched| {
+            vaxis_surface.blitTouched(renderer, screen, touched, term_width, 0, 0);
         }
     }
 }
@@ -288,7 +307,7 @@ pub fn drawScrollIndicator(renderer: *Renderer, pane_x: u16, pane_y: u16, pane_w
 
     // Yellow background (palette 3), black text (palette 0)
     for (indicator_chars, 0..) |char, i| {
-        putChar(renderer, x_pos + @as(u16, @intCast(i)), pane_y, char, .{ .palette = 0 }, .{ .palette = 3 }, false);
+        vaxis_draw.putChar(renderer, x_pos + @as(u16, @intCast(i)), pane_y, char, .{ .palette = 0 }, .{ .palette = 3 }, false);
     }
 }
 
@@ -318,14 +337,14 @@ pub fn drawFloatingBorder(
             if (h > 2) {
                 var row: u16 = 1;
                 while (row < h - 1) : (row += 1) {
-                    putChar(renderer, sx, y + row, ' ', null, shadow_bg, false);
+                    vaxis_draw.putChar(renderer, sx, y + row, ' ', null, shadow_bg, false);
                 }
             }
 
             // Add a small "cap" next to the bottom border so there is no
             // visible gap between the side shadow and the bottom shadow.
             if (h > 1) {
-                putChar(renderer, sx, y + h - 1, ' ', null, shadow_bg, false);
+                vaxis_draw.putChar(renderer, sx, y + h - 1, ' ', null, shadow_bg, false);
             }
 
             // Bottom shadow: start 1 col after left border, and include the
@@ -334,7 +353,7 @@ pub fn drawFloatingBorder(
             while (col <= w) : (col += 1) {
                 // Use upper-half block for bottom shadow so it feels visually
                 // closer in "weight" to the 1-col side shadow.
-                putChar(renderer, x + col, sy, 0x2580, shadow_fg, null, false);
+                vaxis_draw.putChar(renderer, x + col, sy, 0x2580, shadow_fg, null, false);
             }
             // Corner is already drawn by the bottom shadow (col == w).
         }
@@ -374,7 +393,7 @@ pub fn drawFloatingBorder(
 
                 // Render styled output
                 const segments = statusbar.renderSegmentOutput(module, output);
-                const inner_w = floatTitleInnerWidth(w);
+                const inner_w = w -| 4;
                 if (inner_w == 0) return;
 
                 // If module formatting produced no visible text, fallback to raw name.
@@ -384,27 +403,71 @@ pub fn drawFloatingBorder(
                     else
                         shp.Style{};
 
-                    const fallback_len = @min(inner_w, statusbar.measureText(name));
-                    const fallback_place = floatTitlePlacement(x, y, w, h, pos, fallback_len);
+                    var draw_x_fallback: u16 = x + 2;
+                    var draw_y_fallback: u16 = y;
+                    if (s.position) |pos2| {
+                        switch (pos2) {
+                            .topcenter => draw_x_fallback = x + (w -| @min(inner_w, statusbar.measureText(name))) / 2,
+                            .topright => draw_x_fallback = x + w -| 2 -| @min(inner_w, statusbar.measureText(name)),
+                            .bottomleft => draw_y_fallback = y + h - 1,
+                            .bottomcenter => {
+                                draw_x_fallback = x + (w -| @min(inner_w, statusbar.measureText(name))) / 2;
+                                draw_y_fallback = y + h - 1;
+                            },
+                            .bottomright => {
+                                draw_x_fallback = x + w -| 2 -| @min(inner_w, statusbar.measureText(name));
+                                draw_y_fallback = y + h - 1;
+                            },
+                            else => {},
+                        }
+                    }
                     const clipped_name = text_width.clipTextToWidth(name, inner_w);
-                    _ = statusbar.drawStyledText(renderer, fallback_place.x, fallback_place.y, clipped_name, fallback_style);
+                    _ = statusbar.drawStyledText(renderer, draw_x_fallback, draw_y_fallback, clipped_name, fallback_style);
                     return;
                 }
 
                 // Calculate position based on style position
                 const unclamped_len: u16 = @intCast(@min(segments.total_len, @as(usize, std.math.maxInt(u16))));
                 const total_len: u16 = @min(unclamped_len, inner_w);
-                const place = floatTitlePlacement(x, y, w, h, pos, total_len);
+                var draw_x: u16 = undefined;
+                var draw_y: u16 = undefined;
+
+                switch (pos) {
+                    .topleft => {
+                        draw_x = x + 2;
+                        draw_y = y;
+                    },
+                    .topcenter => {
+                        draw_x = x + (w -| total_len) / 2;
+                        draw_y = y;
+                    },
+                    .topright => {
+                        draw_x = x + w -| 2 -| total_len;
+                        draw_y = y;
+                    },
+                    .bottomleft => {
+                        draw_x = x + 2;
+                        draw_y = y + h - 1;
+                    },
+                    .bottomcenter => {
+                        draw_x = x + (w -| total_len) / 2;
+                        draw_y = y + h - 1;
+                    },
+                    .bottomright => {
+                        draw_x = x + w -| 2 -| total_len;
+                        draw_y = y + h - 1;
+                    },
+                }
 
                 // Draw each segment with its style
-                var cur_x = place.x;
+                var cur_x = draw_x;
                 const max_x = x + w -| 2;
                 for (segments.items[0..segments.count]) |seg| {
                     if (cur_x >= max_x) break;
                     const remain = max_x - cur_x;
                     const clipped = text_width.clipTextToWidth(seg.text, remain);
                     if (clipped.len == 0) continue;
-                    cur_x = statusbar.drawStyledText(renderer, cur_x, place.y, clipped, toShpStyle(seg));
+                    cur_x = statusbar.drawStyledText(renderer, cur_x, draw_y, clipped, toShpStyle(seg));
                 }
             }
         }

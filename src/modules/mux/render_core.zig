@@ -45,6 +45,12 @@ pub const Renderer = struct {
         self.vx.screen.clear();
     }
 
+    pub fn invertCell(self: *Renderer, x: u16, y: u16) void {
+        var cell = self.getVaxisCell(x, y) orelse return;
+        cell.style.reverse = !cell.style.reverse;
+        self.setVaxisCell(x, y, cell);
+    }
+
     pub fn setVaxisCell(self: *Renderer, x: u16, y: u16, cell: vaxis.Cell) void {
         if (x >= self.vx.screen.width or y >= self.vx.screen.height) return;
 
@@ -62,6 +68,10 @@ pub const Renderer = struct {
 
     pub fn screenWidth(self: *const Renderer) u16 {
         return self.vx.screen.width;
+    }
+
+    pub fn screenHeight(self: *const Renderer) u16 {
+        return self.vx.screen.height;
     }
 
     pub fn drawRenderState(self: *Renderer, state: *const ghostty.RenderState, offset_x: u16, offset_y: u16, width: u16, height: u16) void {
@@ -89,3 +99,5 @@ pub const Renderer = struct {
         render_sprite.drawSpriteOverlay(self, pane_x, pane_y, pane_width, pane_height, sprite_content, pokemon_config);
     }
 };
+
+pub const drawRenderStateIntoWindow = vt_bridge.drawRenderState;

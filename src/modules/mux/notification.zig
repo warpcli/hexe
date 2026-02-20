@@ -5,28 +5,8 @@ const vaxis = @import("vaxis");
 const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
 const text_width = @import("text_width.zig");
-
-fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: ?Color, bg: ?Color, bold: bool) void {
-    var buf: [4]u8 = undefined;
-    const grapheme: []const u8 = if (cp < 128)
-        buf[0..blk: {
-            buf[0] = @intCast(cp);
-            break :blk 1;
-        }]
-    else blk: {
-        const n = std.unicode.utf8Encode(cp, &buf) catch return;
-        break :blk buf[0..n];
-    };
-
-    var vx_style: vaxis.Style = .{ .bold = bold };
-    if (fg) |c| vx_style.fg = c.toVaxis();
-    if (bg) |c| vx_style.bg = c.toVaxis();
-
-    renderer.setVaxisCell(x, y, .{
-        .char = .{ .grapheme = grapheme, .width = 1 },
-        .style = vx_style,
-    });
-}
+const vaxis_surface = @import("vaxis_surface.zig");
+const vaxis_draw = @import("vaxis_draw.zig");
 
 pub fn renderFull(self: *pop.notification.NotificationManager, renderer: *Renderer, screen_width: u16, screen_height: u16) void {
     renderInBounds(self, renderer, 0, 0, screen_width, screen_height, true);
@@ -69,7 +49,7 @@ pub fn renderInBounds(
     while (yi < box_height) : (yi += 1) {
         var xi: u16 = 0;
         while (xi < box_width) : (xi += 1) {
-            putChar(renderer, x + xi, y + yi, ' ', toRenderColor(style.fg), toRenderColor(style.bg), false);
+            vaxis_draw.putChar(renderer, x + xi, y + yi, ' ', toRenderColor(style.fg), toRenderColor(style.bg), false);
         }
     }
 
@@ -98,16 +78,16 @@ fn renderTextWithVaxis(renderer: *Renderer, start_x: u16, y: u16, text: []const 
     const width = vaxis.gwidth.gwidth(text, .unicode);
     if (width == 0) return;
 
-    const screen_w = renderer.screenWidth();
-    if (start_x >= screen_w) return;
-    const row = renderer.vx.window().child(.{
-        .x_off = @intCast(start_x),
-        .y_off = @intCast(y),
-        .width = screen_w - start_x,
-        .height = 1,
-    });
+    const win = vaxis_surface.pooledWindow(std.heap.page_allocator, width, 1) catch return;
+
     const seg = vaxis.Segment{ .text = text, .style = toVaxisStyle(style) };
-    _ = row.print(&.{seg}, .{ .row_offset = 0, .col_offset = 0, .wrap = .none, .commit = true });
+    const res = win.print(&.{seg}, .{ .wrap = .none, .commit = true });
+    const end_col = @min(res.col, win.width);
+
+    if (end_col > 0) {
+        const clipped = win.child(.{ .width = end_col, .height = 1 });
+        vaxis_surface.blitWindow(renderer, clipped, start_x, y);
+    }
 }
 
 fn toRenderColor(c: pop.notification.Color) Color {
