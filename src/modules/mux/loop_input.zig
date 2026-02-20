@@ -487,6 +487,13 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 continue;
             }
 
+            // Swallow parser transport/control sequences so they never leak
+            // through to pane stdin as visible CSI text.
+            if (input.parseTransportSequence(inp[i..], state.allocator)) |consumed| {
+                i += consumed;
+                continue;
+            }
+
             // ==========================================================================
             // LEVEL 3: PANE-level popup - blocks only input to that specific pane
             // ==========================================================================

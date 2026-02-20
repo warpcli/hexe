@@ -86,6 +86,38 @@ pub fn parseKeyEvent(input_bytes: []const u8, allocator: std.mem.Allocator) ?Key
     };
 }
 
+/// Consume non-key parser transport/control sequences so they don't leak to pane stdin.
+/// Returns consumed byte count when sequence should be swallowed.
+pub fn parseTransportSequence(input_bytes: []const u8, allocator: std.mem.Allocator) ?usize {
+    if (input_bytes.len == 0) return null;
+    if (input_bytes[0] != 0x1b) return null;
+
+    var parser: vaxis.Parser = .{};
+    const parsed = parser.parse(input_bytes, allocator) catch return null;
+    if (parsed.n == 0) return null;
+
+    if (parsed.event == null) return parsed.n;
+
+    return switch (parsed.event.?) {
+        .paste_start,
+        .paste_end,
+        .focus_in,
+        .focus_out,
+        .winsize,
+        .color_scheme,
+        .cap_kitty_keyboard,
+        .cap_kitty_graphics,
+        .cap_rgb,
+        .cap_unicode,
+        .cap_sgr_pixels,
+        .cap_color_scheme_updates,
+        .cap_multi_cursor,
+        .cap_da1,
+        => parsed.n,
+        else => null,
+    };
+}
+
 pub fn parseScrollEvent(input_bytes: []const u8, allocator: std.mem.Allocator) ?ScrollEvent {
     if (input_bytes.len == 0) return null;
 
