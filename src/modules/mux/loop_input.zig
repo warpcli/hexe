@@ -456,7 +456,8 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
             // Parse key events through libvaxis parser first.
             if (input.parseKeyEvent(inp[i..], state.allocator)) |ev| {
-                const kitty_mode = state.renderer.vx.caps.kitty_keyboard;
+                if (ev.when == .release) state.parser_key_release_seen = true;
+                const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
                 if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, false, kitty_mode)) {
                     i += ev.consumed;
                     continue;
@@ -466,7 +467,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 // If Alt variant didn't match, retry as Ctrl+Alt for ASCII letters.
                 if (ev.mods == 1 and @as(core.Config.BindKeyKind, ev.key) == .char and ev.when == .press) {
                     const ch = ev.key.char;
-                    if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z')) {
+                    if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9')) {
                         if (keybinds.handleKeyEvent(state, ev.mods | 2, ev.key, ev.when, false, kitty_mode)) {
                             i += ev.consumed;
                             continue;
