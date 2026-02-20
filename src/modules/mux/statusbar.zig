@@ -815,7 +815,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                 }
             }
         } else if (std.mem.eql(u8, mod.name, "spinner")) {
-            output_text = spinnerAsciiFrame(ctx.now_ms, ctx.now_ms, 100);
+            output_text = spinnerAsciiFrame(ctx.now_ms, ctx.shell_started_at_ms orelse 0, 100);
         } else if (std.mem.eql(u8, mod.name, "session")) {
             output_text = ctx.session_name;
         } else if (std.mem.eql(u8, mod.name, "randomdo")) {
@@ -874,7 +874,7 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
                 }
             }
         } else if (std.mem.eql(u8, mod.name, "spinner")) {
-            output_text = spinnerAsciiFrame(ctx.now_ms, ctx.now_ms, 100);
+            output_text = spinnerAsciiFrame(ctx.now_ms, ctx.shell_started_at_ms orelse 0, 100);
         } else if (std.mem.eql(u8, mod.name, "session")) {
             output_text = ctx.session_name;
         } else if (std.mem.eql(u8, mod.name, "randomdo")) {
