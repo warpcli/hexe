@@ -1,5 +1,211 @@
 # Changelog
 
+## [0.0.6] - 2026-02-21
+
+### <!-- 0 -->⛰️  Features
+
+- Map virtual kitty placements with clip offsets
+- Prefer unicode width method with explicit-width support
+- Render pinned kitty graphics placements
+- Bridge kitty image placements into vaxis cells
+- Reset mouse shape on mux teardown
+- Map OSC8 hyperlinks into vaxis cell links
+- Reset mouse shape on mouse-leave events
+- Add vaxis-backed clipboard copy action
+- Add vaxis-backed system notification action
+- Add vaxis-backed system clipboard request action
+- Handle in-band winsize and color-scheme updates
+- Use vaxis OSC52 clipboard for mux selections
+- Integrate vaxis mouse shape transitions
+- Add terminal capability diagnostics action
+- Apply capability-gated terminal feature modes
+- Wire vaxis terminal capability detection cycle
+- Parse key events through vaxis parser
+- Start vaxis parser integration for input events
+- Replace renderer output with libvaxis render engine
+- Add ghostty-to-vaxis cell bridge (vt_bridge.zig)
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Always reset in-band resize mode on exit
+- Detect kitty image content changes by hash
+- Preserve grapheme text and links across wide cells
+- Free cached kitty images on pane teardown
+- Hide kitty graphics placeholder glyphs
+- Queue OSC query replies per pane
+- Forward bracketed paste boundary sequences
+- Harden bracketed paste handling across modal paths
+- Forward bracketed paste payloads to focused pane
+- Keep terminal caps notification message owned
+- Expose terminal caps action in Lua API
+- Consume unmapped parser events in input dispatch
+- Consume parser release/report events before forwarding
+- Swallow mid-stream terminal probe replies
+- Clamp float and segment numeric fields from lua
+- Encode enter and control keys via ghostty mapping
+- Parse spinner options in mux add_segment API
+- Swallow title clicks during float rename mode
+- Unify float title geometry for draw and hit-test
+- Sanitize float labels and unstick spinner fallback
+- Strip ansi escape payloads from float labels
+- Preserve shifted parser text in pane forwarding
+- Forward parser text codepoints for char keys
+- Filter terminal probe replies from pane input
+- Restore float label fallback and generic spinner modules
+- Strengthen spinner output and float title rendering
+- Restore float exit key, spinner fallback, and title clipping
+- Restore float binds, spinner fallback, and tab display mapping
+- Swallow modifier-only kitty key transport events
+- Swallow parser control sequences before pane forwarding
+- Filter terminal capability reply noise on startup
+- Enable kitty key timing only after release observed
+- Add ctrl-alt fallback for parser key events
+- Request full kitty keyboard reporting flags
+- Gate parser keybind mode on kitty capability
+- Normalize vaxis key events for bind matching
+- Restore legacy key dispatch for keybind compatibility
+- Restore legacy sgr mouse parser semantics
+- Restore legacy mouse mode for float interactions
+- Make float title editor unicode-aware
+- Make overlay text rendering unicode-aware
+- Render popup text with unicode-aware widths
+- Preserve utf-8 literals in status formats
+- Render float border titles with unicode width
+- Use unicode width for statusbar layout and draw
+- Add frame arena for non-ASCII grapheme encoding in vaxis bridge
+
+### <!-- 2 -->🚜 Refactor
+
+- Unify terminal resize handling for winsize events
+- Track and log detected terminal capabilities
+- Add deterministic terminal capability query lifecycle
+- Remove OSC compatibility interception path
+- Forward OSC queries to terminal without synthetic replies
+- Remove pane-side CSI/DCS query emulation
+- Simplify parser-only input and feature setup
+- Move terminal mode setup fully to vaxis
+- Remove remaining raw input fallbacks
+- Simplify raw keycast fallback parser
+- Prefer parser events for keycast formatting
+- Unify raw query-reply stripping helpers
+- Return first parsed non-query event directly
+- Cache first parsed event after query stripping
+- Extract parser-driven input subloops
+- Fold parser flag updates into event dispatch
+- Reuse first parsed event in input loop
+- Prefer parser events for query-reply stripping
+- Drop unused key event consumed metadata
+- Unify parser-driven pane select and popup dispatch
+- Split key event state machine handlers
+- Extract popup and rename handlers from input loop
+- Clarify osc copy terminator comment
+- Reuse parser head helper in input loop
+- Remove dead loop input imports
+- Avoid reparsing encoded key forwarding bytes
+- Simplify blocked popup helper signature
+- Thread parsed events into pane forwarding
+- Simplify parser-event popup blocking helpers
+- Remove debug trace logging from api bridge
+- Remove raw-byte float exit key matching
+- Remove raw popup byte parser path
+- Require parsed events for blocked popup handling
+- Remove compatibility key mode and always use full events
+- Rename key event mode away from legacy wording
+- Route mux popup blocking through parsed event helper
+- Replace legacy key encoding with ghostty encoder
+- Extract unified parsed event dispatcher
+- Centralize parsed non-key event consumption
+- Centralize parsed key dispatch in input loop
+- Simplify tab popup parsed-event gating
+- Unify focused pane popup and forwarding path
+- Avoid reparsing popup bytes when event already parsed
+- Reuse parser events across blocked popup handlers
+- Reuse parsed events for pane popup input
+- Reuse parsed popup events in tab popup mode
+- Handle mouse input directly as vaxis events
+- Simplify parser mouse event conversion
+- Dispatch mux input from single parser pass
+- Remove obsolete scroll parse wrapper
+- Derive scroll actions from parsed vaxis events
+- Expose vaxis event helpers for key and scroll
+- Remove pooled surface layer from borders
+- Trim unused vaxis surface helpers
+- Draw split borders directly on renderer
+- Move surface threadlocal cleanup into main
+- Print statusbar text directly with vaxis window
+- Remove remaining float title draw shim
+- Drop draw shim in borders and statusbar clear
+- Remove popup vaxis draw shim usage
+- Move popup overlay and notifications to direct vaxis draws
+- Draw statusbar text directly on vaxis row
+- Route parser transport and mouse handling through loop input
+- Inline frame and pane render orchestration
+- Parse mux input in single vaxis pass
+- Route parser transport and mouse handling through loop input
+- Inline frame and pane render orchestration
+- Remove vaxis surface shims and fix parser text forwarding
+- Remove vaxis color adapter and use core style colors
+- Remove remaining render type bridges and style adapters
+- Drop unused style-color conversion in render types
+- Remove legacy render Cell compatibility types
+- Remove render cell bridge and legacy setCell API
+- Route remaining ui primitives through vaxis cell writes
+- Render sprite overlay using vaxis cells
+- Operate overlay and selection on vaxis cells
+- Blit vaxis cells directly into renderer
+- Remove CellBuffer path and render directly with vaxis
+- Remove render facade module and stale references
+- Remove render facade imports across mux modules
+- Migrate ui modules to shared render color type
+- Hide direct next-buffer access behind renderer api
+- Turn render module into facade
+- Decouple style and cell helpers from render module
+- Extract vaxis frame lifecycle helpers
+- Extract render-state blit from renderer core
+- Extract render cell and buffer types
+- Extract render-to-vaxis bridge helpers
+- Split sprite rendering out of render core
+- Add core style conversions for vaxis
+- Remove legacy pane-input sanitization layer
+- Handle ctrl-q quit through parser key path
+- Use parser key events for tab-popup tab switching
+- Parse popup keys through vaxis parser
+- Remove legacy escape-sequence key compatibility path
+- Decode mouse events through vaxis parser
+- Route statusbar text through pooled vaxis window
+- Share render-to-shp style conversion helpers
+- Pool temporary vaxis surfaces across modules
+- Add shared unicode screen initialization helper
+- Share temporary vaxis screen blit helpers
+- Centralize grapheme width clipping helper
+- Dedupe vaxis cell conversion helpers
+- Route split border cells through vaxis window
+- Switch mux mouse mode setup to vaxis api
+- Render floating border frame via vaxis
+- Draw popup frames using vaxis window borders
+- Preserve colors in overlay dim effect
+- Render notifications via vaxis print
+- Render statusbar text via vaxis print
+- Remove legacy csi-u input module
+- Route paste and mouse parsing through vaxis
+- Use vaxis helpers for terminal mode setup
+- Remove winpulse feature entirely
+
+### <!-- 3 -->📚 Documentation
+
+- Update keybinding documentation
+- Update and expand documentation for Hexa
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Refactor release workflow to use dedicated jobs
+- Remove stale input migration comment
+
+### Build
+
+- Require libvaxis and drop caps diagnostics action
+- Add libvaxis dependency to mux module
+
 ## [0.0.4] - 2026-02-20
 
 ### <!-- 0 -->⛰️  Features
