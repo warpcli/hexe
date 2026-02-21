@@ -632,6 +632,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
 
     if (state.floats.items.len > 0) {
         state.syncPaneFocus(state.floats.items[state.floats.items.len - 1], old_uuid);
+        state.drop_next_input_batch = true;
     }
     state.needs_render = true;
 

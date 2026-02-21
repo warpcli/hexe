@@ -192,6 +192,9 @@ pub const State = struct {
     terminal_caps_ready: bool = false,
     terminal_query_timed_out: bool = false,
 
+    // Drop one stdin batch after focus handoff to a newly spawned float.
+    drop_next_input_batch: bool = false,
+
     pending_float_requests: std.AutoHashMap([32]u8, PendingFloatRequest),
 
     mouse_selection: mouse_selection.MouseSelection,
@@ -332,6 +335,7 @@ pub const State = struct {
             .terminal_query_deadline_ms = 0,
             .terminal_caps_ready = false,
             .terminal_query_timed_out = false,
+            .drop_next_input_batch = false,
 
             .pending_float_requests = std.AutoHashMap([32]u8, PendingFloatRequest).init(allocator),
 

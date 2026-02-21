@@ -475,6 +475,15 @@ fn dispatchParsedEvent(state: *State, parsed: anytype) ParsedDispatchResult {
         }
     }
 
+    // If libvaxis decoded a key press that doesn't map to local BindKey
+    // (for example PageUp/PageDown/Home/End/function keys), forward the
+    // original bytes to the focused pane unchanged.
+    switch (ev) {
+        .key_press => return .{ .consumed = false, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n },
+        .key_release => return .{ .consumed = true, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n },
+        else => {},
+    }
+
     if (handleParsedNonKeyEvent(state, ev)) {
         return .{ .consumed = true, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n };
     }
@@ -540,6 +549,7 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
     var i: usize = 0;
     while (i < inp.len) {
         var parsed_event_for_popup: ?vaxis.Event = null;
+        var forward_bytes: ?[]const u8 = null;
 
         // Parse once through libvaxis and dispatch key/scroll/mouse/control.
         const parsed = firstOrParseAt(state, inp, i, first_parsed);
@@ -559,6 +569,8 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
                 i += dispatch.consumed_bytes;
                 continue;
             }
+
+            forward_bytes = inp[i .. i + res.n];
         } else {
             // Parser-first policy: never forward undecoded bytes.
             // Keep rename mode isolated and drop unknown bytes in normal mode.
@@ -581,7 +593,9 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
                 pane.scrollToBottom();
                 state.needs_render = true;
             }
-            forwardSanitizedToFocusedPane(state, inp[i..], parsed_event_for_popup);
+            if (forward_bytes) |bytes| {
+                forwardSanitizedToFocusedPane(state, bytes, parsed_event_for_popup);
+            }
         }
         return;
     }
@@ -627,6 +641,13 @@ fn harvestPendingOscReplies(state: *State) void {
 
 pub fn handleInput(state: *State, input_bytes: []const u8) void {
     if (input_bytes.len == 0) return;
+
+    if (state.drop_next_input_batch) {
+        state.drop_next_input_batch = false;
+        state.stdin_tail_len = 0;
+        vaxis_parser = .{};
+        return;
+    }
 
     // Stdin reads can split escape sequences. Merge with any pending tail first.
     const merged_res = mergeStdinTail(state, input_bytes);
