@@ -434,6 +434,9 @@ pub fn runMainLoop(state: *State) !void {
                 pane.vt.freeCachedKittyImages(&state.renderer.vx, &tty_restore.interface);
             }
         }
+        // Ensure in-band resize mode is reset even if vaxis internal state
+        // tracking missed setting it during capability query setup.
+        tty_restore.interface.writeAll("\x1b[?2048l") catch {};
         loop_mouse.resetShape(state);
         state.renderer.vx.resetState(&tty_restore.interface) catch {};
         tty_restore.interface.flush() catch {};
