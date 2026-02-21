@@ -185,6 +185,10 @@ pub const State = struct {
     // Track bracketed paste mode to suppress keycast during paste
     in_bracketed_paste: bool = false,
 
+    // Terminal capability query lifecycle for custom event loop mode.
+    terminal_query_in_flight: bool = false,
+    terminal_query_deadline_ms: i64 = 0,
+
     pending_float_requests: std.AutoHashMap([32]u8, PendingFloatRequest),
 
     mouse_selection: mouse_selection.MouseSelection,
@@ -319,6 +323,9 @@ pub const State = struct {
             .osc_reply_buf = .empty,
             .osc_reply_in_progress = false,
             .osc_reply_prev_esc = false,
+
+            .terminal_query_in_flight = false,
+            .terminal_query_deadline_ms = 0,
 
             .pending_float_requests = std.AutoHashMap([32]u8, PendingFloatRequest).init(allocator),
 

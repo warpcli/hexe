@@ -27,6 +27,26 @@ const LoopTimerContext = struct {
     heartbeat_interval: i64,
 };
 
+const TERMINAL_QUERY_TIMEOUT_MS: i64 = 1200;
+
+fn finalizeTerminalQueryIfReady(state: *State, now_ms: i64) void {
+    if (!state.terminal_query_in_flight) return;
+
+    const query_done = state.renderer.vx.queries_done.load(.unordered);
+    const timed_out = now_ms >= state.terminal_query_deadline_ms;
+    if (!query_done and !timed_out) return;
+
+    const stdout = std.fs.File.stdout();
+    var tty_buf: [1024]u8 = undefined;
+    var tty = stdout.writer(&tty_buf);
+    state.renderer.vx.enableDetectedFeatures(&tty.interface) catch {};
+    tty.interface.flush() catch {};
+
+    state.renderer.vx.queries_done.store(true, .unordered);
+    state.terminal_query_in_flight = false;
+    state.terminal_query_deadline_ms = 0;
+}
+
 fn loopTimerCallback(
     ctx: ?*LoopTimerContext,
     _: *xev.Loop,
@@ -333,9 +353,18 @@ pub fn runMainLoop(state: *State) !void {
     try state.renderer.vx.enterAltScreen(&tty_init.interface);
     try state.renderer.vx.setBracketedPaste(&tty_init.interface, true);
     try state.renderer.vx.setMouseMode(&tty_init.interface, true);
-    // Keep kitty keyboard enabled even without capability probe replies.
+    // Keep kitty keyboard available as baseline while capability probing runs.
     state.renderer.vx.caps.kitty_keyboard = true;
-    try state.renderer.vx.enableDetectedFeatures(&tty_init.interface);
+    state.renderer.vx.queryTerminalSend(&tty_init.interface) catch {
+        try state.renderer.vx.enableDetectedFeatures(&tty_init.interface);
+        state.renderer.vx.queries_done.store(true, .unordered);
+        state.terminal_query_in_flight = false;
+        state.terminal_query_deadline_ms = 0;
+    };
+    if (!state.renderer.vx.queries_done.load(.unordered)) {
+        state.terminal_query_in_flight = true;
+        state.terminal_query_deadline_ms = std.time.milliTimestamp() + TERMINAL_QUERY_TIMEOUT_MS;
+    }
     try tty_init.interface.flush();
     defer {
         var tty_restore_buf: [512]u8 = undefined;
@@ -490,6 +519,8 @@ pub fn runMainLoop(state: *State) !void {
 
         // Clear skip flag from previous iteration.
         state.skip_dead_check = false;
+
+        finalizeTerminalQueryIfReady(state, std.time.milliTimestamp());
 
         // Check for terminal resize.
         {
