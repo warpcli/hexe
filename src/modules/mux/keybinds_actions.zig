@@ -55,6 +55,30 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             actions.enterPaneSelectMode(state, false);
             return true;
         },
+        .terminal_caps_show => {
+            const caps = state.renderer.vx.caps;
+            var buf: [256]u8 = undefined;
+            const msg = std.fmt.bufPrint(
+                &buf,
+                "caps: kk={} kg={} rgb={} uni={s} px={} csu={} mc={} ew={} st={} ready={} timeout={}",
+                .{
+                    caps.kitty_keyboard,
+                    caps.kitty_graphics,
+                    caps.rgb,
+                    @tagName(caps.unicode),
+                    caps.sgr_pixels,
+                    caps.color_scheme_updates,
+                    caps.multi_cursor,
+                    caps.explicit_width,
+                    caps.scaled_text,
+                    state.terminal_caps_ready,
+                    state.terminal_query_timed_out,
+                },
+            ) catch "caps: unavailable";
+            state.notifications.showFor(msg, 2500);
+            state.needs_render = true;
+            return true;
+        },
         .keycast_toggle => {
             state.overlays.toggleKeycast();
             state.needs_render = true;
