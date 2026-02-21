@@ -188,6 +188,8 @@ pub const State = struct {
     // Terminal capability query lifecycle for custom event loop mode.
     terminal_query_in_flight: bool = false,
     terminal_query_deadline_ms: i64 = 0,
+    terminal_caps_ready: bool = false,
+    terminal_query_timed_out: bool = false,
 
     pending_float_requests: std.AutoHashMap([32]u8, PendingFloatRequest),
 
@@ -326,6 +328,8 @@ pub const State = struct {
 
             .terminal_query_in_flight = false,
             .terminal_query_deadline_ms = 0,
+            .terminal_caps_ready = false,
+            .terminal_query_timed_out = false,
 
             .pending_float_requests = std.AutoHashMap([32]u8, PendingFloatRequest).init(allocator),
 

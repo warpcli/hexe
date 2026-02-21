@@ -32,8 +32,20 @@ fn parseEventHead(state: *State, bytes: []const u8) ?ParsedEventHead {
     return .{ .n = parsed.n, .event = parsed.event };
 }
 
+fn applyQueryProbeKeyFlags(state: *State, key: vaxis.Key) void {
+    if (!state.terminal_query_in_flight) return;
+    if (key.codepoint != vaxis.Key.f3) return;
+
+    // libvaxis probe path encodes explicit-width and scaled-text detection via
+    // modified F3 key parses while query mode is active.
+    if (key.mods.shift) state.renderer.vx.caps.explicit_width = true;
+    if (key.mods.alt) state.renderer.vx.caps.scaled_text = true;
+}
+
 fn applyInputFlagsForEvent(state: *State, event: vaxis.Event) void {
     switch (event) {
+        .key_press => |k| applyQueryProbeKeyFlags(state, k),
+        .key_release => |k| applyQueryProbeKeyFlags(state, k),
         .paste_start => state.in_bracketed_paste = true,
         .paste_end => state.in_bracketed_paste = false,
         .cap_kitty_keyboard => state.renderer.vx.caps.kitty_keyboard = true,

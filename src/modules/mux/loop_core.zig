@@ -29,6 +29,25 @@ const LoopTimerContext = struct {
 
 const TERMINAL_QUERY_TIMEOUT_MS: i64 = 1200;
 
+fn logTerminalCapabilities(state: *State, timed_out: bool) void {
+    const caps = state.renderer.vx.caps;
+    mux.debugLog(
+        "terminal caps: kitty_keyboard={} kitty_graphics={} rgb={} unicode={s} sgr_pixels={} color_updates={} multi_cursor={} explicit_width={} scaled_text={} timeout={}",
+        .{
+            caps.kitty_keyboard,
+            caps.kitty_graphics,
+            caps.rgb,
+            @tagName(caps.unicode),
+            caps.sgr_pixels,
+            caps.color_scheme_updates,
+            caps.multi_cursor,
+            caps.explicit_width,
+            caps.scaled_text,
+            timed_out,
+        },
+    );
+}
+
 fn finalizeTerminalQueryIfReady(state: *State, now_ms: i64) void {
     if (!state.terminal_query_in_flight) return;
 
@@ -45,6 +64,9 @@ fn finalizeTerminalQueryIfReady(state: *State, now_ms: i64) void {
     state.renderer.vx.queries_done.store(true, .unordered);
     state.terminal_query_in_flight = false;
     state.terminal_query_deadline_ms = 0;
+    state.terminal_caps_ready = true;
+    state.terminal_query_timed_out = timed_out;
+    logTerminalCapabilities(state, timed_out);
 }
 
 fn loopTimerCallback(
@@ -360,6 +382,9 @@ pub fn runMainLoop(state: *State) !void {
         state.renderer.vx.queries_done.store(true, .unordered);
         state.terminal_query_in_flight = false;
         state.terminal_query_deadline_ms = 0;
+        state.terminal_caps_ready = true;
+        state.terminal_query_timed_out = true;
+        logTerminalCapabilities(state, true);
     };
     if (!state.renderer.vx.queries_done.load(.unordered)) {
         state.terminal_query_in_flight = true;
