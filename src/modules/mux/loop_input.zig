@@ -175,7 +175,9 @@ fn consumeLeadingTerminalQueryReplies(state: *State, inp: []const u8) QueryReply
     while (i < inp.len) {
         const parsed = parseEventHead(state, inp[i..]) orelse break;
         const event = parsed.event orelse return .{ .bytes = inp[i..], .first_parsed = parsed };
-        if (!isTerminalQueryReplyEvent(event)) break;
+        if (!isTerminalQueryReplyEvent(event)) {
+            return .{ .bytes = inp[i..], .first_parsed = parsed };
+        }
         applyInputFlagsForEvent(state, event);
         i += parsed.n;
     }
