@@ -77,5 +77,6 @@ Then Ghostty came out. Saw what Mitchell was doing with Zig and decided to start
 - [ghostty-vt](https://github.com/ghostty-org/ghostty) — terminal emulation
 - [libvaxis](https://github.com/rockorager/libvaxis) — TUI rendering
 - [libxev](https://github.com/mitchellh/libxev) — event loop
+- [yazap](https://github.com/PrajwalCH/yazap) — CLI argument parser
 - [voidbox](https://github.com/bresilla/voidbox) — process isolation
 - [krabby](https://github.com/yannjor/krabby) — Pokemon sprites

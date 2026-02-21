@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.0.11] - 2026-02-21
+
+### <!-- 0 -->⛰️  Features
+
+- Add basic CLI help output
+- Refactor popup handlers into dedicated module
+- Migrate CLI argument parsing to Yazap
+
 ## [0.0.10] - 2026-02-21
 
 ### <!-- 7 -->⚙️ Miscellaneous Tasks
