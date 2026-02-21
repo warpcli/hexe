@@ -22,6 +22,19 @@ const Backend = union(enum) {
     },
 };
 
+const DcsQueryState = enum {
+    idle,
+    esc,
+    dcs,
+    dcs_esc,
+};
+
+const CsiQueryState = enum {
+    idle,
+    esc,
+    csi,
+};
+
 /// A Pane is a ghostty VT that receives bytes via the SES VT channel
 /// (pod-backed, persistent scrollback).
 pub const Pane = struct {
@@ -104,6 +117,16 @@ pub const Pane = struct {
     osc_pending_esc: bool = false,
     osc_prev_esc: bool = false,
     osc_expected_responses: u16 = 0,
+
+    // Pane-local DCS query capture (DECRQSS support)
+    dcs_query_state: DcsQueryState = .idle,
+    dcs_query_buf: [128]u8 = undefined,
+    dcs_query_len: u8 = 0,
+
+    // Pane-local CSI query capture (CPR support)
+    csi_query_state: CsiQueryState = .idle,
+    csi_query_buf: [32]u8 = undefined,
+    csi_query_len: u8 = 0,
 
     // Pane-local notifications (PANE realm - renders at bottom of pane)
     notifications: NotificationManager = undefined,
@@ -300,6 +323,10 @@ pub const Pane = struct {
         self.osc_pending_esc = false;
         self.osc_prev_esc = false;
         self.osc_buf.clearRetainingCapacity();
+        self.dcs_query_state = .idle;
+        self.dcs_query_len = 0;
+        self.csi_query_state = .idle;
+        self.csi_query_len = 0;
 
         self.sendResizeToPod(self.width, self.height);
     }
@@ -328,6 +355,10 @@ pub const Pane = struct {
                 self.osc_pending_esc = false;
                 self.osc_prev_esc = false;
                 self.osc_buf.clearRetainingCapacity();
+                self.dcs_query_state = .idle;
+                self.dcs_query_len = 0;
+                self.csi_query_state = .idle;
+                self.csi_query_len = 0;
             },
             .pod => return error.NotLocalPane,
         }

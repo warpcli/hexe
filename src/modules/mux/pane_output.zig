@@ -8,6 +8,8 @@ pub fn processOutput(self: *Pane, data: []const u8) void {
     if (self.capture_output) {
         pane_capture.appendCapturedOutput(self, data);
     }
+    handleCsiQueries(self, data);
+    handleDcsQueries(self, data);
     forwardOsc(self, data);
 
     if (containsClearSeq(self.esc_tail[0..self.esc_tail_len], data)) {
@@ -19,6 +21,134 @@ pub fn processOutput(self: *Pane, data: []const u8) void {
         @memcpy(self.esc_tail[0..take], data[data.len - take .. data.len]);
         self.esc_tail_len = @intCast(take);
     }
+}
+
+fn handleCsiQueries(self: *Pane, data: []const u8) void {
+    const ESC: u8 = 0x1b;
+
+    for (data) |b| {
+        switch (self.csi_query_state) {
+            .idle => {
+                if (b == ESC) self.csi_query_state = .esc;
+            },
+            .esc => {
+                if (b == '[') {
+                    self.csi_query_state = .csi;
+                    self.csi_query_len = 0;
+                } else {
+                    self.csi_query_state = .idle;
+                }
+            },
+            .csi => {
+                if (b >= 0x40 and b <= 0x7e) {
+                    handleCsiQueryFinal(self, b, self.csi_query_buf[0..self.csi_query_len]);
+                    self.csi_query_state = .idle;
+                    self.csi_query_len = 0;
+                } else if (self.csi_query_len < self.csi_query_buf.len) {
+                    self.csi_query_buf[self.csi_query_len] = b;
+                    self.csi_query_len += 1;
+                } else {
+                    self.csi_query_state = .idle;
+                    self.csi_query_len = 0;
+                }
+            },
+        }
+    }
+}
+
+fn handleCsiQueryFinal(self: *Pane, final: u8, params: []const u8) void {
+    // Minimal CPR compatibility: CSI 6n -> CSI {row};{col}R
+    if (final != 'n') return;
+
+    var p = params;
+    if (p.len > 0 and p[0] == '?') p = p[1..];
+    if (!std.mem.eql(u8, p, "6")) return;
+
+    const cursor = self.vt.getCursor();
+    var buf: [32]u8 = undefined;
+    const row: u16 = cursor.y + 1;
+    const col: u16 = cursor.x + 1;
+    const resp = std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{ row, col }) catch return;
+    self.write(resp) catch {};
+}
+
+fn handleDcsQueries(self: *Pane, data: []const u8) void {
+    const ESC: u8 = 0x1b;
+
+    for (data) |b| {
+        switch (self.dcs_query_state) {
+            .idle => {
+                if (b == ESC) self.dcs_query_state = .esc;
+            },
+            .esc => {
+                if (b == 'P') {
+                    self.dcs_query_state = .dcs;
+                    self.dcs_query_len = 0;
+                } else {
+                    self.dcs_query_state = .idle;
+                }
+            },
+            .dcs => {
+                if (b == ESC) {
+                    self.dcs_query_state = .dcs_esc;
+                } else if (self.dcs_query_len < self.dcs_query_buf.len) {
+                    self.dcs_query_buf[self.dcs_query_len] = b;
+                    self.dcs_query_len += 1;
+                } else {
+                    self.dcs_query_state = .idle;
+                    self.dcs_query_len = 0;
+                }
+            },
+            .dcs_esc => {
+                if (b == '\\') {
+                    handleDcsQuery(self, self.dcs_query_buf[0..self.dcs_query_len]);
+                    self.dcs_query_state = .idle;
+                    self.dcs_query_len = 0;
+                } else if (self.dcs_query_len + 2 <= self.dcs_query_buf.len) {
+                    self.dcs_query_buf[self.dcs_query_len] = ESC;
+                    self.dcs_query_len += 1;
+                    self.dcs_query_buf[self.dcs_query_len] = b;
+                    self.dcs_query_len += 1;
+                    self.dcs_query_state = .dcs;
+                } else {
+                    self.dcs_query_state = .idle;
+                    self.dcs_query_len = 0;
+                }
+            },
+        }
+    }
+}
+
+fn handleDcsQuery(self: *Pane, payload: []const u8) void {
+    // DECRQSS: DCS $ q <request> ST
+    if (!std.mem.startsWith(u8, payload, "$q")) return;
+    const req = payload[2..];
+
+    // SGR request
+    if (std.mem.eql(u8, req, "m")) {
+        self.write("\x1bP1$r0m\x1b\\") catch {};
+        return;
+    }
+
+    // DECSCUSR request (SP q)
+    if (std.mem.eql(u8, req, " q")) {
+        const style = self.vt.getCursorStyle();
+        var buf: [64]u8 = undefined;
+        const resp = std.fmt.bufPrint(&buf, "\x1bP1$r {d} q\x1b\\", .{style}) catch return;
+        self.write(resp) catch {};
+        return;
+    }
+
+    // DECSTBM request
+    if (std.mem.eql(u8, req, "r")) {
+        var buf: [64]u8 = undefined;
+        const resp = std.fmt.bufPrint(&buf, "\x1bP1$r1;{d}r\x1b\\", .{self.height}) catch return;
+        self.write(resp) catch {};
+        return;
+    }
+
+    // Invalid/unavailable request
+    self.write("\x1bP0$r\x1b\\") catch {};
 }
 
 fn forwardOsc(self: *Pane, data: []const u8) void {
