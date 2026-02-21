@@ -202,8 +202,7 @@ fn handleParsedScrollAction(state: *State, action: input.ScrollAction) bool {
     return true;
 }
 
-fn handleBlockedPopupInput(popups: anytype, bytes: []const u8, parsed_event: ?vaxis.Event) bool {
-    _ = bytes;
+fn handleBlockedPopupInput(popups: anytype, parsed_event: ?vaxis.Event) bool {
     if (parsed_event) |ev| {
         // Reuse already parsed event and avoid reparsing raw bytes.
         return input.handlePopupEvent(popups, ev);
@@ -358,7 +357,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
             else
                 null;
 
-            if (handleBlockedPopupInput(&state.popups, inp, parsed_mux_event)) {
+            if (handleBlockedPopupInput(&state.popups, parsed_mux_event)) {
                 // Check if this was a confirm/picker dialog for pending action
                 if (state.pending_action) |action| {
                     switch (action) {
@@ -463,7 +462,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 }
             }
             // Block everything else - handle popup input.
-            if (handleBlockedPopupInput(&current_tab.popups, inp, parsed_tab_event)) {
+            if (handleBlockedPopupInput(&current_tab.popups, parsed_tab_event)) {
                 loop_ipc.sendPopResponse(state);
             }
             state.needs_render = true;
@@ -552,7 +551,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
             // ======================================================================
             if (resolveFocusedPaneForInput(state)) |pane| {
                 if (pane.popups.isBlocked()) {
-                    if (handleBlockedPopupInput(&pane.popups, inp[i..], parsed_event_for_popup)) {
+                    if (handleBlockedPopupInput(&pane.popups, parsed_event_for_popup)) {
                         loop_ipc.sendPopResponse(state);
                     }
                     state.needs_render = true;

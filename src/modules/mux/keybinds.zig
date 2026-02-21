@@ -18,20 +18,30 @@ pub const BindAction = core.Config.BindAction;
 const PaneQuery = core.PaneQuery;
 const FocusContext = @import("state.zig").FocusContext;
 
-pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
+fn parsedEventFromBytes(state: *State, bytes: []const u8) ?vaxis.Event {
     var parser: vaxis.Parser = .{};
-    const parsed_event: ?vaxis.Event = blk: {
-        const parsed = parser.parse(bytes, state.allocator) catch break :blk null;
-        if (parsed.n == 0) break :blk null;
-        break :blk parsed.event;
-    };
+    const parsed = parser.parse(bytes, state.allocator) catch return null;
+    if (parsed.n == 0) return null;
+    return parsed.event;
+}
+
+fn handleBlockedPopup(state: *State, popups: anytype, parsed_event: ?vaxis.Event) bool {
+    _ = state;
+    if (parsed_event) |ev| {
+        return input.handlePopupEvent(popups, ev);
+    }
+    return false;
+}
+
+pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
+    const parsed_event = parsedEventFromBytes(state, bytes);
 
     if (state.active_floating) |idx| {
         const fpane = state.floats.items[idx];
         const can_interact = if (fpane.parent_tab) |parent| parent == state.active_tab else true;
         if (fpane.isVisibleOnTab(state.active_tab) and can_interact) {
             if (fpane.popups.isBlocked()) {
-                if (parsed_event != null and input.handlePopupEvent(&fpane.popups, parsed_event.?)) {
+                if (handleBlockedPopup(state, &fpane.popups, parsed_event)) {
                     loop_ipc.sendPopResponse(state);
                 }
                 state.needs_render = true;
@@ -48,7 +58,7 @@ pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
 
     if (state.currentLayout().getFocusedPane()) |pane| {
         if (pane.popups.isBlocked()) {
-            if (parsed_event != null and input.handlePopupEvent(&pane.popups, parsed_event.?)) {
+            if (handleBlockedPopup(state, &pane.popups, parsed_event)) {
                 loop_ipc.sendPopResponse(state);
             }
             state.needs_render = true;
