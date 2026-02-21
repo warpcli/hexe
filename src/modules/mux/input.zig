@@ -47,7 +47,6 @@ pub const MouseEvent = struct {
     x: u16,
     y: u16,
     is_release: bool,
-    consumed: usize,
 };
 
 pub const KeyEvent = struct {
@@ -169,7 +168,7 @@ fn vaxisKeyToBindKey(vk: vaxis.Key, mods_inout: *u8) ?core.Config.BindKey {
     };
 }
 
-pub fn mouseEventFromVaxis(mouse: vaxis.Mouse, consumed: usize) MouseEvent {
+pub fn mouseEventFromVaxis(mouse: vaxis.Mouse) MouseEvent {
     var btn: u16 = switch (mouse.button) {
         .left => 0,
         .middle => 1,
@@ -199,6 +198,5 @@ pub fn mouseEventFromVaxis(mouse: vaxis.Mouse, consumed: usize) MouseEvent {
         .x = x,
         .y = y,
         .is_release = mouse.type == .release,
-        .consumed = consumed,
     };
 }
