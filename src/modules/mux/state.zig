@@ -172,6 +172,7 @@ pub const State = struct {
     state_version: u32 = 0,
 
     osc_reply_target_uuid: ?[32]u8,
+    osc_reply_targets: std.ArrayList([32]u8),
     osc_reply_buf: std.ArrayList(u8),
     osc_reply_in_progress: bool,
     osc_reply_prev_esc: bool,
@@ -322,6 +323,7 @@ pub const State = struct {
             .session_name_owned = null,
 
             .osc_reply_target_uuid = null,
+            .osc_reply_targets = .empty,
             .osc_reply_buf = .empty,
             .osc_reply_in_progress = false,
             .osc_reply_prev_esc = false,
@@ -464,6 +466,7 @@ pub const State = struct {
         self.config.deinit();
         var ses_cfg = self.ses_config;
         ses_cfg.deinit(self.allocator);
+        self.osc_reply_targets.deinit(self.allocator);
         self.osc_reply_buf.deinit(self.allocator);
         self.renderer.deinit();
         self.ses_client.deinit();
@@ -482,6 +485,23 @@ pub const State = struct {
         if (self.session_name_owned) |owned| {
             self.allocator.free(owned);
         }
+    }
+
+    pub fn enqueueOscReplyTarget(self: *State, uuid: [32]u8) void {
+        for (self.osc_reply_targets.items) |queued| {
+            if (std.mem.eql(u8, &queued, &uuid)) return;
+        }
+        if (self.osc_reply_target_uuid) |active| {
+            if (std.mem.eql(u8, &active, &uuid)) return;
+        }
+        self.osc_reply_targets.append(self.allocator, uuid) catch {};
+    }
+
+    pub fn dequeueOscReplyTarget(self: *State) ?[32]u8 {
+        if (self.osc_reply_targets.items.len == 0) return null;
+        const next = self.osc_reply_targets.items[0];
+        _ = self.osc_reply_targets.orderedRemove(0);
+        return next;
     }
 
     pub const PendingKeyTimerKind = enum { delayed_press, tap_pending, hold, hold_fired, repeat_wait, repeat_active, repeat_locked };

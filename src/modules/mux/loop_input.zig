@@ -651,55 +651,65 @@ pub fn switchToTab(state: *State, new_tab: usize) void {
 }
 
 fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) []const u8 {
-    // Only do work if we previously forwarded a query.
-    if (state.osc_reply_target_uuid == null and !state.osc_reply_in_progress) return inp;
+    if (inp.len == 0) return inp;
 
     const ESC: u8 = 0x1b;
     const BEL: u8 = 0x07;
 
-    // Start capture only if the input begins with an OSC response.
-    if (!state.osc_reply_in_progress) {
-        if (inp.len < 2 or inp[0] != ESC or inp[1] != ']') return inp;
-        state.osc_reply_in_progress = true;
-        state.osc_reply_prev_esc = false;
-        state.osc_reply_buf.clearRetainingCapacity();
-    }
+    var rem = inp;
+    while (rem.len > 0) {
+        if (!state.osc_reply_in_progress and state.osc_reply_targets.items.len == 0) break;
 
-    var i: usize = 0;
-    while (i < inp.len) : (i += 1) {
-        const b = inp[i];
-        state.osc_reply_buf.append(state.allocator, b) catch {
-            // Drop on allocation error.
-            clearOscReplyCapture(state);
-            return inp[i + 1 ..];
-        };
-
-        var done = false;
-        if (b == BEL) {
-            done = true;
-        } else if (state.osc_reply_prev_esc and b == '\\') {
-            done = true;
-        }
-        state.osc_reply_prev_esc = (b == ESC);
-
-        if (state.osc_reply_buf.items.len > 64 * 1024) {
-            clearOscReplyCapture(state);
-            return inp[i + 1 ..];
+        if (!state.osc_reply_in_progress) {
+            // Consume only head-aligned OSC replies.
+            if (rem.len < 2 or rem[0] != ESC or rem[1] != ']') break;
+            state.osc_reply_target_uuid = state.dequeueOscReplyTarget();
+            state.osc_reply_in_progress = true;
+            state.osc_reply_prev_esc = false;
+            state.osc_reply_buf.clearRetainingCapacity();
         }
 
-        if (done) {
-            if (state.osc_reply_target_uuid) |uuid| {
-                if (state.findPaneByUuid(uuid)) |pane| {
-                    pane.write(state.osc_reply_buf.items) catch {};
-                }
+        var i: usize = 0;
+        while (i < rem.len) : (i += 1) {
+            const b = rem[i];
+            state.osc_reply_buf.append(state.allocator, b) catch {
+                clearOscReplyCapture(state);
+                rem = rem[i + 1 ..];
+                break;
+            };
+
+            var done = false;
+            if (b == BEL) {
+                done = true;
+            } else if (state.osc_reply_prev_esc and b == '\\') {
+                done = true;
+            }
+            state.osc_reply_prev_esc = (b == ESC);
+
+            if (state.osc_reply_buf.items.len > 64 * 1024) {
+                clearOscReplyCapture(state);
+                rem = rem[i + 1 ..];
+                break;
             }
 
-            clearOscReplyCapture(state);
+            if (done) {
+                if (state.osc_reply_target_uuid) |uuid| {
+                    if (state.findPaneByUuid(uuid)) |pane| {
+                        pane.write(state.osc_reply_buf.items) catch {};
+                    }
+                }
 
-            return inp[i + 1 ..];
+                clearOscReplyCapture(state);
+                rem = rem[i + 1 ..];
+                break;
+            }
+        }
+
+        if (state.osc_reply_in_progress) {
+            // Consumed all currently available bytes as partial OSC response.
+            return &[_]u8{};
         }
     }
 
-    // Consumed everything into the pending reply buffer.
-    return &[_]u8{};
+    return rem;
 }
