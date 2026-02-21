@@ -1,8 +1,12 @@
 const std = @import("std");
 const core = @import("core");
+const vaxis = @import("vaxis");
 
 const State = @import("state.zig").State;
+const input = @import("input.zig");
 const actions = @import("loop_actions.zig");
+
+var keycast_parser: vaxis.Parser = .{};
 
 /// Parsed exit key with modifiers.
 const ParsedExitKey = struct {
@@ -23,6 +27,25 @@ pub fn recordKeycastInput(state: *State, inp: []const u8) void {
 
     var i: usize = 0;
     while (i < inp.len) {
+        const parsed = keycast_parser.parse(inp[i..], state.allocator) catch null;
+        if (parsed) |res| {
+            if (res.n == 0) break;
+            if (res.event) |ev_raw| {
+                if (input.keyEventFromVaxisEvent(ev_raw)) |ev| {
+                    if (ev.when == .press) {
+                        var event_buf: [32]u8 = undefined;
+                        const event_text = formatKeycastEvent(ev, &event_buf);
+                        if (event_text.len > 0) {
+                            state.overlays.recordKeypress(event_text);
+                            state.needs_render = true;
+                        }
+                    }
+                }
+            }
+            i += res.n;
+            continue;
+        }
+
         var buf: [32]u8 = undefined;
         const result = formatKeycastInput(inp[i..], &buf);
         if (result.text.len > 0) {
@@ -32,6 +55,40 @@ pub fn recordKeycastInput(state: *State, inp: []const u8) void {
         if (result.consumed == 0) break;
         i += result.consumed;
     }
+}
+
+fn formatKeycastEvent(ev: input.KeyEvent, buf: *[32]u8) []const u8 {
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+
+    if (ev.mods & 2 != 0) writer.writeAll("C-") catch {};
+    if (ev.mods & 1 != 0) writer.writeAll("A-") catch {};
+
+    switch (@as(core.Config.BindKeyKind, ev.key)) {
+        .up => writer.writeAll("Up") catch {},
+        .down => writer.writeAll("Down") catch {},
+        .left => writer.writeAll("Left") catch {},
+        .right => writer.writeAll("Right") catch {},
+        .space => writer.writeAll("Space") catch {},
+        .char => {
+            const ch = ev.key.char;
+            switch (ch) {
+                '\r' => writer.writeAll("Enter") catch {},
+                '\t' => writer.writeAll("Tab") catch {},
+                0x7f => writer.writeAll("Bksp") catch {},
+                0x1b => writer.writeAll("Esc") catch {},
+                else => {
+                    if (ch >= 0x20 and ch < 0x7f) {
+                        writer.writeByte(ch) catch {};
+                    } else {
+                        std.fmt.format(writer, "0x{x:0>2}", .{ch}) catch {};
+                    }
+                },
+            }
+        },
+    }
+
+    return buf[0..stream.pos];
 }
 
 /// Check parser-decoded key event against focused float exit_key.
