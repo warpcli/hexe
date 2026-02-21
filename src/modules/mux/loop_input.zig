@@ -475,17 +475,23 @@ fn dispatchParsedEvent(state: *State, parsed: anytype) ParsedDispatchResult {
         }
     }
 
+    if (handleParsedNonKeyEvent(state, ev)) {
+        return .{ .consumed = true, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n };
+    }
+
     // If libvaxis decoded a key press that doesn't map to local BindKey
     // (for example PageUp/PageDown/Home/End/function keys), forward the
     // original bytes to the focused pane unchanged.
     switch (ev) {
-        .key_press => return .{ .consumed = false, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n },
+        .key_press => |k| {
+            // Never leak internal probe keys or bare modifier keys to panes.
+            if ((state.terminal_query_in_flight and k.codepoint == vaxis.Key.f3) or isModifierOnlyKey(k.codepoint)) {
+                return .{ .consumed = true, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n };
+            }
+            return .{ .consumed = false, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n };
+        },
         .key_release => return .{ .consumed = true, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n },
         else => {},
-    }
-
-    if (handleParsedNonKeyEvent(state, ev)) {
-        return .{ .consumed = true, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n };
     }
 
     // Parser-first policy: never forward decoded-but-unmapped events as raw bytes.
@@ -662,10 +668,13 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     const stable = stashIncompleteParserTail(state, slice);
     if (stable.len == 0) return;
 
-    // Record all input for keycast display (before any processing)
-    loop_input_keys.recordKeycastInput(state, stable);
+    const cpr_res = consumeCprRepliesFromTerminal(state, stable);
+    defer if (cpr_res.owned) |m| state.allocator.free(m);
+    const inp = cpr_res.bytes;
+    if (inp.len == 0) return;
 
-    const inp = stable;
+    // Record all input for keycast display (before any processing)
+    loop_input_keys.recordKeycastInput(state, inp);
 
     const first_parsed = parseEventHead(state, inp);
     const popup_event: ?vaxis.Event = if (first_parsed) |h| h.event else null;
@@ -703,6 +712,8 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
 
     const ESC: u8 = 0x1b;
     const BEL: u8 = 0x07;
+    const OSC_C1: u8 = 0x9d;
+    const ST_C1: u8 = 0x9c;
 
     const out = state.allocator.alloc(u8, inp.len) catch return .{ .bytes = inp };
     var out_i: usize = 0;
@@ -710,31 +721,58 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
 
     var i: usize = 0;
     while (i < inp.len) {
-        if (!state.osc_reply_in_progress and
-            state.osc_reply_targets.items.len > 0 and
-            i + 1 < inp.len and inp[i] == ESC and inp[i + 1] == ']')
-        {
+        if (!state.osc_reply_in_progress and state.osc_reply_targets.items.len == 0) {
+            const starts_esc_osc = i + 1 < inp.len and inp[i] == ESC and inp[i + 1] == ']';
+            const starts_c1_osc = inp[i] == OSC_C1;
+            if (starts_esc_osc or starts_c1_osc) {
+                // Best-effort race guard: pane output and terminal input can be
+                // serviced in either order within the loop tick.
+                harvestPendingOscReplies(state);
+            }
+        }
+
+        if (!state.osc_reply_in_progress and state.osc_reply_targets.items.len > 0) {
+            const starts_esc_osc = i + 1 < inp.len and inp[i] == ESC and inp[i + 1] == ']';
+            const starts_c1_osc = inp[i] == OSC_C1;
+            if (!starts_esc_osc and !starts_c1_osc) {
+                out[out_i] = inp[i];
+                out_i += 1;
+                i += 1;
+                continue;
+            }
+
             state.osc_reply_target_uuid = state.dequeueOscReplyTarget();
             state.osc_reply_in_progress = true;
             state.osc_reply_prev_esc = false;
             state.osc_reply_buf.clearRetainingCapacity();
 
-            state.osc_reply_buf.append(state.allocator, ESC) catch {
-                clearOscReplyCapture(state);
-                out[out_i] = inp[i];
-                out_i += 1;
+            if (starts_esc_osc) {
+                state.osc_reply_buf.append(state.allocator, ESC) catch {
+                    clearOscReplyCapture(state);
+                    out[out_i] = inp[i];
+                    out_i += 1;
+                    i += 1;
+                    continue;
+                };
+                state.osc_reply_buf.append(state.allocator, ']') catch {
+                    clearOscReplyCapture(state);
+                    out[out_i] = inp[i];
+                    out_i += 1;
+                    i += 1;
+                    continue;
+                };
+                i += 2;
+            } else {
+                state.osc_reply_buf.append(state.allocator, OSC_C1) catch {
+                    clearOscReplyCapture(state);
+                    out[out_i] = inp[i];
+                    out_i += 1;
+                    i += 1;
+                    continue;
+                };
                 i += 1;
-                continue;
-            };
-            state.osc_reply_buf.append(state.allocator, ']') catch {
-                clearOscReplyCapture(state);
-                out[out_i] = inp[i];
-                out_i += 1;
-                i += 1;
-                continue;
-            };
+            }
             consumed_any = true;
-            i += 2;
             continue;
         }
 
@@ -757,6 +795,8 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
         if (b == BEL) {
             done = true;
         } else if (state.osc_reply_prev_esc and b == '\\') {
+            done = true;
+        } else if (b == ST_C1) {
             done = true;
         }
         state.osc_reply_prev_esc = (b == ESC);
@@ -786,6 +826,73 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
     if (out_i == inp.len) {
         state.allocator.free(out);
         return .{ .bytes = inp };
+    }
+
+    const trimmed = state.allocator.alloc(u8, out_i) catch {
+        state.allocator.free(out);
+        return .{ .bytes = inp };
+    };
+    @memcpy(trimmed, out[0..out_i]);
+    state.allocator.free(out);
+    return .{ .bytes = trimmed, .owned = trimmed };
+}
+
+fn parseCprReportLen(inp: []const u8, start: usize) usize {
+    var i = start;
+    const CSI_C1: u8 = 0x9b;
+
+    if (inp[i] == 0x1b) {
+        if (i + 1 >= inp.len or inp[i + 1] != '[') return 0;
+        i += 2;
+    } else if (inp[i] == CSI_C1) {
+        i += 1;
+    } else {
+        return 0;
+    }
+
+    if (i < inp.len and inp[i] == '?') i += 1;
+
+    const row_start = i;
+    while (i < inp.len and inp[i] >= '0' and inp[i] <= '9') : (i += 1) {}
+    if (i == row_start) return 0;
+    if (i >= inp.len or inp[i] != ';') return 0;
+    i += 1;
+
+    const col_start = i;
+    while (i < inp.len and inp[i] >= '0' and inp[i] <= '9') : (i += 1) {}
+    if (i == col_start) return 0;
+    if (i >= inp.len or inp[i] != 'R') return 0;
+
+    return (i + 1) - start;
+}
+
+fn consumeCprRepliesFromTerminal(state: *State, inp: []const u8) OscConsumeResult {
+    if (inp.len == 0) return .{ .bytes = inp };
+
+    const out = state.allocator.alloc(u8, inp.len) catch return .{ .bytes = inp };
+    var out_i: usize = 0;
+    var consumed_any = false;
+
+    var i: usize = 0;
+    while (i < inp.len) {
+        const n = parseCprReportLen(inp, i);
+        if (n > 0) {
+            consumed_any = true;
+            i += n;
+            continue;
+        }
+        out[out_i] = inp[i];
+        out_i += 1;
+        i += 1;
+    }
+
+    if (!consumed_any) {
+        state.allocator.free(out);
+        return .{ .bytes = inp };
+    }
+    if (out_i == 0) {
+        state.allocator.free(out);
+        return .{ .bytes = &[_]u8{} };
     }
 
     const trimmed = state.allocator.alloc(u8, out_i) catch {

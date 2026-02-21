@@ -57,19 +57,44 @@ fn handleCsiQueries(self: *Pane, data: []const u8) void {
 }
 
 fn handleCsiQueryFinal(self: *Pane, final: u8, params: []const u8) void {
-    // Minimal CPR compatibility: CSI 6n -> CSI {row};{col}R
-    if (final != 'n') return;
+    if (final == 'n') {
+        var p = params;
+        const private = p.len > 0 and p[0] == '?';
+        if (private) p = p[1..];
+        if (p.len == 0) return;
 
-    var p = params;
-    if (p.len > 0 and p[0] == '?') p = p[1..];
-    if (!std.mem.eql(u8, p, "6")) return;
+        const first = std.mem.indexOfScalar(u8, p, ';') orelse p.len;
+        const value = std.fmt.parseInt(u16, p[0..first], 10) catch return;
 
-    const cursor = self.vt.getCursor();
-    var buf: [32]u8 = undefined;
-    const row: u16 = cursor.y + 1;
-    const col: u16 = cursor.x + 1;
-    const resp = std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{ row, col }) catch return;
-    self.write(resp) catch {};
+        if (value == 5 or value == 0 or value == 1) {
+            self.write("\x1b[0n") catch {};
+            return;
+        }
+        if (value == 6) {
+            const cursor = self.vt.getCursor();
+            var buf: [32]u8 = undefined;
+            const row: u16 = cursor.y + 1;
+            const col: u16 = cursor.x + 1;
+            const resp = if (private)
+                std.fmt.bufPrint(&buf, "\x1b[?{d};{d}R", .{ row, col }) catch return
+            else
+                std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{ row, col }) catch return;
+            self.write(resp) catch {};
+        }
+        return;
+    }
+
+    if (final == 'c') {
+        const is_secondary = params.len > 0 and params[0] == '>';
+        var buf: [32]u8 = undefined;
+        if (is_secondary) {
+            const resp = std.fmt.bufPrint(&buf, "\x1b[>0;0;0c", .{}) catch return;
+            self.write(resp) catch {};
+        } else {
+            const resp = std.fmt.bufPrint(&buf, "\x1b[?1;2c", .{}) catch return;
+            self.write(resp) catch {};
+        }
+    }
 }
 
 fn handleDcsQueries(self: *Pane, data: []const u8) void {
@@ -122,19 +147,19 @@ fn handleDcsQueries(self: *Pane, data: []const u8) void {
 fn handleDcsQuery(self: *Pane, payload: []const u8) void {
     // DECRQSS: DCS $ q <request> ST
     if (!std.mem.startsWith(u8, payload, "$q")) return;
-    const req = payload[2..];
+    const req = std.mem.trim(u8, payload[2..], " ");
 
     // SGR request
     if (std.mem.eql(u8, req, "m")) {
-        self.write("\x1bP1$r0m\x1b\\") catch {};
+        self.write("\x1bP1$r 0m\x1b\\") catch {};
         return;
     }
 
     // DECSCUSR request (SP q)
-    if (std.mem.eql(u8, req, " q")) {
+    if (std.mem.eql(u8, req, "q")) {
         const style = self.vt.getCursorStyle();
         var buf: [64]u8 = undefined;
-        const resp = std.fmt.bufPrint(&buf, "\x1bP1$r {d} q\x1b\\", .{style}) catch return;
+        const resp = std.fmt.bufPrint(&buf, "\x1bP1$r q{d}\x1b\\", .{style}) catch return;
         self.write(resp) catch {};
         return;
     }
@@ -142,7 +167,7 @@ fn handleDcsQuery(self: *Pane, payload: []const u8) void {
     // DECSTBM request
     if (std.mem.eql(u8, req, "r")) {
         var buf: [64]u8 = undefined;
-        const resp = std.fmt.bufPrint(&buf, "\x1bP1$r1;{d}r\x1b\\", .{self.height}) catch return;
+        const resp = std.fmt.bufPrint(&buf, "\x1bP1$r 1;{d}r\x1b\\", .{self.height}) catch return;
         self.write(resp) catch {};
         return;
     }
@@ -154,6 +179,8 @@ fn handleDcsQuery(self: *Pane, payload: []const u8) void {
 fn forwardOsc(self: *Pane, data: []const u8) void {
     const ESC: u8 = 0x1b;
     const BEL: u8 = 0x07;
+    const OSC_C1: u8 = 0x9d;
+    const ST_C1: u8 = 0x9c;
 
     for (data) |b| {
         if (!self.osc_in_progress) {
@@ -175,6 +202,17 @@ fn forwardOsc(self: *Pane, data: []const u8) void {
                 }
             }
 
+            if (b == OSC_C1) {
+                self.osc_in_progress = true;
+                self.osc_prev_esc = false;
+                self.osc_buf.clearRetainingCapacity();
+                self.osc_buf.append(self.allocator, OSC_C1) catch {
+                    self.osc_in_progress = false;
+                    continue;
+                };
+                continue;
+            }
+
             if (b == ESC) {
                 self.osc_pending_esc = true;
             }
@@ -194,6 +232,8 @@ fn forwardOsc(self: *Pane, data: []const u8) void {
             done = true;
         } else if (self.osc_prev_esc and b == '\\') {
             done = true;
+        } else if (b == ST_C1) {
+            done = true;
         }
         self.osc_prev_esc = (b == ESC);
 
@@ -210,20 +250,74 @@ fn forwardOsc(self: *Pane, data: []const u8) void {
             self.osc_pending_esc = false;
             self.osc_prev_esc = false;
 
-            if (isOscQuery(self.osc_buf.items)) {
-                self.osc_expected_responses +|= 1;
+            if (shouldPassthroughOsc(self.osc_buf.items)) {
+                const code = parseOscCode(self.osc_buf.items) orelse 0;
+                if (isOscQuery(self.osc_buf.items)) {
+                    if (!handleOscQuery(self, code)) {
+                        self.osc_expected_responses +|= 1;
+                        const stdout = std.fs.File.stdout();
+                        stdout.writeAll(self.osc_buf.items) catch {};
+                    }
+                } else {
+                    const stdout = std.fs.File.stdout();
+                    stdout.writeAll(self.osc_buf.items) catch {};
+                }
             }
-            const stdout = std.fs.File.stdout();
-            stdout.writeAll(self.osc_buf.items) catch {};
 
             self.osc_buf.clearRetainingCapacity();
         }
     }
 }
 
+fn parseOscCode(seq: []const u8) ?u32 {
+    const starts_esc = seq.len >= 2 and seq[0] == 0x1b and seq[1] == ']';
+    const starts_c1 = seq.len >= 1 and seq[0] == 0x9d;
+    if (!starts_esc and !starts_c1) return null;
+
+    var i: usize = if (starts_esc) 2 else 1;
+    var code: u32 = 0;
+    var any: bool = false;
+    while (i < seq.len) : (i += 1) {
+        const c = seq[i];
+        if (c == ';') break;
+        if (c < '0' or c > '9') return null;
+        any = true;
+        code = code * 10 + @as(u32, c - '0');
+        if (code > 10000) return null;
+    }
+    if (!any) return null;
+    return code;
+}
+
+fn handleOscQuery(self: *Pane, code: u32) bool {
+    if (!(code == 10 or code == 11 or code == 12)) return false;
+
+    const color = switch (code) {
+        10 => "ffff/ffff/ffff",
+        11 => "0000/0000/0000",
+        12 => "ffff/ffff/ffff",
+        else => "0000/0000/0000",
+    };
+
+    var buf: [48]u8 = undefined;
+    const resp = std.fmt.bufPrint(&buf, "\x1b]{d};rgb:{s}\x07", .{ code, color }) catch return true;
+    self.write(resp) catch {};
+    return true;
+}
+
+fn shouldPassthroughOsc(seq: []const u8) bool {
+    const code = parseOscCode(seq) orelse return false;
+    if (code == 0 or code == 1 or code == 2) return true;
+    if (code == 7) return true;
+    if (code == 4 or code == 104) return true;
+    if (code >= 10 and code <= 19) return true;
+    if (code >= 110 and code <= 119) return true;
+    return false;
+}
+
 fn isOscQuery(seq: []const u8) bool {
-    if (seq.len < 4) return false;
-    if (seq[0] != 0x1b or seq[1] != ']') return false;
+    const code = parseOscCode(seq) orelse return false;
+    if (!(code == 4 or code == 104 or (code >= 10 and code <= 19) or (code >= 110 and code <= 119))) return false;
     return std.mem.indexOf(u8, seq, ";?") != null;
 }
 
