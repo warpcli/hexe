@@ -25,8 +25,7 @@ fn parsedEventFromBytes(state: *State, bytes: []const u8) ?vaxis.Event {
     return parsed.event;
 }
 
-fn handleBlockedPopup(state: *State, popups: anytype, parsed_event: ?vaxis.Event) bool {
-    _ = state;
+fn handleBlockedPopup(popups: anytype, parsed_event: ?vaxis.Event) bool {
     if (parsed_event) |ev| {
         return input.handlePopupEvent(popups, ev);
     }
@@ -44,7 +43,7 @@ pub fn forwardInputToFocusedPaneWithEvent(state: *State, bytes: []const u8, pars
         const can_interact = if (fpane.parent_tab) |parent| parent == state.active_tab else true;
         if (fpane.isVisibleOnTab(state.active_tab) and can_interact) {
             if (fpane.popups.isBlocked()) {
-                if (handleBlockedPopup(state, &fpane.popups, parsed_event)) {
+                if (handleBlockedPopup(&fpane.popups, parsed_event)) {
                     loop_ipc.sendPopResponse(state);
                 }
                 state.needs_render = true;
@@ -61,7 +60,7 @@ pub fn forwardInputToFocusedPaneWithEvent(state: *State, bytes: []const u8, pars
 
     if (state.currentLayout().getFocusedPane()) |pane| {
         if (pane.popups.isBlocked()) {
-            if (handleBlockedPopup(state, &pane.popups, parsed_event)) {
+            if (handleBlockedPopup(&pane.popups, parsed_event)) {
                 loop_ipc.sendPopResponse(state);
             }
             state.needs_render = true;
