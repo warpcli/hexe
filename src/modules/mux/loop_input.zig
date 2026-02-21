@@ -131,40 +131,6 @@ fn isTerminalQueryReplyEvent(event: vaxis.Event) bool {
     };
 }
 
-fn consumeLeadingTerminalQueryRepliesRaw(inp: []const u8) []const u8 {
-    const ESC: u8 = 0x1b;
-
-    var i: usize = 0;
-    while (i + 2 < inp.len and inp[i] == ESC and inp[i + 1] == '[') {
-        var j: usize = i + 2;
-        while (j < inp.len) : (j += 1) {
-            const b = inp[j];
-            if (b >= 0x40 and b <= 0x7e) break;
-        }
-        if (j >= inp.len) break;
-
-        const seq = inp[i .. j + 1];
-        const final = seq[seq.len - 1];
-
-        const has_question = std.mem.indexOfScalar(u8, seq, '?') != null;
-        const has_semicolon = std.mem.indexOfScalar(u8, seq, ';') != null;
-        const has_dollar_y = std.mem.indexOf(u8, seq, "$y") != null;
-
-        // Swallow known terminal probe replies only:
-        // - DEC mode reports: ESC[?...$y
-        // - CPR replies:       ESC[<row>;<col>R
-        // - Kitty/DA replies:  ESC[?...u / ESC[?...c
-        const is_query_reply = has_dollar_y or
-            (final == 'R' and has_semicolon) or
-            (has_question and (final == 'u' or final == 'c'));
-
-        if (!is_query_reply) break;
-        i = j + 1;
-    }
-
-    return inp[i..];
-}
-
 fn rawTerminalQueryReplyLen(inp: []const u8) ?usize {
     const ESC: u8 = 0x1b;
     if (inp.len < 3) return null;
@@ -192,6 +158,15 @@ fn rawTerminalQueryReplyLen(inp: []const u8) ?usize {
     return j + 1;
 }
 
+fn consumeLeadingTerminalQueryRepliesRaw(inp: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i < inp.len) {
+        const n = rawTerminalQueryReplyLen(inp[i..]) orelse break;
+        i += n;
+    }
+    return inp[i..];
+}
+
 const QueryReplyStripResult = struct {
     bytes: []const u8,
     first_parsed: ?ParsedEventHead,
@@ -216,7 +191,9 @@ fn consumeLeadingTerminalQueryReplies(state: *State, inp: []const u8) QueryReply
         return .{ .bytes = remaining, .first_parsed = first };
     }
 
-    return .{ .bytes = consumeLeadingTerminalQueryRepliesRaw(inp), .first_parsed = null };
+    const raw_cleaned = consumeLeadingTerminalQueryRepliesRaw(inp);
+    if (raw_cleaned.len == 0) return .{ .bytes = raw_cleaned, .first_parsed = null };
+    return .{ .bytes = raw_cleaned, .first_parsed = parseEventHead(state, raw_cleaned) };
 }
 
 fn handleParsedScrollAction(state: *State, action: input.ScrollAction) bool {
