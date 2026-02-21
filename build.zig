@@ -10,11 +10,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     })) |ghostty_dep| ghostty_dep.module("ghostty-vt") else null;
 
-    // Get argonaut module from dependency
-    const argonaut_mod = if (b.lazyDependency("argonaut", .{
-        .target = target,
-        .optimize = optimize,
-    })) |argonaut_dep| argonaut_dep.module("argonaut") else null;
+    // Get yazap module from dependency
+    const yazap_mod = if (b.lazyDependency("yazap", .{})) |yazap_dep| yazap_dep.module("yazap") else null;
 
     // Get ziglua dependency for embedded Lua
     const ziglua_dep = b.lazyDependency("ziglua", .{
@@ -120,7 +117,7 @@ pub fn build(b: *std.Build) void {
 
     // Build unified hexe CLI executable
     const cli_root = b.createModule(.{
-        .root_source_file = b.path("src/cli/main.zig"),
+        .root_source_file = b.path("src/cli/app.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -131,8 +128,8 @@ pub fn build(b: *std.Build) void {
     cli_root.addImport("pod", pod_module);
     cli_root.addImport("shp", shp_module);
     cli_root.addImport("xev", xev_mod);
-    if (argonaut_mod) |arg| {
-        cli_root.addImport("argonaut", arg);
+    if (yazap_mod) |yazap| {
+        cli_root.addImport("yazap", yazap);
     }
     const cli_exe = b.addExecutable(.{
         .name = "hexe",

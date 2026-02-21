@@ -18,10 +18,6 @@
             .url = "git+https://github.com/ghostty-org/ghostty#4e17eee5dea3d67aa9b0fec56be7f461c496ffe4",
             .hash = "ghostty-1.3.0-dev-5UdBCw7QSATpenpLhfop3klSjURk7Aj_yT7u0yPXmgpQ",
         },
-        .argonaut = .{
-            .url = "git+https://codeberg.org/OhMyDitzzy/argonaut#1d8779fe017aa7fd33774bf86c30d239a080d199",
-            .hash = "argonaut-0.0.1-BgmCpIt6AQCUnRrUtsAg1AuaeuSE1tr7tlWpjXbDulXi",
-        },
         .ziglua = .{
             .url = "git+https://github.com/natecraddock/ziglua#0.6.0",
             .hash = "zlua-0.1.0-hGRpCww-BQCx3cX6zbKWfTgOx6B7Peo4P17RK2hm7-xV",
@@ -33,6 +29,10 @@
         .libvaxis = .{
             .url = "git+https://github.com/rockorager/libvaxis#67bbc1ee072aa390838c66caf4ed47edee282dc4",
             .hash = "vaxis-0.5.1-BWNV_IxJCQC5OGNaXQfNnqgn9_Vku0PMgey-dplubcQK",
+        },
+        .yazap = .{
+            .url = "git+https://github.com/PrajwalCH/yazap#a85c65beefe911db5fc17bc90e756738d742dc63",
+            .hash = "yazap-0.6.3-Z1t-EmrzAQA-8vFR-JGpI7vCSpHv5_6z6PAIDq2X4PoH",
         },
     },
     .fingerprint = 0x4c99ab0b473f252d,
