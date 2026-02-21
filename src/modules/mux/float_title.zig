@@ -1,5 +1,7 @@
+const std = @import("std");
 const shp = @import("shp");
 const text_width = @import("text_width.zig");
+const vaxis = @import("vaxis");
 
 const core = @import("core");
 
@@ -7,8 +9,29 @@ const Pane = @import("pane.zig").Pane;
 const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
 const statusbar = @import("statusbar.zig");
-const vaxis_draw = @import("vaxis_draw.zig");
 const borders = @import("borders.zig");
+
+fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: ?Color, bg: ?Color, bold: bool) void {
+    var buf: [4]u8 = undefined;
+    const grapheme: []const u8 = if (cp < 128)
+        buf[0..blk: {
+            buf[0] = @intCast(cp);
+            break :blk 1;
+        }]
+    else blk: {
+        const n = std.unicode.utf8Encode(cp, &buf) catch return;
+        break :blk buf[0..n];
+    };
+
+    var style: vaxis.Style = .{ .bold = bold };
+    if (fg) |c| style.fg = c.toVaxis();
+    if (bg) |c| style.bg = c.toVaxis();
+
+    renderer.setVaxisCell(x, y, .{
+        .char = .{ .grapheme = grapheme, .width = 1 },
+        .style = style,
+    });
+}
 
 pub const TitleRect = struct {
     x: u16,
@@ -77,12 +100,12 @@ pub fn drawTitleEditor(renderer: *Renderer, pane: *const Pane, buf: []const u8) 
     // Background box.
     var i: u16 = 0;
     while (i < want_w) : (i += 1) {
-        vaxis_draw.putChar(renderer, place.x + i, place.y, ' ', fg, bg, false);
+        putChar(renderer, place.x + i, place.y, ' ', fg, bg, false);
     }
 
     // Text + cursor.
     const clipped = text_width.clipTextToWidth(buf, want_w - 1);
     const cursor_x = statusbar.drawStyledText(renderer, place.x, place.y, clipped, text_style);
     // Cursor marker at end (ASCII for portability).
-    vaxis_draw.putChar(renderer, cursor_x, place.y, '|', fg, bg, true);
+    putChar(renderer, cursor_x, place.y, '|', fg, bg, true);
 }
