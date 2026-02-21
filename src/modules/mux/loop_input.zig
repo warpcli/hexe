@@ -21,6 +21,17 @@ const tab_switch = @import("tab_switch.zig");
 // libvaxis parser for structured input events.
 var vaxis_parser: vaxis.Parser = .{};
 
+const ParsedEventHead = struct {
+    n: usize,
+    event: ?vaxis.Event,
+};
+
+fn parseEventHead(state: *State, bytes: []const u8) ?ParsedEventHead {
+    const parsed = vaxis_parser.parse(bytes, state.allocator) catch return null;
+    if (parsed.n == 0) return null;
+    return .{ .n = parsed.n, .event = parsed.event };
+}
+
 fn updateInputFlagsFromParser(state: *State, input_bytes: []const u8) void {
     var offset: usize = 0;
     while (offset < input_bytes.len) {
@@ -346,11 +357,8 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
         // LEVEL 1: MUX-level popup blocks EVERYTHING
         // ==========================================================================
         if (state.popups.isBlocked()) {
-            const parsed_mux = vaxis_parser.parse(inp, state.allocator) catch null;
-            const parsed_mux_event: ?vaxis.Event = if (parsed_mux) |p|
-                if (p.n > 0) p.event else null
-            else
-                null;
+            const parsed_mux = parseEventHead(state, inp);
+            const parsed_mux_event: ?vaxis.Event = if (parsed_mux) |p| p.event else null;
 
             if (handleBlockedPopupInput(&state.popups, parsed_mux_event)) {
                 // Check if this was a confirm/picker dialog for pending action
@@ -442,17 +450,16 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
         // ==========================================================================
         const current_tab = &state.tabs.items[state.active_tab];
         if (current_tab.popups.isBlocked()) {
-            const parsed_tab = vaxis_parser.parse(inp, state.allocator) catch null;
-            const parsed_tab_event: ?vaxis.Event = if (parsed_tab) |p|
-                if (p.n > 0) p.event else null
-            else
-                null;
+            const parsed_tab = parseEventHead(state, inp);
+            const parsed_tab_event: ?vaxis.Event = if (parsed_tab) |p| p.event else null;
 
             // Allow only tab switching while a tab popup is open.
-            if (parsed_tab != null and parsed_tab.?.n > 0 and parsed_tab_event != null) {
-                if (input.keyEventFromVaxisEvent(parsed_tab_event.?, parsed_tab.?.n)) |ev| {
-                    if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true)) {
-                        return;
+            if (parsed_tab) |p| {
+                if (parsed_tab_event != null) {
+                    if (input.keyEventFromVaxisEvent(parsed_tab_event.?, p.n)) |ev| {
+                        if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true)) {
+                            return;
+                        }
                     }
                 }
             }
@@ -527,7 +534,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
             var parsed_event_for_popup: ?vaxis.Event = null;
 
             // Parse once through libvaxis and dispatch key/scroll/mouse/control.
-            const parsed = vaxis_parser.parse(inp[i..], state.allocator) catch null;
+            const parsed = parseEventHead(state, inp[i..]);
             if (parsed) |res| {
                 const dispatch = dispatchParsedEvent(state, res);
                 parsed_event_for_popup = dispatch.parsed_event;
