@@ -418,6 +418,15 @@ pub fn runMainLoop(state: *State) !void {
     defer {
         var tty_restore_buf: [512]u8 = undefined;
         var tty_restore = stdout.writer(&tty_restore_buf);
+        {
+            var split_it = state.currentLayout().splitIterator();
+            while (split_it.next()) |pane| {
+                pane.*.vt.freeCachedKittyImages(&state.renderer.vx, &tty_restore.interface);
+            }
+            for (state.floats.items) |pane| {
+                pane.vt.freeCachedKittyImages(&state.renderer.vx, &tty_restore.interface);
+            }
+        }
         loop_mouse.resetShape(state);
         state.renderer.vx.resetState(&tty_restore.interface) catch {};
         tty_restore.interface.flush() catch {};
