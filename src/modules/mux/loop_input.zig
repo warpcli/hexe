@@ -166,6 +166,19 @@ fn handleParsedScrollAction(state: *State, action: input.ScrollAction) bool {
     return true;
 }
 
+fn forwardPasteToFocusedPane(state: *State, txt: []const u8) void {
+    if (txt.len == 0) return;
+
+    if (resolveFocusedPaneForInput(state)) |pane| {
+        if (pane.popups.isBlocked()) return;
+        if (pane.isScrolled()) {
+            pane.scrollToBottom();
+            state.needs_render = true;
+        }
+        pane.write(txt) catch {};
+    }
+}
+
 fn handleBlockedPopupInput(popups: anytype, parsed_event: ?vaxis.Event) bool {
     if (parsed_event) |ev| {
         // Reuse already parsed event and avoid reparsing raw bytes.
@@ -368,7 +381,8 @@ fn handleParsedNonKeyEvent(state: *State, ev: vaxis.Event) bool {
             return true;
         },
         .paste => |txt| {
-            state.allocator.free(txt);
+            defer state.allocator.free(txt);
+            forwardPasteToFocusedPane(state, txt);
             return true;
         },
         .key_press => |k| return isModifierOnlyKey(k.codepoint),
