@@ -31,7 +31,8 @@
             .hash = "voidbox-0.0.9-fHvjRQsrBQCmQlJfs8hfE5HzK2r1rOEq9fkSznXY53FO",
         },
         .libvaxis = .{
-            .path = "xtra/libvaxis",
+            .url = "git+https://github.com/rockorager/libvaxis#67bbc1ee072aa390838c66caf4ed47edee282dc4",
+            .hash = "vaxis-0.5.1-BWNV_IxJCQC5OGNaXQfNnqgn9_Vku0PMgey-dplubcQK",
         },
     },
     .fingerprint = 0x4c99ab0b473f252d,
