@@ -542,6 +542,7 @@ pub const Config = struct {
         pane_adopt,
         pane_close,
         pane_select_mode,
+        clipboard_request,
         keycast_toggle,
         sprite_toggle,
         split_h,
@@ -563,6 +564,7 @@ pub const Config = struct {
         pane_adopt,
         pane_close, // close current float or split pane (never closes tab)
         pane_select_mode, // enter pane select mode (focus or swap)
+        clipboard_request, // request system clipboard via OSC52 through vaxis
         keycast_toggle, // toggle keycast overlay
         sprite_toggle, // toggle pokemon sprite overlay
         split_h,
@@ -1162,6 +1164,7 @@ fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction
     if (std.mem.eql(u8, action_type, "pane.adopt")) return .pane_adopt;
     if (std.mem.eql(u8, action_type, "pane.close")) return .pane_close;
     if (std.mem.eql(u8, action_type, "pane.select_mode")) return .pane_select_mode;
+    if (std.mem.eql(u8, action_type, "clipboard.request")) return .clipboard_request;
     if (std.mem.eql(u8, action_type, "overlay.keycast_toggle")) return .keycast_toggle;
     if (std.mem.eql(u8, action_type, "overlay.sprite_toggle")) return .sprite_toggle;
     if (std.mem.eql(u8, action_type, "split.h")) return .split_h;
@@ -1205,6 +1208,7 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     if (std.mem.eql(u8, action, "pane.adopt")) return .pane_adopt;
     if (std.mem.eql(u8, action, "pane.close")) return .pane_close;
     if (std.mem.eql(u8, action, "pane.select_mode")) return .pane_select_mode;
+    if (std.mem.eql(u8, action, "clipboard.request")) return .clipboard_request;
     if (std.mem.eql(u8, action, "overlay.keycast_toggle")) return .keycast_toggle;
     if (std.mem.eql(u8, action, "overlay.sprite_toggle")) return .sprite_toggle;
     if (std.mem.eql(u8, action, "split.h")) return .split_h;

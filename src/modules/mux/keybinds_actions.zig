@@ -55,6 +55,19 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             actions.enterPaneSelectMode(state, false);
             return true;
         },
+        .clipboard_request => {
+            const stdout = std.fs.File.stdout();
+            var buf: [256]u8 = undefined;
+            var writer = stdout.writer(&buf);
+            state.renderer.vx.requestSystemClipboard(&writer.interface) catch {
+                state.notifications.showFor("Clipboard request failed", 1200);
+                state.needs_render = true;
+                return true;
+            };
+            state.notifications.showFor("Requested clipboard", 900);
+            state.needs_render = true;
+            return true;
+        },
         .keycast_toggle => {
             state.overlays.toggleKeycast();
             state.needs_render = true;

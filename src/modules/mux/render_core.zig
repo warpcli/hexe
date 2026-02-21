@@ -25,6 +25,7 @@ pub const Renderer = struct {
                 .report_all_as_ctl_seqs = true,
                 .report_text = true,
             },
+            .system_clipboard_allocator = allocator,
         });
         try render_vx.initVaxisForSize(allocator, &vx, width, height);
 
