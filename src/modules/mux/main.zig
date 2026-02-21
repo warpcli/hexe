@@ -13,6 +13,7 @@ const SesClient = ses_client.SesClient;
 const State = @import("state.zig").State;
 const loop_core = @import("loop_core.zig");
 const statusbar = @import("statusbar.zig");
+const vaxis_surface = @import("vaxis_surface.zig");
 
 var debug_enabled: bool = false;
 
@@ -169,6 +170,7 @@ pub fn run(mux_args: MuxArgs) !void {
     var state = try State.init(allocator, size.cols, size.rows, mux_args.debug, mux_args.log_file);
     defer {
         statusbar.deinitThreadlocals();
+        vaxis_surface.deinitThreadlocals(std.heap.page_allocator);
         state.deinit();
     }
 

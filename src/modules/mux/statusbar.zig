@@ -2,7 +2,6 @@ const std = @import("std");
 const core = @import("core");
 const shp = @import("shp");
 const vaxis = @import("vaxis");
-const vaxis_surface = @import("vaxis_surface.zig");
 const animations = core.segments.animations;
 const randomdo_mod = core.segments.randomdo;
 
@@ -61,8 +60,6 @@ pub fn deinitThreadlocals() void {
         state.deinit();
         randomdo_state = null;
     }
-
-    vaxis_surface.deinitThreadlocals(std.heap.page_allocator);
 }
 
 fn getRandomdoStateMap() *std.AutoHashMap(usize, RandomdoState) {
