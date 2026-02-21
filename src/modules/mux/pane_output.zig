@@ -81,7 +81,7 @@ fn forwardOsc(self: *Pane, data: []const u8) void {
             self.osc_prev_esc = false;
 
             if (isOscQuery(self.osc_buf.items)) {
-                self.osc_expect_response = true;
+                self.osc_expected_responses +|= 1;
             }
             const stdout = std.fs.File.stdout();
             stdout.writeAll(self.osc_buf.items) catch {};

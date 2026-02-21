@@ -488,12 +488,6 @@ pub const State = struct {
     }
 
     pub fn enqueueOscReplyTarget(self: *State, uuid: [32]u8) void {
-        for (self.osc_reply_targets.items) |queued| {
-            if (std.mem.eql(u8, &queued, &uuid)) return;
-        }
-        if (self.osc_reply_target_uuid) |active| {
-            if (std.mem.eql(u8, &active, &uuid)) return;
-        }
         self.osc_reply_targets.append(self.allocator, uuid) catch {};
     }
 

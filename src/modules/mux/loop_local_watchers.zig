@@ -105,8 +105,12 @@ pub fn localPaneCallback(
             pane.vt.invalidateRenderState();
             slot.state.needs_render = true;
         }
-        if (pane.takeOscExpectResponse()) {
-            slot.state.enqueueOscReplyTarget(pane.uuid);
+        const osc_responses = pane.takeOscExpectedResponses();
+        if (osc_responses > 0) {
+            var j: u16 = 0;
+            while (j < osc_responses) : (j += 1) {
+                slot.state.enqueueOscReplyTarget(pane.uuid);
+            }
         }
         if (pane.did_clear) {
             slot.state.force_full_render = true;
@@ -163,8 +167,12 @@ pub fn floatPaneCallback(
             pane.vt.invalidateRenderState();
             slot.state.needs_render = true;
         }
-        if (pane.takeOscExpectResponse()) {
-            slot.state.enqueueOscReplyTarget(pane.uuid);
+        const osc_responses = pane.takeOscExpectedResponses();
+        if (osc_responses > 0) {
+            var j: u16 = 0;
+            while (j < osc_responses) : (j += 1) {
+                slot.state.enqueueOscReplyTarget(pane.uuid);
+            }
         }
         if (pane.did_clear) {
             slot.state.force_full_render = true;

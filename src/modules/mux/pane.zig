@@ -103,7 +103,7 @@ pub const Pane = struct {
     osc_in_progress: bool = false,
     osc_pending_esc: bool = false,
     osc_prev_esc: bool = false,
-    osc_expect_response: bool = false,
+    osc_expected_responses: u16 = 0,
 
     // Pane-local notifications (PANE realm - renders at bottom of pane)
     notifications: NotificationManager = undefined,
@@ -124,9 +124,9 @@ pub const Pane = struct {
         return (self.tab_visible & (@as(u64, 1) << @intCast(tab))) != 0;
     }
 
-    pub fn takeOscExpectResponse(self: *Pane) bool {
-        const v = self.osc_expect_response;
-        self.osc_expect_response = false;
+    pub fn takeOscExpectedResponses(self: *Pane) u16 {
+        const v = self.osc_expected_responses;
+        self.osc_expected_responses = 0;
         return v;
     }
 
