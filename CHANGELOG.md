@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.9] - 2026-02-21
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Update dependencies and release workflow
+
 ## [0.0.8] - 2026-02-21
 
 ### <!-- 7 -->⚙️ Miscellaneous Tasks

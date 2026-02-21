@@ -29,15 +29,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Remove local tag
-        run: git tag -d "${{ github.ref_name }}" 2>/dev/null || true
-
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
         with:
           version: 0.15.2
 
       - name: Build binary
+        env:
+          GIT_CEILING_DIRECTORIES: ${{ github.workspace }}/.zig-cache
         run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
 
       - name: Prepare artifact
