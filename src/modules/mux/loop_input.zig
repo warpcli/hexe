@@ -229,6 +229,13 @@ const KeyDispatchResult = enum {
     unhandled,
 };
 
+const ParsedDispatchResult = struct {
+    consumed: bool,
+    quit: bool,
+    parsed_event: ?vaxis.Event,
+    consumed_bytes: usize,
+};
+
 fn handleParsedNonKeyEvent(state: *State, ev: vaxis.Event) bool {
     switch (ev) {
         .mouse => |m| {
@@ -254,6 +261,33 @@ fn handleParsedNonKeyEvent(state: *State, ev: vaxis.Event) bool {
         => return true,
         else => return false,
     }
+}
+
+fn dispatchParsedEvent(state: *State, parsed: anytype) ParsedDispatchResult {
+    if (parsed.n == 0) return .{ .consumed = false, .quit = false, .parsed_event = null, .consumed_bytes = 0 };
+    if (parsed.event == null) return .{ .consumed = true, .quit = false, .parsed_event = null, .consumed_bytes = parsed.n };
+
+    const ev = parsed.event.?;
+
+    if (input.scrollActionFromVaxisEvent(ev)) |action| {
+        if (handleParsedScrollAction(state, action)) {
+            return .{ .consumed = true, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n };
+        }
+    }
+
+    if (input.keyEventFromVaxisEvent(ev, parsed.n)) |key_ev| {
+        switch (handleParsedKeyEvent(state, key_ev)) {
+            .quit => return .{ .consumed = true, .quit = true, .parsed_event = ev, .consumed_bytes = parsed.n },
+            .consumed => return .{ .consumed = true, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n },
+            .unhandled => {},
+        }
+    }
+
+    if (handleParsedNonKeyEvent(state, ev)) {
+        return .{ .consumed = true, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n };
+    }
+
+    return .{ .consumed = false, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n };
 }
 
 fn handleParsedKeyEvent(state: *State, ev: input.KeyEvent) KeyDispatchResult {
@@ -506,40 +540,15 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
             // Parse once through libvaxis and dispatch key/scroll/mouse/control.
             const parsed = vaxis_parser.parse(inp[i..], state.allocator) catch null;
             if (parsed) |res| {
-                if (res.n > 0) {
-                    parsed_event_for_popup = res.event;
-                    if (res.event) |ev| {
-                        if (input.scrollActionFromVaxisEvent(ev)) |action| {
-                            if (handleParsedScrollAction(state, action)) {
-                                i += res.n;
-                                continue;
-                            }
-                        }
-
-                        if (input.keyEventFromVaxisEvent(ev, res.n)) |key_ev| {
-                            switch (handleParsedKeyEvent(state, key_ev)) {
-                                .quit => {
-                                    state.running = false;
-                                    return;
-                                },
-                                .consumed => {
-                                    i += key_ev.consumed;
-                                    continue;
-                                },
-                                .unhandled => {},
-                            }
-                        }
-
-                        // Parse and consume non-key parser events (mouse/transport/control)
-                        // so escape/control bytes never leak into pane stdin.
-                        if (handleParsedNonKeyEvent(state, ev)) {
-                            i += res.n;
-                            continue;
-                        }
-                    } else {
-                        i += res.n;
-                        continue;
-                    }
+                const dispatch = dispatchParsedEvent(state, res);
+                parsed_event_for_popup = dispatch.parsed_event;
+                if (dispatch.quit) {
+                    state.running = false;
+                    return;
+                }
+                if (dispatch.consumed) {
+                    i += dispatch.consumed_bytes;
+                    continue;
                 }
             }
 
