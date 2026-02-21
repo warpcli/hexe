@@ -229,6 +229,33 @@ const KeyDispatchResult = enum {
     unhandled,
 };
 
+fn handleParsedNonKeyEvent(state: *State, ev: vaxis.Event) bool {
+    switch (ev) {
+        .mouse => |m| {
+            _ = loop_mouse.handle(state, m);
+            return true;
+        },
+        .key_press => |k| return isModifierOnlyKey(k.codepoint),
+        .key_release => |k| return isModifierOnlyKey(k.codepoint),
+        .paste_start,
+        .paste_end,
+        .focus_in,
+        .focus_out,
+        .winsize,
+        .color_scheme,
+        .cap_kitty_keyboard,
+        .cap_kitty_graphics,
+        .cap_rgb,
+        .cap_unicode,
+        .cap_sgr_pixels,
+        .cap_color_scheme_updates,
+        .cap_multi_cursor,
+        .cap_da1,
+        => return true,
+        else => return false,
+    }
+}
+
 fn handleParsedKeyEvent(state: *State, ev: input.KeyEvent) KeyDispatchResult {
     if (loop_input_keys.checkExitKeyEvent(state, ev.mods, ev.key, ev.when)) {
         return .consumed;
@@ -505,43 +532,9 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
                         // Parse and consume non-key parser events (mouse/transport/control)
                         // so escape/control bytes never leak into pane stdin.
-                        switch (ev) {
-                            .mouse => |m| {
-                                _ = loop_mouse.handle(state, m);
-                                i += res.n;
-                                continue;
-                            },
-                            .key_press => |k| {
-                                if (isModifierOnlyKey(k.codepoint)) {
-                                    i += res.n;
-                                    continue;
-                                }
-                            },
-                            .key_release => |k| {
-                                if (isModifierOnlyKey(k.codepoint)) {
-                                    i += res.n;
-                                    continue;
-                                }
-                            },
-                            .paste_start,
-                            .paste_end,
-                            .focus_in,
-                            .focus_out,
-                            .winsize,
-                            .color_scheme,
-                            .cap_kitty_keyboard,
-                            .cap_kitty_graphics,
-                            .cap_rgb,
-                            .cap_unicode,
-                            .cap_sgr_pixels,
-                            .cap_color_scheme_updates,
-                            .cap_multi_cursor,
-                            .cap_da1,
-                            => {
-                                i += res.n;
-                                continue;
-                            },
-                            else => {},
+                        if (handleParsedNonKeyEvent(state, ev)) {
+                            i += res.n;
+                            continue;
                         }
                     } else {
                         i += res.n;
