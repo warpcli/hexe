@@ -6,6 +6,7 @@ const mux = @import("mux");
 const ses = @import("ses");
 const pod = @import("pod");
 const shp = @import("shp");
+const pop_handlers = @import("pop_handlers.zig");
 const cli_cmds = @import("commands/com.zig");
 const config_validate = @import("commands/config_validate.zig");
 const ses_export = @import("commands/ses_export.zig");
@@ -64,6 +65,15 @@ fn parseOptionalI64(value: ?[]const u8, field_name: []const u8) !i64 {
     return 0;
 }
 
+fn normalizeTopLevelCommand(command: []const u8) []const u8 {
+    if (std.mem.eql(u8, command, "ses")) return "session";
+    if (std.mem.eql(u8, command, "mux")) return "multiplexer";
+    if (std.mem.eql(u8, command, "shp")) return "shell";
+    if (std.mem.eql(u8, command, "pop")) return "popup";
+    if (std.mem.eql(u8, command, "cfg")) return "config";
+    return command;
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -74,19 +84,19 @@ pub fn main() !void {
 
     var root = app.rootCommand();
 
-    var ses_cmd = app.createCommand("ses", "Session daemon management");
+    var ses_cmd = app.createCommand("session", "Session daemon management");
     ses_cmd.setProperty(.help_on_empty_args);
 
     var pod_cmd = app.createCommand("pod", "Per-pane PTY daemon");
     pod_cmd.setProperty(.help_on_empty_args);
 
-    var mux_cmd = app.createCommand("mux", "Terminal multiplexer");
+    var mux_cmd = app.createCommand("multiplexer", "Terminal multiplexer");
     mux_cmd.setProperty(.help_on_empty_args);
 
-    var shp_cmd = app.createCommand("shp", "Shell prompt renderer");
+    var shp_cmd = app.createCommand("shell", "Shell prompt renderer");
     shp_cmd.setProperty(.help_on_empty_args);
 
-    var pop_cmd = app.createCommand("pop", "Popup overlays");
+    var pop_cmd = app.createCommand("popup", "Popup overlays");
     pop_cmd.setProperty(.help_on_empty_args);
 
     var config_cmd = app.createCommand("config", "Configuration management");
@@ -321,14 +331,37 @@ pub fn main() !void {
 
     try root.addSubcommands(&[_]yazap.Command{ ses_cmd, pod_cmd, mux_cmd, shp_cmd, pop_cmd, config_cmd });
 
-    const matches = try app.parseProcess();
+    const raw_args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, raw_args);
+
+    var normalized_args: std.ArrayList([:0]const u8) = .empty;
+    defer normalized_args.deinit(allocator);
+
+    var owned_alias_args: std.ArrayList([:0]u8) = .empty;
+    defer {
+        for (owned_alias_args.items) |item| allocator.free(item);
+        owned_alias_args.deinit(allocator);
+    }
+
+    for (raw_args[1..], 0..) |arg, idx| {
+        const mapped = if (idx == 0) normalizeTopLevelCommand(arg) else arg;
+        if (!std.mem.eql(u8, mapped, arg)) {
+            const duped = try allocator.dupeZ(u8, mapped);
+            try owned_alias_args.append(allocator, duped);
+            try normalized_args.append(allocator, duped);
+        } else {
+            try normalized_args.append(allocator, arg);
+        }
+    }
+
+    const matches = try app.parseFrom(normalized_args.items);
 
     if (!matches.containsArgs()) {
         try runMuxNew("", false, "");
         return;
     }
 
-    if (matches.subcommandMatches("ses")) |ses_matches| {
+    if (matches.subcommandMatches("session")) |ses_matches| {
         if (ses_matches.subcommandMatches("daemon")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
@@ -469,7 +502,7 @@ pub fn main() !void {
             try cli_cmds.runPodGc(allocator, m.containsArg("dry-run"));
             return;
         }
-    } else if (matches.subcommandMatches("mux")) |mux_matches| {
+    } else if (matches.subcommandMatches("multiplexer")) |mux_matches| {
         if (mux_matches.subcommandMatches("new")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) {
@@ -559,7 +592,7 @@ pub fn main() !void {
             try cli_cmds.runInfo(allocator, m.getSingleValue("uuid") orelse "", m.containsArg("creator"), m.containsArg("last"));
             return;
         }
-    } else if (matches.subcommandMatches("shp")) |shp_matches| {
+    } else if (matches.subcommandMatches("shell")) |shp_matches| {
         if (shp_matches.subcommandMatches("prompt")) |m| {
             const status = try parseOptionalI64(m.getSingleValue("status"), "status");
             const duration = try parseOptionalI64(m.getSingleValue("duration"), "duration");
@@ -599,20 +632,20 @@ pub fn main() !void {
             try runShpSpinner(m.getSingleValue("name") orelse "", width, interval, hold, m.containsArg("loop"));
             return;
         }
-    } else if (matches.subcommandMatches("pop")) |pop_matches| {
+    } else if (matches.subcommandMatches("popup")) |pop_matches| {
         if (pop_matches.subcommandMatches("notify")) |m| {
             const timeout = try parseOptionalI64(m.getSingleValue("timeout"), "timeout");
-            try runPopNotify(allocator, m.getSingleValue("uuid") orelse "", timeout, m.getSingleValue("message") orelse "");
+            try pop_handlers.runPopNotify(allocator, m.getSingleValue("uuid") orelse "", timeout, m.getSingleValue("message") orelse "");
             return;
         }
         if (pop_matches.subcommandMatches("confirm")) |m| {
             const timeout = try parseOptionalI64(m.getSingleValue("timeout"), "timeout");
-            try runPopConfirm(allocator, m.getSingleValue("uuid") orelse "", timeout, m.getSingleValue("message") orelse "");
+            try pop_handlers.runPopConfirm(allocator, m.getSingleValue("uuid") orelse "", timeout, m.getSingleValue("message") orelse "");
             return;
         }
         if (pop_matches.subcommandMatches("choose")) |m| {
             const timeout = try parseOptionalI64(m.getSingleValue("timeout"), "timeout");
-            try runPopChoose(allocator, m.getSingleValue("uuid") orelse "", timeout, m.getSingleValue("items") orelse "", m.getSingleValue("message") orelse "");
+            try pop_handlers.runPopChoose(allocator, m.getSingleValue("uuid") orelse "", timeout, m.getSingleValue("items") orelse "", m.getSingleValue("message") orelse "");
             return;
         }
     } else if (matches.subcommandMatches("config")) |config_matches| {
@@ -807,197 +840,4 @@ fn runShpSpinner(name: []const u8, width_i: i64, interval_i: i64, hold_i: i64, l
     }
 
     stdout.writeAll("\r\n") catch {};
-}
-
-fn parseUuid32Hex(text: []const u8) ?[32]u8 {
-    if (text.len != 32) return null;
-    var out: [32]u8 = undefined;
-    for (text, 0..) |ch, i| {
-        if (!std.ascii.isHex(ch)) return null;
-        out[i] = ch;
-    }
-    return out;
-}
-
-fn runPopNotify(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64, message: []const u8) !void {
-    const wire = core.wire;
-    const posix = std.posix;
-
-    if (message.len == 0) {
-        print("Error: message is required\n", .{});
-        return;
-    }
-
-    var target_uuid: [32]u8 = undefined;
-    if (uuid.len > 0) {
-        target_uuid = parseUuid32Hex(uuid) orelse {
-            print("Error: --uuid must be 32 hex chars\n", .{});
-            return;
-        };
-    } else {
-        const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: --uuid required (or run inside hexe mux)\n", .{});
-            return;
-        };
-        target_uuid = parseUuid32Hex(env_uuid) orelse {
-            print("Error: invalid HEXE_PANE_UUID\n", .{});
-            return;
-        };
-    }
-
-    const fd = cli_cmds.connectSesCliChannel(allocator) orelse return;
-    defer posix.close(fd);
-
-    const timeout_ms: i32 = if (timeout > 0) @intCast(timeout) else 3000;
-    const tn = wire.TargetedNotify{
-        .uuid = target_uuid,
-        .timeout_ms = timeout_ms,
-        .msg_len = @intCast(message.len),
-    };
-    wire.writeControlWithTrail(fd, .targeted_notify, std.mem.asBytes(&tn), message) catch {};
-}
-
-fn runPopConfirm(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64, message: []const u8) !void {
-    const wire = core.wire;
-    const posix = std.posix;
-
-    if (message.len == 0) {
-        print("Error: message is required\n", .{});
-        return;
-    }
-
-    var target_uuid: [32]u8 = undefined;
-    if (uuid.len > 0) {
-        target_uuid = parseUuid32Hex(uuid) orelse {
-            print("Error: --uuid must be 32 hex chars\n", .{});
-            std.process.exit(1);
-        };
-    } else {
-        const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: --uuid required (or run inside hexe mux)\n", .{});
-            return;
-        };
-        target_uuid = parseUuid32Hex(env_uuid) orelse {
-            print("Error: invalid HEXE_PANE_UUID\n", .{});
-            std.process.exit(1);
-        };
-    }
-
-    const fd = cli_cmds.connectSesCliChannel(allocator) orelse std.process.exit(1);
-
-    const timeout_ms: i32 = if (timeout > 0) @intCast(timeout) else 0;
-    const pc = wire.PopConfirm{
-        .uuid = target_uuid,
-        .timeout_ms = timeout_ms,
-        .msg_len = @intCast(message.len),
-    };
-    wire.writeControlWithTrail(fd, .pop_confirm, std.mem.asBytes(&pc), message) catch {
-        posix.close(fd);
-        std.process.exit(1);
-    };
-
-    const hdr = wire.readControlHeader(fd) catch {
-        posix.close(fd);
-        std.process.exit(1);
-    };
-    const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-    if (msg_type != .pop_response or hdr.payload_len < @sizeOf(wire.PopResponse)) {
-        posix.close(fd);
-        std.process.exit(1);
-    }
-    const resp = wire.readStruct(wire.PopResponse, fd) catch {
-        posix.close(fd);
-        std.process.exit(1);
-    };
-    posix.close(fd);
-
-    if (resp.response_type == 1) {
-        std.process.exit(0);
-    }
-    std.process.exit(1);
-}
-
-fn runPopChoose(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64, items: []const u8, message: []const u8) !void {
-    const wire = core.wire;
-    const posix = std.posix;
-
-    if (items.len == 0) {
-        print("Error: --items is required\n", .{});
-        return;
-    }
-
-    var target_uuid: [32]u8 = undefined;
-    if (uuid.len > 0) {
-        target_uuid = parseUuid32Hex(uuid) orelse {
-            print("Error: --uuid must be 32 hex chars\n", .{});
-            std.process.exit(1);
-        };
-    } else {
-        const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: --uuid required (or run inside hexe mux)\n", .{});
-            return;
-        };
-        target_uuid = parseUuid32Hex(env_uuid) orelse {
-            print("Error: invalid HEXE_PANE_UUID\n", .{});
-            std.process.exit(1);
-        };
-    }
-
-    var trail: std.ArrayList(u8) = .empty;
-    defer trail.deinit(allocator);
-
-    const title = if (message.len > 0) message else "Select option";
-    try trail.appendSlice(allocator, title);
-
-    var item_count: u16 = 0;
-    var it = std.mem.splitScalar(u8, items, ',');
-    while (it.next()) |item| {
-        const trimmed = std.mem.trim(u8, item, " ");
-        if (trimmed.len > 0) {
-            const len: u16 = @intCast(trimmed.len);
-            try trail.appendSlice(allocator, std.mem.asBytes(&len));
-            try trail.appendSlice(allocator, trimmed);
-            item_count += 1;
-        }
-    }
-
-    if (item_count == 0) {
-        print("Error: no valid items provided\n", .{});
-        return;
-    }
-
-    const fd = cli_cmds.connectSesCliChannel(allocator) orelse std.process.exit(1);
-
-    const timeout_ms: i32 = if (timeout > 0) @intCast(timeout) else 0;
-    const pc = wire.PopChoose{
-        .uuid = target_uuid,
-        .timeout_ms = timeout_ms,
-        .title_len = @intCast(title.len),
-        .item_count = item_count,
-    };
-    wire.writeControlWithTrail(fd, .pop_choose, std.mem.asBytes(&pc), trail.items) catch {
-        posix.close(fd);
-        std.process.exit(1);
-    };
-
-    const hdr = wire.readControlHeader(fd) catch {
-        posix.close(fd);
-        std.process.exit(1);
-    };
-    const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-    if (msg_type != .pop_response or hdr.payload_len < @sizeOf(wire.PopResponse)) {
-        posix.close(fd);
-        std.process.exit(1);
-    }
-    const resp = wire.readStruct(wire.PopResponse, fd) catch {
-        posix.close(fd);
-        std.process.exit(1);
-    };
-    posix.close(fd);
-
-    if (resp.response_type == 2) {
-        print("{d}\n", .{resp.selected_idx});
-        std.process.exit(0);
-    }
-    std.process.exit(1);
 }
