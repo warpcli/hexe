@@ -203,10 +203,9 @@ fn handleParsedScrollAction(state: *State, action: input.ScrollAction) bool {
     return true;
 }
 
-fn handleBlockedPopupInput(state: *State, popups: anytype, bytes: []const u8) bool {
-    const parsed = vaxis_parser.parse(bytes, state.allocator) catch null;
-    if (parsed != null and parsed.?.event != null) {
-        if (input.handlePopupEvent(popups, parsed.?.event.?)) return true;
+fn handleBlockedPopupInput(popups: anytype, bytes: []const u8, parsed_event: ?vaxis.Event) bool {
+    if (parsed_event) |ev| {
+        if (input.handlePopupEvent(popups, ev)) return true;
     }
     return input.handlePopupInput(popups, bytes);
 }
@@ -332,6 +331,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
         const current_tab = &state.tabs.items[state.active_tab];
         if (current_tab.popups.isBlocked()) {
             const parsed_tab = vaxis_parser.parse(inp, state.allocator) catch null;
+            const parsed_tab_event: ?vaxis.Event = if (parsed_tab != null and parsed_tab.?.n > 0) parsed_tab.?.event else null;
 
             // Allow only tab switching while a tab popup is open.
             if (parsed_tab) |parsed_key| {
@@ -346,9 +346,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 }
             }
             // Block everything else - handle popup input.
-            if (parsed_tab != null and parsed_tab.?.event != null and input.handlePopupEvent(&current_tab.popups, parsed_tab.?.event.?)) {
-                loop_ipc.sendPopResponse(state);
-            } else if (input.handlePopupInput(&current_tab.popups, inp)) {
+            if (handleBlockedPopupInput(&current_tab.popups, inp, parsed_tab_event)) {
                 loop_ipc.sendPopResponse(state);
             }
             state.needs_render = true;
@@ -422,10 +420,13 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 continue;
             }
 
+            var parsed_event_for_popup: ?vaxis.Event = null;
+
             // Parse once through libvaxis and dispatch key/scroll/mouse/control.
             const parsed = vaxis_parser.parse(inp[i..], state.allocator) catch null;
             if (parsed) |res| {
                 if (res.n > 0) {
+                    parsed_event_for_popup = res.event;
                     if (res.event) |ev| {
                         if (input.scrollActionFromVaxisEvent(ev)) |action| {
                             if (handleParsedScrollAction(state, action)) {
@@ -533,7 +534,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 if (fpane.isVisibleOnTab(state.active_tab) and can_interact) {
                     // Check if this float pane has a blocking popup.
                     if (fpane.popups.isBlocked()) {
-                        if (handleBlockedPopupInput(state, &fpane.popups, inp[i..])) {
+                        if (handleBlockedPopupInput(&fpane.popups, inp[i..], parsed_event_for_popup)) {
                             loop_ipc.sendPopResponse(state);
                         }
                         state.needs_render = true;
@@ -549,7 +550,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                     if (state.currentLayout().getFocusedPane()) |pane| {
                         // Check if this pane has a blocking popup.
                         if (pane.popups.isBlocked()) {
-                            if (handleBlockedPopupInput(state, &pane.popups, inp[i..])) {
+                            if (handleBlockedPopupInput(&pane.popups, inp[i..], parsed_event_for_popup)) {
                                 loop_ipc.sendPopResponse(state);
                             }
                             state.needs_render = true;
@@ -565,7 +566,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
             } else if (state.currentLayout().getFocusedPane()) |pane| {
                 // Check if this pane has a blocking popup.
                 if (pane.popups.isBlocked()) {
-                    if (handleBlockedPopupInput(state, &pane.popups, inp[i..])) {
+                    if (handleBlockedPopupInput(&pane.popups, inp[i..], parsed_event_for_popup)) {
                         loop_ipc.sendPopResponse(state);
                     }
                     state.needs_render = true;
