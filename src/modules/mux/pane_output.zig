@@ -86,11 +86,9 @@ fn forwardOsc(self: *Pane, data: []const u8) void {
                     handleOsc52(self, self.osc_buf.items);
                 }
                 if (isOscQuery(self.osc_buf.items)) {
-                    if (!handleOscQuery(self, self.osc_buf.items, code)) {
-                        self.osc_expect_response = true;
-                        const stdout = std.fs.File.stdout();
-                        stdout.writeAll(self.osc_buf.items) catch {};
-                    }
+                    self.osc_expect_response = true;
+                    const stdout = std.fs.File.stdout();
+                    stdout.writeAll(self.osc_buf.items) catch {};
                 } else {
                     const stdout = std.fs.File.stdout();
                     stdout.writeAll(self.osc_buf.items) catch {};
@@ -100,23 +98,6 @@ fn forwardOsc(self: *Pane, data: []const u8) void {
             self.osc_buf.clearRetainingCapacity();
         }
     }
-}
-
-fn handleOscQuery(self: *Pane, seq: []const u8, code: u32) bool {
-    _ = seq;
-    if (!(code == 10 or code == 11 or code == 12)) return false;
-
-    const color = switch (code) {
-        10 => "ffff/ffff/ffff",
-        11 => "0000/0000/0000",
-        12 => "ffff/ffff/ffff",
-        else => "0000/0000/0000",
-    };
-
-    var buf: [48]u8 = undefined;
-    const resp = std.fmt.bufPrint(&buf, "\x1b]{d};rgb:{s}\x07", .{ code, color }) catch return true;
-    self.write(resp) catch {};
-    return true;
 }
 
 fn parseOscCode(seq: []const u8) ?u32 {
