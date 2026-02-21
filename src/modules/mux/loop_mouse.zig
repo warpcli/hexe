@@ -8,7 +8,6 @@ const focus_nav = @import("focus_nav.zig");
 const float_title = @import("float_title.zig");
 const float_util = @import("float_util.zig");
 const mouse_selection = @import("mouse_selection.zig");
-const clipboard = @import("clipboard.zig");
 const statusbar = @import("statusbar.zig");
 
 const Pane = @import("pane.zig").Pane;
@@ -389,7 +388,11 @@ fn copySelectionRange(state: *State, pane: *Pane, range: anytype) bool {
     if (bytes.len == 0) {
         state.notifications.showFor("No text selected", 1200);
     } else {
-        clipboard.copyToClipboard(state.allocator, bytes);
+        if (!copyTextToSystemClipboard(state, bytes)) {
+            state.notifications.showFor("Clipboard copy failed", 1200);
+            state.needs_render = true;
+            return true;
+        }
         state.notifications.showFor("Copied selection", 1200);
     }
     state.needs_render = true;
@@ -409,6 +412,14 @@ fn forwardToFocusedAltPane(state: *State, ev: MouseEvent) bool {
         }
     }
     return false;
+}
+
+fn copyTextToSystemClipboard(state: *State, bytes: []const u8) bool {
+    const stdout = std.fs.File.stdout();
+    var buf: [256]u8 = undefined;
+    var writer = stdout.writer(&buf);
+    state.renderer.vx.copyToSystemClipboard(&writer.interface, bytes, state.allocator) catch return false;
+    return true;
 }
 
 fn shapeForResizeEdge(mask: u8) vaxis.Mouse.Shape {
@@ -589,7 +600,11 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                                 if (bytes.len == 0) {
                                     state.notifications.showFor("No text selected", 1200);
                                 } else {
-                                    clipboard.copyToClipboard(state.allocator, bytes);
+                                    if (!copyTextToSystemClipboard(state, bytes)) {
+                                        state.notifications.showFor("Clipboard copy failed", 1200);
+                                        state.needs_render = true;
+                                        return true;
+                                    }
                                     state.notifications.showFor("Copied selection", 1200);
                                 }
                             }
