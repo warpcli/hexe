@@ -128,7 +128,22 @@ fn stashFromIndex(state: *State, inp: []const u8, start: usize) []const u8 {
     return inp[0..start];
 }
 
-fn consumeLeadingTerminalQueryReplies(inp: []const u8) []const u8 {
+fn isTerminalQueryReplyEvent(event: vaxis.Event) bool {
+    return switch (event) {
+        .cap_kitty_keyboard,
+        .cap_kitty_graphics,
+        .cap_rgb,
+        .cap_unicode,
+        .cap_sgr_pixels,
+        .cap_color_scheme_updates,
+        .cap_multi_cursor,
+        .cap_da1,
+        => true,
+        else => false,
+    };
+}
+
+fn consumeLeadingTerminalQueryRepliesRaw(inp: []const u8) []const u8 {
     const ESC: u8 = 0x1b;
 
     var i: usize = 0;
@@ -160,6 +175,18 @@ fn consumeLeadingTerminalQueryReplies(inp: []const u8) []const u8 {
     }
 
     return inp[i..];
+}
+
+fn consumeLeadingTerminalQueryReplies(state: *State, inp: []const u8) []const u8 {
+    var i: usize = 0;
+    while (i < inp.len) {
+        const parsed = parseEventHead(state, inp[i..]) orelse break;
+        const event = parsed.event orelse break;
+        if (!isTerminalQueryReplyEvent(event)) break;
+        i += parsed.n;
+    }
+    if (i > 0) return inp[i..];
+    return consumeLeadingTerminalQueryRepliesRaw(inp);
 }
 
 fn handleParsedScrollAction(state: *State, action: input.ScrollAction) bool {
@@ -503,7 +530,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     const stable = stashIncompleteParserTail(state, slice);
     if (stable.len == 0) return;
 
-    const cleaned = consumeLeadingTerminalQueryReplies(stable);
+    const cleaned = consumeLeadingTerminalQueryReplies(state, stable);
     if (cleaned.len == 0) return;
 
     // Keep bracketed-paste state synchronized from parsed terminal events.
