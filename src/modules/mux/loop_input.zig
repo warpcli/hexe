@@ -165,17 +165,29 @@ fn consumeLeadingTerminalQueryRepliesRaw(inp: []const u8) []const u8 {
     return inp[i..];
 }
 
-fn consumeLeadingTerminalQueryReplies(state: *State, inp: []const u8) []const u8 {
+const QueryReplyStripResult = struct {
+    bytes: []const u8,
+    first_parsed: ?ParsedEventHead,
+};
+
+fn consumeLeadingTerminalQueryReplies(state: *State, inp: []const u8) QueryReplyStripResult {
     var i: usize = 0;
     while (i < inp.len) {
         const parsed = parseEventHead(state, inp[i..]) orelse break;
-        const event = parsed.event orelse break;
+        const event = parsed.event orelse return .{ .bytes = inp[i..], .first_parsed = parsed };
         if (!isTerminalQueryReplyEvent(event)) break;
         applyInputFlagsForEvent(state, event);
         i += parsed.n;
     }
-    if (i > 0) return inp[i..];
-    return consumeLeadingTerminalQueryRepliesRaw(inp);
+
+    if (i > 0) {
+        const remaining = inp[i..];
+        if (remaining.len == 0) return .{ .bytes = remaining, .first_parsed = null };
+        const first = parseEventHead(state, remaining);
+        return .{ .bytes = remaining, .first_parsed = first };
+    }
+
+    return .{ .bytes = consumeLeadingTerminalQueryRepliesRaw(inp), .first_parsed = null };
 }
 
 fn handleParsedScrollAction(state: *State, action: input.ScrollAction) bool {
@@ -576,6 +588,13 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
     }
 }
 
+fn clearOscReplyCapture(state: *State) void {
+    state.osc_reply_in_progress = false;
+    state.osc_reply_prev_esc = false;
+    state.osc_reply_target_uuid = null;
+    state.osc_reply_buf.clearRetainingCapacity();
+}
+
 pub fn handleInput(state: *State, input_bytes: []const u8) void {
     if (input_bytes.len == 0) return;
 
@@ -590,7 +609,8 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     const stable = stashIncompleteParserTail(state, slice);
     if (stable.len == 0) return;
 
-    const cleaned = consumeLeadingTerminalQueryReplies(state, stable);
+    const cleaned_res = consumeLeadingTerminalQueryReplies(state, stable);
+    const cleaned = cleaned_res.bytes;
     if (cleaned.len == 0) return;
 
     // Record all input for keycast display (before any processing)
@@ -598,7 +618,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
     const inp = cleaned;
 
-    const first_parsed = parseEventHead(state, inp);
+    const first_parsed = cleaned_res.first_parsed orelse parseEventHead(state, inp);
     const popup_event: ?vaxis.Event = if (first_parsed) |h| h.event else null;
 
     if (handleMuxLevelPopup(state, popup_event)) return;
@@ -626,15 +646,6 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) []const u8 {
     const ESC: u8 = 0x1b;
     const BEL: u8 = 0x07;
 
-    const resetOscReply = struct {
-        fn run(st: *State) void {
-            st.osc_reply_in_progress = false;
-            st.osc_reply_prev_esc = false;
-            st.osc_reply_target_uuid = null;
-            st.osc_reply_buf.clearRetainingCapacity();
-        }
-    }.run;
-
     // Start capture only if the input begins with an OSC response.
     if (!state.osc_reply_in_progress) {
         if (inp.len < 2 or inp[0] != ESC or inp[1] != ']') return inp;
@@ -648,7 +659,7 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) []const u8 {
         const b = inp[i];
         state.osc_reply_buf.append(state.allocator, b) catch {
             // Drop on allocation error.
-            resetOscReply(state);
+            clearOscReplyCapture(state);
             return inp[i + 1 ..];
         };
 
@@ -661,7 +672,7 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) []const u8 {
         state.osc_reply_prev_esc = (b == ESC);
 
         if (state.osc_reply_buf.items.len > 64 * 1024) {
-            resetOscReply(state);
+            clearOscReplyCapture(state);
             return inp[i + 1 ..];
         }
 
@@ -672,7 +683,7 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) []const u8 {
                 }
             }
 
-            resetOscReply(state);
+            clearOscReplyCapture(state);
 
             return inp[i + 1 ..];
         }
