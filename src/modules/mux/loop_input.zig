@@ -73,8 +73,8 @@ fn isModifierOnlyKey(cp: u21) bool {
         cp == vaxis.Key.iso_level_3_shift or cp == vaxis.Key.iso_level_5_shift;
 }
 
-fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8) void {
-    keybinds.forwardInputToFocusedPane(state, bytes);
+fn forwardSanitizedToFocusedPane(state: *State, bytes: []const u8, parsed_event: ?vaxis.Event) void {
+    keybinds.forwardInputToFocusedPaneWithEvent(state, bytes, parsed_event);
 }
 
 fn mergeStdinTail(state: *State, input_bytes: []const u8) struct { merged: []const u8, owned: ?[]u8 } {
@@ -561,7 +561,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                     pane.scrollToBottom();
                     state.needs_render = true;
                 }
-                forwardSanitizedToFocusedPane(state, inp[i..]);
+                forwardSanitizedToFocusedPane(state, inp[i..], parsed_event_for_popup);
             }
             return;
         }

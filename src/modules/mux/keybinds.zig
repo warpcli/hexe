@@ -35,7 +35,10 @@ fn handleBlockedPopup(state: *State, popups: anytype, parsed_event: ?vaxis.Event
 
 pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
     const parsed_event = parsedEventFromBytes(state, bytes);
+    forwardInputToFocusedPaneWithEvent(state, bytes, parsed_event);
+}
 
+pub fn forwardInputToFocusedPaneWithEvent(state: *State, bytes: []const u8, parsed_event: ?vaxis.Event) void {
     if (state.active_floating) |idx| {
         const fpane = state.floats.items[idx];
         const can_interact = if (fpane.parent_tab) |parent| parent == state.active_tab else true;
