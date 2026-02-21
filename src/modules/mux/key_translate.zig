@@ -1,112 +1,117 @@
+const std = @import("std");
+const ghostty = @import("ghostty-vt");
 const core = @import("core");
 
 const BindKey = core.Config.BindKey;
 const BindKeyKind = core.Config.BindKeyKind;
 
-/// Convert kitty CSI-u modifiers value (modifiers field before -1) to mux mod mask.
-/// Output bitmask: alt=1, ctrl=2, shift=4, super=8.
-pub fn decodeKittyMods(mod_val: u32) u8 {
-    const mask: u32 = if (mod_val > 0) mod_val - 1 else 0;
-    var mods: u8 = 0;
-    if ((mask & 2) != 0) mods |= 1; // alt
-    if ((mask & 4) != 0) mods |= 2; // ctrl
-    if ((mask & 1) != 0) mods |= 4; // shift
-    if ((mask & 8) != 0) mods |= 8; // super
-    return mods;
+pub fn encodeKey(
+    out: *[64]u8,
+    mods: u8,
+    key: BindKey,
+    text_codepoint: ?u21,
+    terminal: *const ghostty.Terminal,
+) ?[]const u8 {
+    var utf8_buf: [4]u8 = undefined;
+    const utf8 = keyUtf8(key, text_codepoint, &utf8_buf);
+
+    const event: ghostty.input.KeyEvent = .{
+        .key = bindKeyToGhosttyKey(key),
+        .utf8 = utf8,
+        .mods = .{
+            .alt = (mods & 1) != 0,
+            .ctrl = (mods & 2) != 0,
+            .shift = (mods & 4) != 0,
+            .super = (mods & 8) != 0,
+        },
+    };
+
+    var writer = std.Io.Writer.fixed(out);
+    var opts = ghostty.input.KeyEncodeOptions.fromTerminal(terminal);
+    opts.macos_option_as_alt = .false;
+    ghostty.input.encodeKey(&writer, event, opts) catch return null;
+    return writer.buffered();
 }
 
-/// Encode a key + modifiers into legacy byte sequences for pane input.
-/// Returns encoded length or null if output buffer is too small.
-pub fn encodeLegacyKey(out: []u8, mods: u8, key: BindKey, use_application_arrows: bool) ?usize {
-    var n: usize = 0;
-
-    switch (@as(BindKeyKind, key)) {
-        .space => {
-            if ((mods & 2) != 0) {
-                if (out.len < 1) return null;
-                out[n] = 0x00;
-                n += 1;
-            } else {
-                if ((mods & 1) != 0) {
-                    if (out.len < n + 1) return null;
-                    out[n] = 0x1b;
-                    n += 1;
-                }
-                if (out.len < n + 1) return null;
-                out[n] = ' ';
-                n += 1;
-            }
-        },
-        .char => {
-            var ch: u8 = key.char;
-            if ((mods & 4) != 0 and ch == 0x09) {
-                if (out.len < n + 3) return null;
-                out[n] = 0x1b;
-                n += 1;
-                out[n] = '[';
-                n += 1;
-                out[n] = 'Z';
-                n += 1;
-            } else {
-                if ((mods & 4) != 0 and ch >= 'a' and ch <= 'z') ch = ch - 'a' + 'A';
-                if ((mods & 2) != 0) {
-                    if (ch >= 'a' and ch <= 'z') ch = ch - 'a' + 1;
-                    if (ch >= 'A' and ch <= 'Z') ch = ch - 'A' + 1;
-                }
-                if ((mods & 1) != 0) {
-                    if (out.len < n + 1) return null;
-                    out[n] = 0x1b;
-                    n += 1;
-                }
-                if (out.len < n + 1) return null;
-                out[n] = ch;
-                n += 1;
-            }
-        },
-        .up, .down, .left, .right => {
-            const dir_char: u8 = switch (@as(BindKeyKind, key)) {
-                .up => 'A',
-                .down => 'B',
-                .right => 'C',
-                .left => 'D',
-                else => unreachable,
-            };
-
-            if (out.len < n + 2) return null;
-            out[n] = 0x1b;
-            n += 1;
-
-            if (mods == 0 and use_application_arrows) {
-                out[n] = 'O';
-                n += 1;
-                if (out.len < n + 1) return null;
-                out[n] = dir_char;
-                n += 1;
-            } else {
-                out[n] = '[';
-                n += 1;
-
-                if (mods != 0) {
-                    var csi_mod: u8 = 1;
-                    if ((mods & 4) != 0) csi_mod |= 1; // shift
-                    if ((mods & 1) != 0) csi_mod |= 2; // alt
-                    if ((mods & 2) != 0) csi_mod |= 4; // ctrl
-
-                    if (out.len < n + 3) return null;
-                    out[n] = '1';
-                    n += 1;
-                    out[n] = ';';
-                    n += 1;
-                    out[n] = '0' + csi_mod;
-                    n += 1;
-                }
-
-                if (out.len < n + 1) return null;
-                out[n] = dir_char;
-                n += 1;
-            }
-        },
+fn keyUtf8(key: BindKey, text_codepoint: ?u21, out: *[4]u8) []const u8 {
+    if (text_codepoint) |cp| {
+        if (cp == 0) return "";
+        const n = std.unicode.utf8Encode(cp, out) catch return "";
+        return out[0..n];
     }
 
-    return n;
+    return switch (@as(BindKeyKind, key)) {
+        .space => " ",
+        .char => blk: {
+            out[0] = key.char;
+            break :blk out[0..1];
+        },
+        else => "",
+    };
+}
+
+fn bindKeyToGhosttyKey(key: BindKey) ghostty.input.Key {
+    return switch (@as(BindKeyKind, key)) {
+        .up => .arrow_up,
+        .down => .arrow_down,
+        .left => .arrow_left,
+        .right => .arrow_right,
+        .space => .space,
+        .char => charToGhosttyKey(key.char),
+    };
+}
+
+fn charToGhosttyKey(ch: u8) ghostty.input.Key {
+    const c = std.ascii.toLower(ch);
+    return switch (c) {
+        'a' => .key_a,
+        'b' => .key_b,
+        'c' => .key_c,
+        'd' => .key_d,
+        'e' => .key_e,
+        'f' => .key_f,
+        'g' => .key_g,
+        'h' => .key_h,
+        'i' => .key_i,
+        'j' => .key_j,
+        'k' => .key_k,
+        'l' => .key_l,
+        'm' => .key_m,
+        'n' => .key_n,
+        'o' => .key_o,
+        'p' => .key_p,
+        'q' => .key_q,
+        'r' => .key_r,
+        's' => .key_s,
+        't' => .key_t,
+        'u' => .key_u,
+        'v' => .key_v,
+        'w' => .key_w,
+        'x' => .key_x,
+        'y' => .key_y,
+        'z' => .key_z,
+        '0' => .digit_0,
+        '1' => .digit_1,
+        '2' => .digit_2,
+        '3' => .digit_3,
+        '4' => .digit_4,
+        '5' => .digit_5,
+        '6' => .digit_6,
+        '7' => .digit_7,
+        '8' => .digit_8,
+        '9' => .digit_9,
+        '-' => .minus,
+        '=' => .equal,
+        '[' => .bracket_left,
+        ']' => .bracket_right,
+        '\\' => .backslash,
+        ';' => .semicolon,
+        '\'' => .quote,
+        '`' => .backquote,
+        ',' => .comma,
+        '.' => .period,
+        '/' => .slash,
+        '\t' => .tab,
+        else => .unidentified,
+    };
 }

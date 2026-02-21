@@ -60,7 +60,7 @@ pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
 }
 
 pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_codepoint: ?u21) void {
-    var out: [16]u8 = undefined;
+    var out: [64]u8 = undefined;
 
     if (@as(BindKeyKind, key) == .char) {
         if (text_codepoint) |cp| {
@@ -81,24 +81,28 @@ pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_code
         }
     }
 
-    const use_application_arrows = blk: {
+    const target_pane = blk: {
         if (state.active_floating) |idx| {
             const fpane = state.floats.items[idx];
             const can_interact = if (fpane.parent_tab) |parent| parent == state.active_tab else true;
             if (fpane.isVisibleOnTab(state.active_tab) and can_interact) {
-                break :blk fpane.vt.inAltScreen();
+                break :blk fpane;
             }
         }
 
         if (state.currentLayout().getFocusedPane()) |pane| {
-            break :blk pane.vt.inAltScreen();
+            break :blk pane;
         }
 
-        break :blk false;
+        break :blk null;
     };
 
-    if (key_translate.encodeLegacyKey(out[0..], mods, key, use_application_arrows)) |n| {
-        if (n > 0) forwardInputToFocusedPane(state, out[0..n]);
+    if (target_pane) |pane| {
+        if (key_translate.encodeKey(&out, mods, key, text_codepoint, &pane.vt.terminal)) |bytes| {
+            if (bytes.len > 0) {
+                forwardInputToFocusedPane(state, bytes);
+            }
+        }
     }
 }
 
