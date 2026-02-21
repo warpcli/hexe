@@ -148,6 +148,10 @@ fn vaxisKeyToBindKey(vk: vaxis.Key, mods_inout: *u8) ?core.Config.BindKey {
         vaxis.Key.left => .left,
         vaxis.Key.right => .right,
         vaxis.Key.space => .space,
+        vaxis.Key.enter => .{ .char = '\r' },
+        vaxis.Key.tab => .{ .char = '\t' },
+        vaxis.Key.backspace => .{ .char = 0x7f },
+        vaxis.Key.escape => .{ .char = 0x1b },
         else => blk: {
             var cp: u21 = vk.base_layout_codepoint orelse vk.codepoint;
 

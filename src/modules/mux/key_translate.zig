@@ -112,6 +112,9 @@ fn charToGhosttyKey(ch: u8) ghostty.input.Key {
         '.' => .period,
         '/' => .slash,
         '\t' => .tab,
+        '\r', '\n' => .enter,
+        0x7f, 0x08 => .backspace,
+        0x1b => .escape,
         else => .unidentified,
     };
 }
