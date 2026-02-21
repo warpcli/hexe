@@ -259,14 +259,22 @@ fn drawKittyVirtualPlacements(
     available_rows: usize,
 ) void {
     if (comptime !@hasDecl(ghostty.kitty.graphics, "unicode")) return;
+    const Storage = @TypeOf(vt.terminal.screens.active.kitty_images);
+    if (comptime !@hasDecl(Storage, "imageById")) return;
 
     if (available_rows == 0) return;
 
     const top = row_pins[0];
     const bottom = row_pins[available_rows - 1];
+    const storage = &vt.terminal.screens.active.kitty_images;
+    const cell_w: u32 = if (vt.terminal.cols == 0) 1 else @max(1, vt.terminal.width_px / vt.terminal.cols);
+    const cell_h: u32 = if (vt.terminal.rows == 0) 1 else @max(1, vt.terminal.height_px / vt.terminal.rows);
 
     var it = ghostty.kitty.graphics.unicode.placementIterator(top, bottom);
     while (it.next()) |placement| {
+        const image = storage.imageById(placement.image_id) orelse continue;
+        const rp = placement.renderPlacement(storage, &image, cell_w, cell_h) catch continue;
+
         const cached = vt.kitty_image_cache.get(placement.image_id) orelse continue;
         const p = vt.terminal.screens.active.pages.pointFromPin(.viewport, placement.pin) orelse continue;
         const vp = p.viewport;
@@ -282,7 +290,17 @@ fn drawKittyVirtualPlacements(
         writeImageCellPreserve(win, col, row, .{
             .img_id = cached.vaxis_id,
             .options = .{
+                .pixel_offset = .{
+                    .x = @intCast(@min(rp.offset_x, std.math.maxInt(u16))),
+                    .y = @intCast(@min(rp.offset_y, std.math.maxInt(u16))),
+                },
                 .size = .{ .rows = size_rows, .cols = size_cols },
+                .clip_region = .{
+                    .x = @intCast(@min(rp.source_x, std.math.maxInt(u16))),
+                    .y = @intCast(@min(rp.source_y, std.math.maxInt(u16))),
+                    .width = @intCast(@min(rp.source_width, std.math.maxInt(u16))),
+                    .height = @intCast(@min(rp.source_height, std.math.maxInt(u16))),
+                },
                 .z_index = -1,
             },
         });
