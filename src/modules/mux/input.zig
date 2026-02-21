@@ -35,7 +35,6 @@ pub const KeyEvent = struct {
     key: core.Config.BindKey,
     text_codepoint: ?u21,
     when: core.Config.BindWhen,
-    consumed: usize,
 };
 
 pub const ScrollAction = enum {
@@ -47,10 +46,10 @@ pub const ScrollAction = enum {
     shift_down,
 };
 
-pub fn keyEventFromVaxisEvent(event: vaxis.Event, consumed: usize) ?KeyEvent {
+pub fn keyEventFromVaxisEvent(event: vaxis.Event) ?KeyEvent {
     return switch (event) {
-        .key_press => |key| parseVaxisKey(key, .press, consumed),
-        .key_release => |key| parseVaxisKey(key, .release, consumed),
+        .key_press => |key| parseVaxisKey(key, .press),
+        .key_release => |key| parseVaxisKey(key, .release),
         else => null,
     };
 }
@@ -72,7 +71,7 @@ pub fn scrollActionFromVaxisEvent(event: vaxis.Event) ?ScrollAction {
     };
 }
 
-fn parseVaxisKey(vk: vaxis.Key, when: core.Config.BindWhen, consumed: usize) ?KeyEvent {
+fn parseVaxisKey(vk: vaxis.Key, when: core.Config.BindWhen) ?KeyEvent {
     var mods = modsMaskFromVaxis(vk.mods);
     const bind_key = vaxisKeyToBindKey(vk, &mods) orelse return null;
     const text_cp = textCodepointForForwarding(vk);
@@ -81,7 +80,6 @@ fn parseVaxisKey(vk: vaxis.Key, when: core.Config.BindWhen, consumed: usize) ?Ke
         .key = bind_key,
         .text_codepoint = text_cp,
         .when = when,
-        .consumed = consumed,
     };
 }
 

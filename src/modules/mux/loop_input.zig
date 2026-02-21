@@ -322,7 +322,7 @@ fn handleTabLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
 
     // Allow only tab switching while a tab popup is open.
     if (parsed_event) |ev_raw| {
-        if (input.keyEventFromVaxisEvent(ev_raw, 0)) |ev| {
+        if (input.keyEventFromVaxisEvent(ev_raw)) |ev| {
             if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true)) {
                 return true;
             }
@@ -442,7 +442,7 @@ fn dispatchParsedEvent(state: *State, parsed: anytype) ParsedDispatchResult {
         }
     }
 
-    if (input.keyEventFromVaxisEvent(ev, parsed.n)) |key_ev| {
+    if (input.keyEventFromVaxisEvent(ev)) |key_ev| {
         switch (handleParsedKeyEvent(state, key_ev)) {
             .quit => return .{ .consumed = true, .quit = true, .parsed_event = ev, .consumed_bytes = parsed.n },
             .consumed => return .{ .consumed = true, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n },
