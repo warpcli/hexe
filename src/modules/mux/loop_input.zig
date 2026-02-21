@@ -516,6 +516,11 @@ fn handleParsedKeyEvent(state: *State, ev: input.KeyEvent) KeyDispatchResult {
     return .unhandled;
 }
 
+fn firstOrParseAt(state: *State, inp: []const u8, offset: usize, first: ?ParsedEventHead) ?ParsedEventHead {
+    if (offset == 0) return first;
+    return parseEventHead(state, inp[offset..]);
+}
+
 pub fn handleInput(state: *State, input_bytes: []const u8) void {
     if (input_bytes.len == 0) return;
 
@@ -542,8 +547,8 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     {
         const inp = cleaned;
 
-        const popup_head = parseEventHead(state, inp);
-        const popup_event: ?vaxis.Event = if (popup_head) |h| h.event else null;
+        const first_parsed = parseEventHead(state, inp);
+        const popup_event: ?vaxis.Event = if (first_parsed) |h| h.event else null;
 
         if (handleMuxLevelPopup(state, popup_event)) return;
         if (handleTabLevelPopup(state, popup_event)) return;
@@ -554,7 +559,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
         if (state.overlays.isPaneSelectActive()) {
             var pane_select_i: usize = 0;
             while (pane_select_i < inp.len) {
-                const parsed = parseEventHead(state, inp[pane_select_i..]);
+                const parsed = firstOrParseAt(state, inp, pane_select_i, first_parsed);
                 if (parsed) |res| {
                     pane_select_i += res.n;
                     _ = actions.handlePaneSelectEvent(state, res.event);
@@ -572,7 +577,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
             var parsed_event_for_popup: ?vaxis.Event = null;
 
             // Parse once through libvaxis and dispatch key/scroll/mouse/control.
-            const parsed = parseEventHead(state, inp[i..]);
+            const parsed = firstOrParseAt(state, inp, i, first_parsed);
             if (parsed) |res| {
                 if (handleFloatRenameParsedEvent(state, res)) {
                     i += res.n;
