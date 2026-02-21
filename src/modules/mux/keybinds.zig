@@ -106,7 +106,7 @@ pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_code
     }
 }
 
-/// Legacy focus context for backward compatibility with timer storage.
+/// Focus context used for key timer bookkeeping.
 fn currentFocusContext(state: *State) FocusContext {
     return if (state.active_floating != null) .float else .split;
 }

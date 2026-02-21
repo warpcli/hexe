@@ -23,8 +23,7 @@ const tab_switch = @import("tab_switch.zig");
 
 // Mouse helpers moved to loop_mouse.zig.
 
-// Transitional parser usage: start consuming structured events from libvaxis
-// while keeping the existing raw-byte input pipeline intact.
+// libvaxis parser for structured input events.
 var vaxis_parser: vaxis.Parser = .{};
 
 fn updateInputFlagsFromParser(state: *State, input_bytes: []const u8) void {
@@ -204,11 +203,12 @@ fn handleParsedScrollAction(state: *State, action: input.ScrollAction) bool {
 }
 
 fn handleBlockedPopupInput(popups: anytype, bytes: []const u8, parsed_event: ?vaxis.Event) bool {
+    _ = bytes;
     if (parsed_event) |ev| {
         // Reuse already parsed event and avoid reparsing raw bytes.
         return input.handlePopupEvent(popups, ev);
     }
-    return input.handlePopupInput(popups, bytes);
+    return false;
 }
 
 fn resolveFocusedPaneForInput(state: *State) ?*Pane {

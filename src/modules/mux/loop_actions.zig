@@ -717,7 +717,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     const isolation_profile: ?[]const u8 = if (float_def.isolation) |iso|
         if (iso.profile.len > 0) iso.profile else null
     else if (float_def.attributes.isolated)
-        "default" // Use default profile for legacy isolated flag
+        "default" // Use default profile when isolated=true and no profile is set
     else
         null;
 
