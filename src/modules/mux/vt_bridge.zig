@@ -44,6 +44,7 @@ pub fn drawRenderState(
     if (available_rows == 0) return;
 
     const row_cells = row_slice.items(.cells);
+    const row_pins = row_slice.items(.pin);
 
     for (0..available_rows) |yi| {
         const y: u16 = @intCast(yi);
@@ -79,9 +80,12 @@ pub fn drawRenderState(
             else
                 convertDefaultStyle(raw, is_direct_color);
 
+            const link = resolveCellLink(arena, row_pins[yi], @intCast(col), raw);
+
             win.writeCell(@intCast(col), y, .{
                 .char = .{ .grapheme = text, .width = cell_width },
                 .style = style,
+                .link = link,
             });
 
             // Write explicit spacer cells for wide characters
@@ -187,4 +191,39 @@ fn applyDirectColor(style: *vaxis.Style, raw: pagepkg.Cell) void {
     } else if (raw.content_tag == .bg_color_palette) {
         style.bg = .{ .index = raw.content.color_palette };
     }
+}
+
+fn resolveCellLink(
+    arena: std.mem.Allocator,
+    pin: ghostty.PageList.Pin,
+    x: u16,
+    raw: pagepkg.Cell,
+) vaxis.Cell.Hyperlink {
+    if (!raw.hyperlink) return .{};
+
+    const rac = pin.node.data.getRowAndCell(x, pin.y);
+    if (!rac.cell.hyperlink) return .{};
+
+    const id = pin.node.data.lookupHyperlink(rac.cell) orelse return .{};
+    const entry = pin.node.data.hyperlink_set.get(pin.node.data.memory, id);
+    const uri_src = entry.uri.slice(pin.node.data.memory);
+    if (uri_src.len == 0) return .{};
+
+    const uri = arena.dupe(u8, uri_src) catch return .{};
+    var params: []const u8 = "";
+
+    switch (entry.id) {
+        .implicit => {},
+        .explicit => |id_slice| {
+            const id_src = id_slice.slice(pin.node.data.memory);
+            if (id_src.len > 0) {
+                const out = arena.alloc(u8, 3 + id_src.len) catch return .{ .uri = uri };
+                std.mem.copyForwards(u8, out[0..3], "id=");
+                std.mem.copyForwards(u8, out[3..], id_src);
+                params = out;
+            }
+        },
+    }
+
+    return .{ .uri = uri, .params = params };
 }
