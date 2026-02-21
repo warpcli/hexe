@@ -344,17 +344,18 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
         const current_tab = &state.tabs.items[state.active_tab];
         if (current_tab.popups.isBlocked()) {
             const parsed_tab = vaxis_parser.parse(inp, state.allocator) catch null;
-            const parsed_tab_event: ?vaxis.Event = if (parsed_tab != null and parsed_tab.?.n > 0) parsed_tab.?.event else null;
+            const parsed_tab_event: ?vaxis.Event = if (parsed_tab) |p|
+                if (p.n > 0) p.event else null
+            else
+                null;
 
             // Allow only tab switching while a tab popup is open.
-            if (parsed_tab) |parsed_key| {
-                if (parsed_key.n > 0 and parsed_key.event != null) {
-                    if (input.keyEventFromVaxisEvent(parsed_key.event.?, parsed_key.n)) |ev| {
-                        if (ev.when == .release) state.parser_key_release_seen = true;
-                        const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
-                        if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true, kitty_mode)) {
-                            return;
-                        }
+            if (parsed_tab != null and parsed_tab.?.n > 0 and parsed_tab_event != null) {
+                if (input.keyEventFromVaxisEvent(parsed_tab_event.?, parsed_tab.?.n)) |ev| {
+                    if (ev.when == .release) state.parser_key_release_seen = true;
+                    const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
+                    if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true, kitty_mode)) {
+                        return;
                     }
                 }
             }
