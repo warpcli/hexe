@@ -58,6 +58,7 @@ pub fn drawRenderState(
 
         const cells_slice = row_cells[yi].slice();
         const raw_cells = cells_slice.items(.raw);
+        const graphemes_arr = cells_slice.items(.grapheme);
         const styles_arr = cells_slice.items(.style);
 
         var col: usize = 0;
@@ -77,8 +78,13 @@ pub fn drawRenderState(
             const is_direct_color = (raw.content_tag == .bg_color_rgb or
                 raw.content_tag == .bg_color_palette);
 
+            const grapheme_tail: []const u21 = if (raw.content_tag == .codepoint_grapheme)
+                graphemes_arr[col]
+            else
+                &.{};
+
             // Resolve grapheme text
-            const text = resolveCellText(arena, raw, is_direct_color) catch " ";
+            const text = resolveCellText(arena, raw, grapheme_tail, is_direct_color) catch " ";
 
             // Resolve style
             const style = if (raw.style_id != 0)
@@ -100,6 +106,7 @@ pub fn drawRenderState(
                 win.writeCell(x + 1, y, .{
                     .char = .{ .grapheme = "", .width = 0 },
                     .style = style,
+                    .link = link,
                 });
             }
 
@@ -116,6 +123,7 @@ pub fn drawRenderState(
 fn resolveCellText(
     alloc: std.mem.Allocator,
     raw: pagepkg.Cell,
+    grapheme_tail: []const u21,
     is_direct_color: bool,
 ) ![]const u8 {
     if (is_direct_color) return " ";
@@ -128,7 +136,20 @@ fn resolveCellText(
     if (raw.wide == .spacer_head) return " ";
 
     // Fast path: single ASCII codepoint (95%+ of terminal content)
-    if (cp < 128) return ascii_lut[cp..][0..1];
+    if (cp < 128 and grapheme_tail.len == 0) return ascii_lut[cp..][0..1];
+
+    // Multi-codepoint grapheme cluster (primary codepoint + tail)
+    if (grapheme_tail.len > 0) {
+        const max_len = (1 + grapheme_tail.len) * 4;
+        var out = try alloc.alloc(u8, max_len);
+        errdefer alloc.free(out);
+        var n: usize = 0;
+        n += std.unicode.utf8Encode(cp, out[n..][0..4]) catch return " ";
+        for (grapheme_tail) |tail_cp| {
+            n += std.unicode.utf8Encode(tail_cp, out[n..][0..4]) catch return " ";
+        }
+        return out[0..n];
+    }
 
     // Non-ASCII: encode to UTF-8 via arena
     var utf8_buf: [4]u8 = undefined;
