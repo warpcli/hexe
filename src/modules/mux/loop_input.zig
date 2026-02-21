@@ -354,7 +354,13 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
         // LEVEL 1: MUX-level popup blocks EVERYTHING
         // ==========================================================================
         if (state.popups.isBlocked()) {
-            if (input.handlePopupInput(&state.popups, inp)) {
+            const parsed_mux = vaxis_parser.parse(inp, state.allocator) catch null;
+            const parsed_mux_event: ?vaxis.Event = if (parsed_mux) |p|
+                if (p.n > 0) p.event else null
+            else
+                null;
+
+            if (handleBlockedPopupInput(&state.popups, inp, parsed_mux_event)) {
                 // Check if this was a confirm/picker dialog for pending action
                 if (state.pending_action) |action| {
                     switch (action) {
