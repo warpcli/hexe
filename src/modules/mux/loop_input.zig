@@ -300,8 +300,8 @@ fn handleParsedKeyEvent(state: *State, ev: input.KeyEvent) KeyDispatchResult {
     }
 
     if (ev.when == .release) state.parser_key_release_seen = true;
-    const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
-    if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, false, kitty_mode)) {
+    const has_full_key_events = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
+    if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, false, has_full_key_events)) {
         return .consumed;
     }
 
@@ -310,7 +310,7 @@ fn handleParsedKeyEvent(state: *State, ev: input.KeyEvent) KeyDispatchResult {
     if (ev.mods == 1 and @as(core.Config.BindKeyKind, ev.key) == .char and ev.when == .press) {
         const ch = ev.key.char;
         if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9')) {
-            if (keybinds.handleKeyEvent(state, ev.mods | 2, ev.key, ev.when, false, kitty_mode)) {
+            if (keybinds.handleKeyEvent(state, ev.mods | 2, ev.key, ev.when, false, has_full_key_events)) {
                 return .consumed;
             }
         }
@@ -460,8 +460,8 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
             if (parsed_tab != null and parsed_tab.?.n > 0 and parsed_tab_event != null) {
                 if (input.keyEventFromVaxisEvent(parsed_tab_event.?, parsed_tab.?.n)) |ev| {
                     if (ev.when == .release) state.parser_key_release_seen = true;
-                    const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
-                    if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true, kitty_mode)) {
+                    const has_full_key_events = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
+                    if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true, has_full_key_events)) {
                         return;
                     }
                 }
