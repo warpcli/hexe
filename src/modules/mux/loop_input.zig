@@ -406,10 +406,14 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 continue;
             }
 
-            if (input.parseScrollEvent(inp[i..], state.allocator)) |sev| {
-                if (handleParsedScrollAction(state, sev.action)) {
-                    i += sev.consumed;
-                    continue;
+            if (vaxis_parser.parse(inp[i..], state.allocator) catch null) |parsed_scroll| {
+                if (parsed_scroll.n > 0 and parsed_scroll.event != null) {
+                    if (input.scrollActionFromVaxisEvent(parsed_scroll.event.?)) |action| {
+                        if (handleParsedScrollAction(state, action)) {
+                            i += parsed_scroll.n;
+                            continue;
+                        }
+                    }
                 }
             }
 
