@@ -6,7 +6,6 @@ const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
 const statusbar = @import("statusbar.zig");
 const text_width = @import("text_width.zig");
-const vaxis_surface = @import("vaxis_surface.zig");
 const Pane = @import("pane.zig").Pane;
 const Layout = @import("layout.zig").Layout;
 
@@ -72,31 +71,52 @@ fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: ?Color, bg: ?Color,
 fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Color, bg: Color, glyph_chars: [6]u21) void {
     if (w == 0 or h == 0) return;
 
-    const root = vaxis_surface.pooledWindow(std.heap.page_allocator, w, h) catch return;
+    // Fill background.
+    var yy: u16 = 0;
+    while (yy < h) : (yy += 1) {
+        var xx: u16 = 0;
+        while (xx < w) : (xx += 1) {
+            putChar(renderer, x + xx, y + yy, ' ', null, bg, false);
+        }
+    }
 
-    root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = .{ .bg = bg.toVaxis() } });
+    if (w == 1 and h == 1) {
+        putChar(renderer, x, y, glyph_chars[0], fg, bg, false);
+        return;
+    }
 
-    var glyph_bufs: [6][4]u8 = undefined;
-    const custom_glyphs: [6][]const u8 = .{
-        encodeCodepointUtf8(glyph_chars[0], &glyph_bufs[0]),
-        encodeCodepointUtf8(glyph_chars[1], &glyph_bufs[1]),
-        encodeCodepointUtf8(glyph_chars[2], &glyph_bufs[2]),
-        encodeCodepointUtf8(glyph_chars[3], &glyph_bufs[3]),
-        encodeCodepointUtf8(glyph_chars[4], &glyph_bufs[4]),
-        encodeCodepointUtf8(glyph_chars[5], &glyph_bufs[5]),
-    };
+    const top_left = glyph_chars[0];
+    const horizontal = glyph_chars[1];
+    const top_right = glyph_chars[2];
+    const vertical = glyph_chars[3];
+    const bottom_right = glyph_chars[4];
+    const bottom_left = glyph_chars[5];
 
-    _ = root.child(.{
-        .width = w,
-        .height = h,
-        .border = .{
-            .where = .all,
-            .glyphs = .{ .custom = custom_glyphs },
-            .style = .{ .fg = fg.toVaxis(), .bg = bg.toVaxis() },
-        },
-    });
+    // Corners.
+    putChar(renderer, x, y, top_left, fg, bg, false);
+    if (w > 1) putChar(renderer, x + w - 1, y, top_right, fg, bg, false);
+    if (h > 1) {
+        putChar(renderer, x, y + h - 1, bottom_left, fg, bg, false);
+        if (w > 1) putChar(renderer, x + w - 1, y + h - 1, bottom_right, fg, bg, false);
+    }
 
-    vaxis_surface.blitWindow(renderer, root, x, y);
+    // Horizontal edges.
+    if (w > 2) {
+        var tx: u16 = 1;
+        while (tx < w - 1) : (tx += 1) {
+            putChar(renderer, x + tx, y, horizontal, fg, bg, false);
+            if (h > 1) putChar(renderer, x + tx, y + h - 1, horizontal, fg, bg, false);
+        }
+    }
+
+    // Vertical edges.
+    if (h > 2) {
+        var ty: u16 = 1;
+        while (ty < h - 1) : (ty += 1) {
+            putChar(renderer, x, y + ty, vertical, fg, bg, false);
+            if (w > 1) putChar(renderer, x + w - 1, y + ty, vertical, fg, bg, false);
+        }
+    }
 }
 
 /// Draw split borders between panes
