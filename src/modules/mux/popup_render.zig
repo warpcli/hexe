@@ -7,7 +7,25 @@ const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
 const statusbar = @import("statusbar.zig");
 const text_width = @import("text_width.zig");
-const vaxis_draw = @import("vaxis_draw.zig");
+
+fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: Color, bg: Color, bold: bool) void {
+    var buf: [4]u8 = undefined;
+    const grapheme: []const u8 = if (cp < 128)
+        buf[0..blk: {
+            buf[0] = @intCast(cp);
+            break :blk 1;
+        }]
+    else blk: {
+        const n = std.unicode.utf8Encode(cp, &buf) catch return;
+        break :blk buf[0..n];
+    };
+
+    const style: vaxis.Style = .{ .bold = bold, .fg = fg.toVaxis(), .bg = bg.toVaxis() };
+    renderer.setVaxisCell(x, y, .{
+        .char = .{ .grapheme = grapheme, .width = 1 },
+        .style = style,
+    });
+}
 
 fn textStyle(fg: Color, bg: Color, bold: bool) shp.Style {
     return .{
@@ -200,15 +218,15 @@ pub fn drawPickerInBounds(renderer: *Renderer, picker: *pop.Picker, cfg: pop.Cho
         const item_fg: Color = if (is_selected) highlight_fg else fg;
         const item_bg: Color = if (is_selected) highlight_bg else bg;
 
-        vaxis_draw.putChar(renderer, content_x, content_y, if (is_selected) '>' else ' ', item_fg, item_bg, false);
-        vaxis_draw.putChar(renderer, content_x + 1, content_y, ' ', item_fg, item_bg, false);
+        putChar(renderer, content_x, content_y, if (is_selected) '>' else ' ', item_fg, item_bg, false);
+        putChar(renderer, content_x + 1, content_y, ' ', item_fg, item_bg, false);
 
         var ix: u16 = content_x + 2;
         const item_width_max = (box_x + box_width - 2) -| ix;
         const clipped_item = text_width.clipTextToWidth(item, item_width_max);
         ix = statusbar.drawStyledText(renderer, ix, content_y, clipped_item, textStyle(item_fg, item_bg, is_selected));
         while (ix < box_x + box_width - 1) : (ix += 1) {
-            vaxis_draw.putChar(renderer, ix, content_y, ' ', item_fg, item_bg, false);
+            putChar(renderer, ix, content_y, ' ', item_fg, item_bg, false);
         }
 
         content_y += 1;
