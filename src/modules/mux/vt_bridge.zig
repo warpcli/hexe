@@ -113,6 +113,7 @@ fn resolveCellText(
     if (is_direct_color) return " ";
 
     const cp = raw.codepoint();
+    if (isKittyGraphicsPlaceholder(cp)) return " ";
     if (cp == 0 or cp < 32 or cp == 127) return " ";
 
     // Spacer head (end-of-line wide char wrap) -> blank
@@ -125,6 +126,17 @@ fn resolveCellText(
     var utf8_buf: [4]u8 = undefined;
     const len = std.unicode.utf8Encode(cp, &utf8_buf) catch return " ";
     return try alloc.dupe(u8, utf8_buf[0..len]);
+}
+
+fn isKittyGraphicsPlaceholder(cp: u21) bool {
+    if (@hasDecl(ghostty, "kitty") and
+        @hasDecl(ghostty.kitty, "graphics") and
+        @hasDecl(ghostty.kitty.graphics, "unicode") and
+        @hasDecl(ghostty.kitty.graphics.unicode, "placeholder"))
+    {
+        return cp == ghostty.kitty.graphics.unicode.placeholder;
+    }
+    return false;
 }
 
 /// Convert ghostty Style to vaxis Style.
