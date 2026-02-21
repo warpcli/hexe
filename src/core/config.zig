@@ -542,6 +542,7 @@ pub const Config = struct {
         pane_adopt,
         pane_close,
         pane_select_mode,
+        clipboard_copy,
         clipboard_request,
         system_notify,
         keycast_toggle,
@@ -565,6 +566,7 @@ pub const Config = struct {
         pane_adopt,
         pane_close, // close current float or split pane (never closes tab)
         pane_select_mode, // enter pane select mode (focus or swap)
+        clipboard_copy, // copy current mux selection via vaxis OSC52
         clipboard_request, // request system clipboard via OSC52 through vaxis
         system_notify, // send desktop notification via terminal OSC
         keycast_toggle, // toggle keycast overlay
@@ -1166,6 +1168,7 @@ fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction
     if (std.mem.eql(u8, action_type, "pane.adopt")) return .pane_adopt;
     if (std.mem.eql(u8, action_type, "pane.close")) return .pane_close;
     if (std.mem.eql(u8, action_type, "pane.select_mode")) return .pane_select_mode;
+    if (std.mem.eql(u8, action_type, "clipboard.copy")) return .clipboard_copy;
     if (std.mem.eql(u8, action_type, "clipboard.request")) return .clipboard_request;
     if (std.mem.eql(u8, action_type, "system.notify")) return .system_notify;
     if (std.mem.eql(u8, action_type, "overlay.keycast_toggle")) return .keycast_toggle;
@@ -1211,6 +1214,7 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     if (std.mem.eql(u8, action, "pane.adopt")) return .pane_adopt;
     if (std.mem.eql(u8, action, "pane.close")) return .pane_close;
     if (std.mem.eql(u8, action, "pane.select_mode")) return .pane_select_mode;
+    if (std.mem.eql(u8, action, "clipboard.copy")) return .clipboard_copy;
     if (std.mem.eql(u8, action, "clipboard.request")) return .clipboard_request;
     if (std.mem.eql(u8, action, "system.notify")) return .system_notify;
     if (std.mem.eql(u8, action, "overlay.keycast_toggle")) return .keycast_toggle;
