@@ -454,7 +454,8 @@ fn dispatchParsedEvent(state: *State, parsed: anytype) ParsedDispatchResult {
         return .{ .consumed = true, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n };
     }
 
-    return .{ .consumed = false, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n };
+    // Parser-first policy: never forward decoded-but-unmapped events as raw bytes.
+    return .{ .consumed = true, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n };
 }
 
 fn handleParsedKeyEvent(state: *State, ev: input.KeyEvent) KeyDispatchResult {
