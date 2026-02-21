@@ -7,7 +7,6 @@ const Color = core.style.Color;
 const statusbar = @import("statusbar.zig");
 const text_width = @import("text_width.zig");
 const vaxis_surface = @import("vaxis_surface.zig");
-const vaxis_draw = @import("vaxis_draw.zig");
 const Pane = @import("pane.zig").Pane;
 const Layout = @import("layout.zig").Layout;
 
@@ -54,6 +53,20 @@ fn encodeCodepointUtf8(cp: u21, out: *[4]u8) []const u8 {
         return out[0..1];
     };
     return out[0..n];
+}
+
+fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: ?Color, bg: ?Color, bold: bool) void {
+    var cp_buf: [4]u8 = undefined;
+    const cp_bytes = encodeCodepointUtf8(cp, &cp_buf);
+
+    var style: vaxis.Style = .{ .bold = bold };
+    if (fg) |c| style.fg = c.toVaxis();
+    if (bg) |c| style.bg = c.toVaxis();
+
+    renderer.setVaxisCell(x, y, .{
+        .char = .{ .grapheme = cp_bytes, .width = 1 },
+        .style = style,
+    });
 }
 
 fn drawBorderFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Color, bg: Color, glyph_chars: [6]u21) void {
@@ -327,7 +340,7 @@ pub fn drawScrollIndicator(renderer: *Renderer, pane_x: u16, pane_y: u16, pane_w
 
     // Yellow background (palette 3), black text (palette 0)
     for (indicator_chars, 0..) |char, i| {
-        vaxis_draw.putChar(renderer, x_pos + @as(u16, @intCast(i)), pane_y, char, .{ .palette = 0 }, .{ .palette = 3 }, false);
+        putChar(renderer, x_pos + @as(u16, @intCast(i)), pane_y, char, .{ .palette = 0 }, .{ .palette = 3 }, false);
     }
 }
 
@@ -357,14 +370,14 @@ pub fn drawFloatingBorder(
             if (h > 2) {
                 var row: u16 = 1;
                 while (row < h - 1) : (row += 1) {
-                    vaxis_draw.putChar(renderer, sx, y + row, ' ', null, shadow_bg, false);
+                    putChar(renderer, sx, y + row, ' ', null, shadow_bg, false);
                 }
             }
 
             // Add a small "cap" next to the bottom border so there is no
             // visible gap between the side shadow and the bottom shadow.
             if (h > 1) {
-                vaxis_draw.putChar(renderer, sx, y + h - 1, ' ', null, shadow_bg, false);
+                putChar(renderer, sx, y + h - 1, ' ', null, shadow_bg, false);
             }
 
             // Bottom shadow: start 1 col after left border, and include the
@@ -373,7 +386,7 @@ pub fn drawFloatingBorder(
             while (col <= w) : (col += 1) {
                 // Use upper-half block for bottom shadow so it feels visually
                 // closer in "weight" to the 1-col side shadow.
-                vaxis_draw.putChar(renderer, x + col, sy, 0x2580, shadow_fg, null, false);
+                putChar(renderer, x + col, sy, 0x2580, shadow_fg, null, false);
             }
             // Corner is already drawn by the bottom shadow (col == w).
         }

@@ -3,7 +3,6 @@ const core = @import("core");
 const shp = @import("shp");
 const vaxis = @import("vaxis");
 const vaxis_surface = @import("vaxis_surface.zig");
-const vaxis_draw = @import("vaxis_draw.zig");
 const animations = core.segments.animations;
 const randomdo_mod = core.segments.randomdo;
 
@@ -407,7 +406,10 @@ pub fn draw(
 
     // Clear status bar
     for (0..width) |xi| {
-        vaxis_draw.putChar(renderer, @intCast(xi), y, ' ', null, null, false);
+        renderer.setVaxisCell(@intCast(xi), y, .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{},
+        });
     }
 
     // Create shp context
