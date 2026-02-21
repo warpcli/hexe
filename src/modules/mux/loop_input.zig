@@ -187,6 +187,14 @@ fn handleBlockedPopupInput(popups: anytype, parsed_event: ?vaxis.Event) bool {
     return false;
 }
 
+fn freeParsedEventPayload(state: *State, parsed_event: ?vaxis.Event) void {
+    const ev = parsed_event orelse return;
+    switch (ev) {
+        .paste => |txt| state.allocator.free(txt),
+        else => {},
+    }
+}
+
 fn resolveFocusedPaneForInput(state: *State) ?*Pane {
     if (state.active_floating) |idx| {
         const fpane = state.floats.items[idx];
@@ -201,6 +209,7 @@ fn resolveFocusedPaneForInput(state: *State) ?*Pane {
 
 fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
     if (!state.popups.isBlocked()) return false;
+    defer freeParsedEventPayload(state, parsed_event);
 
     if (handleBlockedPopupInput(&state.popups, parsed_event)) {
         // Check if this was a confirm/picker dialog for pending action
@@ -290,6 +299,7 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
 fn handleTabLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
     const current_tab = &state.tabs.items[state.active_tab];
     if (!current_tab.popups.isBlocked()) return false;
+    defer freeParsedEventPayload(state, parsed_event);
 
     // Allow only tab switching while a tab popup is open.
     if (parsed_event) |ev_raw| {
@@ -313,8 +323,8 @@ fn appendFloatRenameText(state: *State, text: []const u8) void {
     const max_len: usize = 64;
     if (state.float_rename_buf.items.len >= max_len) return;
     const remaining = max_len - state.float_rename_buf.items.len;
-    if (text.len > remaining) return;
-    state.float_rename_buf.appendSlice(state.allocator, text) catch return;
+    const n = @min(text.len, remaining);
+    state.float_rename_buf.appendSlice(state.allocator, text[0..n]) catch return;
     state.needs_render = true;
 }
 
@@ -324,6 +334,11 @@ fn handleFloatRenameParsedEvent(state: *State, parsed: ParsedEventHead) bool {
     const event = parsed.event orelse return true;
     return switch (event) {
         .mouse => false,
+        .paste => |txt| blk: {
+            defer state.allocator.free(txt);
+            appendFloatRenameText(state, txt);
+            break :blk true;
+        },
         .key_release => true,
         .key_press => |k| blk: {
             switch (k.codepoint) {
@@ -485,6 +500,7 @@ fn handlePaneSelectLoop(state: *State, inp: []const u8, first_parsed: ?ParsedEve
         if (parsed) |res| {
             i += res.n;
             _ = actions.handlePaneSelectEvent(state, res.event);
+            freeParsedEventPayload(state, res.event);
             continue;
         }
 
