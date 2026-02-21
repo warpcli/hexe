@@ -16,12 +16,12 @@ jobs:
       matrix:
         include:
           # Linux x86_64
-          - os: ubuntu-latest
+          - os: ubuntu-24.04-x64
             target: x86_64-linux
             artifact_name: hexe-x86_64-linux
 
-          # Linux aarch64
-          - os: ubuntu-latest
+          # Linux aarch64 (native runner, avoids C cross-compilation issues)
+          - os: ubuntu-24.04-arm
             target: aarch64-linux
             artifact_name: hexe-aarch64-linux
 
