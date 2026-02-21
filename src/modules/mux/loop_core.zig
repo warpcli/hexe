@@ -35,6 +35,13 @@ fn applyPostQueryFeatureModes(state: *State) void {
     var tty_buf: [1024]u8 = undefined;
     var tty = stdout.writer(&tty_buf);
 
+    // Prefer Unicode width handling when explicit-width modifiers are supported.
+    // This lets render output use richer grapheme width semantics without relying
+    // on Mode 2027 being active.
+    if (state.renderer.vx.caps.explicit_width or state.renderer.vx.caps.unicode == .unicode) {
+        state.renderer.vx.screen.width_method = .unicode;
+    }
+
     // Re-apply mouse mode after capability discovery so terminals with
     // SGR-pixels support get upgraded from cell-coordinates to pixel mode.
     state.renderer.vx.setMouseMode(&tty.interface, true) catch {};
