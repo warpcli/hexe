@@ -80,9 +80,13 @@ pub fn parseKeyEvent(input_bytes: []const u8, allocator: std.mem.Allocator) ?Key
     if (parsed.n == 0) return null;
     const event = parsed.event orelse return null;
 
+    return keyEventFromVaxisEvent(event, parsed.n);
+}
+
+pub fn keyEventFromVaxisEvent(event: vaxis.Event, consumed: usize) ?KeyEvent {
     return switch (event) {
-        .key_press => |key| parseVaxisKey(key, .press, parsed.n),
-        .key_release => |key| parseVaxisKey(key, .release, parsed.n),
+        .key_press => |key| parseVaxisKey(key, .press, consumed),
+        .key_release => |key| parseVaxisKey(key, .release, consumed),
         else => null,
     };
 }
@@ -95,22 +99,26 @@ pub fn parseScrollEvent(input_bytes: []const u8, allocator: std.mem.Allocator) ?
     if (parsed.n == 0) return null;
     const event = parsed.event orelse return null;
 
+    const action = scrollActionFromVaxisEvent(event) orelse return null;
+
+    return .{ .action = action, .consumed = parsed.n };
+}
+
+pub fn scrollActionFromVaxisEvent(event: vaxis.Event) ?ScrollAction {
     const key = switch (event) {
         .key_press => |k| k,
         else => return null,
     };
 
-    const action: ScrollAction = switch (key.codepoint) {
+    return switch (key.codepoint) {
         vaxis.Key.page_up => .page_up,
         vaxis.Key.page_down => .page_down,
         vaxis.Key.home => .home,
         vaxis.Key.end => .end,
-        vaxis.Key.up => if (key.mods.shift) .shift_up else return null,
-        vaxis.Key.down => if (key.mods.shift) .shift_down else return null,
-        else => return null,
+        vaxis.Key.up => if (key.mods.shift) .shift_up else null,
+        vaxis.Key.down => if (key.mods.shift) .shift_down else null,
+        else => null,
     };
-
-    return .{ .action = action, .consumed = parsed.n };
 }
 
 fn parseVaxisKey(vk: vaxis.Key, when: core.Config.BindWhen, consumed: usize) ?KeyEvent {
