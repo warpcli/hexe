@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.7] - 2026-02-21
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Trigger release workflow on new release
+
 ## [0.0.6] - 2026-02-21
 
 ### <!-- 0 -->⛰️  Features
