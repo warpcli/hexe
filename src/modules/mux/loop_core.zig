@@ -585,26 +585,7 @@ pub fn runMainLoop(state: *State) !void {
         {
             const new_size = terminal.getTermSize();
             if (new_size.cols != state.term_width or new_size.rows != state.term_height) {
-                state.term_width = new_size.cols;
-                state.term_height = new_size.rows;
-                const status_h: u16 = if (state.config.tabs.status.enabled) 1 else 0;
-                state.status_height = status_h;
-                state.layout_width = new_size.cols;
-                state.layout_height = new_size.rows - status_h;
-
-                // Resize all tabs.
-                for (state.tabs.items) |*tab| {
-                    tab.layout.resize(state.layout_width, state.layout_height);
-                }
-
-                // Resize floats based on their stored percentages.
-                state.resizeFloatingPanes();
-
-                // Resize renderer and force full redraw.
-                state.renderer.resize(new_size.cols, new_size.rows) catch {};
-                state.renderer.invalidate();
-                state.needs_render = true;
-                state.force_full_render = true;
+                state.applyTerminalResize(new_size.cols, new_size.rows);
             }
         }
 

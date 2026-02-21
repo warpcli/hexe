@@ -187,26 +187,7 @@ fn forwardBracketedPasteBoundary(state: *State, is_start: bool) void {
 fn applyInBandWinsize(state: *State, ws: vaxis.Winsize) void {
     const cols = ws.cols;
     const rows = ws.rows;
-    if (cols == 0 or rows == 0) return;
-    if (cols == state.term_width and rows == state.term_height) return;
-
-    state.term_width = cols;
-    state.term_height = rows;
-
-    const status_h: u16 = if (state.config.tabs.status.enabled) 1 else 0;
-    state.status_height = status_h;
-    state.layout_width = cols;
-    state.layout_height = rows - status_h;
-
-    for (state.tabs.items) |*tab| {
-        tab.layout.resize(state.layout_width, state.layout_height);
-    }
-
-    state.resizeFloatingPanes();
-    state.renderer.resize(cols, rows) catch {};
-    state.renderer.invalidate();
-    state.needs_render = true;
-    state.force_full_render = true;
+    state.applyTerminalResize(cols, rows);
 }
 
 fn handleBlockedPopupInput(popups: anytype, parsed_event: ?vaxis.Event) bool {

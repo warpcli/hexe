@@ -638,6 +638,28 @@ pub const State = struct {
         return state_sync.resizeFloatingPanes(self);
     }
 
+    pub fn applyTerminalResize(self: *State, cols: u16, rows: u16) void {
+        if (cols == 0 or rows == 0) return;
+        if (cols == self.term_width and rows == self.term_height) return;
+
+        self.term_width = cols;
+        self.term_height = rows;
+        const status_h: u16 = if (self.config.tabs.status.enabled) 1 else 0;
+        self.status_height = status_h;
+        self.layout_width = cols;
+        self.layout_height = rows - status_h;
+
+        for (self.tabs.items) |*tab| {
+            tab.layout.resize(self.layout_width, self.layout_height);
+        }
+
+        self.resizeFloatingPanes();
+        self.renderer.resize(cols, rows) catch {};
+        self.renderer.invalidate();
+        self.needs_render = true;
+        self.force_full_render = true;
+    }
+
     pub fn setPaneShell(self: *State, uuid: [32]u8, cmd: ?[]const u8, cwd: ?[]const u8, status: ?i32, duration_ms: ?u64, jobs: ?u16) void {
         var entry = self.pane_shell.getPtr(uuid);
         if (entry == null) {
