@@ -17,7 +17,15 @@ pub const Renderer = struct {
     frame_arena: std.heap.ArenaAllocator,
 
     pub fn init(allocator: std.mem.Allocator, width: u16, height: u16) !Renderer {
-        var vx = try vaxis.Vaxis.init(allocator, .{});
+        var vx = try vaxis.Vaxis.init(allocator, .{
+            .kitty_keyboard_flags = .{
+                .disambiguate = true,
+                .report_events = true,
+                .report_alternate_keys = true,
+                .report_all_as_ctl_seqs = true,
+                .report_text = true,
+            },
+        });
         try render_vx.initVaxisForSize(allocator, &vx, width, height);
 
         return .{
