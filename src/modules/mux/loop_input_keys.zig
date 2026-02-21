@@ -27,33 +27,24 @@ pub fn recordKeycastInput(state: *State, inp: []const u8) void {
 
     var i: usize = 0;
     while (i < inp.len) {
-        const parsed = keycast_parser.parse(inp[i..], state.allocator) catch null;
-        if (parsed) |res| {
-            if (res.n == 0) break;
-            if (res.event) |ev_raw| {
-                if (input.keyEventFromVaxisEvent(ev_raw)) |ev| {
-                    if (ev.when == .press) {
-                        var event_buf: [32]u8 = undefined;
-                        const event_text = formatKeycastEvent(ev, &event_buf);
-                        if (event_text.len > 0) {
-                            state.overlays.recordKeypress(event_text);
-                            state.needs_render = true;
-                        }
+        const res = keycast_parser.parse(inp[i..], state.allocator) catch {
+            i += 1;
+            continue;
+        };
+        if (res.n == 0) break;
+        if (res.event) |ev_raw| {
+            if (input.keyEventFromVaxisEvent(ev_raw)) |ev| {
+                if (ev.when == .press) {
+                    var event_buf: [32]u8 = undefined;
+                    const event_text = formatKeycastEvent(ev, &event_buf);
+                    if (event_text.len > 0) {
+                        state.overlays.recordKeypress(event_text);
+                        state.needs_render = true;
                     }
                 }
             }
-            i += res.n;
-            continue;
         }
-
-        var buf: [32]u8 = undefined;
-        const result = formatKeycastInput(inp[i..], &buf);
-        if (result.text.len > 0) {
-            state.overlays.recordKeypress(result.text);
-            state.needs_render = true;
-        }
-        if (result.consumed == 0) break;
-        i += result.consumed;
+        i += res.n;
     }
 }
 
@@ -125,37 +116,6 @@ pub fn checkExitKeyEvent(state: *State, mods: u8, key: core.Config.BindKey, when
     actions.performClose(state);
     state.needs_render = true;
     return true;
-}
-
-/// Format raw input bytes for keycast display.
-/// Returns the number of bytes consumed and the formatted text.
-fn formatKeycastInput(inp: []const u8, buf: *[32]u8) struct { consumed: usize, text: []const u8 } {
-    if (inp.len == 0) return .{ .consumed = 0, .text = "" };
-
-    var stream = std.io.fixedBufferStream(buf);
-    const writer = stream.writer();
-
-    const b = inp[0];
-    if (b == 0x1b) {
-        if (inp.len >= 2 and inp[1] >= 0x20 and inp[1] < 0x7f) {
-            writer.writeAll("A-") catch {};
-            writer.writeByte(inp[1]) catch {};
-            return .{ .consumed = 2, .text = buf[0..stream.pos] };
-        }
-        writer.writeAll("Esc") catch {};
-        return .{ .consumed = 1, .text = buf[0..stream.pos] };
-    }
-
-    if (b == '\r') writer.writeAll("Enter") catch {} else if (b == '\t') writer.writeAll("Tab") catch {} else if (b == 0x08 or b == 0x7f) writer.writeAll("Bksp") catch {} else if (b < 0x20) {
-        writer.writeAll("C-") catch {};
-        writer.writeByte(@min(@as(u8, 'z'), b + 'a' - 1)) catch {};
-    } else if (b >= 0x20 and b < 0x7f) {
-        writer.writeByte(b) catch {};
-    } else {
-        std.fmt.format(writer, "0x{x:0>2}", .{b}) catch {};
-    }
-
-    return .{ .consumed = 1, .text = buf[0..stream.pos] };
 }
 
 fn isFocusedPaneInPasswordMode(state: *State) bool {

@@ -131,42 +131,6 @@ fn isTerminalQueryReplyEvent(event: vaxis.Event) bool {
     };
 }
 
-fn rawTerminalQueryReplyLen(inp: []const u8) ?usize {
-    const ESC: u8 = 0x1b;
-    if (inp.len < 3) return null;
-    if (inp[0] != ESC or inp[1] != '[') return null;
-
-    var j: usize = 2;
-    while (j < inp.len) : (j += 1) {
-        const b = inp[j];
-        if (b >= 0x40 and b <= 0x7e) break;
-    }
-    if (j >= inp.len) return null;
-
-    const seq = inp[0 .. j + 1];
-    const final = seq[seq.len - 1];
-
-    const has_question = std.mem.indexOfScalar(u8, seq, '?') != null;
-    const has_semicolon = std.mem.indexOfScalar(u8, seq, ';') != null;
-    const has_dollar_y = std.mem.indexOf(u8, seq, "$y") != null;
-
-    const is_query_reply = has_dollar_y or
-        (final == 'R' and has_semicolon) or
-        (has_question and (final == 'u' or final == 'c'));
-
-    if (!is_query_reply) return null;
-    return j + 1;
-}
-
-fn consumeLeadingTerminalQueryRepliesRaw(inp: []const u8) []const u8 {
-    var i: usize = 0;
-    while (i < inp.len) {
-        const n = rawTerminalQueryReplyLen(inp[i..]) orelse break;
-        i += n;
-    }
-    return inp[i..];
-}
-
 const QueryReplyStripResult = struct {
     bytes: []const u8,
     first_parsed: ?ParsedEventHead,
@@ -175,7 +139,7 @@ const QueryReplyStripResult = struct {
 fn consumeLeadingTerminalQueryReplies(state: *State, inp: []const u8) QueryReplyStripResult {
     var i: usize = 0;
     while (i < inp.len) {
-        const parsed = parseEventHead(state, inp[i..]) orelse break;
+        const parsed = parseEventHead(state, inp[i..]) orelse return .{ .bytes = inp[i..], .first_parsed = null };
         const event = parsed.event orelse return .{ .bytes = inp[i..], .first_parsed = parsed };
         if (!isTerminalQueryReplyEvent(event)) {
             return .{ .bytes = inp[i..], .first_parsed = parsed };
@@ -184,16 +148,7 @@ fn consumeLeadingTerminalQueryReplies(state: *State, inp: []const u8) QueryReply
         i += parsed.n;
     }
 
-    if (i > 0) {
-        const remaining = inp[i..];
-        if (remaining.len == 0) return .{ .bytes = remaining, .first_parsed = null };
-        const first = parseEventHead(state, remaining);
-        return .{ .bytes = remaining, .first_parsed = first };
-    }
-
-    const raw_cleaned = consumeLeadingTerminalQueryRepliesRaw(inp);
-    if (raw_cleaned.len == 0) return .{ .bytes = raw_cleaned, .first_parsed = null };
-    return .{ .bytes = raw_cleaned, .first_parsed = parseEventHead(state, raw_cleaned) };
+    return .{ .bytes = inp[i..], .first_parsed = null };
 }
 
 fn handleParsedScrollAction(state: *State, action: input.ScrollAction) bool {
@@ -567,14 +522,10 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
                 i += dispatch.consumed_bytes;
                 continue;
             }
-        } else if (state.float_rename_uuid != null) {
-            // Keep rename mode isolated if parser cannot produce an event.
+        } else {
+            // Parser-first policy: never forward undecoded bytes.
+            // Keep rename mode isolated and drop unknown bytes in normal mode.
             i += 1;
-            continue;
-        }
-
-        if (rawTerminalQueryReplyLen(inp[i..])) |n| {
-            i += n;
             continue;
         }
 
