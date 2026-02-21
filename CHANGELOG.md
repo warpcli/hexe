@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.8] - 2026-02-21
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Remove local tag before Zig setup
+
 ## [0.0.7] - 2026-02-21
 
 ### <!-- 7 -->⚙️ Miscellaneous Tasks
