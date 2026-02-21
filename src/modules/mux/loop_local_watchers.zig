@@ -106,7 +106,7 @@ pub fn localPaneCallback(
             slot.state.needs_render = true;
         }
         if (pane.takeOscExpectResponse()) {
-            slot.state.osc_reply_target_uuid = pane.uuid;
+            slot.state.enqueueOscReplyTarget(pane.uuid);
         }
         if (pane.did_clear) {
             slot.state.force_full_render = true;
@@ -164,7 +164,7 @@ pub fn floatPaneCallback(
             slot.state.needs_render = true;
         }
         if (pane.takeOscExpectResponse()) {
-            slot.state.osc_reply_target_uuid = pane.uuid;
+            slot.state.enqueueOscReplyTarget(pane.uuid);
         }
         if (pane.did_clear) {
             slot.state.force_full_render = true;

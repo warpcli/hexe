@@ -1,82 +1,85 @@
 # Float attributes
 
-This document describes float *attributes* under `floats[].attributes` in your mux config (`init.lua`).
+Detailed reference for float behavior flags under `floats[].attributes`.
 
-Each float definition can declare a set of boolean attributes:
+For the full float guide (sizing, borders, layout, CLI) see [floats.md](floats.md).
 
-```json
-{
-  "key": "f",
-  "command": "btop",
-  "attributes": {
-    "exclusive": true,
-    "global": true,
-    "per_cwd": false,
-    "sticky": false,
-    "destroy": false
-  }
-}
+---
+
+## Setting attributes
+
+```lua
+hx.ses.layout.define({
+  floats = {
+    {
+      key     = "f",
+      command = "btop",
+      attributes = {
+        exclusive = true,
+        global    = true,
+        per_cwd   = false,
+        sticky    = false,
+        destroy   = false,
+        isolated  = false,
+      },
+    },
+  },
+})
 ```
 
-The first float entry (the one with no `key`) can also provide *default attributes*.
-Current merge behavior is additive: defaults only turn attributes on for keyed floats.
-Keyed floats do not currently force a default `true` back to `false`.
+The first float entry (no `key`) can provide default attributes for all floats. Defaults are additive — they can turn attributes on but not force them off for keyed floats.
 
-## exclusive
+---
 
-When `exclusive` is true, showing this float will hide all other floats on the current tab.
+## `exclusive`
 
-Notes:
-- This is currently one-way: hidden floats stay hidden until you toggle them back on.
+When shown, this float hides all other floats on the current tab.
 
-Use cases:
-- A "main tool" float (like `btop`) where you want a clean focus mode.
-- A distraction-free scratch terminal.
+- The hidden floats stay hidden until you toggle them back individually
+- Useful for modal-style focus (e.g. `btop` monitor, distraction-free scratch terminal)
 
-## per_cwd
+## `per_cwd`
 
-When `per_cwd` is true, the float is "one instance per working directory".
+One float instance per working directory.
 
-What this means in practice:
-- If you open the float in `/repo/a`, it creates (or reuses) the `/repo/a` instance.
-- If you open the same key in `/repo/b`, it creates (or reuses) a different instance.
+- Toggle the key in `/repo/a` → creates or reuses the `/repo/a` instance
+- Toggle the same key in `/repo/b` → different instance, separate state
+- Navigate back to `/repo/a` → same instance resumes where you left off
 
-Use cases:
-- Project-scoped tools: `lazygit`, `opencode`, `nvim`, a repo-specific shell.
-- Anything where you want separate state per project.
+Use for project-scoped tools: `lazygit`, `nvim`, `opencode`, language REPLs.
 
-## sticky
+## `sticky`
 
-When `sticky` is true, ses will preserve the float across mux restarts.
+The float survives mux exits and restarts.
 
-Use cases:
-- A long-running monitor (e.g. `btop`) that you want to keep around.
-- A background REPL.
+- On detach or mux exit, ses keeps the pod alive in a half-attached state
+- A new mux automatically reclaims it on reattach
+- Matched by directory + key combination
 
-## global
+Does not combine meaningfully with `destroy` (a sticky float that destroys itself on hide loses all persistence benefit).
 
-Controls whether the float is global (not tab-bound) or tab-bound.
+## `global`
 
-- `global: true` means the float is not owned by a single tab.
-  Visibility is tracked per-tab.
-- `global: false` means the float is tab-bound (owned by the current tab).
-  Closing that tab will also close the float.
+Controls tab ownership.
 
-Default:
-- `global` defaults to `false` (tab-bound) unless you set it to `true`.
+- `global = true`: Float is not owned by any tab. Visibility is tracked per-tab via a bitmask. Toggling from any tab shows/hides it on that tab.
+- `global = false` (default): Float is bound to the tab it was created in. Closing that tab destroys the float.
 
-Use cases:
-- Global: tools you want available on multiple tabs.
-- Tab-bound: scratch tools that should die with the tab.
+`per_cwd` floats are always treated as global regardless of this setting.
 
-## destroy
+## `destroy`
 
-When `destroy` is true, hiding the float should kill the underlying process.
+The float process is killed when the float is hidden.
 
-Notes:
-- This is generally not meaningful together with `per_cwd`.
-- It is often not what you want together with `sticky`.
+- Only meaningful for tab-bound, non-`per_cwd` floats
+- Use for fire-and-forget commands or single-run dialogs
+- Combining with `sticky` or `per_cwd` has no effect (those modes require persistence)
 
-Use cases:
-- Fire-and-forget tools.
-- A float that runs a command and you never want it to keep state.
+## `isolated`
+
+The float runs inside a sandboxed pod.
+
+- Uses Linux namespaces (user, PID, mount) and optionally cgroups
+- Configure the isolation level and resource limits via `isolation = { profile = "...", ... }`
+
+See [isolation.md](isolation.md) for profiles and limits.

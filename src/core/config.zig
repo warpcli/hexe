@@ -542,6 +542,9 @@ pub const Config = struct {
         pane_adopt,
         pane_close,
         pane_select_mode,
+        clipboard_copy,
+        clipboard_request,
+        system_notify,
         keycast_toggle,
         sprite_toggle,
         split_h,
@@ -563,6 +566,9 @@ pub const Config = struct {
         pane_adopt,
         pane_close, // close current float or split pane (never closes tab)
         pane_select_mode, // enter pane select mode (focus or swap)
+        clipboard_copy, // copy current mux selection via vaxis OSC52
+        clipboard_request, // request system clipboard via OSC52 through vaxis
+        system_notify, // send desktop notification via terminal OSC
         keycast_toggle, // toggle keycast overlay
         sprite_toggle, // toggle pokemon sprite overlay
         split_h,
@@ -638,11 +644,6 @@ pub const Config = struct {
     confirm_on_detach: bool = false,
     confirm_on_disown: bool = false, // When Alt+z disowns a pane
     confirm_on_close: bool = false, // When Alt+x closes a float/tab
-
-    // Winpulse - highlight focused pane on focus change
-    winpulse_enabled: bool = false,
-    winpulse_duration_ms: u32 = 50, // Total animation duration
-    winpulse_brighten_factor: f32 = 1.3, // Brighten factor for focused pane (1.0 = no change, 1.3 = 30% brighter)
 
     // Floating pane defaults
     float_width_percent: u8 = 60,
@@ -866,11 +867,6 @@ fn parseConfig(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocat
     if (runtime.getBool(-1, "confirm_on_detach")) |v| config.confirm_on_detach = v;
     if (runtime.getBool(-1, "confirm_on_disown")) |v| config.confirm_on_disown = v;
     if (runtime.getBool(-1, "confirm_on_close")) |v| config.confirm_on_close = v;
-
-    // Winpulse
-    if (runtime.getBool(-1, "winpulse_enabled")) |v| config.winpulse_enabled = v;
-    if (runtime.getInt(u32, -1, "winpulse_duration_ms")) |v| config.winpulse_duration_ms = v;
-    if (runtime.getNumber(-1, "winpulse_brighten_factor")) |v| config.winpulse_brighten_factor = @floatCast(v);
 
     // Selection color
     if (runtime.getInt(u8, -1, "selection_color")) |v| config.selection_color = v;
@@ -1172,6 +1168,9 @@ fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction
     if (std.mem.eql(u8, action_type, "pane.adopt")) return .pane_adopt;
     if (std.mem.eql(u8, action_type, "pane.close")) return .pane_close;
     if (std.mem.eql(u8, action_type, "pane.select_mode")) return .pane_select_mode;
+    if (std.mem.eql(u8, action_type, "clipboard.copy")) return .clipboard_copy;
+    if (std.mem.eql(u8, action_type, "clipboard.request")) return .clipboard_request;
+    if (std.mem.eql(u8, action_type, "system.notify")) return .system_notify;
     if (std.mem.eql(u8, action_type, "overlay.keycast_toggle")) return .keycast_toggle;
     if (std.mem.eql(u8, action_type, "overlay.sprite_toggle")) return .sprite_toggle;
     if (std.mem.eql(u8, action_type, "split.h")) return .split_h;
@@ -1215,6 +1214,9 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     if (std.mem.eql(u8, action, "pane.adopt")) return .pane_adopt;
     if (std.mem.eql(u8, action, "pane.close")) return .pane_close;
     if (std.mem.eql(u8, action, "pane.select_mode")) return .pane_select_mode;
+    if (std.mem.eql(u8, action, "clipboard.copy")) return .clipboard_copy;
+    if (std.mem.eql(u8, action, "clipboard.request")) return .clipboard_request;
+    if (std.mem.eql(u8, action, "system.notify")) return .system_notify;
     if (std.mem.eql(u8, action, "overlay.keycast_toggle")) return .keycast_toggle;
     if (std.mem.eql(u8, action, "overlay.sprite_toggle")) return .sprite_toggle;
     if (std.mem.eql(u8, action, "split.h")) return .split_h;

@@ -1,13 +1,35 @@
 const std = @import("std");
-const render = @import("render.zig");
-const Renderer = render.Renderer;
-const Color = render.Color;
+const shp = @import("shp");
+const core = @import("core");
+const vaxis = @import("vaxis");
+const Renderer = @import("render_core.zig").Renderer;
+const statusbar = @import("statusbar.zig");
+const text_width = @import("text_width.zig");
 
 const pop = @import("pop");
 const overlay = pop.overlay;
 const OverlayManager = overlay.OverlayManager;
 
 const Pos = struct { x: u16, y: u16 };
+
+fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: core.style.Color, bg: core.style.Color, bold: bool) void {
+    var buf: [4]u8 = undefined;
+    const grapheme: []const u8 = if (cp < 128)
+        buf[0..blk: {
+            buf[0] = @intCast(cp);
+            break :blk 1;
+        }]
+    else blk: {
+        const n = std.unicode.utf8Encode(cp, &buf) catch return;
+        break :blk buf[0..n];
+    };
+
+    const style: vaxis.Style = .{ .bold = bold, .fg = fg.toVaxis(), .bg = bg.toVaxis() };
+    renderer.setVaxisCell(x, y, .{
+        .char = .{ .grapheme = grapheme, .width = 1 },
+        .style = style,
+    });
+}
 
 /// Bounds of a rectangular area to exclude from dimming
 pub const Bounds = struct {
@@ -23,7 +45,7 @@ pub const Bounds = struct {
 };
 
 /// Apply dimming effect to the entire screen, except the focused pane.
-/// Sets foreground to 238 (dark gray) and background to 235 (darker gray).
+/// Preserve existing colors and reduce contrast instead of forcing fixed palette colors.
 pub fn applyDimEffect(renderer: *Renderer, width: u16, height: u16, exclude: ?Bounds) void {
     for (0..height) |yi| {
         for (0..width) |xi| {
@@ -35,16 +57,26 @@ pub fn applyDimEffect(renderer: *Renderer, width: u16, height: u16, exclude: ?Bo
                 if (bounds.contains(x, y)) continue;
             }
 
-            const cell = renderer.next.get(x, y);
-            cell.fg = .{ .palette = 238 }; // dark gray text
-            // Only dim bg if it's not already the default (none or black)
-            switch (cell.bg) {
-                .none => {},
-                .palette => |p| {
-                    if (p != 0) cell.bg = .{ .palette = 236 }; // dim colored backgrounds
+            var cell = renderer.getVaxisCell(x, y) orelse continue;
+            cell.style.dim = true;
+
+            // Dim background while preserving its original color model.
+            switch (cell.style.bg) {
+                .default => {},
+                .index => |p| {
+                    if (p != 0 and p != 236 and p != 238) {
+                        cell.style.bg = .{ .index = if (p >= 8) 238 else 236 };
+                    }
                 },
-                .rgb => cell.bg = .{ .palette = 236 },
+                .rgb => |rgb| {
+                    cell.style.bg = .{ .rgb = .{
+                        @intCast((@as(u16, rgb[0]) * 70) / 100),
+                        @intCast((@as(u16, rgb[1]) * 70) / 100),
+                        @intCast((@as(u16, rgb[2]) * 70) / 100),
+                    } };
+                },
             }
+            renderer.setVaxisCell(x, y, cell);
         }
     }
 }
@@ -103,12 +135,7 @@ fn renderPaneSelectLabels(renderer: *Renderer, overlays: *OverlayManager) void {
             // Fall back to single character for small panes
             const cx = pl.x + pl.width / 2;
             const cy = pl.y + pl.height / 2;
-            renderer.setCell(cx, cy, .{
-                .char = pl.label,
-                .fg = .{ .palette = 0 },
-                .bg = .{ .palette = 1 },
-                .bold = true,
-            });
+            putChar(renderer, cx, cy, pl.label, .{ .palette = 0 }, .{ .palette = 1 }, true);
             continue;
         }
 
@@ -121,11 +148,7 @@ fn renderPaneSelectLabels(renderer: *Renderer, overlays: *OverlayManager) void {
             for (0..box_w) |dx| {
                 const x = box_x + @as(u16, @intCast(dx));
                 const y = box_y + @as(u16, @intCast(dy));
-                renderer.setCell(x, y, .{
-                    .char = ' ',
-                    .fg = .{ .palette = 0 },
-                    .bg = .{ .palette = 1 }, // red background
-                });
+                putChar(renderer, x, y, ' ', .{ .palette = 0 }, .{ .palette = 1 }, false);
             }
         }
 
@@ -138,11 +161,7 @@ fn renderPaneSelectLabels(renderer: *Renderer, overlays: *OverlayManager) void {
                 if (ch != ' ') {
                     const x = digit_x + @as(u16, @intCast(dx));
                     const y = digit_y + @as(u16, @intCast(dy));
-                    renderer.setCell(x, y, .{
-                        .char = ch,
-                        .fg = .{ .palette = 0 }, // black blocks
-                        .bg = .{ .palette = 1 }, // red background
-                    });
+                    putChar(renderer, x, y, ch, .{ .palette = 0 }, .{ .palette = 1 }, false);
                 }
             }
         }
@@ -159,7 +178,7 @@ fn renderResizeInfo(renderer: *Renderer, overlays: *OverlayManager) void {
         overlays.resize_info_y,
     }) catch return;
 
-    const text_len: u16 = @intCast(text.len);
+    const text_len: u16 = statusbar.measureText(text);
     const padding: u16 = 1;
     const box_width = text_len + padding * 2;
     const box_height: u16 = 1;
@@ -173,21 +192,11 @@ fn renderResizeInfo(renderer: *Renderer, overlays: *OverlayManager) void {
     // Draw background
     for (0..box_width) |dx| {
         const x = box_x + @as(u16, @intCast(dx));
-        renderer.setCell(x, box_y, .{
-            .char = ' ',
-            .fg = .{ .palette = 0 },
-            .bg = .{ .palette = 1 }, // red
-        });
+        putChar(renderer, x, box_y, ' ', .{ .palette = 0 }, .{ .palette = 1 }, false);
     }
 
     // Draw text
-    for (text, 0..) |ch, i| {
-        renderer.setCell(box_x + padding + @as(u16, @intCast(i)), box_y, .{
-            .char = ch,
-            .fg = .{ .palette = 0 }, // black
-            .bg = .{ .palette = 1 }, // red
-        });
-    }
+    _ = statusbar.drawStyledText(renderer, box_x + padding, box_y, text, textStyle(.{ .palette = 0 }, .{ .palette = 1 }, false));
 }
 
 /// Render keycast history in bottom-right corner
@@ -205,7 +214,7 @@ fn renderKeycast(renderer: *Renderer, overlays: *const OverlayManager, screen_wi
 
     for (entries) |entry| {
         const text = entry.getText();
-        const text_len: u16 = @intCast(text.len);
+        const text_len: u16 = statusbar.measureText(text);
         const padding: u16 = 1;
         const box_width = text_len + padding * 2;
 
@@ -218,22 +227,11 @@ fn renderKeycast(renderer: *Renderer, overlays: *const OverlayManager, screen_wi
         // Draw background
         for (0..box_width) |dx| {
             const x = box_x + @as(u16, @intCast(dx));
-            renderer.setCell(x, y, .{
-                .char = ' ',
-                .fg = .{ .palette = 15 },
-                .bg = .{ .palette = 238 }, // dark gray
-            });
+            putChar(renderer, x, y, ' ', .{ .palette = 15 }, .{ .palette = 238 }, false);
         }
 
         // Draw text
-        for (text, 0..) |ch, ci| {
-            renderer.setCell(box_x + padding + @as(u16, @intCast(ci)), y, .{
-                .char = ch,
-                .fg = .{ .palette = 15 },
-                .bg = .{ .palette = 238 },
-                .bold = true,
-            });
-        }
+        _ = statusbar.drawStyledText(renderer, box_x + padding, y, text, textStyle(.{ .palette = 15 }, .{ .palette = 238 }, true));
 
         y += 1;
     }
@@ -241,7 +239,8 @@ fn renderKeycast(renderer: *Renderer, overlays: *const OverlayManager, screen_wi
 
 /// Render a generic overlay
 fn renderOverlay(renderer: *Renderer, ov: overlay.Overlay, screen_width: u16, screen_height: u16) void {
-    const text_len: u16 = @intCast(@min(ov.text.len, 80));
+    const clipped = text_width.clipTextToWidth(ov.text, 80);
+    const text_len: u16 = statusbar.measureText(clipped);
     if (text_len == 0) return;
 
     const box_width = text_len + @as(u16, ov.padding_x) * 2;
@@ -258,25 +257,14 @@ fn renderOverlay(renderer: *Renderer, ov: overlay.Overlay, screen_width: u16, sc
         for (0..box_width) |dx| {
             const x = pos.x + @as(u16, @intCast(dx));
             const y = pos.y + @as(u16, @intCast(dy));
-            renderer.setCell(x, y, .{
-                .char = ' ',
-                .fg = .{ .palette = ov.fg },
-                .bg = .{ .palette = ov.bg },
-            });
+            putChar(renderer, x, y, ' ', .{ .palette = ov.fg }, .{ .palette = ov.bg }, false);
         }
     }
 
     // Draw text
     const text_x = pos.x + ov.padding_x;
     const text_y = pos.y + ov.padding_y;
-    for (0..text_len) |i| {
-        renderer.setCell(text_x + @as(u16, @intCast(i)), text_y, .{
-            .char = ov.text[i],
-            .fg = .{ .palette = ov.fg },
-            .bg = .{ .palette = ov.bg },
-            .bold = ov.bold,
-        });
-    }
+    _ = statusbar.drawStyledText(renderer, text_x, text_y, clipped, textStyle(.{ .palette = ov.fg }, .{ .palette = ov.bg }, ov.bold));
 }
 
 fn calculateCornerPosition(
@@ -294,5 +282,20 @@ fn calculateCornerPosition(
         .bottom_left => .{ .x = offset_x, .y = screen_height -| box_height -| offset_y },
         .bottom_right => .{ .x = screen_width -| box_width -| offset_x, .y = screen_height -| box_height -| offset_y },
         .center => .{ .x = screen_width / 2 -| box_width / 2, .y = screen_height / 2 -| box_height / 2 },
+    };
+}
+fn textStyle(fg: core.style.Color, bg: core.style.Color, bold: bool) shp.Style {
+    return .{
+        .fg = switch (fg) {
+            .none => .none,
+            .palette => |idx| .{ .palette = idx },
+            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
+        },
+        .bg = switch (bg) {
+            .none => .none,
+            .palette => |idx| .{ .palette = idx },
+            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
+        },
+        .bold = bold,
     };
 }

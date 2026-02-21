@@ -1,394 +1,217 @@
 # Keybindings
 
-Hexe mux keybindings are defined in your Lua config under `mux.input.binds`.
+Keybindings are defined with `hx.mux.keymap.set({...})` in your config.
 
-This system is designed to:
-- keep every bind explicit (no implicit defaults)
-- allow context-sensitive behavior (split vs float focus)
-- support advanced gestures (press/release/repeat/hold/double-tap)
-- work across many terminals via progressive enhancement
+---
 
-## File locations
-
-Hexe reads its config from:
-- `$XDG_CONFIG_HOME/hexe/init.lua`
-- or `~/.config/hexe/init.lua`
-- optional local override: `./.hexe.lua`
-
-Main config should return a Lua table containing the `mux` section.
-
-## Basic schema
+## Basic structure
 
 ```lua
 local hx = require("hexe")
 
-return {
-  mux = {
-    input = {
-      timing = {
-        hold_ms = 350,
-        tap_ms = 200,
-      },
-      binds = {
-        {
-          on = "press",
-          mods = { hx.mod.alt },
-          key = "q",
-          when = { all = { "focus:any" } },
-          action = { type = hx.action.mux_quit },
-        },
-      },
-    },
-  },
-}
+hx.mux.keymap.set({
+  { key = { hx.key.ctrl, hx.key.alt, hx.key.q }, action = { type = hx.action.mux_quit } },
+  { key = { hx.key.ctrl, hx.key.alt, hx.key.t }, action = { type = hx.action.tab_new } },
+})
 ```
 
-### `mods`
+---
 
-`mods` is an array of modifier values:
-- `hx.mod.alt`
-- `hx.mod.ctrl`
-- `hx.mod.shift`
-- `hx.mod.super`
+## `key`
 
-### `key`
-
-Supported key values:
-- single characters like `"q"`, `"1"`, `"."`
-- named keys: `"up"`, `"down"`, `"left"`, `"right"`, `"space"`
-
-### `when` (conditions)
-
-`when` filters when a bind can fire.
-
-- string shorthand: `when = "focus:any"`
-- table form: `when = { all = { "focus:split", "fg:nvim" } }`
-- script form: `when = { bash = "[[ -n $SSH_CONNECTION ]]" }` or `when = { lua = "return true" }`
-
-### `mode`
-
-The `mode` field controls what happens when a keybind matches:
-
-- **`act_and_consume`** (default): Execute the action and consume the key (key is NOT sent to pane)
-- **`act_and_passthrough`**: Execute the action AND forward the key to the pane
-- **`passthrough_only`**: Don't execute any action, just forward the key to the pane
-
-Example use cases:
+The `key` field is a single array containing modifiers and the key, all using `hx.key.*`:
 
 ```lua
--- Default: Alt+T creates tab, key is consumed
-{
-  on = "press",
-  mods = { hx.mod.alt },
-  key = "t",
-  action = { type = hx.action.tab_new },
-  -- mode = "act_and_consume" is implicit
-}
-
--- Execute action AND send key to pane (e.g., for logging/notifications)
-{
-  on = "press",
-  mods = { hx.mod.ctrl },
-  key = "s",
-  mode = "act_and_passthrough",
-  action = { type = hx.action.keycast_toggle },
-}
-
--- Passthrough only: useful for conditional forwarding
--- When in nvim, forward Ctrl+W to pane (let nvim handle it)
-{
-  on = "press",
-  mods = { hx.mod.ctrl },
-  key = "w",
-  mode = "passthrough_only",
-  when = { all = { "fg:nvim" } },
-}
+key = { hx.key.ctrl, hx.key.alt, hx.key.q }
+key = { hx.key.ctrl, hx.key.alt, hx.key.shift, hx.key.p }
+key = { hx.key.ctrl, hx.key.alt, hx.key.up }
+key = { hx.key.ctrl, hx.key.alt, hx.key["1"] }   -- number keys
+key = { hx.key.ctrl, hx.key.alt, hx.key.dot }
+key = { hx.key.ctrl, hx.key.alt, hx.key.comma }
 ```
 
-**Important**: Keys without ANY keybinding pass through to panes unchanged. You only need `passthrough_only` when you want to explicitly forward a key in specific contexts while consuming it in others.
+**Modifiers:**
+- `hx.key.ctrl`
+- `hx.key.alt`
+- `hx.key.shift`
+- `hx.key.super`
 
-### `action`
+**Named keys:**
+- Letters: `hx.key.a` … `hx.key.z`
+- Numbers: `hx.key["0"]` … `hx.key["9"]`
+- Arrows: `hx.key.up`, `hx.key.down`, `hx.key.left`, `hx.key.right`
+- Punctuation: `hx.key.dot`, `hx.key.comma`, `hx.key.space`, etc.
 
-Actions are dispatchers that trigger mux operations.
+---
 
-Supported action types:
-- `mux_quit` - quit the mux session
-- `mux_detach` - detach from session (leave running)
-- `pane_disown` - disown current pane (orphan it)
-- `pane_adopt` - adopt orphaned panes
-- `pane_close` - close current float or split pane
-- `pane_select_mode` - enter pane select mode
-- `keycast_toggle` - toggle keycast overlay
-- `split_h` - split horizontally
-- `split_v` - split vertically
-- `split_resize` - resize split (requires `dir`)
-- `tab_new` - create new tab
-- `tab_next` - switch to next tab
-- `tab_prev` - switch to previous tab
-- `tab_close` - close current tab
-- `float_toggle` - toggle named float (requires `float`)
-- `float_nudge` - move float position (requires `dir`)
-- `focus_move` - move focus (requires `dir`)
+## `action`
 
-Action parameters:
-- `float_toggle`: `{ type = hx.action.float_toggle, float = "p" }`
-- `focus_move`: `{ type = hx.action.focus_move, dir = "left" }`
-- `split_resize`: `{ type = hx.action.split_resize, dir = "left" }`
-- `float_nudge`: `{ type = hx.action.float_nudge, dir = "up" }`
+Actions trigger mux operations. All available types:
 
-## Advanced gestures
+| Action | Description |
+|---|---|
+| `hx.action.mux_quit` | Exit the mux |
+| `hx.action.mux_detach` | Detach from session (leave running) |
+| `hx.action.pane_disown` | Orphan current pane |
+| `hx.action.pane_adopt` | Adopt an orphaned pane |
+| `hx.action.pane_close` | Close current float or split pane |
+| `hx.action.pane_select_mode` | Enter pane select/swap mode |
+| `hx.action.split_h` | Split horizontally |
+| `hx.action.split_v` | Split vertically |
+| `hx.action.split_resize` | Resize split (requires `dir`) |
+| `hx.action.tab_new` | New tab |
+| `hx.action.tab_next` | Next tab |
+| `hx.action.tab_prev` | Previous tab |
+| `hx.action.tab_close` | Close current tab |
+| `hx.action.float_toggle` | Toggle named float (requires `float`) |
+| `hx.action.float_nudge` | Move float (requires `dir`) |
+| `hx.action.focus_move` | Move focus (requires `dir`) |
+| `hx.action.clipboard_copy` | Copy selection to clipboard |
+| `hx.action.clipboard_request` | Paste from clipboard |
+| `hx.action.system_notify` | Send a system notification |
+| `hx.action.sprite_toggle` | Toggle Pokemon sprite overlay |
 
-These features are enabled by the kitty keyboard protocol when the terminal supports it.
-
-### `on: press`
-
-Runs when the key is pressed.
+**Actions that take parameters:**
 
 ```lua
-{ on = "press", mods = { hx.mod.alt }, key = "t", when = { all = { "focus:any" } }, action = { type = hx.action.tab_new } }
+{ key = { ... }, action = { type = hx.action.float_toggle, float = "1" } }
+{ key = { ... }, action = { type = hx.action.focus_move,   dir = "left" } }
+{ key = { ... }, action = { type = hx.action.split_resize, dir = "up" } }
+{ key = { ... }, action = { type = hx.action.float_nudge,  dir = "down" } }
 ```
 
-### `on: repeat`
+---
 
-Runs while the key is held and repeat events are generated.
+## `mode`
 
-Notes:
-- If there is no `repeat` binding for the key, repeat events are NOT forwarded (to prevent accidental repeated actions).
-- Useful for repeating navigation actions.
+Controls what happens to the key after the bind fires:
+
+| Mode | Description |
+|---|---|
+| `hx.mode.act_and_consume` | Run action, swallow the key (default) |
+| `hx.mode.act_and_passthrough` | Run action AND forward key to pane |
+| `hx.mode.passthrough_only` | Forward key to pane, no action |
 
 ```lua
-{ on = "repeat", mods = { hx.mod.alt }, key = "left", when = { all = { "focus:any" } }, action = { type = hx.action.focus_move, dir = "left" } }
+-- default: key is consumed
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.t }, action = { type = hx.action.tab_new } }
+
+-- passthrough: forward to pane, no action
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.up }, mode = hx.mode.passthrough_only,
+  when = { any = { "fg:nvim", "fg:vim" } } }
+
+-- both: run action and also send key into pane
+{ key = { ... }, mode = hx.mode.act_and_passthrough, action = { type = hx.action.sprite_toggle } }
 ```
 
-### `on: release`
+Keys without any binding always pass through unchanged.
 
-Runs when the key is released.
+---
 
-Notes:
-- Requires a terminal that supports kitty keyboard protocol event types.
-- Release events are mux-only; they are not forwarded into panes.
+## `when`
+
+Optional condition that must be true for the bind to fire.
+
+**String shorthand** (single token):
 
 ```lua
-{ on = "release", mods = { hx.mod.alt, hx.mod.shift }, key = "d", when = { all = { "focus:any" } }, action = { type = hx.action.mux_detach } }
+when = "focus_split"
+when = "focus_float"
 ```
 
-### `on: hold`
-
-Runs once after the key has been held for a given duration.
-
-Configuration:
-- per-bind: `hold_ms`
-- default: `input.timing.hold_ms`
-
-Notes:
-- Implemented as a mux timer.
-- A key release cancels a pending hold.
+**Table form** — `any` (OR) or `all` (AND):
 
 ```lua
-{ on = "hold", mods = { hx.mod.alt }, key = "q", hold_ms = 600, when = { all = { "focus:any" } }, action = { type = hx.action.mux_quit } }
+when = { any = { "fg:nvim", "fg:vim" } }
+when = { all = { "focus_split", "fg:nvim" } }
 ```
 
-### `double_tap`
-
-`double_tap` is not currently supported in bind parsing. Use `on = "press" | "release" | "repeat" | "hold"`.
-
-## Context-sensitive use cases
-
-### Same key, different action depending on focus
+**Shell/script conditions:**
 
 ```lua
-{ mods = { hx.mod.alt }, key = "x", on = "press", when = { all = { "focus:float" } }, action = { type = hx.action.pane_close } }
-{ mods = { hx.mod.alt }, key = "x", on = "press", when = { all = { "focus:split" } }, action = { type = hx.action.tab_close } }
+when = { bash = "[[ -n $SSH_CONNECTION ]]" }
+when = { lua  = "return ctx.last_status ~= 0" }
+when = { env  = "MY_VAR" }       -- set and non-empty
+when = { env_not = "MY_VAR" }    -- not set or empty
+```
+
+**Available tokens:**
+
+| Token | Meaning |
+|---|---|
+| `focus_split` | Focused pane is a split |
+| `focus_float` | Focused pane is a float |
+| `fg:nvim` | Foreground process matches `nvim` |
+| `fg:vim` | Foreground process matches `vim` |
+| `float_sticky` | Current float has sticky attribute |
+| `float_exclusive` | Current float has exclusive attribute |
+| `float_per_cwd` | Current float has per_cwd attribute |
+| `float_global` | Current float has global attribute |
+| `float_isolated` | Current float has isolated attribute |
+| `float_destroyable` | Current float has destroy attribute |
+| `process_running` | A process is running in focused pane |
+| `alt_screen` | Terminal is in alt-screen mode |
+| `has_selection` | Active text selection |
+| `adhoc_float` | An ad-hoc float is open |
+| `named_float` | A named float is open |
+| `tabs_gt1` | More than one tab open |
+
+---
+
+## Common patterns
+
+### Nvim passthrough
+
+Pass `Ctrl+Alt+Arrow` through to nvim/vim, otherwise move focus:
+
+```lua
+-- passthrough first (evaluated before the fallback)
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.up },    when = { any = {"fg:nvim","fg:vim"} }, mode = hx.mode.passthrough_only },
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.down },  when = { any = {"fg:nvim","fg:vim"} }, mode = hx.mode.passthrough_only },
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.left },  when = { any = {"fg:nvim","fg:vim"} }, mode = hx.mode.passthrough_only },
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.right }, when = { any = {"fg:nvim","fg:vim"} }, mode = hx.mode.passthrough_only },
+
+-- fallback: move mux focus
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.up },    action = { type = hx.action.focus_move, dir = "up" } },
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.down },  action = { type = hx.action.focus_move, dir = "down" } },
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.left },  action = { type = hx.action.focus_move, dir = "left" } },
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.right }, action = { type = hx.action.focus_move, dir = "right" } },
+```
+
+Binds are evaluated in order — first match wins.
+
+### Context-sensitive split/float
+
+```lua
+-- split only when a split is focused
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.h }, when = "focus_split", action = { type = hx.action.split_h } },
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.v }, when = "focus_split", action = { type = hx.action.split_v } },
 ```
 
 ### Float toggles
 
-Named floats are configured under `floats[]` (command, size, style, attributes), and are triggered via binds:
-
 ```lua
-{ mods = { hx.mod.alt }, key = "p", on = "press", when = { all = { "focus:any" } }, action = { type = hx.action.float_toggle, float = "p" } }
+{ key = { hx.key.ctrl, hx.key.alt, hx.key["1"] }, action = { type = hx.action.float_toggle, float = "1" } },
+{ key = { hx.key.ctrl, hx.key.alt, hx.key["2"] }, action = { type = hx.action.float_toggle, float = "2" } },
+{ key = { hx.key.ctrl, hx.key.alt, hx.key["0"] }, action = { type = hx.action.float_toggle, float = "p" } },
 ```
 
-### Disable binds in specific apps (Neovim integration)
+The `float` value must match the `key` field of a float defined in your layout.
 
-If you want Hexe to handle `Alt+Arrow` everywhere except inside Neovim (so Neovim can use the same keys), add an exclude filter:
+---
 
-```lua
-{ mods = { hx.mod.alt }, key = "left", on = "press", when = { all = { "focus:any", "not_fg:nvim" } }, action = { type = hx.action.focus_move, dir = "left" } }
-```
+## Terminal support
 
-Then Neovim can call `hexe mux focus left|right|up|down` when it needs to move between mux panes.
+Hexa enables the kitty keyboard protocol on startup. Terminals that support it send structured key events (including modifiers on arrows, etc.). Terminals that don't fall back to legacy escape sequences — most binds still work.
 
-### Passthrough keys to specific programs
+**Key forwarding for passthrough modes** translates to legacy sequences:
+- Arrow keys with mods → `ESC [ 1 ; <mod> A/B/C/D`
+- Ctrl+letter → control character (0x01–0x1A)
+- Alt+key → ESC prefix
+- Shift+Tab → `ESC [ Z`
 
-Forward Ctrl+W to pane only when running vim/nvim (otherwise mux handles it):
+---
 
-```lua
--- In vim: let vim handle Ctrl+W (window commands)
-{
-  on = "press",
-  mods = { hx.mod.ctrl },
-  key = "w",
-  mode = "passthrough_only",
-  when = { all = { "fg:nvim" } },
-}
+## Conditions in status bar and prompt
 
--- Outside vim: close pane
-{
-  on = "press",
-  mods = { hx.mod.ctrl },
-  key = "w",
-  when = { all = { "not_fg:nvim" } },
-  action = { type = hx.action.pane_close },
-}
-```
-
-## Float Title Styling
-
-Float titles are rendered by the float border renderer. The float title text comes from the float definition (`floats[].title`).
-
-The optional `style.title` section controls where and how that title string is rendered:
-
-```lua
-style = {
-  title = {
-    position = "topcenter",
-    outputs = {
-      { style = "bg:0 fg:1", format = "[" },
-      { style = "bg:237 fg:250", format = " $output " },
-      { style = "bg:0 fg:1", format = "]" },
-    },
-  },
-}
-```
-
-## Terminal support and fallback behavior
-
-Hexe uses progressive enhancement:
-
-- On mux start, Hexe enables kitty keyboard protocol (`CSI > ... u`).
-- Terminals that support it will send CSI-u key events, including repeat/release if requested.
-- Terminals that don't support it ignore the enable sequence and keep sending legacy escape sequences.
-
-### Key forwarding behavior
-
-**Keys without bindings**: Pass through raw to the pane unchanged. This preserves all escape sequences (Shift+Tab, F-keys, etc.).
-
-**Keys with bindings**:
-- `act_and_consume`: Key is consumed, not sent to pane
-- `act_and_passthrough`: Action runs, key is translated and sent to pane
-- `passthrough_only`: Key is translated and sent to pane (no action)
-
-For passthrough modes, keys are translated to legacy sequences:
-- Shift+Tab becomes `ESC [ Z` (backtab)
-- Ctrl+Space becomes NUL (0x00)
-- Arrow keys with mods become `ESC [ 1 ; <mod> A/B/C/D`
-- Ctrl+letter becomes control character (0x01-0x1A)
-- Alt+key gets ESC prefix
-
-Practical implications:
-- Your binds work in many terminals (legacy parsing fallback).
-- Release detection is best-effort and only active when the terminal reports release events.
-- Keys you don't bind pass through unchanged, preserving complex sequences.
-
-## Conditional `when` (Prompt + Status Modules)
-
-Hexe supports conditional rendering for:
-
-- `shp.prompt` modules (shell prompt)
-- `mux.tabs.status` modules (mux status bar)
-
-The condition is configured via a `when = { ... }` table.
-
-Important:
-- `when` must be a table (no string form)
-- conditions are ANDed: if multiple providers are present, all must pass
-
-### Prompt Modules (`shp.prompt`)
-
-Supported providers:
-- `bash`: run a bash condition (exit code 0 = show)
-- `lua`: run a Lua chunk that returns a boolean
-
-Example:
-
-```lua
-{
-  name = "ssh",
-  command = "echo //",
-  when = {
-    bash = "[[ -n $SSH_CONNECTION ]]",
-  },
-  outputs = {
-    { style = "bg:237 italic fg:15", format = " $output" },
-  },
-}
-```
-
-For `lua`, the chunk must `return true/false`. A `ctx` table is provided:
-- `ctx.cwd`
-- `ctx.exit_status`
-- `ctx.cmd_duration_ms`
-- `ctx.jobs`
-- `ctx.terminal_width`
-
-Example:
-
-```lua
-when = {
-  lua = "return (ctx.exit_status or 0) ~= 0",
-}
-```
-
-### Status Bar Modules (`mux.tabs.status`)
-
-Supported providers:
-- `hexe`: a list of built-in mux predicates (ANDed)
-- `bash`: run a bash condition (rate-limited)
-- `lua`: run a Lua chunk that returns a boolean (rate-limited)
-
-Example:
-
-```lua
-{
-  name = "running_anim/knight_rider?width=10&step=30&hold=20",
-  when = {
-    hexe = { "process_running", "not_alt_screen" },
-  },
-  outputs = {
-    { format = " $output" },
-  },
-}
-```
-
-`hexe.shp` tokens available:
-- `process_running`
-- `not_process_running`
-- `alt_screen`
-- `not_alt_screen`
-- `jobs_nonzero`
-- `has_last_cmd`
-- `last_status_nonzero`
-
-`hexe.mux` tokens available:
-- `focus_float`
-- `focus_split`
-- `adhoc_float`
-- `named_float`
-- `float_destroyable`
-- `float_exclusive`
-- `float_sticky`
-- `float_per_cwd`
-- `float_global`
-- `float_isolated`
-- `tabs_gt1`
-- `tabs_eq1`
-
-For statusbar `lua`, `ctx` includes:
-- `ctx.shell_running`
-- `ctx.alt_screen`
-- `ctx.jobs`
-- `ctx.last_status`
-- `ctx.last_command`
-- `ctx.cwd`
-- `ctx.now_ms`
+`when` is also used in status bar segments and shell prompt segments. See [statusbar](statusbar.md) for the full token list available in those contexts.

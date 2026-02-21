@@ -4,6 +4,7 @@ const core = @import("core");
 const layout_mod = @import("layout.zig");
 const actions = @import("loop_actions.zig");
 const focus_move = @import("focus_move.zig");
+const mouse_selection = @import("mouse_selection.zig");
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
@@ -53,6 +54,82 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .pane_select_mode => {
             actions.enterPaneSelectMode(state, false);
+            return true;
+        },
+        .clipboard_copy => {
+            const pane: ?*Pane = if (state.active_floating) |idx|
+                state.floats.items[idx]
+            else
+                state.currentLayout().getFocusedPane();
+
+            const p = pane orelse {
+                state.notifications.showFor("No focused pane", 1200);
+                state.needs_render = true;
+                return true;
+            };
+
+            const range = state.mouse_selection.bufRangeForPane(state.active_tab, p) orelse {
+                state.notifications.showFor("No text selected", 1200);
+                state.needs_render = true;
+                return true;
+            };
+
+            const bytes = mouse_selection.extractText(state.allocator, p, range) catch {
+                state.notifications.showFor("Copy failed", 1200);
+                state.needs_render = true;
+                return true;
+            };
+            defer state.allocator.free(bytes);
+
+            if (bytes.len == 0) {
+                state.notifications.showFor("No text selected", 1200);
+                state.needs_render = true;
+                return true;
+            }
+
+            const stdout = std.fs.File.stdout();
+            var io_buf: [256]u8 = undefined;
+            var writer = stdout.writer(&io_buf);
+            state.renderer.vx.copyToSystemClipboard(&writer.interface, bytes, state.allocator) catch {
+                state.notifications.showFor("Clipboard copy failed", 1200);
+                state.needs_render = true;
+                return true;
+            };
+
+            state.notifications.showFor("Copied selection", 1200);
+            state.needs_render = true;
+            return true;
+        },
+        .clipboard_request => {
+            const stdout = std.fs.File.stdout();
+            var buf: [256]u8 = undefined;
+            var writer = stdout.writer(&buf);
+            state.renderer.vx.requestSystemClipboard(&writer.interface) catch {
+                state.notifications.showFor("Clipboard request failed", 1200);
+                state.needs_render = true;
+                return true;
+            };
+            state.notifications.showFor("Requested clipboard", 900);
+            state.needs_render = true;
+            return true;
+        },
+        .system_notify => {
+            const stdout = std.fs.File.stdout();
+            var io_buf: [512]u8 = undefined;
+            var writer = stdout.writer(&io_buf);
+
+            const body = if (state.tabs.items.len > 0 and state.active_tab < state.tabs.items.len)
+                state.tabs.items[state.active_tab].name
+            else
+                "hexe";
+
+            state.renderer.vx.notify(&writer.interface, "hexe", body) catch {
+                state.notifications.showFor("Notification send failed", 1200);
+                state.needs_render = true;
+                return true;
+            };
+            state.notifications.showFor("Notification sent", 900);
+            state.needs_render = true;
             return true;
         },
         .keycast_toggle => {

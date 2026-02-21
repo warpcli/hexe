@@ -34,6 +34,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }).module("xev");
 
+    // Get libvaxis dependency (required TUI rendering library)
+    const vaxis_mod = b.dependency("libvaxis", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("vaxis");
+
     // Create core module
     const core_module = b.createModule(.{
         .root_source_file = b.path("src/core/mod.zig"),
@@ -51,6 +57,7 @@ pub fn build(b: *std.Build) void {
     if (voidbox_mod) |vb| {
         core_module.addImport("voidbox", vb);
     }
+    core_module.addImport("vaxis", vaxis_mod);
     core_module.addImport("xev", xev_mod);
 
     // Create shp module (shell prompt/status bar segments)
@@ -83,6 +90,7 @@ pub fn build(b: *std.Build) void {
     if (ghostty_vt_mod) |vt| {
         mux_module.addImport("ghostty-vt", vt);
     }
+    mux_module.addImport("vaxis", vaxis_mod);
 
     // Create ses module for unified CLI
     const ses_module = b.createModule(.{

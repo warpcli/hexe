@@ -1,8 +1,86 @@
 const std = @import("std");
 const pop = @import("pop");
-const render = @import("render.zig");
+const core = @import("core");
+const shp = @import("shp");
+const vaxis = @import("vaxis");
+const Renderer = @import("render_core.zig").Renderer;
+const Color = core.style.Color;
+const statusbar = @import("statusbar.zig");
+const text_width = @import("text_width.zig");
 
-pub const Renderer = render.Renderer;
+fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: Color, bg: Color, bold: bool) void {
+    var buf: [4]u8 = undefined;
+    const grapheme: []const u8 = if (cp < 128)
+        buf[0..blk: {
+            buf[0] = @intCast(cp);
+            break :blk 1;
+        }]
+    else blk: {
+        const n = std.unicode.utf8Encode(cp, &buf) catch return;
+        break :blk buf[0..n];
+    };
+
+    const style: vaxis.Style = .{ .bold = bold, .fg = fg.toVaxis(), .bg = bg.toVaxis() };
+    renderer.setVaxisCell(x, y, .{
+        .char = .{ .grapheme = grapheme, .width = 1 },
+        .style = style,
+    });
+}
+
+fn textStyle(fg: Color, bg: Color, bold: bool) shp.Style {
+    return .{
+        .fg = switch (fg) {
+            .none => .none,
+            .palette => |idx| .{ .palette = idx },
+            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
+        },
+        .bg = switch (bg) {
+            .none => .none,
+            .palette => |idx| .{ .palette = idx },
+            .rgb => |rgb| .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
+        },
+        .bold = bold,
+    };
+}
+
+fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Color, bg: Color, title: ?[]const u8) void {
+    if (w == 0 or h == 0) return;
+
+    const root = renderer.vx.window().child(.{
+        .x_off = @intCast(x),
+        .y_off = @intCast(y),
+        .width = w,
+        .height = h,
+    });
+
+    const base_style: vaxis.Style = .{ .fg = fg.toVaxis(), .bg = bg.toVaxis() };
+    root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = base_style });
+    _ = root.child(.{
+        .width = w,
+        .height = h,
+        .border = .{
+            .where = .all,
+            .glyphs = .single_square,
+            .style = base_style,
+        },
+    });
+
+    if (title) |t| {
+        if (h > 0 and w > 4) {
+            const clipped = text_width.clipTextToWidth(t, w - 4);
+            const title_segments = &[_]vaxis.Segment{
+                .{ .text = " ", .style = base_style },
+                .{ .text = clipped, .style = .{ .fg = fg.toVaxis(), .bg = bg.toVaxis(), .bold = true } },
+                .{ .text = " ", .style = base_style },
+            };
+            _ = root.print(title_segments, .{ .row_offset = 0, .col_offset = 2, .wrap = .none, .commit = true });
+        }
+    }
+}
+
+fn textWidth(text: []const u8) u16 {
+    return statusbar.measureText(text);
+}
 
 /// Draw a blocking popup (confirm or picker) centered in bounds
 pub fn drawInBounds(renderer: *Renderer, popup: pop.Popup, cfg: anytype, bounds_x: u16, bounds_y: u16, bounds_w: u16, bounds_h: u16) void {
@@ -18,8 +96,8 @@ pub fn draw(renderer: *Renderer, popup: pop.Popup, cfg: anytype, term_width: u16
 }
 
 fn confirmBoxDimensions(confirm: *pop.Confirm, cfg: pop.ConfirmStyle) struct { width: u16, height: u16 } {
-    const msg_width: u16 = @intCast(confirm.message.len);
-    const buttons_width: u16 = @intCast(confirm.yes_label.len + confirm.no_label.len + 14);
+    const msg_width: u16 = textWidth(confirm.message);
+    const buttons_width: u16 = textWidth(confirm.yes_label) + textWidth(confirm.no_label) + 14;
     const content_width = @max(msg_width, buttons_width);
     const box_width = content_width + cfg.padding_x * 2 + 2;
     const box_height: u16 = 3 + cfg.padding_y * 2 + 2;
@@ -29,12 +107,12 @@ fn confirmBoxDimensions(confirm: *pop.Confirm, cfg: pop.ConfirmStyle) struct { w
 fn pickerBoxDimensions(picker: *pop.Picker, cfg: pop.ChooseStyle) struct { width: u16, height: u16 } {
     var max_item_width: usize = 0;
     for (picker.items) |item| {
-        max_item_width = @max(max_item_width, item.len);
+        max_item_width = @max(max_item_width, textWidth(item));
     }
 
     var title_width: usize = 0;
     if (picker.title) |t| {
-        title_width = t.len + 4;
+        title_width = textWidth(t) + 4;
     }
 
     const content_width = @max(max_item_width + 2, title_width);
@@ -59,103 +137,54 @@ pub fn drawConfirmInBounds(renderer: *Renderer, confirm: *pop.Confirm, cfg: pop.
     const box_x = center_x -| (box_width / 2);
     const box_y = center_y -| (box_height / 2);
 
-    const fg: render.Color = .{ .palette = cfg.fg };
-    const bg: render.Color = .{ .palette = cfg.bg };
+    const fg: Color = .{ .palette = cfg.fg };
+    const bg: Color = .{ .palette = cfg.bg };
     const padding_x = cfg.padding_x;
     const padding_y = cfg.padding_y;
 
     const inner_width = box_width - 2;
     const inner_x = box_x + 1;
 
-    // Draw box background
-    var y: u16 = box_y;
-    while (y < box_y + box_height) : (y += 1) {
-        var x: u16 = box_x;
-        while (x < box_x + box_width) : (x += 1) {
-            renderer.setCell(x, y, .{ .char = ' ', .fg = fg, .bg = bg });
-        }
-    }
-
-    // Top border
-    renderer.setCell(box_x, box_y, .{ .char = '┌', .fg = fg, .bg = bg });
-    var x: u16 = box_x + 1;
-    while (x < box_x + box_width - 1) : (x += 1) {
-        renderer.setCell(x, box_y, .{ .char = '─', .fg = fg, .bg = bg });
-    }
-    renderer.setCell(box_x + box_width - 1, box_y, .{ .char = '┐', .fg = fg, .bg = bg });
-
-    // Bottom border
-    renderer.setCell(box_x, box_y + box_height - 1, .{ .char = '└', .fg = fg, .bg = bg });
-    x = box_x + 1;
-    while (x < box_x + box_width - 1) : (x += 1) {
-        renderer.setCell(x, box_y + box_height - 1, .{ .char = '─', .fg = fg, .bg = bg });
-    }
-    renderer.setCell(box_x + box_width - 1, box_y + box_height - 1, .{ .char = '┘', .fg = fg, .bg = bg });
-
-    // Side borders
-    y = box_y + 1;
-    while (y < box_y + box_height - 1) : (y += 1) {
-        renderer.setCell(box_x, y, .{ .char = '│', .fg = fg, .bg = bg });
-        renderer.setCell(box_x + box_width - 1, y, .{ .char = '│', .fg = fg, .bg = bg });
-    }
+    drawPopupFrame(renderer, box_x, box_y, box_width, box_height, fg, bg, null);
 
     // Draw message
     const msg_y = box_y + 1 + padding_y;
-    const msg = confirm.message;
-    const msg_len: u16 = @intCast(@min(msg.len, inner_width - padding_x * 2));
-    const msg_x = inner_x + padding_x + (inner_width - padding_x * 2 -| msg_len) / 2;
-    for (msg[0..msg_len], 0..) |char, i| {
-        const cx = msg_x + @as(u16, @intCast(i));
-        if (cx < box_x + box_width - 1) {
-            renderer.setCell(cx, msg_y, .{ .char = char, .fg = fg, .bg = bg, .bold = cfg.bold });
-        }
-    }
+    const max_msg_width = inner_width -| padding_x * 2;
+    const msg = text_width.clipTextToWidth(confirm.message, max_msg_width);
+    const msg_len: u16 = textWidth(msg);
+    const msg_x = inner_x + padding_x + (max_msg_width -| msg_len) / 2;
+    _ = statusbar.drawStyledText(renderer, msg_x, msg_y, msg, textStyle(fg, bg, cfg.bold));
 
     // Draw buttons
     const buttons_y = msg_y + 2;
     const yes_label = confirm.yes_label;
     const no_label = confirm.no_label;
 
-    const yes_text_len: u16 = @intCast(yes_label.len + 4);
-    const no_text_len: u16 = @intCast(no_label.len + 4);
+    const yes_text_len: u16 = textWidth(yes_label) + 4;
+    const no_text_len: u16 = textWidth(no_label) + 4;
     const total_buttons_width = yes_text_len + 4 + no_text_len;
     const buttons_start_x = inner_x + (inner_width -| total_buttons_width) / 2;
 
     // Yes button
     const yes_selected = confirm.selected == .yes;
-    const yes_fg: render.Color = if (yes_selected) bg else fg;
-    const yes_bg: render.Color = if (yes_selected) fg else bg;
+    const yes_fg: Color = if (yes_selected) bg else fg;
+    const yes_bg: Color = if (yes_selected) fg else bg;
     var bx = buttons_start_x;
-    renderer.setCell(bx, buttons_y, .{ .char = '[', .fg = yes_fg, .bg = yes_bg });
-    bx += 1;
-    renderer.setCell(bx, buttons_y, .{ .char = ' ', .fg = yes_fg, .bg = yes_bg });
-    bx += 1;
-    for (yes_label) |char| {
-        renderer.setCell(bx, buttons_y, .{ .char = char, .fg = yes_fg, .bg = yes_bg, .bold = yes_selected });
-        bx += 1;
-    }
-    renderer.setCell(bx, buttons_y, .{ .char = ' ', .fg = yes_fg, .bg = yes_bg });
-    bx += 1;
-    renderer.setCell(bx, buttons_y, .{ .char = ']', .fg = yes_fg, .bg = yes_bg });
-    bx += 1;
+    const yes_style = textStyle(yes_fg, yes_bg, yes_selected);
+    bx = statusbar.drawStyledText(renderer, bx, buttons_y, "[ ", yes_style);
+    bx = statusbar.drawStyledText(renderer, bx, buttons_y, yes_label, yes_style);
+    bx = statusbar.drawStyledText(renderer, bx, buttons_y, " ]", yes_style);
 
     bx += 4; // spacing
 
     // No button
     const no_selected = confirm.selected == .no;
-    const no_fg: render.Color = if (no_selected) bg else fg;
-    const no_bg: render.Color = if (no_selected) fg else bg;
-    renderer.setCell(bx, buttons_y, .{ .char = '[', .fg = no_fg, .bg = no_bg });
-    bx += 1;
-    renderer.setCell(bx, buttons_y, .{ .char = ' ', .fg = no_fg, .bg = no_bg });
-    bx += 1;
-    for (no_label) |char| {
-        renderer.setCell(bx, buttons_y, .{ .char = char, .fg = no_fg, .bg = no_bg, .bold = no_selected });
-        bx += 1;
-    }
-    renderer.setCell(bx, buttons_y, .{ .char = ' ', .fg = no_fg, .bg = no_bg });
-    bx += 1;
-    renderer.setCell(bx, buttons_y, .{ .char = ']', .fg = no_fg, .bg = no_bg });
+    const no_fg: Color = if (no_selected) bg else fg;
+    const no_bg: Color = if (no_selected) fg else bg;
+    const no_style = textStyle(no_fg, no_bg, no_selected);
+    bx = statusbar.drawStyledText(renderer, bx, buttons_y, "[ ", no_style);
+    bx = statusbar.drawStyledText(renderer, bx, buttons_y, no_label, no_style);
+    _ = statusbar.drawStyledText(renderer, bx, buttons_y, " ]", no_style);
 }
 
 pub fn drawPickerInBounds(renderer: *Renderer, picker: *pop.Picker, cfg: pop.ChooseStyle, bounds_x: u16, bounds_y: u16, bounds_w: u16, bounds_h: u16) void {
@@ -170,56 +199,12 @@ pub fn drawPickerInBounds(renderer: *Renderer, picker: *pop.Picker, cfg: pop.Cho
     const box_x = center_x -| (box_width / 2);
     const box_y = center_y -| (box_height / 2);
 
-    const fg: render.Color = .{ .palette = cfg.fg };
-    const bg: render.Color = .{ .palette = cfg.bg };
-    const highlight_fg: render.Color = .{ .palette = cfg.highlight_fg };
-    const highlight_bg: render.Color = .{ .palette = cfg.highlight_bg };
+    const fg: Color = .{ .palette = cfg.fg };
+    const bg: Color = .{ .palette = cfg.bg };
+    const highlight_fg: Color = .{ .palette = cfg.highlight_fg };
+    const highlight_bg: Color = .{ .palette = cfg.highlight_bg };
 
-    // Draw box background
-    var y: u16 = box_y;
-    while (y < box_y + box_height) : (y += 1) {
-        var x: u16 = box_x;
-        while (x < box_x + box_width) : (x += 1) {
-            renderer.setCell(x, y, .{ .char = ' ', .fg = fg, .bg = bg });
-        }
-    }
-
-    // Top border with optional title
-    renderer.setCell(box_x, box_y, .{ .char = '┌', .fg = fg, .bg = bg });
-    var x: u16 = box_x + 1;
-    if (picker.title) |title| {
-        renderer.setCell(x, box_y, .{ .char = '─', .fg = fg, .bg = bg });
-        x += 1;
-        renderer.setCell(x, box_y, .{ .char = ' ', .fg = fg, .bg = bg });
-        x += 1;
-        for (title) |char| {
-            if (x < box_x + box_width - 2) {
-                renderer.setCell(x, box_y, .{ .char = char, .fg = fg, .bg = bg, .bold = true });
-                x += 1;
-            }
-        }
-        renderer.setCell(x, box_y, .{ .char = ' ', .fg = fg, .bg = bg });
-        x += 1;
-    }
-    while (x < box_x + box_width - 1) : (x += 1) {
-        renderer.setCell(x, box_y, .{ .char = '─', .fg = fg, .bg = bg });
-    }
-    renderer.setCell(box_x + box_width - 1, box_y, .{ .char = '┐', .fg = fg, .bg = bg });
-
-    // Bottom border
-    renderer.setCell(box_x, box_y + box_height - 1, .{ .char = '└', .fg = fg, .bg = bg });
-    x = box_x + 1;
-    while (x < box_x + box_width - 1) : (x += 1) {
-        renderer.setCell(x, box_y + box_height - 1, .{ .char = '─', .fg = fg, .bg = bg });
-    }
-    renderer.setCell(box_x + box_width - 1, box_y + box_height - 1, .{ .char = '┘', .fg = fg, .bg = bg });
-
-    // Side borders
-    y = box_y + 1;
-    while (y < box_y + box_height - 1) : (y += 1) {
-        renderer.setCell(box_x, y, .{ .char = '│', .fg = fg, .bg = bg });
-        renderer.setCell(box_x + box_width - 1, y, .{ .char = '│', .fg = fg, .bg = bg });
-    }
+    drawPopupFrame(renderer, box_x, box_y, box_width, box_height, fg, bg, picker.title);
 
     // Draw items
     const content_x = box_x + 2;
@@ -230,21 +215,18 @@ pub fn drawPickerInBounds(renderer: *Renderer, picker: *pop.Picker, cfg: pop.Cho
     while (i < visible_end) : (i += 1) {
         const item = picker.items[i];
         const is_selected = i == picker.selected;
-        const item_fg: render.Color = if (is_selected) highlight_fg else fg;
-        const item_bg: render.Color = if (is_selected) highlight_bg else bg;
+        const item_fg: Color = if (is_selected) highlight_fg else fg;
+        const item_bg: Color = if (is_selected) highlight_bg else bg;
 
-        renderer.setCell(content_x, content_y, .{ .char = if (is_selected) '>' else ' ', .fg = item_fg, .bg = item_bg });
-        renderer.setCell(content_x + 1, content_y, .{ .char = ' ', .fg = item_fg, .bg = item_bg });
+        putChar(renderer, content_x, content_y, if (is_selected) '>' else ' ', item_fg, item_bg, false);
+        putChar(renderer, content_x + 1, content_y, ' ', item_fg, item_bg, false);
 
         var ix: u16 = content_x + 2;
-        for (item) |char| {
-            if (ix < box_x + box_width - 2) {
-                renderer.setCell(ix, content_y, .{ .char = char, .fg = item_fg, .bg = item_bg, .bold = is_selected });
-                ix += 1;
-            }
-        }
+        const item_width_max = (box_x + box_width - 2) -| ix;
+        const clipped_item = text_width.clipTextToWidth(item, item_width_max);
+        ix = statusbar.drawStyledText(renderer, ix, content_y, clipped_item, textStyle(item_fg, item_bg, is_selected));
         while (ix < box_x + box_width - 1) : (ix += 1) {
-            renderer.setCell(ix, content_y, .{ .char = ' ', .fg = item_fg, .bg = item_bg });
+            putChar(renderer, ix, content_y, ' ', item_fg, item_bg, false);
         }
 
         content_y += 1;

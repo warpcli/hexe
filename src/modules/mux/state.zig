@@ -12,8 +12,7 @@ pub const PendingFloatRequest = state_types.PendingFloatRequest;
 const layout_mod = @import("layout.zig");
 const Layout = layout_mod.Layout;
 
-const render = @import("render.zig");
-const Renderer = render.Renderer;
+const Renderer = @import("render_core.zig").Renderer;
 
 const ses_client = @import("ses_client.zig");
 const SesClient = ses_client.SesClient;
@@ -25,8 +24,6 @@ const OverlayManager = pop.overlay.OverlayManager;
 
 const Pane = @import("pane.zig").Pane;
 
-const winpulse_mod = @import("winpulse.zig");
-
 const BindKey = core.Config.BindKey;
 const BindAction = core.Config.BindAction;
 /// Simple focus context for timer storage (float vs split).
@@ -35,7 +32,6 @@ pub const FocusContext = enum { split, float };
 const state_tabs = @import("state_tabs.zig");
 const state_serialize = @import("state_serialize.zig");
 const state_sync = @import("state_sync.zig");
-const state_pulse = @import("state_pulse.zig");
 const mouse_selection = @import("mouse_selection.zig");
 
 pub const TabFocusKind = enum { split, float };
@@ -139,11 +135,6 @@ pub const State = struct {
     force_full_render: bool,
     /// When true, force cursor visible on next render (set after float death)
     cursor_needs_restore: bool,
-    /// Winpulse state tracking
-    pulse_start_ms: i64 = 0,
-    pulse_pane_uuid: ?[32]u8 = null,
-    pulse_saved_colors: ?[]winpulse_mod.SavedCell = null,
-    pulse_pane_bounds: ?PaneBounds = null,
     term_width: u16,
     term_height: u16,
     status_height: u16,
@@ -181,6 +172,7 @@ pub const State = struct {
     state_version: u32 = 0,
 
     osc_reply_target_uuid: ?[32]u8,
+    osc_reply_targets: std.ArrayList([32]u8),
     osc_reply_buf: std.ArrayList(u8),
     osc_reply_in_progress: bool,
     osc_reply_prev_esc: bool,
@@ -193,6 +185,12 @@ pub const State = struct {
 
     // Track bracketed paste mode to suppress keycast during paste
     in_bracketed_paste: bool = false,
+
+    // Terminal capability query lifecycle for custom event loop mode.
+    terminal_query_in_flight: bool = false,
+    terminal_query_deadline_ms: i64 = 0,
+    terminal_caps_ready: bool = false,
+    terminal_query_timed_out: bool = false,
 
     pending_float_requests: std.AutoHashMap([32]u8, PendingFloatRequest),
 
@@ -325,9 +323,15 @@ pub const State = struct {
             .session_name_owned = null,
 
             .osc_reply_target_uuid = null,
+            .osc_reply_targets = .empty,
             .osc_reply_buf = .empty,
             .osc_reply_in_progress = false,
             .osc_reply_prev_esc = false,
+
+            .terminal_query_in_flight = false,
+            .terminal_query_deadline_ms = 0,
+            .terminal_caps_ready = false,
+            .terminal_query_timed_out = false,
 
             .pending_float_requests = std.AutoHashMap([32]u8, PendingFloatRequest).init(allocator),
 
@@ -446,9 +450,6 @@ pub const State = struct {
 
         self.key_timers.deinit(self.allocator);
 
-        // Clean up pulse state
-        self.stopPulse();
-
         // Deinit floats.
         for (self.floats.items) |pane| {
             pane.deinit();
@@ -465,6 +466,7 @@ pub const State = struct {
         self.config.deinit();
         var ses_cfg = self.ses_config;
         ses_cfg.deinit(self.allocator);
+        self.osc_reply_targets.deinit(self.allocator);
         self.osc_reply_buf.deinit(self.allocator);
         self.renderer.deinit();
         self.ses_client.deinit();
@@ -483,6 +485,23 @@ pub const State = struct {
         if (self.session_name_owned) |owned| {
             self.allocator.free(owned);
         }
+    }
+
+    pub fn enqueueOscReplyTarget(self: *State, uuid: [32]u8) void {
+        for (self.osc_reply_targets.items) |queued| {
+            if (std.mem.eql(u8, &queued, &uuid)) return;
+        }
+        if (self.osc_reply_target_uuid) |active| {
+            if (std.mem.eql(u8, &active, &uuid)) return;
+        }
+        self.osc_reply_targets.append(self.allocator, uuid) catch {};
+    }
+
+    pub fn dequeueOscReplyTarget(self: *State) ?[32]u8 {
+        if (self.osc_reply_targets.items.len == 0) return null;
+        const next = self.osc_reply_targets.items[0];
+        _ = self.osc_reply_targets.orderedRemove(0);
+        return next;
     }
 
     pub const PendingKeyTimerKind = enum { delayed_press, tap_pending, hold, hold_fired, repeat_wait, repeat_active, repeat_locked };
@@ -599,16 +618,6 @@ pub const State = struct {
         return state_sync.syncPaneUnfocus(self, pane);
     }
 
-    /// Start winpulse animation for the currently focused pane
-    pub fn startPulse(self: *State) void {
-        return state_pulse.startPulse(self);
-    }
-
-    /// Stop winpulse animation and restore original colors
-    pub fn stopPulse(self: *State) void {
-        return state_pulse.stopPulse(self);
-    }
-
     pub fn refreshPaneCwd(self: *State, pane: *Pane) ?[]const u8 {
         return state_sync.refreshPaneCwd(self, pane);
     }
@@ -627,6 +636,28 @@ pub const State = struct {
 
     pub fn resizeFloatingPanes(self: *State) void {
         return state_sync.resizeFloatingPanes(self);
+    }
+
+    pub fn applyTerminalResize(self: *State, cols: u16, rows: u16) void {
+        if (cols == 0 or rows == 0) return;
+        if (cols == self.term_width and rows == self.term_height) return;
+
+        self.term_width = cols;
+        self.term_height = rows;
+        const status_h: u16 = if (self.config.tabs.status.enabled) 1 else 0;
+        self.status_height = status_h;
+        self.layout_width = cols;
+        self.layout_height = rows - status_h;
+
+        for (self.tabs.items) |*tab| {
+            tab.layout.resize(self.layout_width, self.layout_height);
+        }
+
+        self.resizeFloatingPanes();
+        self.renderer.resize(cols, rows) catch {};
+        self.renderer.invalidate();
+        self.needs_render = true;
+        self.force_full_render = true;
     }
 
     pub fn setPaneShell(self: *State, uuid: [32]u8, cmd: ?[]const u8, cwd: ?[]const u8, status: ?i32, duration_ms: ?u64, jobs: ?u16) void {

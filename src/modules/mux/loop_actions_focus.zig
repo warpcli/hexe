@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("core");
 const pop = @import("pop");
+const vaxis = @import("vaxis");
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
@@ -86,26 +87,53 @@ pub fn focusPaneByUuid(state: *State, uuid: [32]u8) void {
     }
 }
 
-/// Handle input when pane select mode is active.
+const PaneSelectChoice = struct {
+    label: u8,
+    is_swap: bool,
+};
+
+fn paneSelectChoiceFromKey(key: vaxis.Key) ?PaneSelectChoice {
+    if (key.text) |txt| {
+        var view = std.unicode.Utf8View.init(txt) catch return null;
+        var it = view.iterator();
+        const cp = it.nextCodepoint() orelse return null;
+        if (it.nextCodepoint() != null) return null;
+        if (cp >= 'a' and cp <= 'z') return .{ .label = @intCast(cp), .is_swap = false };
+        if (cp >= 'A' and cp <= 'Z') return .{ .label = @intCast(cp + 32), .is_swap = true };
+    }
+
+    const cp = key.base_layout_codepoint orelse key.codepoint;
+    if (cp >= 'A' and cp <= 'Z') return .{ .label = @intCast(cp + 32), .is_swap = true };
+    if (cp >= 'a' and cp <= 'z') {
+        return .{ .label = @intCast(cp), .is_swap = key.mods.shift };
+    }
+    return null;
+}
+
+/// Handle parser events when pane select mode is active.
 /// Returns true if input was consumed.
-/// - Lowercase (a-z): Focus that pane
-/// - Uppercase (A-Z): Swap focused pane position with target
-/// - ESC: Cancel
-pub fn handlePaneSelectInput(state: *State, byte: u8) bool {
+/// - letter: focus pane by label
+/// - Shift+letter / uppercase: swap focused pane with target label
+/// - Escape: cancel
+pub fn handlePaneSelectEvent(state: *State, parsed_event: ?vaxis.Event) bool {
     if (!state.overlays.isPaneSelectActive()) return false;
 
-    if (byte == 0x1b) {
+    const ev = parsed_event orelse return true;
+    const key = switch (ev) {
+        .key_press => |k| k,
+        else => return true,
+    };
+
+    if (key.codepoint == vaxis.Key.escape) {
         state.overlays.exitPaneSelectMode();
         state.needs_render = true;
         return true;
     }
 
-    const is_swap = byte >= 'A' and byte <= 'Z';
-    const label: u8 = if (is_swap) byte + 32 else byte;
-    if (label < 'a' or label > 'z') return true;
+    const choice = paneSelectChoiceFromKey(key) orelse return true;
 
-    if (state.overlays.findPaneByLabel(label)) |target_uuid| {
-        if (is_swap) {
+    if (state.overlays.findPaneByLabel(choice.label)) |target_uuid| {
+        if (choice.is_swap) {
             const focused = getCurrentFocusedPane(state);
             const target = state.findPaneByUuid(target_uuid);
             if (focused != null and target != null and focused.? != target.?) {

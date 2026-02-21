@@ -1,13 +1,15 @@
 const std = @import("std");
 const core = @import("core");
 const shp = @import("shp");
+const vaxis = @import("vaxis");
 const animations = core.segments.animations;
 const randomdo_mod = core.segments.randomdo;
 
 const LuaRuntime = core.LuaRuntime;
 
 const State = @import("state.zig").State;
-const render = @import("render.zig");
+const Renderer = @import("render_core.zig").Renderer;
+const Color = core.style.Color;
 const Pane = @import("pane.zig").Pane;
 
 const WhenCacheEntry = struct {
@@ -25,6 +27,13 @@ const RandomdoState = struct {
 };
 
 threadlocal var randomdo_state: ?std.AutoHashMap(usize, RandomdoState) = null;
+
+fn spinnerAsciiFrame(now_ms: u64, started_at_ms: u64, step_ms: u64) []const u8 {
+    const frames = [_][]const u8{ "|", "/", "-", "\\" };
+    const step: u64 = if (step_ms == 0) 100 else step_ms;
+    const tick = (now_ms - started_at_ms) / step;
+    return frames[@intCast(tick % frames.len)];
+}
 
 /// Clean up all threadlocal resources. Call this on MUX shutdown.
 pub fn deinitThreadlocals() void {
@@ -285,12 +294,10 @@ fn passesWhenClause(ctx: *shp.Context, query: *const core.PaneQuery, w: core.Whe
     return true;
 }
 
-pub const Renderer = render.Renderer;
-
 pub const RenderedSegment = struct {
     text: []const u8,
-    fg: render.Color,
-    bg: render.Color,
+    fg: Color,
+    bg: Color,
     bold: bool,
     italic: bool,
 };
@@ -322,9 +329,13 @@ pub fn renderSegmentOutput(module: *const core.Segment, output: []const u8) Rend
                 text_len += copy_len;
                 i += 7;
             } else {
-                result.buffers[result.count][text_len] = out.format[i];
-                text_len += 1;
-                i += 1;
+                const cp_len = std.unicode.utf8ByteSequenceLength(out.format[i]) catch 1;
+                const end = @min(i + cp_len, out.format.len);
+                const token_len = end - i;
+                if (text_len + token_len > 64) break;
+                @memcpy(result.buffers[result.count][text_len .. text_len + token_len], out.format[i..end]);
+                text_len += token_len;
+                i = end;
             }
         }
 
@@ -337,14 +348,14 @@ pub fn renderSegmentOutput(module: *const core.Segment, output: []const u8) Rend
             .bold = style.bold,
             .italic = style.italic,
         };
-        result.total_len += text_len;
+        result.total_len += measureText(result.items[result.count].text);
         result.count += 1;
     }
 
     return result;
 }
 
-pub fn styleColorToRender(col: shp.Color) render.Color {
+pub fn styleColorToRender(col: shp.Color) Color {
     return switch (col) {
         .none => .none,
         .palette => |p| .{ .palette = p },
@@ -392,7 +403,10 @@ pub fn draw(
 
     // Clear status bar
     for (0..width) |xi| {
-        renderer.setCell(@intCast(xi), y, .{ .char = ' ' });
+        renderer.setVaxisCell(@intCast(xi), y, .{
+            .char = .{ .grapheme = " ", .width = 1 },
+            .style = .{},
+        });
     }
 
     // Create shp context
@@ -475,29 +489,35 @@ pub fn draw(
         }
     }
 
-    // Collect tab titles for center section
+    // Collect tab titles for center section.
+    // Keep active-tab mapping in display space (especially when clipped to 16).
     var tab_names: [16][]const u8 = undefined;
     var tab_count: usize = 0;
-    for (tabs.items) |*tab| {
-        if (tab_count < 16) {
-            if (use_basename) {
-                if (tab.layout.getFocusedPane()) |pane| {
-                    const pwd = pane.getRealCwd();
-                    tab_names[tab_count] = if (pwd) |p| blk: {
-                        const base = std.fs.path.basename(p);
-                        break :blk if (base.len == 0) "/" else base;
-                    } else tab.name;
-                } else {
-                    tab_names[tab_count] = tab.name;
-                }
-            } else {
-                tab_names[tab_count] = tab.name;
-            }
+    var active_display_tab: ?usize = null;
+    for (tabs.items, 0..) |*tab, ti| {
+        const tab_name = if (use_basename)
+            if (tab.layout.getFocusedPane()) |pane|
+                if (pane.getRealCwd()) |p| blk: {
+                    const base = std.fs.path.basename(p);
+                    break :blk if (base.len == 0) "/" else base;
+                } else tab.name
+            else
+                tab.name
+        else
+            tab.name;
+
+        if (tab_count < tab_names.len) {
+            tab_names[tab_count] = tab_name;
+            if (ti == active_tab) active_display_tab = tab_count;
             tab_count += 1;
+        } else if (ti == active_tab) {
+            // Keep active tab visible when list is clipped.
+            tab_names[tab_names.len - 1] = tab_name;
+            active_display_tab = tab_names.len - 1;
         }
     }
     ctx.tab_names = tab_names[0..tab_count];
-    ctx.active_tab = active_tab;
+    ctx.active_tab = active_display_tab orelse 0;
     ctx.session_name = session_name;
 
     // Build PaneQuery for condition evaluation
@@ -697,27 +717,32 @@ pub fn hitTestTab(
 
     var tab_names: [16][]const u8 = undefined;
     var tab_count: usize = 0;
-    for (tabs.items) |*tab| {
-        if (tab_count >= tab_names.len) break;
-        if (use_basename) {
-            if (tab.layout.getFocusedPane()) |pane| {
-                const pwd = pane.getRealCwd();
-                tab_names[tab_count] = if (pwd) |p| blk: {
+    var active_display_tab: ?usize = null;
+    for (tabs.items, 0..) |*tab, ti| {
+        const tab_name = if (use_basename)
+            if (tab.layout.getFocusedPane()) |pane|
+                if (pane.getRealCwd()) |p| blk: {
                     const base = std.fs.path.basename(p);
                     break :blk if (base.len == 0) "/" else base;
-                } else tab.name;
-            } else {
-                tab_names[tab_count] = tab.name;
-            }
-        } else {
-            tab_names[tab_count] = tab.name;
+                } else tab.name
+            else
+                tab.name
+        else
+            tab.name;
+
+        if (tab_count < tab_names.len) {
+            tab_names[tab_count] = tab_name;
+            if (ti == active_tab) active_display_tab = tab_count;
+            tab_count += 1;
+        } else if (ti == active_tab) {
+            tab_names[tab_names.len - 1] = tab_name;
+            active_display_tab = tab_names.len - 1;
         }
-        tab_count += 1;
     }
     if (tab_count == 0) return null;
 
     ctx.tab_names = tab_names[0..tab_count];
-    ctx.active_tab = active_tab;
+    ctx.active_tab = active_display_tab orelse 0;
     ctx.session_name = session_name;
 
     const mod = tabs_mod.?;
@@ -778,16 +803,22 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
 
         var output_segs: ?[]const shp.Segment = null;
         var output_text: []const u8 = "";
-        if (std.mem.eql(u8, mod.name, "session")) {
+        if (mod.spinner) |cfg_in| {
+            var cfg = cfg_in;
+            cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
+            output_segs = animations.renderSegments(ctx, cfg);
+            if (output_segs == null) {
+                output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
+                if (output_text.len == 0) {
+                    output_text = spinnerAsciiFrame(ctx.now_ms, cfg.started_at_ms, cfg.step_ms);
+                }
+            }
+        } else if (std.mem.eql(u8, mod.name, "spinner")) {
+            output_text = spinnerAsciiFrame(ctx.now_ms, ctx.shell_started_at_ms orelse 0, 100);
+        } else if (std.mem.eql(u8, mod.name, "session")) {
             output_text = ctx.session_name;
         } else if (std.mem.eql(u8, mod.name, "randomdo")) {
             output_text = randomdoTextFor(ctx, mod, true);
-        } else if (std.mem.eql(u8, mod.name, "spinner")) {
-            if (mod.spinner) |cfg_in| {
-                var cfg = cfg_in;
-                cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
-                output_segs = animations.renderSegments(ctx, cfg);
-            }
         } else {
             output_segs = ctx.renderSegment(mod.name);
         }
@@ -831,17 +862,23 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
 
         var output_segs: ?[]const shp.Segment = null;
         var output_text: []const u8 = "";
-        if (std.mem.eql(u8, mod.name, "session")) {
+        if (mod.spinner) |cfg_in| {
+            var cfg = cfg_in;
+            cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
+            output_segs = animations.renderSegments(ctx, cfg);
+            if (output_segs == null) {
+                output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
+                if (output_text.len == 0) {
+                    output_text = spinnerAsciiFrame(ctx.now_ms, cfg.started_at_ms, cfg.step_ms);
+                }
+            }
+        } else if (std.mem.eql(u8, mod.name, "spinner")) {
+            output_text = spinnerAsciiFrame(ctx.now_ms, ctx.shell_started_at_ms orelse 0, 100);
+        } else if (std.mem.eql(u8, mod.name, "session")) {
             output_text = ctx.session_name;
         } else if (std.mem.eql(u8, mod.name, "randomdo")) {
             width += calcFormattedWidthMax(out.format, randomdo_mod.MAX_LEN);
             continue;
-        } else if (std.mem.eql(u8, mod.name, "spinner")) {
-            if (mod.spinner) |cfg_in| {
-                var cfg = cfg_in;
-                cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
-                output_segs = animations.renderSegments(ctx, cfg);
-            }
         } else {
             output_segs = ctx.renderSegment(mod.name);
         }
@@ -860,8 +897,9 @@ fn calcFormattedWidthMax(format: []const u8, output_max: u16) u16 {
             i += 7;
         } else {
             const len = std.unicode.utf8ByteSequenceLength(format[i]) catch 1;
-            i += len;
-            width += 1;
+            const end = @min(i + len, format.len);
+            width += vaxis.gwidth.gwidth(format[i..end], .unicode);
+            i = end;
         }
     }
     return width;
@@ -873,15 +911,7 @@ pub fn countDisplayWidth(text: []const u8) u16 {
 
 // Measure text width in terminal cells (same logic as drawStyledText)
 pub fn measureText(text: []const u8) u16 {
-    var width: u16 = 0;
-    var i: usize = 0;
-    while (i < text.len) {
-        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-        const end = @min(i + len, text.len);
-        i = end;
-        width += 1;
-    }
-    return width;
+    return vaxis.gwidth.gwidth(text, .unicode);
 }
 
 pub fn calcFormattedWidth(format: []const u8, output: []const u8, output_segs: ?[]const shp.Segment) u16 {
@@ -900,8 +930,9 @@ pub fn calcFormattedWidth(format: []const u8, output: []const u8, output_segs: ?
             i += 7;
         } else {
             const len = std.unicode.utf8ByteSequenceLength(format[i]) catch 1;
-            i += len;
-            width += 1;
+            const end = @min(i + len, format.len);
+            width += vaxis.gwidth.gwidth(format[i..end], .unicode);
+            i = end;
         }
     }
     return width;
@@ -918,40 +949,39 @@ fn mergeStyle(base: shp.Style, override: shp.Style) shp.Style {
     return out;
 }
 
+fn shpStyleToVaxis(style: shp.Style) vaxis.Style {
+    var out: vaxis.Style = .{};
+    out.fg = style.fg.toVaxis();
+    out.bg = style.bg.toVaxis();
+    out.bold = style.bold;
+    out.italic = style.italic;
+    out.dim = style.dim;
+    out.ul_style = if (style.underline) .single else .off;
+    return out;
+}
+
 pub fn drawSegment(renderer: *Renderer, x: u16, y: u16, seg: shp.Segment, default_style: shp.Style) u16 {
     const style = if (seg.style.isEmpty()) default_style else mergeStyle(default_style, seg.style);
     return drawStyledText(renderer, x, y, seg.text, style);
 }
 
 pub fn drawStyledText(renderer: *Renderer, start_x: u16, y: u16, text: []const u8, style: shp.Style) u16 {
-    var x = start_x;
-    var i: usize = 0;
+    const screen_w = renderer.screenWidth();
+    const screen_h = renderer.vx.screen.height;
+    if (start_x >= screen_w or y >= screen_h) return start_x;
 
-    while (i < text.len) {
-        const len = std.unicode.utf8ByteSequenceLength(text[i]) catch 1;
-        const codepoint = std.unicode.utf8Decode(text[i..][0..len]) catch ' ';
+    // Status text often comes from short-lived buffers. Keep the printed text
+    // in the frame arena so vaxis never sees dangling slices.
+    const owned_text = renderer.frame_arena.allocator().dupe(u8, text) catch text;
 
-        var cell = render.Cell{
-            .char = codepoint,
-            .bold = style.bold,
-            .italic = style.italic,
-        };
+    const row = renderer.vx.window().child(.{
+        .x_off = @intCast(start_x),
+        .y_off = @intCast(y),
+        .width = screen_w - start_x,
+        .height = 1,
+    });
 
-        switch (style.fg) {
-            .none => {},
-            .palette => |p| cell.fg = .{ .palette = p },
-            .rgb => |rgb| cell.fg = .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
-        }
-        switch (style.bg) {
-            .none => {},
-            .palette => |p| cell.bg = .{ .palette = p },
-            .rgb => |rgb| cell.bg = .{ .rgb = .{ .r = rgb.r, .g = rgb.g, .b = rgb.b } },
-        }
-
-        renderer.setCell(x, y, cell);
-        x += 1;
-        i += len;
-    }
-
-    return x;
+    const seg = vaxis.Segment{ .text = owned_text, .style = shpStyleToVaxis(style) };
+    const res = row.print(&.{seg}, .{ .row_offset = 0, .col_offset = 0, .wrap = .none, .commit = true });
+    return start_x + @min(res.col, row.width);
 }

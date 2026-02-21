@@ -20,7 +20,7 @@ pub const Position = enum {
     bottom,
 };
 
-/// Color representation (matches render.zig)
+/// Color representation (matches mux/render_types.zig)
 pub const Color = union(enum) {
     none,
     palette: u8,

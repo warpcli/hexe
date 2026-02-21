@@ -61,9 +61,6 @@ pub const MuxConfigBuilder = struct {
     confirm_on_detach: ?bool = null,
     confirm_on_disown: ?bool = null,
     confirm_on_close: ?bool = null,
-    winpulse_enabled: ?bool = null,
-    winpulse_duration_ms: ?u32 = null,
-    winpulse_brighten_factor: ?f32 = null,
     selection_color: ?u8 = null,
     mouse_selection_override_mods: ?u8 = null,
 
@@ -249,9 +246,6 @@ pub const MuxConfigBuilder = struct {
         if (self.confirm_on_detach) |v| result.confirm_on_detach = v;
         if (self.confirm_on_disown) |v| result.confirm_on_disown = v;
         if (self.confirm_on_close) |v| result.confirm_on_close = v;
-        if (self.winpulse_enabled) |v| result.winpulse_enabled = v;
-        if (self.winpulse_duration_ms) |v| result.winpulse_duration_ms = v;
-        if (self.winpulse_brighten_factor) |v| result.winpulse_brighten_factor = v;
         if (self.selection_color) |v| result.selection_color = v;
         if (self.mouse_selection_override_mods) |v| result.mouse.selection_override_mods = v;
 
