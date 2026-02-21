@@ -223,6 +223,46 @@ fn resolveFocusedPaneForInput(state: *State) ?*Pane {
     return state.currentLayout().getFocusedPane();
 }
 
+const KeyDispatchResult = enum {
+    consumed,
+    quit,
+    unhandled,
+};
+
+fn handleParsedKeyEvent(state: *State, ev: input.KeyEvent) KeyDispatchResult {
+    if (loop_input_keys.checkExitKeyEvent(state, ev.mods, ev.key, ev.when)) {
+        return .consumed;
+    }
+
+    if (ev.when == .press and ev.mods == 2 and @as(core.Config.BindKeyKind, ev.key) == .char and ev.key.char == 'q') {
+        return .quit;
+    }
+
+    if (ev.when == .release) state.parser_key_release_seen = true;
+    const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
+    if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, false, kitty_mode)) {
+        return .consumed;
+    }
+
+    // Some terminals collapse Ctrl+Alt+letter into Alt+letter.
+    // If Alt variant didn't match, retry as Ctrl+Alt for ASCII letters.
+    if (ev.mods == 1 and @as(core.Config.BindKeyKind, ev.key) == .char and ev.when == .press) {
+        const ch = ev.key.char;
+        if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9')) {
+            if (keybinds.handleKeyEvent(state, ev.mods | 2, ev.key, ev.when, false, kitty_mode)) {
+                return .consumed;
+            }
+        }
+    }
+
+    if (ev.when == .press) {
+        keybinds.forwardKeyToPaneWithText(state, ev.mods, ev.key, ev.text_codepoint);
+        return .consumed;
+    }
+
+    return .unhandled;
+}
+
 pub fn handleInput(state: *State, input_bytes: []const u8) void {
     if (input_bytes.len == 0) return;
 
@@ -450,41 +490,17 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                         }
 
                         if (input.keyEventFromVaxisEvent(ev, res.n)) |key_ev| {
-                            if (loop_input_keys.checkExitKeyEvent(state, key_ev.mods, key_ev.key, key_ev.when)) {
-                                i += key_ev.consumed;
-                                continue;
+                            switch (handleParsedKeyEvent(state, key_ev)) {
+                                .quit => {
+                                    state.running = false;
+                                    return;
+                                },
+                                .consumed => {
+                                    i += key_ev.consumed;
+                                    continue;
+                                },
+                                .unhandled => {},
                             }
-
-                            if (key_ev.when == .press and key_ev.mods == 2 and @as(core.Config.BindKeyKind, key_ev.key) == .char and key_ev.key.char == 'q') {
-                                state.running = false;
-                                return;
-                            }
-
-                            if (key_ev.when == .release) state.parser_key_release_seen = true;
-                            const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
-                            if (keybinds.handleKeyEvent(state, key_ev.mods, key_ev.key, key_ev.when, false, kitty_mode)) {
-                                i += key_ev.consumed;
-                                continue;
-                            }
-
-                            // Some terminals collapse Ctrl+Alt+letter into Alt+letter.
-                            // If Alt variant didn't match, retry as Ctrl+Alt for ASCII letters.
-                            if (key_ev.mods == 1 and @as(core.Config.BindKeyKind, key_ev.key) == .char and key_ev.when == .press) {
-                                const ch = key_ev.key.char;
-                                if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9')) {
-                                    if (keybinds.handleKeyEvent(state, key_ev.mods | 2, key_ev.key, key_ev.when, false, kitty_mode)) {
-                                        i += key_ev.consumed;
-                                        continue;
-                                    }
-                                }
-                            }
-
-                            if (key_ev.when == .press) {
-                                keybinds.forwardKeyToPaneWithText(state, key_ev.mods, key_ev.key, key_ev.text_codepoint);
-                            }
-
-                            i += key_ev.consumed;
-                            continue;
                         }
 
                         // Parse and consume non-key parser events (mouse/transport/control)
