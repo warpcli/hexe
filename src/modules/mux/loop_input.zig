@@ -179,6 +179,11 @@ fn forwardPasteToFocusedPane(state: *State, txt: []const u8) void {
     }
 }
 
+fn forwardBracketedPasteBoundary(state: *State, is_start: bool) void {
+    const seq: []const u8 = if (is_start) "\x1b[200~" else "\x1b[201~";
+    forwardSanitizedToFocusedPane(state, seq, null);
+}
+
 fn handleBlockedPopupInput(popups: anytype, parsed_event: ?vaxis.Event) bool {
     if (parsed_event) |ev| {
         // Reuse already parsed event and avoid reparsing raw bytes.
@@ -400,10 +405,16 @@ fn handleParsedNonKeyEvent(state: *State, ev: vaxis.Event) bool {
             forwardPasteToFocusedPane(state, txt);
             return true;
         },
+        .paste_start => {
+            forwardBracketedPasteBoundary(state, true);
+            return true;
+        },
+        .paste_end => {
+            forwardBracketedPasteBoundary(state, false);
+            return true;
+        },
         .key_press => |k| return isModifierOnlyKey(k.codepoint),
         .key_release => |k| return isModifierOnlyKey(k.codepoint),
-        .paste_start,
-        .paste_end,
         .color_report,
         .focus_in,
         .focus_out,
