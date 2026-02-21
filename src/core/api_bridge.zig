@@ -1313,6 +1313,119 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     }
     lua.pop(1);
 
+    // Parse spinner
+    _ = lua.getField(idx, "spinner");
+    if (lua.typeOf(-1) == .table) {
+        var spinner = config.SpinnerDef{};
+        spinner.kind = allocator.dupe(u8, spinner.kind) catch {
+            lua.pop(1);
+            return segment;
+        };
+
+        // kind
+        _ = lua.getField(-1, "kind");
+        if (lua.typeOf(-1) == .string) {
+            const kind = lua.toString(-1) catch "knight_rider";
+            const kind_copy = allocator.dupe(u8, kind) catch spinner.kind;
+            if (kind_copy.ptr != spinner.kind.ptr) {
+                allocator.free(spinner.kind);
+                spinner.kind = kind_copy;
+            }
+        }
+        lua.pop(1);
+
+        // width
+        _ = lua.getField(-1, "width");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch @as(f64, @floatFromInt(spinner.width));
+            if (std.math.isFinite(v)) spinner.width = @intFromFloat(std.math.clamp(v, 1, 64));
+        }
+        lua.pop(1);
+
+        // step / step_ms
+        _ = lua.getField(-1, "step");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch @as(f64, @floatFromInt(spinner.step_ms));
+            if (std.math.isFinite(v)) spinner.step_ms = @intFromFloat(std.math.clamp(v, 1, 5000));
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "step_ms");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch @as(f64, @floatFromInt(spinner.step_ms));
+            if (std.math.isFinite(v)) spinner.step_ms = @intFromFloat(std.math.clamp(v, 1, 5000));
+        }
+        lua.pop(1);
+
+        // hold / hold_frames
+        _ = lua.getField(-1, "hold");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch @as(f64, @floatFromInt(spinner.hold_frames));
+            if (std.math.isFinite(v)) spinner.hold_frames = @intFromFloat(std.math.clamp(v, 0, 120));
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "hold_frames");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch @as(f64, @floatFromInt(spinner.hold_frames));
+            if (std.math.isFinite(v)) spinner.hold_frames = @intFromFloat(std.math.clamp(v, 0, 120));
+        }
+        lua.pop(1);
+
+        // bg / bg_color
+        _ = lua.getField(-1, "bg");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch 0;
+            if (std.math.isFinite(v)) spinner.bg_color = @intFromFloat(std.math.clamp(v, 0, 255));
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "bg_color");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch 0;
+            if (std.math.isFinite(v)) spinner.bg_color = @intFromFloat(std.math.clamp(v, 0, 255));
+        }
+        lua.pop(1);
+
+        // placeholder / placeholder_color
+        _ = lua.getField(-1, "placeholder");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch 0;
+            if (std.math.isFinite(v)) spinner.placeholder_color = @intFromFloat(std.math.clamp(v, 0, 255));
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "placeholder_color");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch 0;
+            if (std.math.isFinite(v)) spinner.placeholder_color = @intFromFloat(std.math.clamp(v, 0, 255));
+        }
+        lua.pop(1);
+
+        // colors = { ...palette indexes... }
+        _ = lua.getField(-1, "colors");
+        if (lua.typeOf(-1) == .table) {
+            var colors = std.ArrayList(u8).empty;
+            const len = lua.rawLen(-1);
+            var i: i32 = 1;
+            while (i <= len) : (i += 1) {
+                _ = lua.rawGetIndex(-1, i);
+                if (lua.typeOf(-1) == .number) {
+                    const v = lua.toNumber(-1) catch 0;
+                    if (std.math.isFinite(v)) {
+                        colors.append(allocator, @intFromFloat(std.math.clamp(v, 0, 255))) catch {};
+                    }
+                }
+                lua.pop(1);
+            }
+            if (colors.items.len > 0) {
+                spinner.colors = colors.toOwnedSlice(allocator) catch spinner.colors;
+            } else {
+                colors.deinit(allocator);
+            }
+        }
+        lua.pop(1);
+
+        segment.spinner = spinner;
+    }
+    lua.pop(1);
+
     return segment;
 }
 
