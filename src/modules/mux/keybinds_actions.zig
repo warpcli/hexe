@@ -68,6 +68,25 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             state.needs_render = true;
             return true;
         },
+        .system_notify => {
+            const stdout = std.fs.File.stdout();
+            var io_buf: [512]u8 = undefined;
+            var writer = stdout.writer(&io_buf);
+
+            const body = if (state.tabs.items.len > 0 and state.active_tab < state.tabs.items.len)
+                state.tabs.items[state.active_tab].name
+            else
+                "hexe";
+
+            state.renderer.vx.notify(&writer.interface, "hexe", body) catch {
+                state.notifications.showFor("Notification send failed", 1200);
+                state.needs_render = true;
+                return true;
+            };
+            state.notifications.showFor("Notification sent", 900);
+            state.needs_render = true;
+            return true;
+        },
         .keycast_toggle => {
             state.overlays.toggleKeycast();
             state.needs_render = true;

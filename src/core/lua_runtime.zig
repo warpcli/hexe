@@ -389,7 +389,7 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "when");
 
     // hx.action = { mux_quit = "mux.quit", tab_new = "tab.new", ... }
-    lua.createTable(0, 17);
+    lua.createTable(0, 18);
     _ = lua.pushString("mux.quit");
     lua.setField(-2, "mux_quit");
     _ = lua.pushString("mux.detach");
@@ -402,6 +402,8 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "pane_select_mode");
     _ = lua.pushString("clipboard.request");
     lua.setField(-2, "clipboard_request");
+    _ = lua.pushString("system.notify");
+    lua.setField(-2, "system_notify");
     _ = lua.pushString("overlay.keycast_toggle");
     lua.setField(-2, "keycast_toggle");
     _ = lua.pushString("overlay.sprite_toggle");
