@@ -15,6 +15,7 @@ const mux = @import("main.zig");
 const loop_input = @import("loop_input.zig");
 const loop_ipc = @import("loop_ipc.zig");
 const loop_local_watchers = @import("loop_local_watchers.zig");
+const loop_mouse = @import("loop_mouse.zig");
 const loop_render = @import("loop_render.zig");
 const float_completion = @import("float_completion.zig");
 const keybinds = @import("keybinds.zig");
@@ -417,6 +418,7 @@ pub fn runMainLoop(state: *State) !void {
     defer {
         var tty_restore_buf: [512]u8 = undefined;
         var tty_restore = stdout.writer(&tty_restore_buf);
+        loop_mouse.resetShape(state);
         state.renderer.vx.resetState(&tty_restore.interface) catch {};
         tty_restore.interface.flush() catch {};
     }
