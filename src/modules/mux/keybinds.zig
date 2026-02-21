@@ -1,5 +1,6 @@
 const std = @import("std");
 const core = @import("core");
+const vaxis = @import("vaxis");
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
@@ -18,12 +19,19 @@ const PaneQuery = core.PaneQuery;
 const FocusContext = @import("state.zig").FocusContext;
 
 pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
+    var parser: vaxis.Parser = .{};
+    const parsed_event: ?vaxis.Event = blk: {
+        const parsed = parser.parse(bytes, state.allocator) catch break :blk null;
+        if (parsed.n == 0) break :blk null;
+        break :blk parsed.event;
+    };
+
     if (state.active_floating) |idx| {
         const fpane = state.floats.items[idx];
         const can_interact = if (fpane.parent_tab) |parent| parent == state.active_tab else true;
         if (fpane.isVisibleOnTab(state.active_tab) and can_interact) {
             if (fpane.popups.isBlocked()) {
-                if (input.handlePopupInput(&fpane.popups, bytes)) {
+                if (parsed_event != null and input.handlePopupEvent(&fpane.popups, parsed_event.?)) {
                     loop_ipc.sendPopResponse(state);
                 }
                 state.needs_render = true;
@@ -40,7 +48,7 @@ pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
 
     if (state.currentLayout().getFocusedPane()) |pane| {
         if (pane.popups.isBlocked()) {
-            if (input.handlePopupInput(&pane.popups, bytes)) {
+            if (parsed_event != null and input.handlePopupEvent(&pane.popups, parsed_event.?)) {
                 loop_ipc.sendPopResponse(state);
             }
             state.needs_render = true;

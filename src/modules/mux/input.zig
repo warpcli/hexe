@@ -3,30 +3,10 @@ const core = @import("core");
 const pop = @import("pop");
 const vaxis = @import("vaxis");
 
-const Pane = @import("pane.zig").Pane;
-
-/// Handle popup input and return true if popup was dismissed
-pub fn handlePopupInput(popups: *pop.PopupManager, input: []const u8) bool {
-    const key = parsePopupKey(input) orelse return false;
-    const result = popups.handleInput(key);
-    return result == .dismissed;
-}
-
 pub fn handlePopupEvent(popups: *pop.PopupManager, event: vaxis.Event) bool {
     const key = popupKeyFromVaxisEvent(event) orelse return false;
     const result = popups.handleInput(key);
     return result == .dismissed;
-}
-
-fn parsePopupKey(input: []const u8) ?u8 {
-    if (input.len == 0) return null;
-
-    var parser: vaxis.Parser = .{};
-    const parsed = parser.parse(input, std.heap.page_allocator) catch return null;
-    if (parsed.n == 0) return null;
-    const event = parsed.event orelse return null;
-
-    return popupKeyFromVaxisEvent(event);
 }
 
 fn popupKeyFromVaxisEvent(event: vaxis.Event) ?u8 {
