@@ -336,7 +336,6 @@ pub fn runMainLoop(state: *State) !void {
     // Keep kitty keyboard enabled even without capability probe replies.
     state.renderer.vx.caps.kitty_keyboard = true;
     try state.renderer.vx.enableDetectedFeatures(&tty_init.interface);
-    state.terminal_features_enabled = true;
     try tty_init.interface.flush();
     defer {
         var tty_restore_buf: [512]u8 = undefined;

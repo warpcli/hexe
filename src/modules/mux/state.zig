@@ -185,9 +185,6 @@ pub const State = struct {
     // Track bracketed paste mode to suppress keycast during paste
     in_bracketed_paste: bool = false,
 
-    // Terminal feature probing state (libvaxis query/enable cycle).
-    terminal_features_enabled: bool = false,
-
     // Becomes true once the parser delivers at least one key_release event.
     // Used to enable kitty timing semantics only when release events are real.
 

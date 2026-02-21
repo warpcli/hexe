@@ -48,14 +48,6 @@ fn applyInputFlagsForEvent(state: *State, event: vaxis.Event) void {
         .cap_multi_cursor => state.renderer.vx.caps.multi_cursor = true,
         .cap_da1 => {
             state.renderer.vx.queries_done.store(true, .unordered);
-            if (!state.terminal_features_enabled) {
-                const stdout = std.fs.File.stdout();
-                var buf: [512]u8 = undefined;
-                var writer = stdout.writer(&buf);
-                state.renderer.vx.enableDetectedFeatures(&writer.interface) catch {};
-                writer.interface.flush() catch {};
-                state.terminal_features_enabled = true;
-            }
         },
         else => {},
     }
@@ -114,41 +106,6 @@ fn stashFromIndex(state: *State, inp: []const u8, start: usize) []const u8 {
     @memcpy(state.stdin_tail[0..tail.len], tail);
     state.stdin_tail_len = @intCast(tail.len);
     return inp[0..start];
-}
-
-fn isTerminalQueryReplyEvent(event: vaxis.Event) bool {
-    return switch (event) {
-        .cap_kitty_keyboard,
-        .cap_kitty_graphics,
-        .cap_rgb,
-        .cap_unicode,
-        .cap_sgr_pixels,
-        .cap_color_scheme_updates,
-        .cap_multi_cursor,
-        .cap_da1,
-        => true,
-        else => false,
-    };
-}
-
-const QueryReplyStripResult = struct {
-    bytes: []const u8,
-    first_parsed: ?ParsedEventHead,
-};
-
-fn consumeLeadingTerminalQueryReplies(state: *State, inp: []const u8) QueryReplyStripResult {
-    var i: usize = 0;
-    while (i < inp.len) {
-        const parsed = parseEventHead(state, inp[i..]) orelse return .{ .bytes = inp[i..], .first_parsed = null };
-        const event = parsed.event orelse return .{ .bytes = inp[i..], .first_parsed = parsed };
-        if (!isTerminalQueryReplyEvent(event)) {
-            return .{ .bytes = inp[i..], .first_parsed = parsed };
-        }
-        applyInputFlagsForEvent(state, event);
-        i += parsed.n;
-    }
-
-    return .{ .bytes = inp[i..], .first_parsed = null };
 }
 
 fn handleParsedScrollAction(state: *State, action: input.ScrollAction) bool {
@@ -582,16 +539,12 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     const stable = stashIncompleteParserTail(state, slice);
     if (stable.len == 0) return;
 
-    const cleaned_res = consumeLeadingTerminalQueryReplies(state, stable);
-    const cleaned = cleaned_res.bytes;
-    if (cleaned.len == 0) return;
-
     // Record all input for keycast display (before any processing)
-    loop_input_keys.recordKeycastInput(state, cleaned);
+    loop_input_keys.recordKeycastInput(state, stable);
 
-    const inp = cleaned;
+    const inp = stable;
 
-    const first_parsed = cleaned_res.first_parsed orelse parseEventHead(state, inp);
+    const first_parsed = parseEventHead(state, inp);
     const popup_event: ?vaxis.Event = if (first_parsed) |h| h.event else null;
 
     if (handleMuxLevelPopup(state, popup_event)) return;
