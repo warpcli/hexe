@@ -190,7 +190,6 @@ pub const State = struct {
 
     // Becomes true once the parser delivers at least one key_release event.
     // Used to enable kitty timing semantics only when release events are real.
-    parser_key_release_seen: bool = false,
 
     pending_float_requests: std.AutoHashMap([32]u8, PendingFloatRequest),
 

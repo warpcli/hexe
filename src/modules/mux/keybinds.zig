@@ -318,26 +318,11 @@ pub fn processKeyTimers(state: *State, now_ms: i64) void {
     }
 }
 
-pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, allow_only_tabs: bool, has_full_key_events: bool) bool {
+pub fn handleKeyEvent(state: *State, mods: u8, key: BindKey, when: BindWhen, allow_only_tabs: bool) bool {
     const cfg = &state.config;
     const query = buildPaneQuery(state);
 
-    // =======================================================
-    // Compatibility mode: only press events are available.
-    // No hold/repeat/release timing semantics.
-    // =======================================================
-    if (!has_full_key_events) {
-        if (when != .press) return true; // Ignore non-press without full key events
-
-        if (findBestBind(state, mods, key, .press, allow_only_tabs, &query)) |b| {
-            return dispatchBindWithMode(state, b, mods, key);
-        }
-        return false;
-    }
-
-    // =======================================================
     // Full key-event mode: press/hold/repeat/release support.
-    // =======================================================
     const focus_ctx = currentFocusContext(state);
     const now_ms = std.time.milliTimestamp();
 
