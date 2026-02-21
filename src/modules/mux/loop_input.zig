@@ -323,8 +323,10 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
         // ==========================================================================
         const current_tab = &state.tabs.items[state.active_tab];
         if (current_tab.popups.isBlocked()) {
+            const parsed_tab = vaxis_parser.parse(inp, state.allocator) catch null;
+
             // Allow only tab switching while a tab popup is open.
-            if (vaxis_parser.parse(inp, state.allocator) catch null) |parsed_key| {
+            if (parsed_tab) |parsed_key| {
                 if (parsed_key.n > 0 and parsed_key.event != null) {
                     if (input.keyEventFromVaxisEvent(parsed_key.event.?, parsed_key.n)) |ev| {
                         if (ev.when == .release) state.parser_key_release_seen = true;
@@ -336,7 +338,9 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 }
             }
             // Block everything else - handle popup input.
-            if (input.handlePopupInput(&current_tab.popups, inp)) {
+            if (parsed_tab != null and parsed_tab.?.event != null and input.handlePopupEvent(&current_tab.popups, parsed_tab.?.event.?)) {
+                loop_ipc.sendPopResponse(state);
+            } else if (input.handlePopupInput(&current_tab.popups, inp)) {
                 loop_ipc.sendPopResponse(state);
             }
             state.needs_render = true;

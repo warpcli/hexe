@@ -12,6 +12,12 @@ pub fn handlePopupInput(popups: *pop.PopupManager, input: []const u8) bool {
     return result == .dismissed;
 }
 
+pub fn handlePopupEvent(popups: *pop.PopupManager, event: vaxis.Event) bool {
+    const key = popupKeyFromVaxisEvent(event) orelse return false;
+    const result = popups.handleInput(key);
+    return result == .dismissed;
+}
+
 fn parsePopupKey(input: []const u8) ?u8 {
     if (input.len == 0) return null;
 
@@ -20,6 +26,10 @@ fn parsePopupKey(input: []const u8) ?u8 {
     if (parsed.n == 0) return null;
     const event = parsed.event orelse return null;
 
+    return popupKeyFromVaxisEvent(event);
+}
+
+fn popupKeyFromVaxisEvent(event: vaxis.Event) ?u8 {
     const key = switch (event) {
         .key_press => |k| k,
         else => return null,
