@@ -1256,7 +1256,9 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     _ = lua.getField(idx, "priority");
     if (lua.typeOf(-1) == .number) {
         const p = lua.toNumber(-1) catch 50;
-        segment.priority = @intFromFloat(p);
+        if (std.math.isFinite(p)) {
+            segment.priority = @intFromFloat(std.math.clamp(p, 0, 255));
+        }
     }
     lua.pop(1);
 
@@ -1543,14 +1545,18 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         _ = lua.getField(-1, "width");
         if (lua.typeOf(-1) == .number) {
             const w = lua.toNumber(-1) catch 0;
-            float_def.width_percent = @intFromFloat(w);
+            if (std.math.isFinite(w)) {
+                float_def.width_percent = @intFromFloat(std.math.clamp(w, 0, 100));
+            }
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "height");
         if (lua.typeOf(-1) == .number) {
             const h = lua.toNumber(-1) catch 0;
-            float_def.height_percent = @intFromFloat(h);
+            if (std.math.isFinite(h)) {
+                float_def.height_percent = @intFromFloat(std.math.clamp(h, 0, 100));
+            }
         }
         lua.pop(1);
     }
@@ -1562,14 +1568,18 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         _ = lua.getField(-1, "x");
         if (lua.typeOf(-1) == .number) {
             const x = lua.toNumber(-1) catch 0;
-            float_def.pos_x = @intFromFloat(x);
+            if (std.math.isFinite(x)) {
+                float_def.pos_x = @intFromFloat(std.math.clamp(x, 0, 100));
+            }
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "y");
         if (lua.typeOf(-1) == .number) {
             const y = lua.toNumber(-1) catch 0;
-            float_def.pos_y = @intFromFloat(y);
+            if (std.math.isFinite(y)) {
+                float_def.pos_y = @intFromFloat(std.math.clamp(y, 0, 100));
+            }
         }
         lua.pop(1);
     }
@@ -1581,14 +1591,18 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         _ = lua.getField(-1, "x");
         if (lua.typeOf(-1) == .number) {
             const x = lua.toNumber(-1) catch 0;
-            float_def.padding_x = @intFromFloat(x);
+            if (std.math.isFinite(x)) {
+                float_def.padding_x = @intFromFloat(std.math.clamp(x, 0, 255));
+            }
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "y");
         if (lua.typeOf(-1) == .number) {
             const y = lua.toNumber(-1) catch 0;
-            float_def.padding_y = @intFromFloat(y);
+            if (std.math.isFinite(y)) {
+                float_def.padding_y = @intFromFloat(std.math.clamp(y, 0, 255));
+            }
         }
         lua.pop(1);
     }
@@ -1602,14 +1616,18 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         _ = lua.getField(-1, "active");
         if (lua.typeOf(-1) == .number) {
             const a = lua.toNumber(-1) catch 1;
-            color.active = @intFromFloat(a);
+            if (std.math.isFinite(a)) {
+                color.active = @intFromFloat(std.math.clamp(a, 0, 255));
+            }
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "passive");
         if (lua.typeOf(-1) == .number) {
             const p = lua.toNumber(-1) catch 237;
-            color.passive = @intFromFloat(p);
+            if (std.math.isFinite(p)) {
+                color.passive = @intFromFloat(std.math.clamp(p, 0, 255));
+            }
         }
         lua.pop(1);
 
@@ -1628,7 +1646,9 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
             _ = lua.getField(-1, "color");
             if (lua.typeOf(-1) == .number) {
                 const color_num = lua.toNumber(-1) catch 0;
-                style.shadow_color = @intFromFloat(color_num);
+                if (std.math.isFinite(color_num)) {
+                    style.shadow_color = @intFromFloat(std.math.clamp(color_num, 0, 255));
+                }
             }
             lua.pop(1); // pop color
         }
