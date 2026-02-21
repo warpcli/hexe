@@ -114,6 +114,7 @@ pub fn drawRenderState(
         }
     }
 
+    drawKittyPinPlacements(win, vt);
     drawKittyVirtualPlacements(win, vt, row_pins, available_rows);
 }
 
@@ -275,16 +276,76 @@ fn drawKittyVirtualPlacements(
         const size_cols: u16 = @intCast(@min(placement.width, std.math.maxInt(u16)));
         if (size_rows == 0 or size_cols == 0) continue;
 
-        win.writeCell(col, row, .{
-            .image = .{
-                .img_id = cached.vaxis_id,
-                .options = .{
-                    .size = .{ .rows = size_rows, .cols = size_cols },
-                    .z_index = -1,
-                },
+        writeImageCellPreserve(win, col, row, .{
+            .img_id = cached.vaxis_id,
+            .options = .{
+                .size = .{ .rows = size_rows, .cols = size_cols },
+                .z_index = -1,
             },
         });
     }
+}
+
+fn drawKittyPinPlacements(win: vaxis.Window, vt: *core.VT) void {
+    const Storage = @TypeOf(vt.terminal.screens.active.kitty_images);
+    if (comptime !@hasField(Storage, "placements")) return;
+    if (comptime !@hasDecl(Storage, "imageById")) return;
+
+    const storage = &vt.terminal.screens.active.kitty_images;
+    var it = storage.placements.iterator();
+    while (it.next()) |kv| {
+        const p = kv.value_ptr.*;
+        switch (p.location) {
+            .pin => {},
+            .virtual => continue,
+        }
+
+        const image = storage.imageById(kv.key_ptr.image_id) orelse continue;
+        const cached = vt.kitty_image_cache.get(kv.key_ptr.image_id) orelse continue;
+        const rect = p.rect(image, &vt.terminal) orelse continue;
+
+        const top = vt.terminal.screens.active.pages.pointFromPin(.viewport, rect.top_left) orelse continue;
+        const vp = top.viewport;
+        const col: u16 = @intCast(vp.x);
+        const row: u16 = @intCast(vp.y);
+        if (col >= win.width or row >= win.height) continue;
+
+        const grid = p.gridSize(image, &vt.terminal);
+        const size_rows: u16 = @intCast(@min(grid.rows, std.math.maxInt(u16)));
+        const size_cols: u16 = @intCast(@min(grid.cols, std.math.maxInt(u16)));
+        if (size_rows == 0 or size_cols == 0) continue;
+
+        const src_w = if (p.source_width == 0) image.width else p.source_width;
+        const src_h = if (p.source_height == 0) image.height else p.source_height;
+
+        writeImageCellPreserve(win, col, row, .{
+            .img_id = cached.vaxis_id,
+            .options = .{
+                .pixel_offset = .{
+                    .x = @intCast(@min(p.x_offset, std.math.maxInt(u16))),
+                    .y = @intCast(@min(p.y_offset, std.math.maxInt(u16))),
+                },
+                .z_index = p.z,
+                .clip_region = .{
+                    .x = @intCast(@min(p.source_x, std.math.maxInt(u16))),
+                    .y = @intCast(@min(p.source_y, std.math.maxInt(u16))),
+                    .width = @intCast(@min(src_w, std.math.maxInt(u16))),
+                    .height = @intCast(@min(src_h, std.math.maxInt(u16))),
+                },
+                .size = .{ .rows = size_rows, .cols = size_cols },
+            },
+        });
+    }
+}
+
+fn writeImageCellPreserve(win: vaxis.Window, col: u16, row: u16, placement: vaxis.Image.Placement) void {
+    if (win.readCell(col, row)) |existing| {
+        var cell = existing;
+        cell.image = placement;
+        win.writeCell(col, row, cell);
+        return;
+    }
+    win.writeCell(col, row, .{ .image = placement });
 }
 
 /// Convert ghostty Style to vaxis Style.
