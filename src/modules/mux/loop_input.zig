@@ -398,10 +398,15 @@ fn handleParsedNonKeyEvent(state: *State, ev: vaxis.Event) bool {
             _ = loop_mouse.handle(state, m);
             return true;
         },
+        .paste => |txt| {
+            state.allocator.free(txt);
+            return true;
+        },
         .key_press => |k| return isModifierOnlyKey(k.codepoint),
         .key_release => |k| return isModifierOnlyKey(k.codepoint),
         .paste_start,
         .paste_end,
+        .color_report,
         .focus_in,
         .focus_out,
         .winsize,
@@ -436,7 +441,12 @@ fn dispatchParsedEvent(state: *State, parsed: anytype) ParsedDispatchResult {
         switch (handleParsedKeyEvent(state, key_ev)) {
             .quit => return .{ .consumed = true, .quit = true, .parsed_event = ev, .consumed_bytes = parsed.n },
             .consumed => return .{ .consumed = true, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n },
-            .unhandled => {},
+            .unhandled => {
+                // Never forward parser key-release bytes to panes.
+                if (key_ev.when == .release) {
+                    return .{ .consumed = true, .quit = false, .parsed_event = ev, .consumed_bytes = parsed.n };
+                }
+            },
         }
     }
 
