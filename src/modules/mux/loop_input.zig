@@ -2,19 +2,14 @@ const std = @import("std");
 const core = @import("core");
 const vaxis = @import("vaxis");
 
-const layout_mod = @import("layout.zig");
-
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 const SesClient = @import("ses_client.zig").SesClient;
 
 const input = @import("input.zig");
-const helpers = @import("helpers.zig");
 
 const actions = @import("loop_actions.zig");
 const loop_ipc = @import("loop_ipc.zig");
-const TabFocusKind = @import("state.zig").TabFocusKind;
-const statusbar = @import("statusbar.zig");
 const keybinds = @import("keybinds.zig");
 const loop_input_keys = @import("loop_input_keys.zig");
 const loop_mouse = @import("loop_mouse.zig");
