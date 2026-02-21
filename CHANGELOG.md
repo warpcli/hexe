@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.10] - 2026-02-21
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Update Linux runners to Ubuntu 24.04
+
 ## [0.0.9] - 2026-02-21
 
 ### <!-- 7 -->⚙️ Miscellaneous Tasks
