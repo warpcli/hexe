@@ -1,9 +1,12 @@
-name: Release Binaries
+name: Release
 
 on:
-  workflow_dispatch:
-  release:
-    types: [created]
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -17,41 +20,47 @@ jobs:
           - os: ubuntu-latest
             target: x86_64-linux
             artifact_name: hexe-x86_64-linux
-            archive_ext: tar.gz
 
           # Linux aarch64
           - os: ubuntu-latest
             target: aarch64-linux
             artifact_name: hexe-aarch64-linux
-            archive_ext: tar.gz
-
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
 
       - name: Build binary
-        env:
-          GITHUB_REF: refs/heads/main
-        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }} -freference-trace=10
+        run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
 
       - name: Prepare artifact
         run: |
-          cp zig-out/bin/hexe ${{ matrix.artifact_name }}
-          chmod +x ${{ matrix.artifact_name }}
-          tar -czf ${{ matrix.artifact_name }}.tar.gz ${{ matrix.artifact_name }}
+          mkdir -p dist
+          tar -czf dist/${{ matrix.artifact_name }}.tar.gz -C zig-out/bin hexe
 
-      - name: Upload release asset
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: dist/${{ matrix.artifact_name }}.tar.gz
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ matrix.artifact_name }}.${{ matrix.archive_ext }}
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          files: artifacts/*.tar.gz
