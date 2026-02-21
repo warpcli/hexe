@@ -29,6 +29,23 @@ const LoopTimerContext = struct {
 
 const TERMINAL_QUERY_TIMEOUT_MS: i64 = 1200;
 
+fn applyPostQueryFeatureModes(state: *State) void {
+    const stdout = std.fs.File.stdout();
+    var tty_buf: [1024]u8 = undefined;
+    var tty = stdout.writer(&tty_buf);
+
+    // Re-apply mouse mode after capability discovery so terminals with
+    // SGR-pixels support get upgraded from cell-coordinates to pixel mode.
+    state.renderer.vx.setMouseMode(&tty.interface, true) catch {};
+
+    // Enable runtime color-scheme updates only when detected.
+    if (state.renderer.vx.caps.color_scheme_updates) {
+        state.renderer.vx.subscribeToColorSchemeUpdates(&tty.interface) catch {};
+    }
+
+    tty.interface.flush() catch {};
+}
+
 fn logTerminalCapabilities(state: *State, timed_out: bool) void {
     const caps = state.renderer.vx.caps;
     mux.debugLog(
@@ -46,6 +63,10 @@ fn logTerminalCapabilities(state: *State, timed_out: bool) void {
             timed_out,
         },
     );
+
+    if (timed_out) {
+        mux.debugLog("terminal capability query timed out; using best-effort feature set", .{});
+    }
 }
 
 fn finalizeTerminalQueryIfReady(state: *State, now_ms: i64) void {
@@ -59,6 +80,7 @@ fn finalizeTerminalQueryIfReady(state: *State, now_ms: i64) void {
     var tty_buf: [1024]u8 = undefined;
     var tty = stdout.writer(&tty_buf);
     state.renderer.vx.enableDetectedFeatures(&tty.interface) catch {};
+    applyPostQueryFeatureModes(state);
     tty.interface.flush() catch {};
 
     state.renderer.vx.queries_done.store(true, .unordered);
@@ -379,6 +401,7 @@ pub fn runMainLoop(state: *State) !void {
     state.renderer.vx.caps.kitty_keyboard = true;
     state.renderer.vx.queryTerminalSend(&tty_init.interface) catch {
         try state.renderer.vx.enableDetectedFeatures(&tty_init.interface);
+        applyPostQueryFeatureModes(state);
         state.renderer.vx.queries_done.store(true, .unordered);
         state.terminal_query_in_flight = false;
         state.terminal_query_deadline_ms = 0;
