@@ -1,16 +1,35 @@
 const std = @import("std");
 const shp = @import("shp");
 const core = @import("core");
+const vaxis = @import("vaxis");
 const Renderer = @import("render_core.zig").Renderer;
 const statusbar = @import("statusbar.zig");
 const text_width = @import("text_width.zig");
-const vaxis_draw = @import("vaxis_draw.zig");
 
 const pop = @import("pop");
 const overlay = pop.overlay;
 const OverlayManager = overlay.OverlayManager;
 
 const Pos = struct { x: u16, y: u16 };
+
+fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: core.style.Color, bg: core.style.Color, bold: bool) void {
+    var buf: [4]u8 = undefined;
+    const grapheme: []const u8 = if (cp < 128)
+        buf[0..blk: {
+            buf[0] = @intCast(cp);
+            break :blk 1;
+        }]
+    else blk: {
+        const n = std.unicode.utf8Encode(cp, &buf) catch return;
+        break :blk buf[0..n];
+    };
+
+    const style: vaxis.Style = .{ .bold = bold, .fg = fg.toVaxis(), .bg = bg.toVaxis() };
+    renderer.setVaxisCell(x, y, .{
+        .char = .{ .grapheme = grapheme, .width = 1 },
+        .style = style,
+    });
+}
 
 /// Bounds of a rectangular area to exclude from dimming
 pub const Bounds = struct {
@@ -116,7 +135,7 @@ fn renderPaneSelectLabels(renderer: *Renderer, overlays: *OverlayManager) void {
             // Fall back to single character for small panes
             const cx = pl.x + pl.width / 2;
             const cy = pl.y + pl.height / 2;
-            vaxis_draw.putChar(renderer, cx, cy, pl.label, .{ .palette = 0 }, .{ .palette = 1 }, true);
+            putChar(renderer, cx, cy, pl.label, .{ .palette = 0 }, .{ .palette = 1 }, true);
             continue;
         }
 
@@ -129,7 +148,7 @@ fn renderPaneSelectLabels(renderer: *Renderer, overlays: *OverlayManager) void {
             for (0..box_w) |dx| {
                 const x = box_x + @as(u16, @intCast(dx));
                 const y = box_y + @as(u16, @intCast(dy));
-                vaxis_draw.putChar(renderer, x, y, ' ', .{ .palette = 0 }, .{ .palette = 1 }, false);
+                putChar(renderer, x, y, ' ', .{ .palette = 0 }, .{ .palette = 1 }, false);
             }
         }
 
@@ -142,7 +161,7 @@ fn renderPaneSelectLabels(renderer: *Renderer, overlays: *OverlayManager) void {
                 if (ch != ' ') {
                     const x = digit_x + @as(u16, @intCast(dx));
                     const y = digit_y + @as(u16, @intCast(dy));
-                    vaxis_draw.putChar(renderer, x, y, ch, .{ .palette = 0 }, .{ .palette = 1 }, false);
+                    putChar(renderer, x, y, ch, .{ .palette = 0 }, .{ .palette = 1 }, false);
                 }
             }
         }
@@ -173,7 +192,7 @@ fn renderResizeInfo(renderer: *Renderer, overlays: *OverlayManager) void {
     // Draw background
     for (0..box_width) |dx| {
         const x = box_x + @as(u16, @intCast(dx));
-        vaxis_draw.putChar(renderer, x, box_y, ' ', .{ .palette = 0 }, .{ .palette = 1 }, false);
+        putChar(renderer, x, box_y, ' ', .{ .palette = 0 }, .{ .palette = 1 }, false);
     }
 
     // Draw text
@@ -208,7 +227,7 @@ fn renderKeycast(renderer: *Renderer, overlays: *const OverlayManager, screen_wi
         // Draw background
         for (0..box_width) |dx| {
             const x = box_x + @as(u16, @intCast(dx));
-            vaxis_draw.putChar(renderer, x, y, ' ', .{ .palette = 15 }, .{ .palette = 238 }, false);
+            putChar(renderer, x, y, ' ', .{ .palette = 15 }, .{ .palette = 238 }, false);
         }
 
         // Draw text
@@ -238,7 +257,7 @@ fn renderOverlay(renderer: *Renderer, ov: overlay.Overlay, screen_width: u16, sc
         for (0..box_width) |dx| {
             const x = pos.x + @as(u16, @intCast(dx));
             const y = pos.y + @as(u16, @intCast(dy));
-            vaxis_draw.putChar(renderer, x, y, ' ', .{ .palette = ov.fg }, .{ .palette = ov.bg }, false);
+            putChar(renderer, x, y, ' ', .{ .palette = ov.fg }, .{ .palette = ov.bg }, false);
         }
     }
 

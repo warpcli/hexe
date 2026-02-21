@@ -6,7 +6,6 @@ const vaxis = @import("vaxis");
 const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
 const statusbar = @import("statusbar.zig");
-const vaxis_surface = @import("vaxis_surface.zig");
 const text_width = @import("text_width.zig");
 const vaxis_draw = @import("vaxis_draw.zig");
 
@@ -29,7 +28,12 @@ fn textStyle(fg: Color, bg: Color, bold: bool) shp.Style {
 fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Color, bg: Color, title: ?[]const u8) void {
     if (w == 0 or h == 0) return;
 
-    const root = vaxis_surface.pooledWindow(std.heap.page_allocator, w, h) catch return;
+    const root = renderer.vx.window().child(.{
+        .x_off = @intCast(x),
+        .y_off = @intCast(y),
+        .width = w,
+        .height = h,
+    });
 
     const base_style: vaxis.Style = .{ .fg = fg.toVaxis(), .bg = bg.toVaxis() };
     root.fill(.{ .char = .{ .grapheme = " ", .width = 1 }, .style = base_style });
@@ -54,8 +58,6 @@ fn drawPopupFrame(renderer: *Renderer, x: u16, y: u16, w: u16, h: u16, fg: Color
             _ = root.print(title_segments, .{ .row_offset = 0, .col_offset = 2, .wrap = .none, .commit = true });
         }
     }
-
-    vaxis_surface.blitWindow(renderer, root, x, y);
 }
 
 fn textWidth(text: []const u8) u16 {
