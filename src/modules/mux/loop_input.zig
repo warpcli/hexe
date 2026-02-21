@@ -511,6 +511,71 @@ fn firstOrParseAt(state: *State, inp: []const u8, offset: usize, first: ?ParsedE
     return parseEventHead(state, inp[offset..]);
 }
 
+fn handlePaneSelectLoop(state: *State, inp: []const u8, first_parsed: ?ParsedEventHead) void {
+    var i: usize = 0;
+    while (i < inp.len) {
+        const parsed = firstOrParseAt(state, inp, i, first_parsed);
+        if (parsed) |res| {
+            i += res.n;
+            _ = actions.handlePaneSelectEvent(state, res.event);
+            continue;
+        }
+
+        // Keep pane-select mode isolated on parser failures.
+        i += 1;
+    }
+}
+
+fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedEventHead) void {
+    var i: usize = 0;
+    while (i < inp.len) {
+        var parsed_event_for_popup: ?vaxis.Event = null;
+
+        // Parse once through libvaxis and dispatch key/scroll/mouse/control.
+        const parsed = firstOrParseAt(state, inp, i, first_parsed);
+        if (parsed) |res| {
+            if (handleFloatRenameParsedEvent(state, res)) {
+                i += res.n;
+                continue;
+            }
+
+            const dispatch = dispatchParsedEvent(state, res);
+            parsed_event_for_popup = dispatch.parsed_event;
+            if (dispatch.quit) {
+                state.running = false;
+                return;
+            }
+            if (dispatch.consumed) {
+                i += dispatch.consumed_bytes;
+                continue;
+            }
+        } else if (state.float_rename_uuid != null) {
+            // Keep rename mode isolated if parser cannot produce an event.
+            i += 1;
+            continue;
+        }
+
+        // ======================================================================
+        // LEVEL 3: Focused pane (float or split) popup + input forwarding
+        // ======================================================================
+        if (resolveFocusedPaneForInput(state)) |pane| {
+            if (pane.popups.isBlocked()) {
+                if (handleBlockedPopupInput(&pane.popups, parsed_event_for_popup)) {
+                    loop_ipc.sendPopResponse(state);
+                }
+                state.needs_render = true;
+                return;
+            }
+            if (pane.isScrolled()) {
+                pane.scrollToBottom();
+                state.needs_render = true;
+            }
+            forwardSanitizedToFocusedPane(state, inp[i..], parsed_event_for_popup);
+        }
+        return;
+    }
+}
+
 pub fn handleInput(state: *State, input_bytes: []const u8) void {
     if (input_bytes.len == 0) return;
 
@@ -531,82 +596,23 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     // Record all input for keycast display (before any processing)
     loop_input_keys.recordKeycastInput(state, cleaned);
 
-    {
-        const inp = cleaned;
+    const inp = cleaned;
 
-        const first_parsed = parseEventHead(state, inp);
-        const popup_event: ?vaxis.Event = if (first_parsed) |h| h.event else null;
+    const first_parsed = parseEventHead(state, inp);
+    const popup_event: ?vaxis.Event = if (first_parsed) |h| h.event else null;
 
-        if (handleMuxLevelPopup(state, popup_event)) return;
-        if (handleTabLevelPopup(state, popup_event)) return;
+    if (handleMuxLevelPopup(state, popup_event)) return;
+    if (handleTabLevelPopup(state, popup_event)) return;
 
-        // ==========================================================================
-        // LEVEL 2.5: Pane select mode - captures all input
-        // ==========================================================================
-        if (state.overlays.isPaneSelectActive()) {
-            var pane_select_i: usize = 0;
-            while (pane_select_i < inp.len) {
-                const parsed = firstOrParseAt(state, inp, pane_select_i, first_parsed);
-                if (parsed) |res| {
-                    pane_select_i += res.n;
-                    _ = actions.handlePaneSelectEvent(state, res.event);
-                    continue;
-                }
-
-                // Keep pane-select mode isolated on parser failures.
-                pane_select_i += 1;
-            }
-            return;
-        }
-
-        var i: usize = 0;
-        while (i < inp.len) {
-            var parsed_event_for_popup: ?vaxis.Event = null;
-
-            // Parse once through libvaxis and dispatch key/scroll/mouse/control.
-            const parsed = firstOrParseAt(state, inp, i, first_parsed);
-            if (parsed) |res| {
-                if (handleFloatRenameParsedEvent(state, res)) {
-                    i += res.n;
-                    continue;
-                }
-
-                const dispatch = dispatchParsedEvent(state, res);
-                parsed_event_for_popup = dispatch.parsed_event;
-                if (dispatch.quit) {
-                    state.running = false;
-                    return;
-                }
-                if (dispatch.consumed) {
-                    i += dispatch.consumed_bytes;
-                    continue;
-                }
-            } else if (state.float_rename_uuid != null) {
-                // Keep rename mode isolated if parser cannot produce an event.
-                i += 1;
-                continue;
-            }
-
-            // ======================================================================
-            // LEVEL 3: Focused pane (float or split) popup + input forwarding
-            // ======================================================================
-            if (resolveFocusedPaneForInput(state)) |pane| {
-                if (pane.popups.isBlocked()) {
-                    if (handleBlockedPopupInput(&pane.popups, parsed_event_for_popup)) {
-                        loop_ipc.sendPopResponse(state);
-                    }
-                    state.needs_render = true;
-                    return;
-                }
-                if (pane.isScrolled()) {
-                    pane.scrollToBottom();
-                    state.needs_render = true;
-                }
-                forwardSanitizedToFocusedPane(state, inp[i..], parsed_event_for_popup);
-            }
-            return;
-        }
+    // ==========================================================================
+    // LEVEL 2.5: Pane select mode - captures all input
+    // ==========================================================================
+    if (state.overlays.isPaneSelectActive()) {
+        handlePaneSelectLoop(state, inp, first_parsed);
+        return;
     }
+
+    handleFocusedInputLoop(state, inp, first_parsed);
 }
 
 pub fn switchToTab(state: *State, new_tab: usize) void {
@@ -619,6 +625,15 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) []const u8 {
 
     const ESC: u8 = 0x1b;
     const BEL: u8 = 0x07;
+
+    const resetOscReply = struct {
+        fn run(st: *State) void {
+            st.osc_reply_in_progress = false;
+            st.osc_reply_prev_esc = false;
+            st.osc_reply_target_uuid = null;
+            st.osc_reply_buf.clearRetainingCapacity();
+        }
+    }.run;
 
     // Start capture only if the input begins with an OSC response.
     if (!state.osc_reply_in_progress) {
@@ -633,10 +648,7 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) []const u8 {
         const b = inp[i];
         state.osc_reply_buf.append(state.allocator, b) catch {
             // Drop on allocation error.
-            state.osc_reply_in_progress = false;
-            state.osc_reply_prev_esc = false;
-            state.osc_reply_target_uuid = null;
-            state.osc_reply_buf.clearRetainingCapacity();
+            resetOscReply(state);
             return inp[i + 1 ..];
         };
 
@@ -649,10 +661,7 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) []const u8 {
         state.osc_reply_prev_esc = (b == ESC);
 
         if (state.osc_reply_buf.items.len > 64 * 1024) {
-            state.osc_reply_in_progress = false;
-            state.osc_reply_prev_esc = false;
-            state.osc_reply_target_uuid = null;
-            state.osc_reply_buf.clearRetainingCapacity();
+            resetOscReply(state);
             return inp[i + 1 ..];
         }
 
@@ -663,10 +672,7 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) []const u8 {
                 }
             }
 
-            state.osc_reply_in_progress = false;
-            state.osc_reply_prev_esc = false;
-            state.osc_reply_target_uuid = null;
-            state.osc_reply_buf.clearRetainingCapacity();
+            resetOscReply(state);
 
             return inp[i + 1 ..];
         }
