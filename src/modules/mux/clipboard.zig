@@ -24,7 +24,7 @@ pub fn copyToClipboard(allocator: std.mem.Allocator, bytes: []const u8) void {
 
 fn sendOsc52(allocator: std.mem.Allocator, bytes: []const u8) void {
     // OSC 52: ESC ] 52 ; c ; <base64> BEL
-    // We use BEL terminator for broad compatibility.
+    // Use BEL terminator for OSC copy completion.
     // To avoid pathological allocations, cap payload.
     const MAX_BYTES: usize = 128 * 1024;
     const payload = if (bytes.len > MAX_BYTES) bytes[0..MAX_BYTES] else bytes;
