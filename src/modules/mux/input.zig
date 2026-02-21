@@ -67,11 +67,6 @@ pub const ScrollAction = enum {
     shift_down,
 };
 
-pub const ScrollEvent = struct {
-    action: ScrollAction,
-    consumed: usize,
-};
-
 pub fn parseKeyEvent(input_bytes: []const u8, allocator: std.mem.Allocator) ?KeyEvent {
     if (input_bytes.len == 0) return null;
 
@@ -89,19 +84,6 @@ pub fn keyEventFromVaxisEvent(event: vaxis.Event, consumed: usize) ?KeyEvent {
         .key_release => |key| parseVaxisKey(key, .release, consumed),
         else => null,
     };
-}
-
-pub fn parseScrollEvent(input_bytes: []const u8, allocator: std.mem.Allocator) ?ScrollEvent {
-    if (input_bytes.len == 0) return null;
-
-    var parser: vaxis.Parser = .{};
-    const parsed = parser.parse(input_bytes, allocator) catch return null;
-    if (parsed.n == 0) return null;
-    const event = parsed.event orelse return null;
-
-    const action = scrollActionFromVaxisEvent(event) orelse return null;
-
-    return .{ .action = action, .consumed = parsed.n };
 }
 
 pub fn scrollActionFromVaxisEvent(event: vaxis.Event) ?ScrollAction {
