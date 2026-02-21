@@ -211,6 +211,18 @@ fn handleBlockedPopupInput(popups: anytype, bytes: []const u8, parsed_event: ?va
     return input.handlePopupInput(popups, bytes);
 }
 
+fn resolveFocusedPaneForInput(state: *State) ?*Pane {
+    if (state.active_floating) |idx| {
+        const fpane = state.floats.items[idx];
+        const can_interact = if (fpane.parent_tab) |parent|
+            parent == state.active_tab
+        else
+            true;
+        if (fpane.isVisibleOnTab(state.active_tab) and can_interact) return fpane;
+    }
+    return state.currentLayout().getFocusedPane();
+}
+
 pub fn handleInput(state: *State, input_bytes: []const u8) void {
     if (input_bytes.len == 0) return;
 
@@ -521,51 +533,10 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 }
             }
 
-            // ==========================================================================
-            // LEVEL 3: PANE-level popup - blocks only input to that specific pane
-            // ==========================================================================
-            if (state.active_floating) |idx| {
-                const fpane = state.floats.items[idx];
-                // Check tab ownership for tab-bound floats.
-                const can_interact = if (fpane.parent_tab) |parent|
-                    parent == state.active_tab
-                else
-                    true;
-
-                if (fpane.isVisibleOnTab(state.active_tab) and can_interact) {
-                    // Check if this float pane has a blocking popup.
-                    if (fpane.popups.isBlocked()) {
-                        if (handleBlockedPopupInput(&fpane.popups, inp[i..], parsed_event_for_popup)) {
-                            loop_ipc.sendPopResponse(state);
-                        }
-                        state.needs_render = true;
-                        return;
-                    }
-                    if (fpane.isScrolled()) {
-                        fpane.scrollToBottom();
-                        state.needs_render = true;
-                    }
-                    forwardSanitizedToFocusedPane(state, inp[i..]);
-                } else {
-                    // Can't input to tab-bound float on wrong tab, forward to tiled pane.
-                    if (state.currentLayout().getFocusedPane()) |pane| {
-                        // Check if this pane has a blocking popup.
-                        if (pane.popups.isBlocked()) {
-                            if (handleBlockedPopupInput(&pane.popups, inp[i..], parsed_event_for_popup)) {
-                                loop_ipc.sendPopResponse(state);
-                            }
-                            state.needs_render = true;
-                            return;
-                        }
-                        if (pane.isScrolled()) {
-                            pane.scrollToBottom();
-                            state.needs_render = true;
-                        }
-                        forwardSanitizedToFocusedPane(state, inp[i..]);
-                    }
-                }
-            } else if (state.currentLayout().getFocusedPane()) |pane| {
-                // Check if this pane has a blocking popup.
+            // ======================================================================
+            // LEVEL 3: Focused pane (float or split) popup + input forwarding
+            // ======================================================================
+            if (resolveFocusedPaneForInput(state)) |pane| {
                 if (pane.popups.isBlocked()) {
                     if (handleBlockedPopupInput(&pane.popups, inp[i..], parsed_event_for_popup)) {
                         loop_ipc.sendPopResponse(state);
