@@ -211,6 +211,7 @@ fn syncKittyImages(vt: *core.VT, vx: *vaxis.Vaxis, stdout: std.fs.File, arena: s
         const ghost_id = entry.key_ptr.*;
         const img = entry.value_ptr.*;
         const fmt = imageFormatToVaxis(img.format) orelse continue;
+        const data_hash = std.hash.Wyhash.hash(0, img.data);
         const fmt_tag: u8 = switch (fmt) {
             .rgb => 1,
             .rgba => 2,
@@ -221,6 +222,7 @@ fn syncKittyImages(vt: *core.VT, vx: *vaxis.Vaxis, stdout: std.fs.File, arena: s
             if (cached.width == img.width and
                 cached.height == img.height and
                 cached.data_len == img.data.len and
+                cached.data_hash == data_hash and
                 cached.format_tag == fmt_tag)
             {
                 continue;
@@ -244,6 +246,7 @@ fn syncKittyImages(vt: *core.VT, vx: *vaxis.Vaxis, stdout: std.fs.File, arena: s
             .width = img.width,
             .height = img.height,
             .data_len = img.data.len,
+            .data_hash = data_hash,
             .format_tag = fmt_tag,
         }) catch {};
     }

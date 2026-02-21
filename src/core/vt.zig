@@ -21,6 +21,7 @@ pub const VT = struct {
         width: u32,
         height: u32,
         data_len: usize,
+        data_hash: u64,
         format_tag: u8,
     };
 
