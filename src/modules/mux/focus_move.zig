@@ -57,7 +57,6 @@ pub fn perform(state: *State, dir: layout_mod.Layout.Direction) bool {
             if (was_on_float) state.cursor_needs_restore = true;
         }
         state.syncPaneFocus(target.pane, old_uuid);
-        state.startPulse(); // Winpulse: brighten focused pane
         state.renderer.invalidate();
         state.force_full_render = true;
     } else {

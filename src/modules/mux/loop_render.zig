@@ -1,8 +1,7 @@
 const std = @import("std");
 
 const State = @import("state.zig").State;
-const winpulse = @import("winpulse.zig");
-const render_mod = @import("render.zig");
+const CursorInfo = @import("render_core.zig").CursorInfo;
 
 const statusbar = @import("statusbar.zig");
 const popup_render = @import("popup_render.zig");
@@ -11,85 +10,122 @@ const mouse_selection = @import("mouse_selection.zig");
 const float_title = @import("float_title.zig");
 const overlay_render = @import("overlay_render.zig");
 const notification = @import("notification.zig");
+const render_vx = @import("render_vx.zig");
+const vt_bridge = @import("vt_bridge.zig");
+const render_sprite = @import("render_sprite.zig");
 
-/// Apply winpulse brightness effect to a pane area
-fn applyPulseEffect(state: *State) void {
-    if (!state.config.winpulse_enabled) {
-        return;
-    }
-    if (state.pulse_start_ms == 0) {
-        return;
-    }
-    const bounds = state.pulse_pane_bounds orelse {
-        return;
-    };
-
-    const now_ms = std.time.milliTimestamp();
-    const elapsed_ms = now_ms - state.pulse_start_ms;
-    if (elapsed_ms >= state.config.winpulse_duration_ms) {
-        // Animation finished - restore colors
-        restorePulseColors(state);
-        state.stopPulse();
-        return;
-    }
-
-    // Calculate brightness intensity (fade out: 1.0 -> 0.0)
-    const progress = @as(f32, @floatFromInt(elapsed_ms)) / @as(f32, @floatFromInt(state.config.winpulse_duration_ms));
-    const intensity = 1.0 - progress;
-
-    // Brighten factor decreases over time
-    const brighten_factor = 1.0 + (state.config.winpulse_brighten_factor - 1.0) * intensity;
-
-    // Apply brightening to all cells in the pane
-    var row: u16 = 0;
-    while (row < bounds.height) : (row += 1) {
-        var col: u16 = 0;
-        while (col < bounds.width) : (col += 1) {
-            const cell = state.renderer.next.get(bounds.x + col, bounds.y + row);
-
-            // Brighten foreground
-            cell.fg = winpulse.brightenColor(cell.fg, brighten_factor);
-
-            // Brighten background
-            cell.bg = winpulse.brightenColor(cell.bg, brighten_factor);
-        }
-    }
-
-    // Keep rendering during animation
-    state.needs_render = true;
+fn drawPaneRenderState(renderer: anytype, state: anytype, x: u16, y: u16, width: u16, height: u16) void {
+    const root = renderer.vx.window();
+    const win = root.child(.{
+        .x_off = @intCast(x),
+        .y_off = @intCast(y),
+        .width = width,
+        .height = height,
+    });
+    vt_bridge.drawRenderState(win, state, width, height, renderer.frame_arena.allocator());
 }
 
-/// Restore original colors from saved state
-fn restorePulseColors(state: *State) void {
-    const saved = state.pulse_saved_colors orelse return;
-    const bounds = state.pulse_pane_bounds orelse return;
+fn sanitizeLabelUtf8(raw: []const u8, out: *[128]u8) []const u8 {
+    var wi: usize = 0;
+    var i: usize = 0;
+    while (i < raw.len and wi < out.len) {
+        const b = raw[i];
 
-    var idx: usize = 0;
-    var row: u16 = 0;
-    while (row < bounds.height) : (row += 1) {
-        var col: u16 = 0;
-        while (col < bounds.width) : (col += 1) {
-            if (idx < saved.len) {
-                const cell = state.renderer.next.get(bounds.x + col, bounds.y + row);
-                cell.fg = saved[idx].fg;
-                cell.bg = saved[idx].bg;
-                idx += 1;
+        // Strip ANSI/VT escape sequences so terminal control bytes never
+        // leak into float titles.
+        if (b == 0x1b) {
+            i += 1;
+            if (i >= raw.len) break;
+            const esc = raw[i];
+
+            // CSI: ESC [ ... final
+            if (esc == '[') {
+                i += 1;
+                while (i < raw.len) : (i += 1) {
+                    const c = raw[i];
+                    if (c >= 0x40 and c <= 0x7e) {
+                        i += 1;
+                        break;
+                    }
+                }
+                continue;
             }
+
+            // OSC: ESC ] ... BEL or ST (ESC \\)
+            if (esc == ']') {
+                i += 1;
+                while (i < raw.len) {
+                    const c = raw[i];
+                    if (c == 0x07) {
+                        i += 1;
+                        break;
+                    }
+                    if (c == 0x1b and i + 1 < raw.len and raw[i + 1] == '\\') {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+
+            // DCS/PM/APC: ESC P/^/_ ... ST (ESC \\)
+            if (esc == 'P' or esc == '^' or esc == '_') {
+                i += 1;
+                while (i < raw.len) {
+                    if (raw[i] == 0x1b and i + 1 < raw.len and raw[i + 1] == '\\') {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+
+            // Other escape forms are 2-byte sequences.
+            i += 1;
+            continue;
         }
+
+        // C1 controls (including 0x9B CSI) are never valid label content.
+        if (b >= 0x80 and b <= 0x9f) {
+            i += 1;
+            continue;
+        }
+
+        const len = std.unicode.utf8ByteSequenceLength(b) catch 1;
+        const end = @min(i + len, raw.len);
+        const chunk = raw[i..end];
+        const cp = std.unicode.utf8Decode(chunk) catch {
+            i = end;
+            continue;
+        };
+
+        // Skip control characters.
+        if (cp < 32 or cp == 127) {
+            i = end;
+            continue;
+        }
+
+        if (wi + chunk.len > out.len) break;
+        @memcpy(out[wi .. wi + chunk.len], chunk);
+        wi += chunk.len;
+        i = end;
     }
+    return out[0..wi];
 }
 
 pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     const renderer = &state.renderer;
 
     // Begin a new frame.
-    renderer.beginFrame();
+    renderer.vx.screen.clear();
 
     // Draw splits into the cell buffer.
     var pane_it = state.currentLayout().splitIterator();
     while (pane_it.next()) |pane| {
         const render_state = pane.*.getRenderState() catch continue;
-        renderer.drawRenderState(render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height);
+        drawPaneRenderState(renderer, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height);
 
         if (state.mouse_selection.rangeForPane(state.active_tab, pane.*)) |range| {
             mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height, range, state.config.selection_color);
@@ -110,7 +146,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         // Draw sprite overlay if enabled
         if (pane.*.pokemon_initialized and pane.*.pokemon_state.show_sprite) {
             if (pane.*.pokemon_state.sprite_content) |content| {
-                renderer.drawSpriteOverlay(pane.*.x, pane.*.y, pane.*.width, pane.*.height, content, state.pop_config.widgets.pokemon);
+                render_sprite.drawSpriteOverlay(renderer, pane.*.x, pane.*.y, pane.*.width, pane.*.height, content, state.pop_config.widgets.pokemon);
             }
         }
     }
@@ -131,7 +167,15 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             if (parent != state.active_tab) continue;
         }
 
-        borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, false, if (pane.float_title) |t| t else "", pane.border_color, pane.float_style);
+        const float_label_raw = if (pane.float_title) |t|
+            t
+        else if (state.pane_names.get(pane.uuid)) |n|
+            n
+        else
+            "";
+        var float_label_buf: [128]u8 = undefined;
+        const float_label = sanitizeLabelUtf8(float_label_raw, &float_label_buf);
+        borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, false, float_label, pane.border_color, pane.float_style);
         if (state.float_rename_uuid) |uuid| {
             if (std.mem.eql(u8, &uuid, &pane.uuid)) {
                 float_title.drawTitleEditor(renderer, pane, state.float_rename_buf.items);
@@ -139,7 +183,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         }
 
         const render_state = pane.getRenderState() catch continue;
-        renderer.drawRenderState(render_state, pane.x, pane.y, pane.width, pane.height);
+        drawPaneRenderState(renderer, render_state, pane.x, pane.y, pane.width, pane.height);
 
         if (state.mouse_selection.rangeForPane(state.active_tab, pane)) |range| {
             mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range, state.config.selection_color);
@@ -157,7 +201,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         // Draw sprite overlay if enabled
         if (pane.pokemon_initialized and pane.pokemon_state.show_sprite) {
             if (pane.pokemon_state.sprite_content) |content| {
-                renderer.drawSpriteOverlay(pane.x, pane.y, pane.width, pane.height, content, state.pop_config.widgets.pokemon);
+                render_sprite.drawSpriteOverlay(renderer, pane.x, pane.y, pane.width, pane.height, content, state.pop_config.widgets.pokemon);
             }
         }
     }
@@ -171,7 +215,15 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         else
             true;
         if (pane.isVisibleOnTab(state.active_tab) and can_render) {
-            borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, true, if (pane.float_title) |t| t else "", pane.border_color, pane.float_style);
+            const active_float_label_raw = if (pane.float_title) |t|
+                t
+            else if (state.pane_names.get(pane.uuid)) |n|
+                n
+            else
+                "";
+            var active_float_label_buf: [128]u8 = undefined;
+            const active_float_label = sanitizeLabelUtf8(active_float_label_raw, &active_float_label_buf);
+            borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, true, active_float_label, pane.border_color, pane.float_style);
             if (state.float_rename_uuid) |uuid| {
                 if (std.mem.eql(u8, &uuid, &pane.uuid)) {
                     float_title.drawTitleEditor(renderer, pane, state.float_rename_buf.items);
@@ -179,7 +231,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             }
 
             if (pane.getRenderState()) |render_state| {
-                renderer.drawRenderState(render_state, pane.x, pane.y, pane.width, pane.height);
+                drawPaneRenderState(renderer, render_state, pane.x, pane.y, pane.width, pane.height);
 
                 if (state.mouse_selection.rangeForPane(state.active_tab, pane)) |range| {
                     mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range, state.config.selection_color);
@@ -198,7 +250,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             // Draw sprite overlay if enabled
             if (pane.pokemon_initialized and pane.pokemon_state.show_sprite) {
                 if (pane.pokemon_state.sprite_content) |content| {
-                    renderer.drawSpriteOverlay(pane.x, pane.y, pane.width, pane.height, content, state.pop_config.widgets.pokemon);
+                    render_sprite.drawSpriteOverlay(renderer, pane.x, pane.y, pane.width, pane.height, content, state.pop_config.widgets.pokemon);
                 }
             }
         }
@@ -208,9 +260,6 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     if (state.config.tabs.status.enabled) {
         statusbar.draw(renderer, state, state.allocator, &state.config, state.term_width, state.term_height, state.tabs, state.active_tab, state.session_name);
     }
-
-    // Apply winpulse brightness effect if active
-    applyPulseEffect(state);
 
     // Check if active float has dim_background set (focus mode)
     const float_dim = if (state.active_floating) |idx| blk: {
@@ -285,52 +334,32 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         popup_render.draw(renderer, popup, &state.pop_config.carrier, state.term_width, state.term_height);
     }
 
-    // End frame with differential render.
-    const output = try renderer.endFrame(state.force_full_render);
-
-    // Get cursor info.
-    var cursor_x: u16 = 1;
-    var cursor_y: u16 = 1;
-    var cursor_style: u8 = 0;
-    var cursor_visible: bool = true;
+    // Gather cursor info.
+    var cursor = CursorInfo{};
 
     if (state.active_floating) |idx| {
         const pane = state.floats.items[idx];
         const pos = pane.getCursorPos();
-        cursor_x = pos.x + 1;
-        cursor_y = pos.y + 1;
-        cursor_style = pane.getCursorStyle();
-        cursor_visible = pane.isCursorVisible();
+        cursor.x = pos.x;
+        cursor.y = pos.y;
+        cursor.style = pane.getCursorStyle();
+        cursor.visible = pane.isCursorVisible();
     } else if (state.currentLayout().getFocusedPane()) |pane| {
         const pos = pane.getCursorPos();
-        cursor_x = pos.x + 1;
-        cursor_y = pos.y + 1;
-        cursor_style = pane.getCursorStyle();
-        cursor_visible = pane.isCursorVisible();
+        cursor.x = pos.x;
+        cursor.y = pos.y;
+        cursor.style = pane.getCursorStyle();
+        cursor.visible = pane.isCursorVisible();
     }
 
-    // Build cursor sequences.
-    var cursor_buf: [64]u8 = undefined;
-    var cursor_len: usize = 0;
-
-    const style_seq = std.fmt.bufPrint(cursor_buf[cursor_len..], "\x1b[{d} q", .{cursor_style}) catch "";
-    cursor_len += style_seq.len;
-
-    const pos_seq = std.fmt.bufPrint(cursor_buf[cursor_len..], "\x1b[{d};{d}H", .{ cursor_y, cursor_x }) catch "";
-    cursor_len += pos_seq.len;
-
-    // Always output cursor visibility state to ensure correct terminal state
     // If cursor_needs_restore is set (e.g., after float death), force cursor visible
-    const should_show = cursor_visible or state.cursor_needs_restore;
-    const vis_seq = if (should_show) "\x1b[?25h" else "\x1b[?25l";
-    @memcpy(cursor_buf[cursor_len..][0..vis_seq.len], vis_seq);
-    cursor_len += vis_seq.len;
-    state.cursor_needs_restore = false;
+    if (state.cursor_needs_restore) {
+        cursor.visible = true;
+        state.cursor_needs_restore = false;
+    }
 
-    // Write everything as a single iovec list.
-    var iovecs = [_]std.posix.iovec_const{
-        .{ .base = output.ptr, .len = output.len },
-        .{ .base = &cursor_buf, .len = cursor_len },
-    };
-    try stdout.writevAll(iovecs[0..]);
+    // End frame: render current vaxis screen.
+    try render_vx.renderFrame(&renderer.vx, stdout, cursor, state.force_full_render);
+    _ = renderer.frame_arena.reset(.retain_capacity);
+    state.force_full_render = false;
 }

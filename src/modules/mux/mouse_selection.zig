@@ -2,8 +2,7 @@ const std = @import("std");
 const ghostty = @import("ghostty-vt");
 
 const Pane = @import("pane.zig").Pane;
-const render = @import("render.zig");
-const Renderer = render.Renderer;
+const Renderer = @import("render_core.zig").Renderer;
 
 /// Pane-local mouse coordinate (viewport coordinate space).
 pub const Pos = struct {
@@ -198,8 +197,9 @@ pub fn applyOverlay(renderer: *Renderer, pane_x: u16, pane_y: u16, pane_w: u16, 
         const end_x: u16 = if (y == norm.end.y) norm.end.x else (pane_w - 1);
         var x: u16 = start_x;
         while (x <= end_x) : (x += 1) {
-            const cell = renderer.next.get(pane_x + x, pane_y + y);
-            cell.bg = .{ .palette = selection_color };
+            var cell = renderer.getVaxisCell(pane_x + x, pane_y + y) orelse continue;
+            cell.style.bg = .{ .index = selection_color };
+            renderer.setVaxisCell(pane_x + x, pane_y + y, cell);
         }
     }
 }
@@ -267,8 +267,9 @@ pub fn applyOverlayTrimmed(renderer: *Renderer, render_state: *const ghostty.Ren
 
         var x: u16 = start_x;
         while (x <= end_x) : (x += 1) {
-            const cell = renderer.next.get(pane_x + x, pane_y + y);
-            cell.bg = .{ .palette = selection_color };
+            var cell = renderer.getVaxisCell(pane_x + x, pane_y + y) orelse continue;
+            cell.style.bg = .{ .index = selection_color };
+            renderer.setVaxisCell(pane_x + x, pane_y + y, cell);
         }
     }
 }
@@ -295,12 +296,12 @@ pub fn extractText(allocator: std.mem.Allocator, pane: *Pane, range: BufRange) !
 
 /// Standard word separators for terminal word selection
 const word_separators = [_]u21{
-    ' ',  '\t', '\n', '\r', // Whitespace
-    '\'', '"',  '`',        // Quotes
-    '(',  ')',  '[',  ']', '{', '}', '<', '>', // Brackets
-    ',',  ';',  ':',  '!', '?', '.', // Punctuation
-    '/',  '\\', '|',  '&', // Path/operators
-    '=',  '+',  '-',  '*', '%', '^', '~', '#', '@', '$', // Operators/special
+    ' ', '\t', '\n', '\r', // Whitespace
+    '\'', '"', '`', // Quotes
+    '(', ')', '[', ']', '{', '}', '<', '>', // Brackets
+    ',', ';', ':', '!', '?', '.', // Punctuation
+    '/', '\\', '|', '&', // Path/operators
+    '=', '+', '-', '*', '%', '^', '~', '#', '@', '$', // Operators/special
 };
 
 /// Select the word under the given viewport-local coordinate.

@@ -83,7 +83,6 @@ pub fn getPopBuilder(lua: *Lua) !*config_builder.PopConfigBuilder {
 /// Parse a key string into BindKey
 fn parseKeyString(key_str: []const u8) ?config.Config.BindKey {
     // Debug: print what we're parsing
-    std.debug.print("DEBUG parseKeyString: key_str='{s}' len={}\n", .{ key_str, key_str.len });
 
     if (key_str.len == 1) return .{ .char = key_str[0] };
     if (std.mem.eql(u8, key_str, "space")) return .space;
@@ -139,7 +138,6 @@ pub fn parseKeyArray(lua: *Lua, table_idx: i32) ?ParsedKey {
 
     if (key) |k| {
         const result = ParsedKey{ .mods = mods, .key = k };
-        std.debug.print("DEBUG parseKeyArray returning: mods={} key={s}\n", .{ result.mods, @tagName(@as(config.Config.BindKeyKind, result.key)) });
         return result;
     }
 
@@ -279,11 +277,9 @@ pub fn parseAction(lua: *Lua, idx: i32) ?config.Config.BindAction {
         _ = lua.getField(idx, "type");
         const type_str = lua.toString(-1) catch {
             lua.pop(1);
-            std.debug.print("DEBUG parseAction: failed to get 'type' field\n", .{});
             return null;
         };
         lua.pop(1); // Pop type immediately after using it!
-        std.debug.print("DEBUG parseAction: type_str='{s}'\n", .{type_str});
 
         // Parametric actions
         if (std.mem.eql(u8, type_str, "split.resize")) {
@@ -322,29 +318,16 @@ pub fn parseAction(lua: *Lua, idx: i32) ?config.Config.BindAction {
         }
 
         if (std.mem.eql(u8, type_str, "focus.move")) {
-            // Check what we can get from the table
-            _ = lua.getField(idx, "type");
-            const has_type = lua.typeOf(-1) != .nil;
-            lua.pop(1);
-
             _ = lua.getField(idx, "dir");
-            const has_dir = lua.typeOf(-1) != .nil;
-            const dir_type = lua.typeOf(-1);
-            std.debug.print("DEBUG focus.move action: has_type={} has_dir={} dir_type={s} idx={}\n", .{ has_type, has_dir, @tagName(dir_type), idx });
             const dir_str = lua.toString(-1) catch {
-                std.debug.print("DEBUG parseAction focus.move: failed to get dir string (type was {s})\n", .{@tagName(dir_type)});
                 lua.pop(1); // Pop "dir" value before returning
                 return null;
             };
-            std.debug.print("DEBUG parseAction focus.move: dir_str='{s}'\n", .{dir_str});
             const dir = std.meta.stringToEnum(config.Config.BindKeyKind, dir_str) orelse {
-                std.debug.print("DEBUG parseAction focus.move: stringToEnum failed for '{s}'\n", .{dir_str});
                 lua.pop(1); // Pop "dir" value before returning
                 return null;
             };
-            std.debug.print("DEBUG parseAction focus.move: dir={s}\n", .{@tagName(dir)});
             if (dir != .up and dir != .down and dir != .left and dir != .right) {
-                std.debug.print("DEBUG parseAction focus.move: invalid direction {s}\n", .{@tagName(dir)});
                 lua.pop(1);
                 return null;
             }
@@ -391,8 +374,6 @@ pub fn hexe_mux_config_set(L: ?*LuaState) callconv(.c) c_int {
             mux.confirm_on_disown = val;
         } else if (std.mem.eql(u8, key, "confirm_on_close")) {
             mux.confirm_on_close = val;
-        } else if (std.mem.eql(u8, key, "winpulse_enabled")) {
-            mux.winpulse_enabled = val;
         } else {
             const msg = std.fmt.allocPrint(mux.allocator, "config.set: unknown boolean key '{s}'", .{key}) catch "config.set: unknown key";
             _ = lua.pushString(msg);
@@ -408,11 +389,7 @@ pub fn hexe_mux_config_set(L: ?*LuaState) callconv(.c) c_int {
             lua.raiseError();
         };
 
-        if (std.mem.eql(u8, key, "winpulse_duration_ms")) {
-            mux.winpulse_duration_ms = @intFromFloat(val_f64);
-        } else if (std.mem.eql(u8, key, "winpulse_brighten_factor")) {
-            mux.winpulse_brighten_factor = @floatCast(val_f64);
-        } else if (std.mem.eql(u8, key, "selection_color")) {
+        if (std.mem.eql(u8, key, "selection_color")) {
             mux.selection_color = @intFromFloat(val_f64);
         } else if (std.mem.eql(u8, key, "mouse_selection_override_mods")) {
             mux.mouse_selection_override_mods = @intFromFloat(val_f64);
@@ -469,18 +446,12 @@ pub export fn hexe_mux_config_setup(L: ?*LuaState) callconv(.c) c_int {
                 mux.confirm_on_disown = val;
             } else if (std.mem.eql(u8, key, "confirm_on_close")) {
                 mux.confirm_on_close = val;
-            } else if (std.mem.eql(u8, key, "winpulse_enabled")) {
-                mux.winpulse_enabled = val;
             }
         }
         // Number options
         else if (val_type == .number) {
             const val_f64 = lua.toNumber(-1) catch 0;
-            if (std.mem.eql(u8, key, "winpulse_duration_ms")) {
-                mux.winpulse_duration_ms = @intFromFloat(val_f64);
-            } else if (std.mem.eql(u8, key, "winpulse_brighten_factor")) {
-                mux.winpulse_brighten_factor = @floatCast(val_f64);
-            } else if (std.mem.eql(u8, key, "selection_color")) {
+            if (std.mem.eql(u8, key, "selection_color")) {
                 mux.selection_color = @intFromFloat(val_f64);
             }
         }
@@ -670,14 +641,12 @@ fn parseWhenAnyArray(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?[]const
 /// 2. Single format: keymap.set({key...}, {action...}, opts)
 pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
-    std.debug.print("DEBUG hexe_mux_keymap_set CALLED\n", .{});
 
     // Get MuxConfigBuilder
     const mux = getMuxBuilder(lua) catch {
         _ = lua.pushString("keymap.set: failed to get config builder");
         lua.raiseError();
     };
-    std.debug.print("DEBUG hexe_mux_keymap_set: got MuxConfigBuilder, current binds.len={}\n", .{mux.binds.items.len});
 
     // Check if arg 1 is an array of bindings (array format) or a key array (single format)
     if (lua.typeOf(1) == .table) {
@@ -689,7 +658,6 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
         if (is_array) {
             // Array format: iterate and parse each binding
             const len = lua.rawLen(1);
-            std.debug.print("DEBUG keymap.set: parsing {} bindings from array\n", .{len});
             var i: i32 = 1;
             while (i <= len) : (i += 1) {
                 _ = lua.rawGetIndex(1, i);
@@ -774,7 +742,6 @@ pub export fn hexe_mux_keymap_set(L: ?*LuaState) callconv(.c) c_int {
                 };
 
                 // Debug: check what we're appending
-                std.debug.print("DEBUG appending bind[{}]: mods={} key={s} action_found={}\n", .{ i, bind.mods, @tagName(@as(config.Config.BindKeyKind, bind.key)), action_found });
 
                 mux.binds.append(mux.allocator, bind) catch {
                     _ = lua.pushString("keymap.set: failed to append binding");
@@ -1039,7 +1006,6 @@ pub export fn hexe_mux_float_set_defaults(L: ?*LuaState) callconv(.c) c_int {
 /// Lua C function: hexe.mux.float.define(key, opts)
 pub export fn hexe_mux_float_define(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
-    std.debug.print("DEBUG hexe_mux_float_define CALLED\n", .{});
 
     // Get key (arg 1)
     const key_str = lua.toString(1) catch {
@@ -1051,7 +1017,6 @@ pub export fn hexe_mux_float_define(L: ?*LuaState) callconv(.c) c_int {
         lua.raiseError();
     }
     const key = key_str[0];
-    std.debug.print("DEBUG float.define: key='{}' (0x{x})\n", .{ key, key });
 
     // Arg 2 must be a table
     if (lua.typeOf(2) != .table) {
@@ -1268,7 +1233,9 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     _ = lua.getField(idx, "priority");
     if (lua.typeOf(-1) == .number) {
         const p = lua.toNumber(-1) catch 50;
-        segment.priority = @intFromFloat(p);
+        if (std.math.isFinite(p)) {
+            segment.priority = @intFromFloat(std.math.clamp(p, 0, 255));
+        }
     }
     lua.pop(1);
 
@@ -1325,31 +1292,139 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     }
     lua.pop(1);
 
+    // Parse spinner
+    _ = lua.getField(idx, "spinner");
+    if (lua.typeOf(-1) == .table) {
+        var spinner = config.SpinnerDef{};
+        spinner.kind = allocator.dupe(u8, spinner.kind) catch {
+            lua.pop(1);
+            return segment;
+        };
+
+        // kind
+        _ = lua.getField(-1, "kind");
+        if (lua.typeOf(-1) == .string) {
+            const kind = lua.toString(-1) catch "knight_rider";
+            const kind_copy = allocator.dupe(u8, kind) catch spinner.kind;
+            if (kind_copy.ptr != spinner.kind.ptr) {
+                allocator.free(spinner.kind);
+                spinner.kind = kind_copy;
+            }
+        }
+        lua.pop(1);
+
+        // width
+        _ = lua.getField(-1, "width");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch @as(f64, @floatFromInt(spinner.width));
+            if (std.math.isFinite(v)) spinner.width = @intFromFloat(std.math.clamp(v, 1, 64));
+        }
+        lua.pop(1);
+
+        // step / step_ms
+        _ = lua.getField(-1, "step");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch @as(f64, @floatFromInt(spinner.step_ms));
+            if (std.math.isFinite(v)) spinner.step_ms = @intFromFloat(std.math.clamp(v, 1, 5000));
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "step_ms");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch @as(f64, @floatFromInt(spinner.step_ms));
+            if (std.math.isFinite(v)) spinner.step_ms = @intFromFloat(std.math.clamp(v, 1, 5000));
+        }
+        lua.pop(1);
+
+        // hold / hold_frames
+        _ = lua.getField(-1, "hold");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch @as(f64, @floatFromInt(spinner.hold_frames));
+            if (std.math.isFinite(v)) spinner.hold_frames = @intFromFloat(std.math.clamp(v, 0, 120));
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "hold_frames");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch @as(f64, @floatFromInt(spinner.hold_frames));
+            if (std.math.isFinite(v)) spinner.hold_frames = @intFromFloat(std.math.clamp(v, 0, 120));
+        }
+        lua.pop(1);
+
+        // bg / bg_color
+        _ = lua.getField(-1, "bg");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch 0;
+            if (std.math.isFinite(v)) spinner.bg_color = @intFromFloat(std.math.clamp(v, 0, 255));
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "bg_color");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch 0;
+            if (std.math.isFinite(v)) spinner.bg_color = @intFromFloat(std.math.clamp(v, 0, 255));
+        }
+        lua.pop(1);
+
+        // placeholder / placeholder_color
+        _ = lua.getField(-1, "placeholder");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch 0;
+            if (std.math.isFinite(v)) spinner.placeholder_color = @intFromFloat(std.math.clamp(v, 0, 255));
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "placeholder_color");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch 0;
+            if (std.math.isFinite(v)) spinner.placeholder_color = @intFromFloat(std.math.clamp(v, 0, 255));
+        }
+        lua.pop(1);
+
+        // colors = { ...palette indexes... }
+        _ = lua.getField(-1, "colors");
+        if (lua.typeOf(-1) == .table) {
+            var colors = std.ArrayList(u8).empty;
+            const len = lua.rawLen(-1);
+            var i: i32 = 1;
+            while (i <= len) : (i += 1) {
+                _ = lua.rawGetIndex(-1, i);
+                if (lua.typeOf(-1) == .number) {
+                    const v = lua.toNumber(-1) catch 0;
+                    if (std.math.isFinite(v)) {
+                        colors.append(allocator, @intFromFloat(std.math.clamp(v, 0, 255))) catch {};
+                    }
+                }
+                lua.pop(1);
+            }
+            if (colors.items.len > 0) {
+                spinner.colors = colors.toOwnedSlice(allocator) catch spinner.colors;
+            } else {
+                colors.deinit(allocator);
+            }
+        }
+        lua.pop(1);
+
+        segment.spinner = spinner;
+    }
+    lua.pop(1);
+
     return segment;
 }
 
 /// Parse a LayoutFloatDef from a Lua table at idx
 fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.LayoutFloatDef {
-    std.debug.print("DEBUG parseLayoutFloat called, idx={}\n", .{idx});
     if (lua.typeOf(idx) != .table) {
-        std.debug.print("DEBUG parseLayoutFloat: not a table\n", .{});
         return null;
     }
 
     // Get key (required)
     _ = lua.getField(idx, "key");
     const key_str = lua.toString(-1) catch {
-        std.debug.print("DEBUG parseLayoutFloat: failed to get key string\n", .{});
         lua.pop(1);
         return null;
     };
     if (key_str.len != 1) {
-        std.debug.print("DEBUG parseLayoutFloat: key length != 1\n", .{});
         lua.pop(1);
         return null;
     }
     const key = key_str[0];
-    std.debug.print("DEBUG parseLayoutFloat: key='{}' (0x{x})\n", .{ key, key });
     lua.pop(1);
 
     // Create float with defaults
@@ -1383,7 +1458,6 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
             return null;
         };
         float_def.title = allocator.dupe(u8, title) catch null;
-        std.debug.print("DEBUG parseLayoutFloat: title='{s}'\n", .{title});
     }
     lua.pop(1);
 
@@ -1442,14 +1516,18 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         _ = lua.getField(-1, "width");
         if (lua.typeOf(-1) == .number) {
             const w = lua.toNumber(-1) catch 0;
-            float_def.width_percent = @intFromFloat(w);
+            if (std.math.isFinite(w)) {
+                float_def.width_percent = @intFromFloat(std.math.clamp(w, 0, 100));
+            }
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "height");
         if (lua.typeOf(-1) == .number) {
             const h = lua.toNumber(-1) catch 0;
-            float_def.height_percent = @intFromFloat(h);
+            if (std.math.isFinite(h)) {
+                float_def.height_percent = @intFromFloat(std.math.clamp(h, 0, 100));
+            }
         }
         lua.pop(1);
     }
@@ -1461,14 +1539,18 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         _ = lua.getField(-1, "x");
         if (lua.typeOf(-1) == .number) {
             const x = lua.toNumber(-1) catch 0;
-            float_def.pos_x = @intFromFloat(x);
+            if (std.math.isFinite(x)) {
+                float_def.pos_x = @intFromFloat(std.math.clamp(x, 0, 100));
+            }
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "y");
         if (lua.typeOf(-1) == .number) {
             const y = lua.toNumber(-1) catch 0;
-            float_def.pos_y = @intFromFloat(y);
+            if (std.math.isFinite(y)) {
+                float_def.pos_y = @intFromFloat(std.math.clamp(y, 0, 100));
+            }
         }
         lua.pop(1);
     }
@@ -1480,14 +1562,18 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         _ = lua.getField(-1, "x");
         if (lua.typeOf(-1) == .number) {
             const x = lua.toNumber(-1) catch 0;
-            float_def.padding_x = @intFromFloat(x);
+            if (std.math.isFinite(x)) {
+                float_def.padding_x = @intFromFloat(std.math.clamp(x, 0, 255));
+            }
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "y");
         if (lua.typeOf(-1) == .number) {
             const y = lua.toNumber(-1) catch 0;
-            float_def.padding_y = @intFromFloat(y);
+            if (std.math.isFinite(y)) {
+                float_def.padding_y = @intFromFloat(std.math.clamp(y, 0, 255));
+            }
         }
         lua.pop(1);
     }
@@ -1501,14 +1587,18 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
         _ = lua.getField(-1, "active");
         if (lua.typeOf(-1) == .number) {
             const a = lua.toNumber(-1) catch 1;
-            color.active = @intFromFloat(a);
+            if (std.math.isFinite(a)) {
+                color.active = @intFromFloat(std.math.clamp(a, 0, 255));
+            }
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "passive");
         if (lua.typeOf(-1) == .number) {
             const p = lua.toNumber(-1) catch 237;
-            color.passive = @intFromFloat(p);
+            if (std.math.isFinite(p)) {
+                color.passive = @intFromFloat(std.math.clamp(p, 0, 255));
+            }
         }
         lua.pop(1);
 
@@ -1527,7 +1617,9 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
             _ = lua.getField(-1, "color");
             if (lua.typeOf(-1) == .number) {
                 const color_num = lua.toNumber(-1) catch 0;
-                style.shadow_color = @intFromFloat(color_num);
+                if (std.math.isFinite(color_num)) {
+                    style.shadow_color = @intFromFloat(std.math.clamp(color_num, 0, 255));
+                }
             }
             lua.pop(1); // pop color
         }
@@ -1683,7 +1775,6 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
 /// Lua C function: hexe.ses.layout.define(opts)
 pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
-    std.debug.print("DEBUG hexe_ses_layout_define CALLED\n", .{});
 
     // Arg 1 must be a table
     if (lua.typeOf(1) != .table) {

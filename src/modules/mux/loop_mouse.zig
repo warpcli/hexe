@@ -1,8 +1,8 @@
 const std = @import("std");
+const vaxis = @import("vaxis");
 
 const core = @import("core");
 
-const input = @import("input.zig");
 const layout_mod = @import("layout.zig");
 const focus_nav = @import("focus_nav.zig");
 const float_title = @import("float_title.zig");
@@ -44,7 +44,43 @@ fn toLocalClamped(pane: *Pane, abs_x: u16, abs_y: u16) mouse_selection.Pos {
 
 /// Forward a mouse event to a pane with translated coordinates.
 /// The app expects pane-local coordinates, not absolute screen coordinates.
-fn forwardMouseToPane(pane: *Pane, ev: input.MouseEvent) void {
+const MouseEvent = struct {
+    btn: u16,
+    x: u16,
+    y: u16,
+    is_release: bool,
+};
+
+fn encodeMouseEvent(mouse: vaxis.Mouse) MouseEvent {
+    var btn: u16 = switch (mouse.button) {
+        .left => 0,
+        .middle => 1,
+        .right => 2,
+        .none => 3,
+        .wheel_up => 64,
+        .wheel_down => 65,
+        .wheel_right => 66,
+        .wheel_left => 67,
+        .button_8 => 128,
+        .button_9 => 129,
+        .button_10 => 130,
+        .button_11 => 131,
+    };
+
+    if (mouse.mods.shift) btn |= 4;
+    if (mouse.mods.alt) btn |= 8;
+    if (mouse.mods.ctrl) btn |= 16;
+    if (mouse.type == .motion or mouse.type == .drag) btn |= 32;
+
+    return .{
+        .btn = btn,
+        .x = if (mouse.col <= 0) 0 else @intCast(mouse.col),
+        .y = if (mouse.row <= 0) 0 else @intCast(mouse.row),
+        .is_release = mouse.type == .release,
+    };
+}
+
+fn forwardMouseToPane(pane: *Pane, ev: MouseEvent) void {
     // Convert absolute coords to pane-local (1-based for SGR)
     const local_x: u16 = if (ev.x >= pane.x) ev.x - pane.x + 1 else 1;
     const local_y: u16 = if (ev.y >= pane.y) ev.y - pane.y + 1 else 1;
@@ -341,7 +377,42 @@ fn updateFloatResize(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const 
     state.overlays.showResizeInfo(pane.uuid, pane.width, pane.height, pane.border_x, pane.border_y);
 }
 
-pub fn handle(state: *State, ev: input.MouseEvent) bool {
+fn copySelectionRange(state: *State, pane: *Pane, range: anytype) bool {
+    state.mouse_selection.setRange(state.active_tab, pane.uuid, pane, range);
+    const bytes = mouse_selection.extractText(state.allocator, pane, range) catch {
+        state.notifications.showFor("Copy failed", 1200);
+        state.needs_render = true;
+        return true;
+    };
+    defer state.allocator.free(bytes);
+
+    if (bytes.len == 0) {
+        state.notifications.showFor("No text selected", 1200);
+    } else {
+        clipboard.copyToClipboard(state.allocator, bytes);
+        state.notifications.showFor("Copied selection", 1200);
+    }
+    state.needs_render = true;
+    return true;
+}
+
+fn forwardToFocusedAltPane(state: *State, ev: MouseEvent) bool {
+    if (state.active_floating) |afi| {
+        if (afi < state.floats.items.len and state.floats.items[afi].vt.inAltScreen()) {
+            forwardMouseToPane(state.floats.items[afi], ev);
+            return true;
+        }
+    } else if (state.currentLayout().getFocusedPane()) |p| {
+        if (p.vt.inAltScreen()) {
+            forwardMouseToPane(p, ev);
+            return true;
+        }
+    }
+    return false;
+}
+
+pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
+    const ev = encodeMouseEvent(mouse);
     const mouse_mods = mouseModsMask(ev.btn);
     const sel_override = state.config.mouse.selection_override_mods;
     const override_active = sel_override != 0 and (mouse_mods & sel_override) == sel_override;
@@ -356,6 +427,18 @@ pub fn handle(state: *State, ev: input.MouseEvent) bool {
         const pane = state.findPaneByUuid(uuid);
         if (pane == null or !float_title.hitTestTitle(pane.?, ev.x, ev.y)) {
             state.clearFloatRename();
+        }
+    }
+
+    // While renaming a float title, consume clicks on the title itself so
+    // release events are not forwarded into the pane as raw mouse sequences.
+    if (state.float_rename_uuid) |uuid| {
+        if (is_left_btn) {
+            if (state.findPaneByUuid(uuid)) |pane| {
+                if (float_title.hitTestTitle(pane, ev.x, ev.y)) {
+                    return true;
+                }
+            }
         }
     }
 
@@ -598,59 +681,17 @@ pub fn handle(state: *State, ev: input.MouseEvent) bool {
                 if (click_count == 2) {
                     // Double-click: select word (stops at separators)
                     if (mouse_selection.selectWordRange(t.pane, local.x, local.y)) |range| {
-                        state.mouse_selection.setRange(state.active_tab, t.pane.uuid, t.pane, range);
-                        const bytes = mouse_selection.extractText(state.allocator, t.pane, range) catch {
-                            state.notifications.showFor("Copy failed", 1200);
-                            state.needs_render = true;
-                            return true;
-                        };
-                        defer state.allocator.free(bytes);
-                        if (bytes.len == 0) {
-                            state.notifications.showFor("No text selected", 1200);
-                        } else {
-                            clipboard.copyToClipboard(state.allocator, bytes);
-                            state.notifications.showFor("Copied selection", 1200);
-                        }
-                        state.needs_render = true;
-                        return true;
+                        return copySelectionRange(state, t.pane, range);
                     }
                 } else if (click_count == 3) {
                     // Triple-click: select word including adjacent separators
                     if (mouse_selection.selectWordWithSeparatorsRange(t.pane, local.x, local.y)) |range| {
-                        state.mouse_selection.setRange(state.active_tab, t.pane.uuid, t.pane, range);
-                        const bytes = mouse_selection.extractText(state.allocator, t.pane, range) catch {
-                            state.notifications.showFor("Copy failed", 1200);
-                            state.needs_render = true;
-                            return true;
-                        };
-                        defer state.allocator.free(bytes);
-                        if (bytes.len == 0) {
-                            state.notifications.showFor("No text selected", 1200);
-                        } else {
-                            clipboard.copyToClipboard(state.allocator, bytes);
-                            state.notifications.showFor("Copied selection", 1200);
-                        }
-                        state.needs_render = true;
-                        return true;
+                        return copySelectionRange(state, t.pane, range);
                     }
                 } else if (click_count == 4) {
                     // Quad-click: select entire line
                     if (mouse_selection.selectLineRange(t.pane, local.x, local.y)) |range| {
-                        state.mouse_selection.setRange(state.active_tab, t.pane.uuid, t.pane, range);
-                        const bytes = mouse_selection.extractText(state.allocator, t.pane, range) catch {
-                            state.notifications.showFor("Copy failed", 1200);
-                            state.needs_render = true;
-                            return true;
-                        };
-                        defer state.allocator.free(bytes);
-                        if (bytes.len == 0) {
-                            state.notifications.showFor("No text selected", 1200);
-                        } else {
-                            clipboard.copyToClipboard(state.allocator, bytes);
-                            state.notifications.showFor("Copied selection", 1200);
-                        }
-                        state.needs_render = true;
-                        return true;
+                        return copySelectionRange(state, t.pane, range);
                     }
                 }
 
@@ -664,17 +705,7 @@ pub fn handle(state: *State, ev: input.MouseEvent) bool {
                 state.mouse_selection.clear();
                 state.needs_render = true;
             }
-            if (state.active_floating) |afi| {
-                if (afi < state.floats.items.len) {
-                    if (state.floats.items[afi].vt.inAltScreen()) {
-                        forwardMouseToPane(state.floats.items[afi], ev);
-                    }
-                }
-            } else if (state.currentLayout().getFocusedPane()) |p| {
-                if (p.vt.inAltScreen()) {
-                    forwardMouseToPane(p, ev);
-                }
-            }
+            _ = forwardToFocusedAltPane(state, ev);
         }
 
         return true;
@@ -686,18 +717,8 @@ pub fn handle(state: *State, ev: input.MouseEvent) bool {
             forwardMouseToPane(t.pane, ev);
             return true;
         }
-    } else if (state.active_floating) |afi| {
-        if (afi < state.floats.items.len) {
-            if (state.floats.items[afi].vt.inAltScreen()) {
-                forwardMouseToPane(state.floats.items[afi], ev);
-                return true;
-            }
-        }
-    } else if (state.currentLayout().getFocusedPane()) |p| {
-        if (p.vt.inAltScreen()) {
-            forwardMouseToPane(p, ev);
-            return true;
-        }
+    } else if (forwardToFocusedAltPane(state, ev)) {
+        return true;
     }
 
     return true;

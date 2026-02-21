@@ -30,6 +30,9 @@
             .url = "git+https://github.com/bresilla/voidbox#0.0.9",
             .hash = "voidbox-0.0.9-fHvjRQsrBQCmQlJfs8hfE5HzK2r1rOEq9fkSznXY53FO",
         },
+        .libvaxis = .{
+            .path = "xtra/libvaxis",
+        },
     },
     .fingerprint = 0x4c99ab0b473f252d,
 }

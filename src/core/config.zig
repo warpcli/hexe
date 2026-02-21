@@ -639,11 +639,6 @@ pub const Config = struct {
     confirm_on_disown: bool = false, // When Alt+z disowns a pane
     confirm_on_close: bool = false, // When Alt+x closes a float/tab
 
-    // Winpulse - highlight focused pane on focus change
-    winpulse_enabled: bool = false,
-    winpulse_duration_ms: u32 = 50, // Total animation duration
-    winpulse_brighten_factor: f32 = 1.3, // Brighten factor for focused pane (1.0 = no change, 1.3 = 30% brighter)
-
     // Floating pane defaults
     float_width_percent: u8 = 60,
     float_height_percent: u8 = 60,
@@ -866,11 +861,6 @@ fn parseConfig(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocat
     if (runtime.getBool(-1, "confirm_on_detach")) |v| config.confirm_on_detach = v;
     if (runtime.getBool(-1, "confirm_on_disown")) |v| config.confirm_on_disown = v;
     if (runtime.getBool(-1, "confirm_on_close")) |v| config.confirm_on_close = v;
-
-    // Winpulse
-    if (runtime.getBool(-1, "winpulse_enabled")) |v| config.winpulse_enabled = v;
-    if (runtime.getInt(u32, -1, "winpulse_duration_ms")) |v| config.winpulse_duration_ms = v;
-    if (runtime.getNumber(-1, "winpulse_brighten_factor")) |v| config.winpulse_brighten_factor = @floatCast(v);
 
     // Selection color
     if (runtime.getInt(u8, -1, "selection_color")) |v| config.selection_color = v;

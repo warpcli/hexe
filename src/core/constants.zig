@@ -1,7 +1,6 @@
 /// Centralized constants for the Hexa terminal multiplexer.
 /// All timing, size limits, and configuration constants should be defined here
 /// to improve maintainability and make them easy to find and modify.
-
 const std = @import("std");
 
 /// Timing-related constants (all values in milliseconds)
@@ -73,10 +72,10 @@ pub const Sizes = struct {
     pub const max_captured_output: usize = 1024 * 1024;
 
     /// Maximum reasonable terminal rows (sanity check)
-    /// Used in: src/core/vt.zig, src/modules/mux/render.zig
+    /// Used in: src/core/vt.zig, src/modules/mux/render_state_blit.zig
     pub const max_reasonable_rows: usize = 10000;
 
     /// Maximum reasonable terminal columns (sanity check)
-    /// Used in: src/core/vt.zig, src/modules/mux/render.zig
+    /// Used in: src/core/vt.zig, src/modules/mux/render_state_blit.zig
     pub const max_reasonable_cols: usize = 1000;
 };

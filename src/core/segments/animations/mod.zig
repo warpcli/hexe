@@ -69,5 +69,15 @@ pub fn renderSegments(ctx: *Context, cfg: SpinnerDef) ?[]const Segment {
     if (std.mem.eql(u8, cfg.kind, "knight_rider")) {
         return knight_rider.renderSegments(ctx, cfg);
     }
-    return null;
+
+    // Generic fallback spinner so unknown kinds still animate visibly.
+    const frame = simpleSpinnerFrame(ctx.now_ms, cfg.started_at_ms, cfg.step_ms);
+    return ctx.addSegment(frame, .{}) catch null;
+}
+
+fn simpleSpinnerFrame(now_ms: u64, started_at_ms: u64, step_ms: u64) []const u8 {
+    const frames = [_][]const u8{ "|", "/", "-", "\\" };
+    const step = if (step_ms == 0) 100 else step_ms;
+    const tick = (now_ms - started_at_ms) / step;
+    return frames[@intCast(tick % frames.len)];
 }
