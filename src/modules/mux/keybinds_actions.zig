@@ -75,7 +75,13 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                     state.terminal_query_timed_out,
                 },
             ) catch "caps: unavailable";
-            state.notifications.showFor(msg, 2500);
+
+            const owned = state.allocator.dupe(u8, msg) catch {
+                state.notifications.showFor("caps: unavailable", 2500);
+                state.needs_render = true;
+                return true;
+            };
+            state.notifications.showWithOptions(owned, .{ .duration_ms = 2500, .owned = true });
             state.needs_render = true;
             return true;
         },
