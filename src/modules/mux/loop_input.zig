@@ -602,6 +602,29 @@ fn routeCapturedOscReply(state: *State) void {
     }
 }
 
+fn harvestPendingOscReplies(state: *State) void {
+    var split_it = state.currentLayout().splitIterator();
+    while (split_it.next()) |pane| {
+        const n = pane.*.takeOscExpectedResponses();
+        if (n > 0) {
+            var j: u16 = 0;
+            while (j < n) : (j += 1) {
+                state.enqueueOscReplyTarget(pane.*.uuid);
+            }
+        }
+    }
+
+    for (state.floats.items) |fp| {
+        const n = fp.takeOscExpectedResponses();
+        if (n > 0) {
+            var j: u16 = 0;
+            while (j < n) : (j += 1) {
+                state.enqueueOscReplyTarget(fp.uuid);
+            }
+        }
+    }
+}
+
 pub fn handleInput(state: *State, input_bytes: []const u8) void {
     if (input_bytes.len == 0) return;
 
@@ -650,6 +673,8 @@ const OscConsumeResult = struct {
 };
 
 fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult {
+    harvestPendingOscReplies(state);
+
     if (inp.len == 0) return .{ .bytes = inp };
     if (!state.osc_reply_in_progress and state.osc_reply_targets.items.len == 0) {
         return .{ .bytes = inp };
