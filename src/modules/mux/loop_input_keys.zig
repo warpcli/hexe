@@ -3,7 +3,6 @@ const core = @import("core");
 
 const State = @import("state.zig").State;
 const actions = @import("loop_actions.zig");
-const main = @import("main.zig");
 
 /// Parsed exit key with modifiers.
 const ParsedExitKey = struct {
@@ -33,97 +32,6 @@ pub fn recordKeycastInput(state: *State, inp: []const u8) void {
         if (result.consumed == 0) break;
         i += result.consumed;
     }
-}
-
-/// Check if input matches a pane's exit_key and close the float if so.
-/// Returns bytes consumed if matched, or 0 if no match.
-pub fn checkExitKey(state: *State, inp: []const u8) usize {
-    const exit_key = getFocusedFloatExitKey(state) orelse return 0;
-    if (exit_key.len == 0) return 0;
-
-    const parsed = parseExitKeySpec(exit_key);
-    const key_char = getKeyChar(parsed.key) orelse return 0;
-
-    // Match the exit_key against input.
-    var consumed: usize = 0;
-    const matched = blk: {
-        // No modifiers - match raw byte.
-        if (parsed.mods == 0) {
-            // Special case for Esc: only treat as standalone if it is the
-            // entire input slice (prevents Alt+key from triggering Esc exit).
-            if (key_char == 0x1b) {
-                if (inp.len == 1 and inp[0] == 0x1b) {
-                    consumed = 1;
-                    break :blk true;
-                }
-                break :blk false;
-            }
-            // Other keys: direct byte match.
-            if (inp.len >= 1 and inp[0] == key_char) {
-                consumed = 1;
-                break :blk true;
-            }
-            break :blk false;
-        }
-
-        // Alt-only / Alt+Shift: ESC + char.
-        if (parsed.mods == 1 or parsed.mods == 5) {
-            if (inp.len >= 2 and inp[0] == 0x1b) {
-                // Make sure it's not a CSI/SS3 sequence.
-                if (inp[1] != '[' and inp[1] != 'O' and matchAltChar(inp[1], key_char)) {
-                    consumed = 2;
-                    break :blk true;
-                }
-            }
-            break :blk false;
-        }
-
-        // Shift-only: same raw key byte as terminal encoding.
-        if (parsed.mods == 4) {
-            if (inp.len >= 1 and inp[0] == key_char) {
-                consumed = 1;
-                break :blk true;
-            }
-            break :blk false;
-        }
-
-        // Ctrl-only / Ctrl+Shift: control character (0x01-0x1a for a-z).
-        if (parsed.mods == 2 or parsed.mods == 6) {
-            if (inp.len >= 1 and matchCtrlChar(inp[0], key_char)) {
-                consumed = 1;
-                break :blk true;
-            }
-            break :blk false;
-        }
-
-        // Ctrl+Alt / Ctrl+Alt+Shift: ESC + control character.
-        if (parsed.mods == 3 or parsed.mods == 7) {
-            if (inp.len >= 2 and inp[0] == 0x1b) {
-                if (inp[1] != '[' and inp[1] != 'O' and matchCtrlChar(inp[1], key_char)) {
-                    consumed = 2;
-                    break :blk true;
-                }
-            }
-            break :blk false;
-        }
-
-        break :blk false;
-    };
-
-    if (matched) {
-        main.debugLog("exit_key matched: key={s}", .{exit_key});
-        // Mark the float as closed by exit key (for error exit code)
-        if (state.active_floating) |idx| {
-            if (idx < state.floats.items.len) {
-                state.floats.items[idx].closed_by_exit_key = true;
-            }
-        }
-        actions.performClose(state);
-        state.needs_render = true;
-        return consumed;
-    }
-
-    return 0;
 }
 
 /// Check parser-decoded key event against focused float exit_key.
@@ -160,23 +68,6 @@ pub fn checkExitKeyEvent(state: *State, mods: u8, key: core.Config.BindKey, when
     actions.performClose(state);
     state.needs_render = true;
     return true;
-}
-
-fn matchAltChar(actual: u8, expected: u8) bool {
-    if (actual == expected) return true;
-    if (expected >= 'A' and expected <= 'Z') return actual == expected + 32;
-    if (expected >= 'a' and expected <= 'z') return actual == expected - 32;
-    return false;
-}
-
-fn matchCtrlChar(actual: u8, expected: u8) bool {
-    var ctrl_char: u8 = 0;
-    if (expected >= 'a' and expected <= 'z') {
-        ctrl_char = expected - 'a' + 1;
-    } else if (expected >= 'A' and expected <= 'Z') {
-        ctrl_char = expected - 'A' + 1;
-    }
-    return ctrl_char != 0 and actual == ctrl_char;
 }
 
 /// Format raw input bytes for keycast display.

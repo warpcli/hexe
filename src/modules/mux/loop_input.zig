@@ -530,13 +530,6 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 }
             }
 
-            // Check for exit_key on focused float (close float if matched).
-            const exit_consumed = loop_input_keys.checkExitKey(state, inp[i..]);
-            if (exit_consumed > 0) {
-                i += exit_consumed;
-                continue;
-            }
-
             var parsed_event_for_popup: ?vaxis.Event = null;
 
             // Parse once through libvaxis and dispatch key/scroll/mouse/control.
