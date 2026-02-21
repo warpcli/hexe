@@ -251,7 +251,6 @@ fn parseSimpleAction(action_str: []const u8) ?config.Config.BindAction {
     if (std.mem.eql(u8, action_str, "pane.adopt")) return .pane_adopt;
     if (std.mem.eql(u8, action_str, "pane.close")) return .pane_close;
     if (std.mem.eql(u8, action_str, "pane.select_mode")) return .pane_select_mode;
-    if (std.mem.eql(u8, action_str, "terminal.caps_show")) return .terminal_caps_show;
     if (std.mem.eql(u8, action_str, "overlay.keycast_toggle")) return .keycast_toggle;
     if (std.mem.eql(u8, action_str, "overlay.sprite_toggle")) return .sprite_toggle;
     if (std.mem.eql(u8, action_str, "split.h")) return .split_h;
