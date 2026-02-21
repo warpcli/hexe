@@ -8,7 +8,6 @@ const focus_nav = @import("focus_nav.zig");
 const float_title = @import("float_title.zig");
 const float_util = @import("float_util.zig");
 const mouse_selection = @import("mouse_selection.zig");
-const clipboard = @import("clipboard.zig");
 const statusbar = @import("statusbar.zig");
 
 const Pane = @import("pane.zig").Pane;
@@ -389,7 +388,11 @@ fn copySelectionRange(state: *State, pane: *Pane, range: anytype) bool {
     if (bytes.len == 0) {
         state.notifications.showFor("No text selected", 1200);
     } else {
-        clipboard.copyToClipboard(state.allocator, bytes);
+        if (!copyTextToSystemClipboard(state, bytes)) {
+            state.notifications.showFor("Clipboard copy failed", 1200);
+            state.needs_render = true;
+            return true;
+        }
         state.notifications.showFor("Copied selection", 1200);
     }
     state.needs_render = true;
@@ -411,11 +414,82 @@ fn forwardToFocusedAltPane(state: *State, ev: MouseEvent) bool {
     return false;
 }
 
+fn copyTextToSystemClipboard(state: *State, bytes: []const u8) bool {
+    const stdout = std.fs.File.stdout();
+    var buf: [256]u8 = undefined;
+    var writer = stdout.writer(&buf);
+    state.renderer.vx.copyToSystemClipboard(&writer.interface, bytes, state.allocator) catch return false;
+    return true;
+}
+
+fn shapeForResizeEdge(mask: u8) vaxis.Mouse.Shape {
+    const has_h = (mask & 1) != 0 or (mask & 2) != 0;
+    const has_v = (mask & 4) != 0 or (mask & 8) != 0;
+    if (has_h and !has_v) return .@"ew-resize";
+    if (has_v and !has_h) return .@"ns-resize";
+    return .@"ew-resize";
+}
+
+fn applyMouseShape(state: *State, shape: vaxis.Mouse.Shape) void {
+    if (state.renderer.vx.screen.mouse_shape == shape) return;
+    state.renderer.vx.setMouseShape(shape);
+    state.needs_render = true;
+}
+
+pub fn resetShape(state: *State) void {
+    applyMouseShape(state, .default);
+}
+
+fn desiredMouseShape(state: *State, ev: MouseEvent, override_active: bool) vaxis.Mouse.Shape {
+    if (state.mouse_drag != .none) {
+        return switch (state.mouse_drag) {
+            .split_resize => |d| if (d.dir == .horizontal) .@"ew-resize" else .@"ns-resize",
+            .float_resize => |d| shapeForResizeEdge(d.edge_mask),
+            .float_move => .pointer,
+            .none => .default,
+        };
+    }
+
+    if (state.config.tabs.status.enabled and ev.y == state.term_height - 1) {
+        return .pointer;
+    }
+
+    const target = findFocusableAt(state, ev.x, ev.y) orelse {
+        if (isSplitJunction(state, ev.x, ev.y)) return .pointer;
+        if (hitTestDivider(state.currentLayout(), ev.x, ev.y)) |d| {
+            return if (d.dir == .horizontal) .@"ew-resize" else .@"ns-resize";
+        }
+        return .default;
+    };
+
+    if (target.kind == .float) {
+        const fp = target.pane;
+        if (float_title.hitTestTitle(fp, ev.x, ev.y)) return .pointer;
+
+        const in_content = ev.x >= fp.x and ev.x < fp.x + fp.width and ev.y >= fp.y and ev.y < fp.y + fp.height;
+        if (!in_content) {
+            var mask: u8 = 0;
+            if (ev.x == fp.border_x) mask |= 1;
+            if (ev.x == fp.border_x + fp.border_w -| 1) mask |= 2;
+            if (ev.y == fp.border_y) mask |= 4;
+            if (ev.y == fp.border_y + fp.border_h -| 1) mask |= 8;
+            if (mask != 0) return shapeForResizeEdge(mask);
+            return .pointer;
+        }
+    }
+
+    const in_content = ev.x >= target.pane.x and ev.x < target.pane.x + target.pane.width and ev.y >= target.pane.y and ev.y < target.pane.y + target.pane.height;
+    if (in_content and (override_active or !target.pane.vt.inAltScreen())) return .text;
+    return .default;
+}
+
 pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
     const ev = encodeMouseEvent(mouse);
     const mouse_mods = mouseModsMask(ev.btn);
     const sel_override = state.config.mouse.selection_override_mods;
     const override_active = sel_override != 0 and (mouse_mods & sel_override) == sel_override;
+
+    applyMouseShape(state, desiredMouseShape(state, ev, override_active));
 
     const is_motion = (ev.btn & 32) != 0;
     const is_wheel = (!ev.is_release) and (ev.btn & 64) != 0;
@@ -530,7 +604,11 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                                 if (bytes.len == 0) {
                                     state.notifications.showFor("No text selected", 1200);
                                 } else {
-                                    clipboard.copyToClipboard(state.allocator, bytes);
+                                    if (!copyTextToSystemClipboard(state, bytes)) {
+                                        state.notifications.showFor("Clipboard copy failed", 1200);
+                                        state.needs_render = true;
+                                        return true;
+                                    }
                                     state.notifications.showFor("Copied selection", 1200);
                                 }
                             }

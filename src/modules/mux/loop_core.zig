@@ -15,6 +15,7 @@ const mux = @import("main.zig");
 const loop_input = @import("loop_input.zig");
 const loop_ipc = @import("loop_ipc.zig");
 const loop_local_watchers = @import("loop_local_watchers.zig");
+const loop_mouse = @import("loop_mouse.zig");
 const loop_render = @import("loop_render.zig");
 const float_completion = @import("float_completion.zig");
 const keybinds = @import("keybinds.zig");
@@ -26,6 +27,77 @@ const LoopTimerContext = struct {
     pane_sync_interval: i64,
     heartbeat_interval: i64,
 };
+
+const TERMINAL_QUERY_TIMEOUT_MS: i64 = 1200;
+
+fn applyPostQueryFeatureModes(state: *State) void {
+    const stdout = std.fs.File.stdout();
+    var tty_buf: [1024]u8 = undefined;
+    var tty = stdout.writer(&tty_buf);
+
+    // Prefer Unicode width handling when explicit-width modifiers are supported.
+    // This lets render output use richer grapheme width semantics without relying
+    // on Mode 2027 being active.
+    if (state.renderer.vx.caps.explicit_width or state.renderer.vx.caps.unicode == .unicode) {
+        state.renderer.vx.screen.width_method = .unicode;
+    }
+
+    // Re-apply mouse mode after capability discovery so terminals with
+    // SGR-pixels support get upgraded from cell-coordinates to pixel mode.
+    state.renderer.vx.setMouseMode(&tty.interface, true) catch {};
+
+    // Enable runtime color-scheme updates only when detected.
+    if (state.renderer.vx.caps.color_scheme_updates) {
+        state.renderer.vx.subscribeToColorSchemeUpdates(&tty.interface) catch {};
+    }
+
+    tty.interface.flush() catch {};
+}
+
+fn logTerminalCapabilities(state: *State, timed_out: bool) void {
+    const caps = state.renderer.vx.caps;
+    mux.debugLog(
+        "terminal caps: kitty_keyboard={} kitty_graphics={} rgb={} unicode={s} sgr_pixels={} color_updates={} multi_cursor={} explicit_width={} scaled_text={} timeout={}",
+        .{
+            caps.kitty_keyboard,
+            caps.kitty_graphics,
+            caps.rgb,
+            @tagName(caps.unicode),
+            caps.sgr_pixels,
+            caps.color_scheme_updates,
+            caps.multi_cursor,
+            caps.explicit_width,
+            caps.scaled_text,
+            timed_out,
+        },
+    );
+
+    if (timed_out) {
+        mux.debugLog("terminal capability query timed out; using best-effort feature set", .{});
+    }
+}
+
+fn finalizeTerminalQueryIfReady(state: *State, now_ms: i64) void {
+    if (!state.terminal_query_in_flight) return;
+
+    const query_done = state.renderer.vx.queries_done.load(.unordered);
+    const timed_out = now_ms >= state.terminal_query_deadline_ms;
+    if (!query_done and !timed_out) return;
+
+    const stdout = std.fs.File.stdout();
+    var tty_buf: [1024]u8 = undefined;
+    var tty = stdout.writer(&tty_buf);
+    state.renderer.vx.enableDetectedFeatures(&tty.interface) catch {};
+    applyPostQueryFeatureModes(state);
+    tty.interface.flush() catch {};
+
+    state.renderer.vx.queries_done.store(true, .unordered);
+    state.terminal_query_in_flight = false;
+    state.terminal_query_deadline_ms = 0;
+    state.terminal_caps_ready = true;
+    state.terminal_query_timed_out = timed_out;
+    logTerminalCapabilities(state, timed_out);
+}
 
 fn loopTimerCallback(
     ctx: ?*LoopTimerContext,
@@ -333,13 +405,39 @@ pub fn runMainLoop(state: *State) !void {
     try state.renderer.vx.enterAltScreen(&tty_init.interface);
     try state.renderer.vx.setBracketedPaste(&tty_init.interface, true);
     try state.renderer.vx.setMouseMode(&tty_init.interface, true);
-    // Keep kitty keyboard enabled even without capability probe replies.
+    // Keep kitty keyboard available as baseline while capability probing runs.
     state.renderer.vx.caps.kitty_keyboard = true;
-    try state.renderer.vx.enableDetectedFeatures(&tty_init.interface);
+    state.renderer.vx.queryTerminalSend(&tty_init.interface) catch {
+        try state.renderer.vx.enableDetectedFeatures(&tty_init.interface);
+        applyPostQueryFeatureModes(state);
+        state.renderer.vx.queries_done.store(true, .unordered);
+        state.terminal_query_in_flight = false;
+        state.terminal_query_deadline_ms = 0;
+        state.terminal_caps_ready = true;
+        state.terminal_query_timed_out = true;
+        logTerminalCapabilities(state, true);
+    };
+    if (!state.renderer.vx.queries_done.load(.unordered)) {
+        state.terminal_query_in_flight = true;
+        state.terminal_query_deadline_ms = std.time.milliTimestamp() + TERMINAL_QUERY_TIMEOUT_MS;
+    }
     try tty_init.interface.flush();
     defer {
         var tty_restore_buf: [512]u8 = undefined;
         var tty_restore = stdout.writer(&tty_restore_buf);
+        {
+            var split_it = state.currentLayout().splitIterator();
+            while (split_it.next()) |pane| {
+                pane.*.vt.freeCachedKittyImages(&state.renderer.vx, &tty_restore.interface);
+            }
+            for (state.floats.items) |pane| {
+                pane.vt.freeCachedKittyImages(&state.renderer.vx, &tty_restore.interface);
+            }
+        }
+        // Ensure in-band resize mode is reset even if vaxis internal state
+        // tracking missed setting it during capability query setup.
+        tty_restore.interface.writeAll("\x1b[?2048l") catch {};
+        loop_mouse.resetShape(state);
         state.renderer.vx.resetState(&tty_restore.interface) catch {};
         tty_restore.interface.flush() catch {};
     }
@@ -491,30 +589,13 @@ pub fn runMainLoop(state: *State) !void {
         // Clear skip flag from previous iteration.
         state.skip_dead_check = false;
 
+        finalizeTerminalQueryIfReady(state, std.time.milliTimestamp());
+
         // Check for terminal resize.
         {
             const new_size = terminal.getTermSize();
             if (new_size.cols != state.term_width or new_size.rows != state.term_height) {
-                state.term_width = new_size.cols;
-                state.term_height = new_size.rows;
-                const status_h: u16 = if (state.config.tabs.status.enabled) 1 else 0;
-                state.status_height = status_h;
-                state.layout_width = new_size.cols;
-                state.layout_height = new_size.rows - status_h;
-
-                // Resize all tabs.
-                for (state.tabs.items) |*tab| {
-                    tab.layout.resize(state.layout_width, state.layout_height);
-                }
-
-                // Resize floats based on their stored percentages.
-                state.resizeFloatingPanes();
-
-                // Resize renderer and force full redraw.
-                state.renderer.resize(new_size.cols, new_size.rows) catch {};
-                state.renderer.invalidate();
-                state.needs_render = true;
-                state.force_full_render = true;
+                state.applyTerminalResize(new_size.cols, new_size.rows);
             }
         }
 

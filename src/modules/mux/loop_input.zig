@@ -32,8 +32,20 @@ fn parseEventHead(state: *State, bytes: []const u8) ?ParsedEventHead {
     return .{ .n = parsed.n, .event = parsed.event };
 }
 
+fn applyQueryProbeKeyFlags(state: *State, key: vaxis.Key) void {
+    if (!state.terminal_query_in_flight) return;
+    if (key.codepoint != vaxis.Key.f3) return;
+
+    // libvaxis probe path encodes explicit-width and scaled-text detection via
+    // modified F3 key parses while query mode is active.
+    if (key.mods.shift) state.renderer.vx.caps.explicit_width = true;
+    if (key.mods.alt) state.renderer.vx.caps.scaled_text = true;
+}
+
 fn applyInputFlagsForEvent(state: *State, event: vaxis.Event) void {
     switch (event) {
+        .key_press => |k| applyQueryProbeKeyFlags(state, k),
+        .key_release => |k| applyQueryProbeKeyFlags(state, k),
         .paste_start => state.in_bracketed_paste = true,
         .paste_end => state.in_bracketed_paste = false,
         .cap_kitty_keyboard => state.renderer.vx.caps.kitty_keyboard = true,
@@ -154,12 +166,44 @@ fn handleParsedScrollAction(state: *State, action: input.ScrollAction) bool {
     return true;
 }
 
+fn forwardPasteToFocusedPane(state: *State, txt: []const u8) void {
+    if (txt.len == 0) return;
+
+    if (resolveFocusedPaneForInput(state)) |pane| {
+        if (pane.popups.isBlocked()) return;
+        if (pane.isScrolled()) {
+            pane.scrollToBottom();
+            state.needs_render = true;
+        }
+        pane.write(txt) catch {};
+    }
+}
+
+fn forwardBracketedPasteBoundary(state: *State, is_start: bool) void {
+    const seq: []const u8 = if (is_start) "\x1b[200~" else "\x1b[201~";
+    forwardSanitizedToFocusedPane(state, seq, null);
+}
+
+fn applyInBandWinsize(state: *State, ws: vaxis.Winsize) void {
+    const cols = ws.cols;
+    const rows = ws.rows;
+    state.applyTerminalResize(cols, rows);
+}
+
 fn handleBlockedPopupInput(popups: anytype, parsed_event: ?vaxis.Event) bool {
     if (parsed_event) |ev| {
         // Reuse already parsed event and avoid reparsing raw bytes.
         return input.handlePopupEvent(popups, ev);
     }
     return false;
+}
+
+fn freeParsedEventPayload(state: *State, parsed_event: ?vaxis.Event) void {
+    const ev = parsed_event orelse return;
+    switch (ev) {
+        .paste => |txt| state.allocator.free(txt),
+        else => {},
+    }
 }
 
 fn resolveFocusedPaneForInput(state: *State) ?*Pane {
@@ -176,6 +220,7 @@ fn resolveFocusedPaneForInput(state: *State) ?*Pane {
 
 fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
     if (!state.popups.isBlocked()) return false;
+    defer freeParsedEventPayload(state, parsed_event);
 
     if (handleBlockedPopupInput(&state.popups, parsed_event)) {
         // Check if this was a confirm/picker dialog for pending action
@@ -265,6 +310,7 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
 fn handleTabLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
     const current_tab = &state.tabs.items[state.active_tab];
     if (!current_tab.popups.isBlocked()) return false;
+    defer freeParsedEventPayload(state, parsed_event);
 
     // Allow only tab switching while a tab popup is open.
     if (parsed_event) |ev_raw| {
@@ -288,8 +334,8 @@ fn appendFloatRenameText(state: *State, text: []const u8) void {
     const max_len: usize = 64;
     if (state.float_rename_buf.items.len >= max_len) return;
     const remaining = max_len - state.float_rename_buf.items.len;
-    if (text.len > remaining) return;
-    state.float_rename_buf.appendSlice(state.allocator, text) catch return;
+    const n = @min(text.len, remaining);
+    state.float_rename_buf.appendSlice(state.allocator, text[0..n]) catch return;
     state.needs_render = true;
 }
 
@@ -299,6 +345,11 @@ fn handleFloatRenameParsedEvent(state: *State, parsed: ParsedEventHead) bool {
     const event = parsed.event orelse return true;
     return switch (event) {
         .mouse => false,
+        .paste => |txt| blk: {
+            defer state.allocator.free(txt);
+            appendFloatRenameText(state, txt);
+            break :blk true;
+        },
         .key_release => true,
         .key_press => |k| blk: {
             switch (k.codepoint) {
@@ -355,19 +406,37 @@ fn handleParsedNonKeyEvent(state: *State, ev: vaxis.Event) bool {
             _ = loop_mouse.handle(state, m);
             return true;
         },
+        .mouse_leave => {
+            loop_mouse.resetShape(state);
+            return true;
+        },
         .paste => |txt| {
-            state.allocator.free(txt);
+            defer state.allocator.free(txt);
+            forwardPasteToFocusedPane(state, txt);
+            return true;
+        },
+        .paste_start => {
+            forwardBracketedPasteBoundary(state, true);
+            return true;
+        },
+        .paste_end => {
+            forwardBracketedPasteBoundary(state, false);
+            return true;
+        },
+        .winsize => |ws| {
+            applyInBandWinsize(state, ws);
+            return true;
+        },
+        .color_scheme => {
+            state.renderer.invalidate();
+            state.needs_render = true;
             return true;
         },
         .key_press => |k| return isModifierOnlyKey(k.codepoint),
         .key_release => |k| return isModifierOnlyKey(k.codepoint),
-        .paste_start,
-        .paste_end,
         .color_report,
         .focus_in,
         .focus_out,
-        .winsize,
-        .color_scheme,
         .cap_kitty_keyboard,
         .cap_kitty_graphics,
         .cap_rgb,
@@ -377,7 +446,6 @@ fn handleParsedNonKeyEvent(state: *State, ev: vaxis.Event) bool {
         .cap_multi_cursor,
         .cap_da1,
         => return true,
-        else => return false,
     }
 }
 
@@ -459,6 +527,7 @@ fn handlePaneSelectLoop(state: *State, inp: []const u8, first_parsed: ?ParsedEve
         if (parsed) |res| {
             i += res.n;
             _ = actions.handlePaneSelectEvent(state, res.event);
+            freeParsedEventPayload(state, res.event);
             continue;
         }
 
@@ -566,55 +635,65 @@ pub fn switchToTab(state: *State, new_tab: usize) void {
 }
 
 fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) []const u8 {
-    // Only do work if we previously forwarded a query.
-    if (state.osc_reply_target_uuid == null and !state.osc_reply_in_progress) return inp;
+    if (inp.len == 0) return inp;
 
     const ESC: u8 = 0x1b;
     const BEL: u8 = 0x07;
 
-    // Start capture only if the input begins with an OSC response.
-    if (!state.osc_reply_in_progress) {
-        if (inp.len < 2 or inp[0] != ESC or inp[1] != ']') return inp;
-        state.osc_reply_in_progress = true;
-        state.osc_reply_prev_esc = false;
-        state.osc_reply_buf.clearRetainingCapacity();
-    }
+    var rem = inp;
+    while (rem.len > 0) {
+        if (!state.osc_reply_in_progress and state.osc_reply_targets.items.len == 0) break;
 
-    var i: usize = 0;
-    while (i < inp.len) : (i += 1) {
-        const b = inp[i];
-        state.osc_reply_buf.append(state.allocator, b) catch {
-            // Drop on allocation error.
-            clearOscReplyCapture(state);
-            return inp[i + 1 ..];
-        };
-
-        var done = false;
-        if (b == BEL) {
-            done = true;
-        } else if (state.osc_reply_prev_esc and b == '\\') {
-            done = true;
-        }
-        state.osc_reply_prev_esc = (b == ESC);
-
-        if (state.osc_reply_buf.items.len > 64 * 1024) {
-            clearOscReplyCapture(state);
-            return inp[i + 1 ..];
+        if (!state.osc_reply_in_progress) {
+            // Consume only head-aligned OSC replies.
+            if (rem.len < 2 or rem[0] != ESC or rem[1] != ']') break;
+            state.osc_reply_target_uuid = state.dequeueOscReplyTarget();
+            state.osc_reply_in_progress = true;
+            state.osc_reply_prev_esc = false;
+            state.osc_reply_buf.clearRetainingCapacity();
         }
 
-        if (done) {
-            if (state.osc_reply_target_uuid) |uuid| {
-                if (state.findPaneByUuid(uuid)) |pane| {
-                    pane.write(state.osc_reply_buf.items) catch {};
-                }
+        var i: usize = 0;
+        while (i < rem.len) : (i += 1) {
+            const b = rem[i];
+            state.osc_reply_buf.append(state.allocator, b) catch {
+                clearOscReplyCapture(state);
+                rem = rem[i + 1 ..];
+                break;
+            };
+
+            var done = false;
+            if (b == BEL) {
+                done = true;
+            } else if (state.osc_reply_prev_esc and b == '\\') {
+                done = true;
+            }
+            state.osc_reply_prev_esc = (b == ESC);
+
+            if (state.osc_reply_buf.items.len > 64 * 1024) {
+                clearOscReplyCapture(state);
+                rem = rem[i + 1 ..];
+                break;
             }
 
-            clearOscReplyCapture(state);
+            if (done) {
+                if (state.osc_reply_target_uuid) |uuid| {
+                    if (state.findPaneByUuid(uuid)) |pane| {
+                        pane.write(state.osc_reply_buf.items) catch {};
+                    }
+                }
 
-            return inp[i + 1 ..];
+                clearOscReplyCapture(state);
+                rem = rem[i + 1 ..];
+                break;
+            }
+        }
+
+        if (state.osc_reply_in_progress) {
+            // Consumed all currently available bytes as partial OSC response.
+            return &[_]u8{};
         }
     }
 
-    // Consumed everything into the pending reply buffer.
-    return &[_]u8{};
+    return rem;
 }
