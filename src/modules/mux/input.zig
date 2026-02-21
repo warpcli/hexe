@@ -67,17 +67,6 @@ pub const ScrollAction = enum {
     shift_down,
 };
 
-pub fn parseKeyEvent(input_bytes: []const u8, allocator: std.mem.Allocator) ?KeyEvent {
-    if (input_bytes.len == 0) return null;
-
-    var parser: vaxis.Parser = .{};
-    const parsed = parser.parse(input_bytes, allocator) catch return null;
-    if (parsed.n == 0) return null;
-    const event = parsed.event orelse return null;
-
-    return keyEventFromVaxisEvent(event, parsed.n);
-}
-
 pub fn keyEventFromVaxisEvent(event: vaxis.Event, consumed: usize) ?KeyEvent {
     return switch (event) {
         .key_press => |key| parseVaxisKey(key, .press, consumed),

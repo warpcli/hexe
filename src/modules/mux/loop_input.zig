@@ -324,11 +324,15 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
         const current_tab = &state.tabs.items[state.active_tab];
         if (current_tab.popups.isBlocked()) {
             // Allow only tab switching while a tab popup is open.
-            if (input.parseKeyEvent(inp, state.allocator)) |ev| {
-                if (ev.when == .release) state.parser_key_release_seen = true;
-                const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
-                if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true, kitty_mode)) {
-                    return;
+            if (vaxis_parser.parse(inp, state.allocator) catch null) |parsed_key| {
+                if (parsed_key.n > 0 and parsed_key.event != null) {
+                    if (input.keyEventFromVaxisEvent(parsed_key.event.?, parsed_key.n)) |ev| {
+                        if (ev.when == .release) state.parser_key_release_seen = true;
+                        const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
+                        if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true, kitty_mode)) {
+                            return;
+                        }
+                    }
                 }
             }
             // Block everything else - handle popup input.
@@ -406,62 +410,58 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                 continue;
             }
 
-            if (vaxis_parser.parse(inp[i..], state.allocator) catch null) |parsed_scroll| {
-                if (parsed_scroll.n > 0 and parsed_scroll.event != null) {
-                    if (input.scrollActionFromVaxisEvent(parsed_scroll.event.?)) |action| {
-                        if (handleParsedScrollAction(state, action)) {
-                            i += parsed_scroll.n;
-                            continue;
-                        }
-                    }
-                }
-            }
-
-            // Parse key events through libvaxis parser first.
-            if (input.parseKeyEvent(inp[i..], state.allocator)) |ev| {
-                if (loop_input_keys.checkExitKeyEvent(state, ev.mods, ev.key, ev.when)) {
-                    i += ev.consumed;
-                    continue;
-                }
-
-                if (ev.when == .press and ev.mods == 2 and @as(core.Config.BindKeyKind, ev.key) == .char and ev.key.char == 'q') {
-                    state.running = false;
-                    return;
-                }
-
-                if (ev.when == .release) state.parser_key_release_seen = true;
-                const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
-                if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, false, kitty_mode)) {
-                    i += ev.consumed;
-                    continue;
-                }
-
-                // Some terminals collapse Ctrl+Alt+letter into Alt+letter.
-                // If Alt variant didn't match, retry as Ctrl+Alt for ASCII letters.
-                if (ev.mods == 1 and @as(core.Config.BindKeyKind, ev.key) == .char and ev.when == .press) {
-                    const ch = ev.key.char;
-                    if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9')) {
-                        if (keybinds.handleKeyEvent(state, ev.mods | 2, ev.key, ev.when, false, kitty_mode)) {
-                            i += ev.consumed;
-                            continue;
-                        }
-                    }
-                }
-
-                if (ev.when == .press) {
-                    keybinds.forwardKeyToPaneWithText(state, ev.mods, ev.key, ev.text_codepoint);
-                }
-
-                i += ev.consumed;
-                continue;
-            }
-
-            // Parse and consume non-key parser events (mouse/transport/control)
-            // so escape/control bytes never leak into pane stdin.
+            // Parse once through libvaxis and dispatch key/scroll/mouse/control.
             const parsed = vaxis_parser.parse(inp[i..], state.allocator) catch null;
             if (parsed) |res| {
                 if (res.n > 0) {
                     if (res.event) |ev| {
+                        if (input.scrollActionFromVaxisEvent(ev)) |action| {
+                            if (handleParsedScrollAction(state, action)) {
+                                i += res.n;
+                                continue;
+                            }
+                        }
+
+                        if (input.keyEventFromVaxisEvent(ev, res.n)) |key_ev| {
+                            if (loop_input_keys.checkExitKeyEvent(state, key_ev.mods, key_ev.key, key_ev.when)) {
+                                i += key_ev.consumed;
+                                continue;
+                            }
+
+                            if (key_ev.when == .press and key_ev.mods == 2 and @as(core.Config.BindKeyKind, key_ev.key) == .char and key_ev.key.char == 'q') {
+                                state.running = false;
+                                return;
+                            }
+
+                            if (key_ev.when == .release) state.parser_key_release_seen = true;
+                            const kitty_mode = state.renderer.vx.caps.kitty_keyboard and state.parser_key_release_seen;
+                            if (keybinds.handleKeyEvent(state, key_ev.mods, key_ev.key, key_ev.when, false, kitty_mode)) {
+                                i += key_ev.consumed;
+                                continue;
+                            }
+
+                            // Some terminals collapse Ctrl+Alt+letter into Alt+letter.
+                            // If Alt variant didn't match, retry as Ctrl+Alt for ASCII letters.
+                            if (key_ev.mods == 1 and @as(core.Config.BindKeyKind, key_ev.key) == .char and key_ev.when == .press) {
+                                const ch = key_ev.key.char;
+                                if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9')) {
+                                    if (keybinds.handleKeyEvent(state, key_ev.mods | 2, key_ev.key, key_ev.when, false, kitty_mode)) {
+                                        i += key_ev.consumed;
+                                        continue;
+                                    }
+                                }
+                            }
+
+                            if (key_ev.when == .press) {
+                                keybinds.forwardKeyToPaneWithText(state, key_ev.mods, key_ev.key, key_ev.text_codepoint);
+                            }
+
+                            i += key_ev.consumed;
+                            continue;
+                        }
+
+                        // Parse and consume non-key parser events (mouse/transport/control)
+                        // so escape/control bytes never leak into pane stdin.
                         switch (ev) {
                             .mouse => |m| {
                                 _ = loop_mouse.handle(state, input.mouseEventFromVaxis(m, res.n));
