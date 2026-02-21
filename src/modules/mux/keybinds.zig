@@ -18,7 +18,7 @@ pub const BindAction = core.Config.BindAction;
 const PaneQuery = core.PaneQuery;
 const FocusContext = @import("state.zig").FocusContext;
 
-fn parsedEventFromBytes(state: *State, bytes: []const u8) ?vaxis.Event {
+fn parseFirstEvent(state: *State, bytes: []const u8) ?vaxis.Event {
     var parser: vaxis.Parser = .{};
     const parsed = parser.parse(bytes, state.allocator) catch return null;
     if (parsed.n == 0) return null;
@@ -33,7 +33,7 @@ fn handleBlockedPopup(popups: anytype, parsed_event: ?vaxis.Event) bool {
 }
 
 pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
-    const parsed_event = parsedEventFromBytes(state, bytes);
+    const parsed_event = parseFirstEvent(state, bytes);
     forwardInputToFocusedPaneWithEvent(state, bytes, parsed_event);
 }
 
@@ -94,7 +94,7 @@ pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_code
                 }
                 n += std.unicode.utf8Encode(cp, out[n..]) catch 0;
                 if (n > 0) {
-                    forwardInputToFocusedPane(state, out[0..n]);
+                    forwardInputToFocusedPaneWithEvent(state, out[0..n], null);
                     return;
                 }
             }
@@ -120,7 +120,7 @@ pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_code
     if (target_pane) |pane| {
         if (key_translate.encodeKey(&out, mods, key, text_codepoint, &pane.vt.terminal)) |bytes| {
             if (bytes.len > 0) {
-                forwardInputToFocusedPane(state, bytes);
+                forwardInputToFocusedPaneWithEvent(state, bytes, null);
             }
         }
     }
