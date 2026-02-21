@@ -32,44 +32,32 @@ fn parseEventHead(state: *State, bytes: []const u8) ?ParsedEventHead {
     return .{ .n = parsed.n, .event = parsed.event };
 }
 
-fn updateInputFlagsFromParser(state: *State, input_bytes: []const u8) void {
-    var offset: usize = 0;
-    while (offset < input_bytes.len) {
-        const result = vaxis_parser.parse(input_bytes[offset..], state.allocator) catch {
-            offset += 1;
-            continue;
-        };
-        if (result.n == 0) break;
-        offset += result.n;
-
-        if (result.event) |event| {
-            switch (event) {
-                .paste_start => state.in_bracketed_paste = true,
-                .paste_end => state.in_bracketed_paste = false,
-                .cap_kitty_keyboard => state.renderer.vx.caps.kitty_keyboard = true,
-                .cap_kitty_graphics => state.renderer.vx.caps.kitty_graphics = true,
-                .cap_rgb => state.renderer.vx.caps.rgb = true,
-                .cap_unicode => {
-                    state.renderer.vx.caps.unicode = .unicode;
-                    state.renderer.vx.screen.width_method = .unicode;
-                },
-                .cap_sgr_pixels => state.renderer.vx.caps.sgr_pixels = true,
-                .cap_color_scheme_updates => state.renderer.vx.caps.color_scheme_updates = true,
-                .cap_multi_cursor => state.renderer.vx.caps.multi_cursor = true,
-                .cap_da1 => {
-                    state.renderer.vx.queries_done.store(true, .unordered);
-                    if (!state.terminal_features_enabled) {
-                        const stdout = std.fs.File.stdout();
-                        var buf: [512]u8 = undefined;
-                        var writer = stdout.writer(&buf);
-                        state.renderer.vx.enableDetectedFeatures(&writer.interface) catch {};
-                        writer.interface.flush() catch {};
-                        state.terminal_features_enabled = true;
-                    }
-                },
-                else => {},
+fn applyInputFlagsForEvent(state: *State, event: vaxis.Event) void {
+    switch (event) {
+        .paste_start => state.in_bracketed_paste = true,
+        .paste_end => state.in_bracketed_paste = false,
+        .cap_kitty_keyboard => state.renderer.vx.caps.kitty_keyboard = true,
+        .cap_kitty_graphics => state.renderer.vx.caps.kitty_graphics = true,
+        .cap_rgb => state.renderer.vx.caps.rgb = true,
+        .cap_unicode => {
+            state.renderer.vx.caps.unicode = .unicode;
+            state.renderer.vx.screen.width_method = .unicode;
+        },
+        .cap_sgr_pixels => state.renderer.vx.caps.sgr_pixels = true,
+        .cap_color_scheme_updates => state.renderer.vx.caps.color_scheme_updates = true,
+        .cap_multi_cursor => state.renderer.vx.caps.multi_cursor = true,
+        .cap_da1 => {
+            state.renderer.vx.queries_done.store(true, .unordered);
+            if (!state.terminal_features_enabled) {
+                const stdout = std.fs.File.stdout();
+                var buf: [512]u8 = undefined;
+                var writer = stdout.writer(&buf);
+                state.renderer.vx.enableDetectedFeatures(&writer.interface) catch {};
+                writer.interface.flush() catch {};
+                state.terminal_features_enabled = true;
             }
-        }
+        },
+        else => {},
     }
 }
 
@@ -183,6 +171,7 @@ fn consumeLeadingTerminalQueryReplies(state: *State, inp: []const u8) []const u8
         const parsed = parseEventHead(state, inp[i..]) orelse break;
         const event = parsed.event orelse break;
         if (!isTerminalQueryReplyEvent(event)) break;
+        applyInputFlagsForEvent(state, event);
         i += parsed.n;
     }
     if (i > 0) return inp[i..];
@@ -462,6 +451,7 @@ fn dispatchParsedEvent(state: *State, parsed: anytype) ParsedDispatchResult {
     if (parsed.event == null) return .{ .consumed = true, .quit = false, .parsed_event = null, .consumed_bytes = parsed.n };
 
     const ev = parsed.event.?;
+    applyInputFlagsForEvent(state, ev);
 
     if (input.scrollActionFromVaxisEvent(ev)) |action| {
         if (handleParsedScrollAction(state, action)) {
@@ -537,9 +527,6 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
     const cleaned = consumeLeadingTerminalQueryReplies(state, stable);
     if (cleaned.len == 0) return;
-
-    // Keep bracketed-paste state synchronized from parsed terminal events.
-    updateInputFlagsFromParser(state, cleaned);
 
     // Record all input for keycast display (before any processing)
     loop_input_keys.recordKeycastInput(state, cleaned);
