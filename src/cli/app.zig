@@ -20,6 +20,16 @@ const App = yazap.App;
 const Arg = yazap.Arg;
 const print = std.debug.print;
 
+const help_ansi = struct {
+    pub const RESET = "\x1b[0m";
+    pub const BOLD = "\x1b[1m";
+    pub const DIM = "\x1b[2m";
+    pub const TITLE = "\x1b[38;5;45m";
+    pub const SECTION = "\x1b[38;5;81m";
+    pub const CMD = "\x1b[38;5;220m";
+    pub const ALIAS = "\x1b[38;5;171m";
+};
+
 fn setEnvVar(key: []const u8, value: []const u8) void {
     if (key.len == 0 or value.len == 0) return;
     const key_z = std.heap.c_allocator.dupeZ(u8, key) catch return;
@@ -72,6 +82,68 @@ fn normalizeTopLevelCommand(command: []const u8) []const u8 {
     if (std.mem.eql(u8, command, "pop")) return "popup";
     if (std.mem.eql(u8, command, "cfg")) return "config";
     return command;
+}
+
+fn hasHelpFlag(args: []const [:0]u8) bool {
+    for (args[1..]) |arg| {
+        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return true;
+    }
+    return false;
+}
+
+fn firstCommandToken(args: []const [:0]u8) ?[]const u8 {
+    for (args[1..]) |arg| {
+        if (arg.len > 0 and arg[0] != '-') return arg;
+    }
+    return null;
+}
+
+fn printHelpRoot() void {
+    print("{s}{s}Hexe CLI{s}\n", .{ help_ansi.BOLD, help_ansi.TITLE, help_ansi.RESET });
+    print("{s}A terminal multiplexer where UI is disposable.{s}\n\n", .{ help_ansi.DIM, help_ansi.RESET });
+    print("{s}Usage{s}: hexe <command> [subcommand] [options]\n\n", .{ help_ansi.SECTION, help_ansi.RESET });
+    print("{s}Commands{s}:\n", .{ help_ansi.SECTION, help_ansi.RESET });
+    print("  {s}session{s}      {s}(alias: ses){s}  Session daemon management\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+    print("  {s}multiplexer{s}  {s}(alias: mux){s}  Terminal multiplexer\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+    print("  {s}pod{s}          {s}(alias: pod){s}  Per-pane PTY daemon\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+    print("  {s}shell{s}        {s}(alias: shp){s}  Shell prompt renderer\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+    print("  {s}popup{s}        {s}(alias: pop){s}  Popup overlays\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+    print("  {s}config{s}       {s}(alias: cfg){s}  Configuration management\n\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+    print("Try {s}hexe session --help{s} or {s}hexe multiplexer --help{s}\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.CMD, help_ansi.RESET });
+}
+
+fn printHelpCommand(command: []const u8) void {
+    if (std.mem.eql(u8, command, "session")) {
+        print("{s}{s}session{s} {s}(alias: ses){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+        print("Subcommands: daemon, status, list, kill, clear, export, stats\n", .{});
+        return;
+    }
+    if (std.mem.eql(u8, command, "multiplexer")) {
+        print("{s}{s}multiplexer{s} {s}(alias: mux){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+        print("Subcommands: new, attach, float, notify, send, info, layout, focus\n", .{});
+        return;
+    }
+    if (std.mem.eql(u8, command, "pod")) {
+        print("{s}{s}pod{s} {s}(alias: pod){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+        print("Subcommands: daemon, list, new, send, attach, kill, gc\n", .{});
+        return;
+    }
+    if (std.mem.eql(u8, command, "shell")) {
+        print("{s}{s}shell{s} {s}(alias: shp){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+        print("Subcommands: prompt, init, exit-intent, shell-event, spinner\n", .{});
+        return;
+    }
+    if (std.mem.eql(u8, command, "popup")) {
+        print("{s}{s}popup{s} {s}(alias: pop){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+        print("Subcommands: notify, confirm, choose\n", .{});
+        return;
+    }
+    if (std.mem.eql(u8, command, "config")) {
+        print("{s}{s}config{s} {s}(alias: cfg){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+        print("Subcommands: validate\n", .{});
+        return;
+    }
+    printHelpRoot();
 }
 
 pub fn main() !void {
@@ -341,6 +413,16 @@ pub fn main() !void {
     defer {
         for (owned_alias_args.items) |item| allocator.free(item);
         owned_alias_args.deinit(allocator);
+    }
+
+    if (hasHelpFlag(raw_args)) {
+        const cmd = if (firstCommandToken(raw_args)) |token| normalizeTopLevelCommand(token) else null;
+        if (cmd) |name| {
+            printHelpCommand(name);
+        } else {
+            printHelpRoot();
+        }
+        return;
     }
 
     for (raw_args[1..], 0..) |arg, idx| {
