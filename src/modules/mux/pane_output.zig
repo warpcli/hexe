@@ -80,158 +80,21 @@ fn forwardOsc(self: *Pane, data: []const u8) void {
             self.osc_pending_esc = false;
             self.osc_prev_esc = false;
 
-            if (shouldPassthroughOsc(self.osc_buf.items)) {
-                const code = parseOscCode(self.osc_buf.items) orelse 0;
-                if (code == 52) {
-                    handleOsc52(self, self.osc_buf.items);
-                }
-                if (isOscQuery(self.osc_buf.items)) {
-                    self.osc_expect_response = true;
-                    const stdout = std.fs.File.stdout();
-                    stdout.writeAll(self.osc_buf.items) catch {};
-                } else {
-                    const stdout = std.fs.File.stdout();
-                    stdout.writeAll(self.osc_buf.items) catch {};
-                }
+            if (isOscQuery(self.osc_buf.items)) {
+                self.osc_expect_response = true;
             }
+            const stdout = std.fs.File.stdout();
+            stdout.writeAll(self.osc_buf.items) catch {};
 
             self.osc_buf.clearRetainingCapacity();
         }
     }
 }
 
-fn parseOscCode(seq: []const u8) ?u32 {
-    if (seq.len < 4) return null;
-    if (seq[0] != 0x1b or seq[1] != ']') return null;
-
-    var i: usize = 2;
-    var code: u32 = 0;
-    var any: bool = false;
-    while (i < seq.len) : (i += 1) {
-        const c = seq[i];
-        if (c == ';') break;
-        if (c < '0' or c > '9') return null;
-        any = true;
-        code = code * 10 + @as(u32, c - '0');
-        if (code > 10000) return null;
-    }
-    if (!any) return null;
-    return code;
-}
-
-fn shouldPassthroughOsc(seq: []const u8) bool {
-    const code = parseOscCode(seq) orelse return false;
-    if (code == 0 or code == 1 or code == 2) return true;
-    if (code == 7) return true;
-    if (code == 52) return true;
-    if (code == 4 or code == 104) return true;
-    if (code >= 10 and code <= 19) return true;
-    if (code >= 110 and code <= 119) return true;
-    return false;
-}
-
 fn isOscQuery(seq: []const u8) bool {
-    const code = parseOscCode(seq) orelse return false;
-    if (!(code == 4 or code == 104 or (code >= 10 and code <= 19) or (code >= 110 and code <= 119))) return false;
+    if (seq.len < 4) return false;
+    if (seq[0] != 0x1b or seq[1] != ']') return false;
     return std.mem.indexOf(u8, seq, ";?") != null;
-}
-
-fn handleOsc52(self: *Pane, seq: []const u8) void {
-    const start = std.mem.indexOf(u8, seq, "\x1b]52;") orelse return;
-    var i: usize = start + 5;
-
-    const sel_end = std.mem.indexOfScalarPos(u8, seq, i, ';') orelse return;
-    i = sel_end + 1;
-    if (i >= seq.len) return;
-
-    var payload = seq[i..];
-    if (payload.len >= 2 and payload[payload.len - 2] == 0x1b and payload[payload.len - 1] == '\\') {
-        payload = payload[0 .. payload.len - 2];
-    } else if (payload.len >= 1 and payload[payload.len - 1] == 0x07) {
-        payload = payload[0 .. payload.len - 1];
-    }
-
-    if (payload.len == 0) return;
-
-    if (payload.len == 1 and payload[0] == '?') {
-        respondToClipboardQuery(self, seq[start + 5 .. sel_end]);
-        return;
-    }
-
-    const decoder = std.base64.standard.Decoder;
-    const out_len = decoder.calcSizeForSlice(payload) catch return;
-    const decoded = self.allocator.alloc(u8, out_len) catch return;
-    defer self.allocator.free(decoded);
-    decoder.decode(decoded, payload) catch return;
-
-    setSystemClipboard(self.allocator, decoded);
-}
-
-fn setSystemClipboard(allocator: std.mem.Allocator, bytes: []const u8) void {
-    if (std.posix.getenv("WAYLAND_DISPLAY") != null) {
-        if (spawnClipboardWriter(allocator, &.{"wl-copy"}, bytes)) return;
-    }
-    if (std.posix.getenv("DISPLAY") != null) {
-        if (spawnClipboardWriter(allocator, &.{ "xclip", "-selection", "clipboard", "-in" }, bytes)) return;
-        if (spawnClipboardWriter(allocator, &.{ "xsel", "--clipboard", "--input" }, bytes)) return;
-    }
-}
-
-fn spawnClipboardWriter(allocator: std.mem.Allocator, argv: []const []const u8, bytes: []const u8) bool {
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
-
-    child.spawn() catch return false;
-
-    if (child.stdin) |stdin_file| {
-        stdin_file.writeAll(bytes) catch {};
-        stdin_file.close();
-    }
-    _ = child.wait() catch {};
-    return true;
-}
-
-fn respondToClipboardQuery(self: *Pane, selection: []const u8) void {
-    const content = getSystemClipboard(self.allocator) orelse return;
-    defer self.allocator.free(content);
-
-    const encoder = std.base64.standard.Encoder;
-    const encoded_len = encoder.calcSize(content.len);
-    const encoded = self.allocator.alloc(u8, encoded_len) catch return;
-    defer self.allocator.free(encoded);
-    _ = encoder.encode(encoded, content);
-
-    var response_buf: [8192]u8 = undefined;
-    const response = std.fmt.bufPrint(&response_buf, "\x1b]52;{s};{s}\x07", .{ selection, encoded }) catch return;
-    self.write(response) catch {};
-}
-
-fn getSystemClipboard(allocator: std.mem.Allocator) ?[]u8 {
-    if (std.posix.getenv("WAYLAND_DISPLAY") != null) {
-        if (readClipboardCommand(allocator, &.{"wl-paste"})) |content| return content;
-    }
-    if (std.posix.getenv("DISPLAY") != null) {
-        if (readClipboardCommand(allocator, &.{ "xclip", "-selection", "clipboard", "-out" })) |content| return content;
-        if (readClipboardCommand(allocator, &.{ "xsel", "--clipboard", "--output" })) |content| return content;
-    }
-    return null;
-}
-
-fn readClipboardCommand(allocator: std.mem.Allocator, argv: []const []const u8) ?[]u8 {
-    var child = std.process.Child.init(argv, allocator);
-    child.stdin_behavior = .Ignore;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Ignore;
-
-    child.spawn() catch return null;
-
-    const stdout = child.stdout orelse return null;
-    const content = stdout.readToEndAlloc(allocator, 1024 * 1024) catch return null;
-    _ = child.wait() catch {};
-
-    return content;
 }
 
 fn containsClearSeq(tail: []const u8, data: []const u8) bool {
