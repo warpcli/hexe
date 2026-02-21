@@ -1,8 +1,8 @@
 const std = @import("std");
+const vaxis = @import("vaxis");
 
 const core = @import("core");
 
-const input = @import("input.zig");
 const layout_mod = @import("layout.zig");
 const focus_nav = @import("focus_nav.zig");
 const float_title = @import("float_title.zig");
@@ -44,7 +44,43 @@ fn toLocalClamped(pane: *Pane, abs_x: u16, abs_y: u16) mouse_selection.Pos {
 
 /// Forward a mouse event to a pane with translated coordinates.
 /// The app expects pane-local coordinates, not absolute screen coordinates.
-fn forwardMouseToPane(pane: *Pane, ev: input.MouseEvent) void {
+const MouseEvent = struct {
+    btn: u16,
+    x: u16,
+    y: u16,
+    is_release: bool,
+};
+
+fn encodeMouseEvent(mouse: vaxis.Mouse) MouseEvent {
+    var btn: u16 = switch (mouse.button) {
+        .left => 0,
+        .middle => 1,
+        .right => 2,
+        .none => 3,
+        .wheel_up => 64,
+        .wheel_down => 65,
+        .wheel_right => 66,
+        .wheel_left => 67,
+        .button_8 => 128,
+        .button_9 => 129,
+        .button_10 => 130,
+        .button_11 => 131,
+    };
+
+    if (mouse.mods.shift) btn |= 4;
+    if (mouse.mods.alt) btn |= 8;
+    if (mouse.mods.ctrl) btn |= 16;
+    if (mouse.type == .motion or mouse.type == .drag) btn |= 32;
+
+    return .{
+        .btn = btn,
+        .x = if (mouse.col <= 0) 0 else @intCast(mouse.col),
+        .y = if (mouse.row <= 0) 0 else @intCast(mouse.row),
+        .is_release = mouse.type == .release,
+    };
+}
+
+fn forwardMouseToPane(pane: *Pane, ev: MouseEvent) void {
     // Convert absolute coords to pane-local (1-based for SGR)
     const local_x: u16 = if (ev.x >= pane.x) ev.x - pane.x + 1 else 1;
     const local_y: u16 = if (ev.y >= pane.y) ev.y - pane.y + 1 else 1;
@@ -341,7 +377,8 @@ fn updateFloatResize(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const 
     state.overlays.showResizeInfo(pane.uuid, pane.width, pane.height, pane.border_x, pane.border_y);
 }
 
-pub fn handle(state: *State, ev: input.MouseEvent) bool {
+pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
+    const ev = encodeMouseEvent(mouse);
     const mouse_mods = mouseModsMask(ev.btn);
     const sel_override = state.config.mouse.selection_override_mods;
     const override_active = sel_override != 0 and (mouse_mods & sel_override) == sel_override;

@@ -40,15 +40,6 @@ fn parsePopupKey(input: []const u8) ?u8 {
     };
 }
 
-/// Parse SGR mouse event from input
-/// Returns mouse event info or null if not a mouse event
-pub const MouseEvent = struct {
-    btn: u16,
-    x: u16,
-    y: u16,
-    is_release: bool,
-};
-
 pub const KeyEvent = struct {
     mods: u8,
     key: core.Config.BindKey,
@@ -165,38 +156,5 @@ fn vaxisKeyToBindKey(vk: vaxis.Key, mods_inout: *u8) ?core.Config.BindKey {
             if (cp > 0xFF) break :blk null;
             break :blk .{ .char = @intCast(cp) };
         },
-    };
-}
-
-pub fn mouseEventFromVaxis(mouse: vaxis.Mouse) MouseEvent {
-    var btn: u16 = switch (mouse.button) {
-        .left => 0,
-        .middle => 1,
-        .right => 2,
-        .none => 3,
-        .wheel_up => 64,
-        .wheel_down => 65,
-        .wheel_right => 66,
-        .wheel_left => 67,
-        .button_8 => 128,
-        .button_9 => 129,
-        .button_10 => 130,
-        .button_11 => 131,
-    };
-
-    if (mouse.mods.shift) btn |= 4;
-    if (mouse.mods.alt) btn |= 8;
-    if (mouse.mods.ctrl) btn |= 16;
-
-    if (mouse.type == .motion or mouse.type == .drag) btn |= 32;
-
-    const x: u16 = if (mouse.col <= 0) 0 else @intCast(mouse.col);
-    const y: u16 = if (mouse.row <= 0) 0 else @intCast(mouse.row);
-
-    return .{
-        .btn = btn,
-        .x = x,
-        .y = y,
-        .is_release = mouse.type == .release,
     };
 }

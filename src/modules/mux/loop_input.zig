@@ -464,7 +464,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                         // so escape/control bytes never leak into pane stdin.
                         switch (ev) {
                             .mouse => |m| {
-                                _ = loop_mouse.handle(state, input.mouseEventFromVaxis(m));
+                                _ = loop_mouse.handle(state, m);
                                 i += res.n;
                                 continue;
                             },
