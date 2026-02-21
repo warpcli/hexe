@@ -15,10 +15,19 @@ const ReadonlyStream = @TypeOf((@as(*Terminal, undefined)).vtStream());
 
 /// Thin wrapper around ghostty Terminal
 pub const VT = struct {
+    const KittyImageCache = struct {
+        vaxis_id: u32,
+        width: u32,
+        height: u32,
+        data_len: usize,
+        format_tag: u8,
+    };
+
     allocator: std.mem.Allocator = undefined,
     terminal: Terminal = undefined,
     stream: ReadonlyStream = undefined,
     render_state: ghostty.RenderState = .empty,
+    kitty_image_cache: std.AutoHashMap(u32, KittyImageCache) = undefined,
     width: u16 = 0,
     height: u16 = 0,
     // NOTE: Do NOT cache RenderState across calls.
@@ -43,10 +52,12 @@ pub const VT = struct {
 
         self.stream = self.terminal.vtStream();
         self.render_state = .empty;
+        self.kitty_image_cache = std.AutoHashMap(u32, KittyImageCache).init(allocator);
     }
 
     pub fn deinit(self: *VT) void {
         self.render_state.deinit(self.allocator);
+        self.kitty_image_cache.deinit();
         self.stream.deinit();
         self.terminal.deinit(self.allocator);
         self.* = undefined;

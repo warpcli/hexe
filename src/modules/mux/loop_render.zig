@@ -13,8 +13,9 @@ const notification = @import("notification.zig");
 const render_vx = @import("render_vx.zig");
 const vt_bridge = @import("vt_bridge.zig");
 const render_sprite = @import("render_sprite.zig");
+const Pane = @import("pane.zig").Pane;
 
-fn drawPaneRenderState(renderer: anytype, state: anytype, x: u16, y: u16, width: u16, height: u16) void {
+fn drawPaneRenderState(renderer: anytype, pane: *Pane, state: anytype, x: u16, y: u16, width: u16, height: u16, stdout: std.fs.File) void {
     const root = renderer.vx.window();
     const win = root.child(.{
         .x_off = @intCast(x),
@@ -22,7 +23,7 @@ fn drawPaneRenderState(renderer: anytype, state: anytype, x: u16, y: u16, width:
         .width = width,
         .height = height,
     });
-    vt_bridge.drawRenderState(win, state, width, height, renderer.frame_arena.allocator());
+    vt_bridge.drawRenderState(win, state, width, height, renderer.frame_arena.allocator(), &pane.vt, &renderer.vx, stdout);
 }
 
 fn sanitizeLabelUtf8(raw: []const u8, out: *[128]u8) []const u8 {
@@ -125,7 +126,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     var pane_it = state.currentLayout().splitIterator();
     while (pane_it.next()) |pane| {
         const render_state = pane.*.getRenderState() catch continue;
-        drawPaneRenderState(renderer, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height);
+        drawPaneRenderState(renderer, pane.*, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height, stdout);
 
         if (state.mouse_selection.rangeForPane(state.active_tab, pane.*)) |range| {
             mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height, range, state.config.selection_color);
@@ -183,7 +184,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         }
 
         const render_state = pane.getRenderState() catch continue;
-        drawPaneRenderState(renderer, render_state, pane.x, pane.y, pane.width, pane.height);
+        drawPaneRenderState(renderer, pane, render_state, pane.x, pane.y, pane.width, pane.height, stdout);
 
         if (state.mouse_selection.rangeForPane(state.active_tab, pane)) |range| {
             mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range, state.config.selection_color);
@@ -231,7 +232,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             }
 
             if (pane.getRenderState()) |render_state| {
-                drawPaneRenderState(renderer, render_state, pane.x, pane.y, pane.width, pane.height);
+                drawPaneRenderState(renderer, pane, render_state, pane.x, pane.y, pane.width, pane.height, stdout);
 
                 if (state.mouse_selection.rangeForPane(state.active_tab, pane)) |range| {
                     mouse_selection.applyOverlayTrimmed(renderer, render_state, pane.x, pane.y, pane.width, pane.height, range, state.config.selection_color);

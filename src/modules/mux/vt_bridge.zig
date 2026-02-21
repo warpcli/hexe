@@ -1,6 +1,7 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
 const ghostty = @import("ghostty-vt");
+const core = @import("core");
 
 const pagepkg = ghostty.page;
 const Style = ghostty.Style;
@@ -30,6 +31,9 @@ pub fn drawRenderState(
     width: u16,
     height: u16,
     arena: std.mem.Allocator,
+    vt: *core.VT,
+    vx: *vaxis.Vaxis,
+    stdout: std.fs.File,
 ) void {
     const MAX_REASONABLE_ROWS: usize = 10_000;
     const MAX_REASONABLE_COLS: usize = 1_000;
@@ -45,6 +49,8 @@ pub fn drawRenderState(
 
     const row_cells = row_slice.items(.cells);
     const row_pins = row_slice.items(.pin);
+
+    syncKittyImages(vt, vx, stdout, arena);
 
     for (0..available_rows) |yi| {
         const y: u16 = @intCast(yi);
@@ -100,6 +106,8 @@ pub fn drawRenderState(
             col += cell_width;
         }
     }
+
+    drawKittyVirtualPlacements(win, vt, row_pins, available_rows);
 }
 
 /// Convert ghostty cell content to a UTF-8 string.
@@ -137,6 +145,125 @@ fn isKittyGraphicsPlaceholder(cp: u21) bool {
         return cp == ghostty.kitty.graphics.unicode.placeholder;
     }
     return false;
+}
+
+fn imageFormatToVaxis(format: anytype) ?vaxis.Image.TransmitFormat {
+    return switch (format) {
+        .rgb => .rgb,
+        .rgba => .rgba,
+        .png => .png,
+        else => null,
+    };
+}
+
+fn syncKittyImages(vt: *core.VT, vx: *vaxis.Vaxis, stdout: std.fs.File, arena: std.mem.Allocator) void {
+    const Storage = @TypeOf(vt.terminal.screens.active.kitty_images);
+    if (comptime !@hasField(Storage, "images")) return;
+
+    if (!vx.caps.kitty_graphics) return;
+
+    const storage = &vt.terminal.screens.active.kitty_images;
+
+    var tty_buf: [4096]u8 = undefined;
+    var writer = stdout.writer(&tty_buf);
+
+    var stale: std.ArrayList(u32) = .empty;
+    defer stale.deinit(arena);
+
+    var cache_it = vt.kitty_image_cache.iterator();
+    while (cache_it.next()) |entry| {
+        if (!storage.images.contains(entry.key_ptr.*)) {
+            stale.append(arena, entry.key_ptr.*) catch {};
+        }
+    }
+
+    for (stale.items) |ghost_id| {
+        if (vt.kitty_image_cache.get(ghost_id)) |cached| {
+            vx.freeImage(&writer.interface, cached.vaxis_id);
+        }
+        _ = vt.kitty_image_cache.remove(ghost_id);
+    }
+
+    var it = storage.images.iterator();
+    while (it.next()) |entry| {
+        const ghost_id = entry.key_ptr.*;
+        const img = entry.value_ptr.*;
+        const fmt = imageFormatToVaxis(img.format) orelse continue;
+        const fmt_tag: u8 = switch (fmt) {
+            .rgb => 1,
+            .rgba => 2,
+            .png => 3,
+        };
+
+        if (vt.kitty_image_cache.get(ghost_id)) |cached| {
+            if (cached.width == img.width and
+                cached.height == img.height and
+                cached.data_len == img.data.len and
+                cached.format_tag == fmt_tag)
+            {
+                continue;
+            }
+
+            vx.freeImage(&writer.interface, cached.vaxis_id);
+            _ = vt.kitty_image_cache.remove(ghost_id);
+        }
+
+        const w: u16 = @intCast(@min(img.width, std.math.maxInt(u16)));
+        const h: u16 = @intCast(@min(img.height, std.math.maxInt(u16)));
+        if (w == 0 or h == 0) continue;
+
+        const enc_size = std.base64.standard.Encoder.calcSize(img.data.len);
+        const enc_buf = arena.alloc(u8, enc_size) catch continue;
+        const b64 = std.base64.standard.Encoder.encode(enc_buf, img.data);
+
+        const vimg = vx.transmitPreEncodedImage(&writer.interface, b64, w, h, fmt) catch continue;
+        vt.kitty_image_cache.put(vt.allocator, ghost_id, .{
+            .vaxis_id = vimg.id,
+            .width = img.width,
+            .height = img.height,
+            .data_len = img.data.len,
+            .format_tag = fmt_tag,
+        }) catch {};
+    }
+}
+
+fn drawKittyVirtualPlacements(
+    win: vaxis.Window,
+    vt: *core.VT,
+    row_pins: []const ghostty.PageList.Pin,
+    available_rows: usize,
+) void {
+    if (comptime !@hasDecl(ghostty.kitty.graphics, "unicode")) return;
+
+    if (available_rows == 0) return;
+
+    const top = row_pins[0];
+    const bottom = row_pins[available_rows - 1];
+
+    var it = ghostty.kitty.graphics.unicode.placementIterator(top, bottom);
+    while (it.next()) |placement| {
+        const cached = vt.kitty_image_cache.get(placement.image_id) orelse continue;
+        const p = vt.terminal.screens.active.pages.pointFromPin(.viewport, placement.pin) orelse continue;
+        const vp = p.viewport;
+
+        const col: u16 = @intCast(vp.x);
+        const row: u16 = @intCast(vp.y);
+        if (col >= win.width or row >= win.height) continue;
+
+        const size_rows: u16 = @intCast(@min(placement.height, std.math.maxInt(u16)));
+        const size_cols: u16 = @intCast(@min(placement.width, std.math.maxInt(u16)));
+        if (size_rows == 0 or size_cols == 0) continue;
+
+        win.writeCell(col, row, .{
+            .image = .{
+                .img_id = cached.vaxis_id,
+                .options = .{
+                    .size = .{ .rows = size_rows, .cols = size_cols },
+                    .z_index = -1,
+                },
+            },
+        });
+    }
 }
 
 /// Convert ghostty Style to vaxis Style.
