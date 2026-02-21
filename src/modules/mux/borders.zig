@@ -107,60 +107,14 @@ pub fn drawSplitBorders(
     term_width: u16,
     content_height: u16,
 ) void {
-    var split_screen_opt: ?vaxis.Screen = null;
-    var split_touched_opt: ?[]bool = null;
-    var split_win_opt: ?vaxis.Window = null;
-    const split_cell_count = @as(usize, term_width) * @as(usize, content_height);
-    if (split_cell_count > 0) {
-        if (vaxis_surface.initUnicodeScreen(std.heap.page_allocator, term_width, content_height) catch null) |screen| {
-            split_screen_opt = screen;
-            if (std.heap.page_allocator.alloc(bool, split_cell_count) catch null) |touched| {
-                @memset(touched, false);
-                split_touched_opt = touched;
-                split_win_opt = .{
-                    .x_off = 0,
-                    .y_off = 0,
-                    .parent_x_off = 0,
-                    .parent_y_off = 0,
-                    .width = term_width,
-                    .height = content_height,
-                    .screen = &split_screen_opt.?,
-                };
-            } else {
-                split_screen_opt.?.deinit(std.heap.page_allocator);
-                split_screen_opt = null;
-            }
-        }
-    }
-    defer {
-        if (split_touched_opt) |touched| std.heap.page_allocator.free(touched);
-        if (split_screen_opt) |*screen| screen.deinit(std.heap.page_allocator);
-    }
-
     const write_split_cell = struct {
         fn go(
             renderer_in: *Renderer,
-            split_win: ?vaxis.Window,
-            touched: ?[]bool,
-            width: u16,
             x: u16,
             y: u16,
             cp: u21,
             color: u8,
         ) void {
-            if (split_win) |win| {
-                var cp_buf: [4]u8 = undefined;
-                const cp_bytes = encodeCodepointUtf8(cp, &cp_buf);
-                win.writeCell(x, y, .{
-                    .char = .{ .grapheme = cp_bytes, .width = 1 },
-                    .style = .{ .fg = .{ .index = color } },
-                });
-                if (touched) |mask| {
-                    const idx = @as(usize, y) * @as(usize, width) + @as(usize, x);
-                    if (idx < mask.len) mask[idx] = true;
-                }
-                return;
-            }
             var cp_buf: [4]u8 = undefined;
             const cp_bytes = encodeCodepointUtf8(cp, &cp_buf);
             renderer_in.setVaxisCell(x, y, .{
@@ -268,7 +222,7 @@ pub fn drawSplitBorders(
                 }
             }
 
-            write_split_cell(renderer, split_win_opt, split_touched_opt, term_width, x, y, char, color);
+            write_split_cell(renderer, x, y, char, color);
         }
     }
 
@@ -318,13 +272,7 @@ pub fn drawSplitBorders(
                 }
             }
 
-            write_split_cell(renderer, split_win_opt, split_touched_opt, term_width, x, y, char, color);
-        }
-    }
-
-    if (split_screen_opt) |*screen| {
-        if (split_touched_opt) |touched| {
-            vaxis_surface.blitTouched(renderer, screen, touched, term_width, 0, 0);
+            write_split_cell(renderer, x, y, char, color);
         }
     }
 }
