@@ -377,6 +377,40 @@ fn updateFloatResize(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const 
     state.overlays.showResizeInfo(pane.uuid, pane.width, pane.height, pane.border_x, pane.border_y);
 }
 
+fn copySelectionRange(state: *State, pane: *Pane, range: anytype) bool {
+    state.mouse_selection.setRange(state.active_tab, pane.uuid, pane, range);
+    const bytes = mouse_selection.extractText(state.allocator, pane, range) catch {
+        state.notifications.showFor("Copy failed", 1200);
+        state.needs_render = true;
+        return true;
+    };
+    defer state.allocator.free(bytes);
+
+    if (bytes.len == 0) {
+        state.notifications.showFor("No text selected", 1200);
+    } else {
+        clipboard.copyToClipboard(state.allocator, bytes);
+        state.notifications.showFor("Copied selection", 1200);
+    }
+    state.needs_render = true;
+    return true;
+}
+
+fn forwardToFocusedAltPane(state: *State, ev: MouseEvent) bool {
+    if (state.active_floating) |afi| {
+        if (afi < state.floats.items.len and state.floats.items[afi].vt.inAltScreen()) {
+            forwardMouseToPane(state.floats.items[afi], ev);
+            return true;
+        }
+    } else if (state.currentLayout().getFocusedPane()) |p| {
+        if (p.vt.inAltScreen()) {
+            forwardMouseToPane(p, ev);
+            return true;
+        }
+    }
+    return false;
+}
+
 pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
     const ev = encodeMouseEvent(mouse);
     const mouse_mods = mouseModsMask(ev.btn);
@@ -647,59 +681,17 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                 if (click_count == 2) {
                     // Double-click: select word (stops at separators)
                     if (mouse_selection.selectWordRange(t.pane, local.x, local.y)) |range| {
-                        state.mouse_selection.setRange(state.active_tab, t.pane.uuid, t.pane, range);
-                        const bytes = mouse_selection.extractText(state.allocator, t.pane, range) catch {
-                            state.notifications.showFor("Copy failed", 1200);
-                            state.needs_render = true;
-                            return true;
-                        };
-                        defer state.allocator.free(bytes);
-                        if (bytes.len == 0) {
-                            state.notifications.showFor("No text selected", 1200);
-                        } else {
-                            clipboard.copyToClipboard(state.allocator, bytes);
-                            state.notifications.showFor("Copied selection", 1200);
-                        }
-                        state.needs_render = true;
-                        return true;
+                        return copySelectionRange(state, t.pane, range);
                     }
                 } else if (click_count == 3) {
                     // Triple-click: select word including adjacent separators
                     if (mouse_selection.selectWordWithSeparatorsRange(t.pane, local.x, local.y)) |range| {
-                        state.mouse_selection.setRange(state.active_tab, t.pane.uuid, t.pane, range);
-                        const bytes = mouse_selection.extractText(state.allocator, t.pane, range) catch {
-                            state.notifications.showFor("Copy failed", 1200);
-                            state.needs_render = true;
-                            return true;
-                        };
-                        defer state.allocator.free(bytes);
-                        if (bytes.len == 0) {
-                            state.notifications.showFor("No text selected", 1200);
-                        } else {
-                            clipboard.copyToClipboard(state.allocator, bytes);
-                            state.notifications.showFor("Copied selection", 1200);
-                        }
-                        state.needs_render = true;
-                        return true;
+                        return copySelectionRange(state, t.pane, range);
                     }
                 } else if (click_count == 4) {
                     // Quad-click: select entire line
                     if (mouse_selection.selectLineRange(t.pane, local.x, local.y)) |range| {
-                        state.mouse_selection.setRange(state.active_tab, t.pane.uuid, t.pane, range);
-                        const bytes = mouse_selection.extractText(state.allocator, t.pane, range) catch {
-                            state.notifications.showFor("Copy failed", 1200);
-                            state.needs_render = true;
-                            return true;
-                        };
-                        defer state.allocator.free(bytes);
-                        if (bytes.len == 0) {
-                            state.notifications.showFor("No text selected", 1200);
-                        } else {
-                            clipboard.copyToClipboard(state.allocator, bytes);
-                            state.notifications.showFor("Copied selection", 1200);
-                        }
-                        state.needs_render = true;
-                        return true;
+                        return copySelectionRange(state, t.pane, range);
                     }
                 }
 
@@ -713,17 +705,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                 state.mouse_selection.clear();
                 state.needs_render = true;
             }
-            if (state.active_floating) |afi| {
-                if (afi < state.floats.items.len) {
-                    if (state.floats.items[afi].vt.inAltScreen()) {
-                        forwardMouseToPane(state.floats.items[afi], ev);
-                    }
-                }
-            } else if (state.currentLayout().getFocusedPane()) |p| {
-                if (p.vt.inAltScreen()) {
-                    forwardMouseToPane(p, ev);
-                }
-            }
+            _ = forwardToFocusedAltPane(state, ev);
         }
 
         return true;
@@ -735,18 +717,8 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
             forwardMouseToPane(t.pane, ev);
             return true;
         }
-    } else if (state.active_floating) |afi| {
-        if (afi < state.floats.items.len) {
-            if (state.floats.items[afi].vt.inAltScreen()) {
-                forwardMouseToPane(state.floats.items[afi], ev);
-                return true;
-            }
-        }
-    } else if (state.currentLayout().getFocusedPane()) |p| {
-        if (p.vt.inAltScreen()) {
-            forwardMouseToPane(p, ev);
-            return true;
-        }
+    } else if (forwardToFocusedAltPane(state, ev)) {
+        return true;
     }
 
     return true;

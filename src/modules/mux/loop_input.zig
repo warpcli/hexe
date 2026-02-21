@@ -228,13 +228,10 @@ fn resolveFocusedPaneForInput(state: *State) ?*Pane {
     return state.currentLayout().getFocusedPane();
 }
 
-fn handleMuxLevelPopup(state: *State, inp: []const u8) bool {
+fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
     if (!state.popups.isBlocked()) return false;
 
-    const parsed_mux = parseEventHead(state, inp);
-    const parsed_mux_event: ?vaxis.Event = if (parsed_mux) |p| p.event else null;
-
-    if (handleBlockedPopupInput(&state.popups, parsed_mux_event)) {
+    if (handleBlockedPopupInput(&state.popups, parsed_event)) {
         // Check if this was a confirm/picker dialog for pending action
         if (state.pending_action) |action| {
             switch (action) {
@@ -319,76 +316,78 @@ fn handleMuxLevelPopup(state: *State, inp: []const u8) bool {
     return true;
 }
 
-fn handleTabLevelPopup(state: *State, inp: []const u8) bool {
+fn handleTabLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
     const current_tab = &state.tabs.items[state.active_tab];
     if (!current_tab.popups.isBlocked()) return false;
 
-    const parsed_tab = parseEventHead(state, inp);
-    const parsed_tab_event: ?vaxis.Event = if (parsed_tab) |p| p.event else null;
-
     // Allow only tab switching while a tab popup is open.
-    if (parsed_tab) |p| {
-        if (parsed_tab_event != null) {
-            if (input.keyEventFromVaxisEvent(parsed_tab_event.?, p.n)) |ev| {
-                if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true)) {
-                    return true;
-                }
+    if (parsed_event) |ev_raw| {
+        if (input.keyEventFromVaxisEvent(ev_raw, 0)) |ev| {
+            if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true)) {
+                return true;
             }
         }
     }
 
     // Block everything else - handle popup input.
-    if (handleBlockedPopupInput(&current_tab.popups, parsed_tab_event)) {
+    if (handleBlockedPopupInput(&current_tab.popups, parsed_event)) {
         loop_ipc.sendPopResponse(state);
     }
     state.needs_render = true;
     return true;
 }
 
-fn handleFloatRenameByte(state: *State, inp: []const u8, i: *usize) bool {
+fn appendFloatRenameText(state: *State, text: []const u8) void {
+    if (text.len == 0) return;
+    const max_len: usize = 64;
+    if (state.float_rename_buf.items.len >= max_len) return;
+    const remaining = max_len - state.float_rename_buf.items.len;
+    if (text.len > remaining) return;
+    state.float_rename_buf.appendSlice(state.allocator, text) catch return;
+    state.needs_render = true;
+}
+
+fn handleFloatRenameParsedEvent(state: *State, parsed: ParsedEventHead) bool {
     if (state.float_rename_uuid == null) return false;
 
-    const b = inp[i.*];
+    const event = parsed.event orelse return true;
+    return switch (event) {
+        .mouse => false,
+        .key_release => true,
+        .key_press => |k| blk: {
+            switch (k.codepoint) {
+                vaxis.Key.escape => {
+                    state.clearFloatRename();
+                    break :blk true;
+                },
+                vaxis.Key.enter => {
+                    state.commitFloatRename();
+                    break :blk true;
+                },
+                vaxis.Key.backspace => {
+                    if (state.float_rename_buf.items.len > 0) {
+                        _ = state.float_rename_buf.pop();
+                        state.needs_render = true;
+                    }
+                    break :blk true;
+                },
+                else => {},
+            }
 
-    // Do not intercept SGR mouse sequences.
-    if (b == 0x1b and i.* + 2 < inp.len and inp[i.* + 1] == '[' and inp[i.* + 2] == '<') {
-        return false;
-    }
+            if (k.text) |txt| {
+                appendFloatRenameText(state, txt);
+                break :blk true;
+            }
 
-    // ESC cancels.
-    if (b == 0x1b) {
-        state.clearFloatRename();
-        i.* += 1;
-        return true;
-    }
-    // Enter commits.
-    if (b == '\r') {
-        state.commitFloatRename();
-        i.* += 1;
-        return true;
-    }
-    // Backspace.
-    if (b == 0x7f or b == 0x08) {
-        if (state.float_rename_buf.items.len > 0) {
-            _ = state.float_rename_buf.pop();
-            state.needs_render = true;
-        }
-        i.* += 1;
-        return true;
-    }
-    // Printable ASCII.
-    if (b >= 32 and b < 127) {
-        if (state.float_rename_buf.items.len < 64) {
-            state.float_rename_buf.append(state.allocator, b) catch {};
-            state.needs_render = true;
-        }
-        i.* += 1;
-        return true;
-    }
-
-    // Ignore everything else while renaming.
-    i.* += 1;
-    return true;
+            const cp = k.base_layout_codepoint orelse k.codepoint;
+            if (cp >= 32 and cp < 127) {
+                const b: u8 = @intCast(cp);
+                appendFloatRenameText(state, &.{b});
+            }
+            break :blk true;
+        },
+        else => true,
+    };
 }
 
 const KeyDispatchResult = enum {
@@ -516,31 +515,43 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     {
         const inp = cleaned;
 
-        if (handleMuxLevelPopup(state, inp)) return;
-        if (handleTabLevelPopup(state, inp)) return;
+        const popup_head = parseEventHead(state, inp);
+        const popup_event: ?vaxis.Event = if (popup_head) |h| h.event else null;
+
+        if (handleMuxLevelPopup(state, popup_event)) return;
+        if (handleTabLevelPopup(state, popup_event)) return;
 
         // ==========================================================================
         // LEVEL 2.5: Pane select mode - captures all input
         // ==========================================================================
         if (state.overlays.isPaneSelectActive()) {
-            // Handle each byte - looking for ESC or label characters
-            for (inp) |byte| {
-                if (actions.handlePaneSelectInput(state, byte)) {
-                    // Input was consumed
+            var pane_select_i: usize = 0;
+            while (pane_select_i < inp.len) {
+                const parsed = parseEventHead(state, inp[pane_select_i..]);
+                if (parsed) |res| {
+                    pane_select_i += res.n;
+                    _ = actions.handlePaneSelectEvent(state, res.event);
+                    continue;
                 }
+
+                // Keep pane-select mode isolated on parser failures.
+                pane_select_i += 1;
             }
             return;
         }
 
         var i: usize = 0;
         while (i < inp.len) {
-            if (handleFloatRenameByte(state, inp, &i)) continue;
-
             var parsed_event_for_popup: ?vaxis.Event = null;
 
             // Parse once through libvaxis and dispatch key/scroll/mouse/control.
             const parsed = parseEventHead(state, inp[i..]);
             if (parsed) |res| {
+                if (handleFloatRenameParsedEvent(state, res)) {
+                    i += res.n;
+                    continue;
+                }
+
                 const dispatch = dispatchParsedEvent(state, res);
                 parsed_event_for_popup = dispatch.parsed_event;
                 if (dispatch.quit) {
@@ -551,6 +562,10 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
                     i += dispatch.consumed_bytes;
                     continue;
                 }
+            } else if (state.float_rename_uuid != null) {
+                // Keep rename mode isolated if parser cannot produce an event.
+                i += 1;
+                continue;
             }
 
             // ======================================================================

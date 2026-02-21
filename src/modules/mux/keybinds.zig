@@ -18,23 +18,11 @@ pub const BindAction = core.Config.BindAction;
 const PaneQuery = core.PaneQuery;
 const FocusContext = @import("state.zig").FocusContext;
 
-fn parseFirstEvent(state: *State, bytes: []const u8) ?vaxis.Event {
-    var parser: vaxis.Parser = .{};
-    const parsed = parser.parse(bytes, state.allocator) catch return null;
-    if (parsed.n == 0) return null;
-    return parsed.event;
-}
-
 fn handleBlockedPopup(popups: anytype, parsed_event: ?vaxis.Event) bool {
     if (parsed_event) |ev| {
         return input.handlePopupEvent(popups, ev);
     }
     return false;
-}
-
-pub fn forwardInputToFocusedPane(state: *State, bytes: []const u8) void {
-    const parsed_event = parseFirstEvent(state, bytes);
-    forwardInputToFocusedPaneWithEvent(state, bytes, parsed_event);
 }
 
 pub fn forwardInputToFocusedPaneWithEvent(state: *State, bytes: []const u8, parsed_event: ?vaxis.Event) void {

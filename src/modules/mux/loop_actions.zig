@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const core = @import("core");
+const vaxis = @import("vaxis");
 const wire = core.wire;
 
 const layout_mod = @import("layout.zig");
@@ -815,8 +816,8 @@ pub fn focusPaneByUuid(state: *State, uuid: [32]u8) void {
     return loop_actions_focus.focusPaneByUuid(state, uuid);
 }
 
-pub fn handlePaneSelectInput(state: *State, byte: u8) bool {
-    return loop_actions_focus.handlePaneSelectInput(state, byte);
+pub fn handlePaneSelectEvent(state: *State, parsed_event: ?vaxis.Event) bool {
+    return loop_actions_focus.handlePaneSelectEvent(state, parsed_event);
 }
 
 pub fn switchToNextTab(state: *State) void {
