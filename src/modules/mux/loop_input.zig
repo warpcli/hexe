@@ -425,6 +425,10 @@ fn handleParsedNonKeyEvent(state: *State, ev: vaxis.Event) bool {
             _ = loop_mouse.handle(state, m);
             return true;
         },
+        .mouse_leave => {
+            loop_mouse.resetShape(state);
+            return true;
+        },
         .paste => |txt| {
             defer state.allocator.free(txt);
             forwardPasteToFocusedPane(state, txt);
@@ -461,7 +465,6 @@ fn handleParsedNonKeyEvent(state: *State, ev: vaxis.Event) bool {
         .cap_multi_cursor,
         .cap_da1,
         => return true,
-        else => return false,
     }
 }
 

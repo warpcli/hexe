@@ -436,6 +436,10 @@ fn applyMouseShape(state: *State, shape: vaxis.Mouse.Shape) void {
     state.needs_render = true;
 }
 
+pub fn resetShape(state: *State) void {
+    applyMouseShape(state, .default);
+}
+
 fn desiredMouseShape(state: *State, ev: MouseEvent, override_active: bool) vaxis.Mouse.Shape {
     if (state.mouse_drag != .none) {
         return switch (state.mouse_drag) {
