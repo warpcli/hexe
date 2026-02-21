@@ -205,7 +205,8 @@ fn handleParsedScrollAction(state: *State, action: input.ScrollAction) bool {
 
 fn handleBlockedPopupInput(popups: anytype, bytes: []const u8, parsed_event: ?vaxis.Event) bool {
     if (parsed_event) |ev| {
-        if (input.handlePopupEvent(popups, ev)) return true;
+        // Reuse already parsed event and avoid reparsing raw bytes.
+        return input.handlePopupEvent(popups, ev);
     }
     return input.handlePopupInput(popups, bytes);
 }
