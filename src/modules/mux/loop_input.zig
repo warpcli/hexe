@@ -228,6 +228,169 @@ fn resolveFocusedPaneForInput(state: *State) ?*Pane {
     return state.currentLayout().getFocusedPane();
 }
 
+fn handleMuxLevelPopup(state: *State, inp: []const u8) bool {
+    if (!state.popups.isBlocked()) return false;
+
+    const parsed_mux = parseEventHead(state, inp);
+    const parsed_mux_event: ?vaxis.Event = if (parsed_mux) |p| p.event else null;
+
+    if (handleBlockedPopupInput(&state.popups, parsed_mux_event)) {
+        // Check if this was a confirm/picker dialog for pending action
+        if (state.pending_action) |action| {
+            switch (action) {
+                .adopt_choose => {
+                    // Handle picker result for selecting orphaned pane
+                    if (state.popups.getPickerResult()) |selected| {
+                        if (selected < state.adopt_orphan_count) {
+                            state.adopt_selected_uuid = state.adopt_orphans[selected].uuid;
+                            // Now show confirm dialog
+                            state.pending_action = .adopt_confirm;
+                            state.popups.clearResults();
+                            state.popups.showConfirm("Destroy current pane?", .{}) catch {};
+                        } else {
+                            state.pending_action = null;
+                        }
+                    } else if (state.popups.wasPickerCancelled()) {
+                        state.pending_action = null;
+                        state.popups.clearResults();
+                    }
+                },
+                .adopt_confirm => {
+                    // Handle confirm result for adopt action
+                    if (state.popups.getConfirmResult()) |destroy_current| {
+                        if (state.adopt_selected_uuid) |uuid| {
+                            actions.performAdopt(state, uuid, destroy_current);
+                        }
+                    }
+                    state.pending_action = null;
+                    state.adopt_selected_uuid = null;
+                    state.popups.clearResults();
+                },
+                else => {
+                    // Handle other confirm dialogs (exit/detach/disown/close)
+                    if (state.popups.getConfirmResult()) |confirmed| {
+                        if (confirmed) {
+                            switch (action) {
+                                .exit => state.running = false,
+                                .exit_intent => {
+                                    // Shell will exit itself; we only approve.
+                                    // Arm a short window to skip the later "Shell exited" confirm.
+                                    state.exit_intent_deadline_ms = std.time.milliTimestamp() + 5000;
+                                },
+                                .detach => actions.performDetach(state),
+                                .disown => actions.performDisown(state),
+                                .close => actions.performClose(state),
+                                .pane_close => {
+                                    // Close split pane only (not tab).
+                                    const layout = state.currentLayout();
+                                    if (layout.splitCount() > 1) {
+                                        _ = layout.closePane(layout.focused_split_id);
+                                        if (layout.getFocusedPane()) |new_pane| {
+                                            state.syncPaneFocus(new_pane, null);
+                                        }
+                                        state.syncStateToSes();
+                                    }
+                                },
+                                else => {},
+                            }
+                        } else {
+                            // User cancelled - if exit was from shell death, defer respawn
+                            if (action == .exit and state.exit_from_shell_death) {
+                                state.needs_respawn = true;
+                            }
+                        }
+
+                        // Reply to a pending exit_intent request via SES.
+                        if (action == .exit_intent) {
+                            loop_ipc.sendExitIntentResultPub(state, confirmed);
+                            state.pending_exit_intent = false;
+                        }
+                    }
+                    state.pending_action = null;
+                    state.exit_from_shell_death = false;
+                    state.popups.clearResults();
+                },
+            }
+        } else {
+            loop_ipc.sendPopResponse(state);
+        }
+    }
+    state.needs_render = true;
+    return true;
+}
+
+fn handleTabLevelPopup(state: *State, inp: []const u8) bool {
+    const current_tab = &state.tabs.items[state.active_tab];
+    if (!current_tab.popups.isBlocked()) return false;
+
+    const parsed_tab = parseEventHead(state, inp);
+    const parsed_tab_event: ?vaxis.Event = if (parsed_tab) |p| p.event else null;
+
+    // Allow only tab switching while a tab popup is open.
+    if (parsed_tab) |p| {
+        if (parsed_tab_event != null) {
+            if (input.keyEventFromVaxisEvent(parsed_tab_event.?, p.n)) |ev| {
+                if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true)) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    // Block everything else - handle popup input.
+    if (handleBlockedPopupInput(&current_tab.popups, parsed_tab_event)) {
+        loop_ipc.sendPopResponse(state);
+    }
+    state.needs_render = true;
+    return true;
+}
+
+fn handleFloatRenameByte(state: *State, inp: []const u8, i: *usize) bool {
+    if (state.float_rename_uuid == null) return false;
+
+    const b = inp[i.*];
+
+    // Do not intercept SGR mouse sequences.
+    if (b == 0x1b and i.* + 2 < inp.len and inp[i.* + 1] == '[' and inp[i.* + 2] == '<') {
+        return false;
+    }
+
+    // ESC cancels.
+    if (b == 0x1b) {
+        state.clearFloatRename();
+        i.* += 1;
+        return true;
+    }
+    // Enter commits.
+    if (b == '\r') {
+        state.commitFloatRename();
+        i.* += 1;
+        return true;
+    }
+    // Backspace.
+    if (b == 0x7f or b == 0x08) {
+        if (state.float_rename_buf.items.len > 0) {
+            _ = state.float_rename_buf.pop();
+            state.needs_render = true;
+        }
+        i.* += 1;
+        return true;
+    }
+    // Printable ASCII.
+    if (b >= 32 and b < 127) {
+        if (state.float_rename_buf.items.len < 64) {
+            state.float_rename_buf.append(state.allocator, b) catch {};
+            state.needs_render = true;
+        }
+        i.* += 1;
+        return true;
+    }
+
+    // Ignore everything else while renaming.
+    i.* += 1;
+    return true;
+}
+
 const KeyDispatchResult = enum {
     consumed,
     quit,
@@ -353,123 +516,8 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     {
         const inp = cleaned;
 
-        // ==========================================================================
-        // LEVEL 1: MUX-level popup blocks EVERYTHING
-        // ==========================================================================
-        if (state.popups.isBlocked()) {
-            const parsed_mux = parseEventHead(state, inp);
-            const parsed_mux_event: ?vaxis.Event = if (parsed_mux) |p| p.event else null;
-
-            if (handleBlockedPopupInput(&state.popups, parsed_mux_event)) {
-                // Check if this was a confirm/picker dialog for pending action
-                if (state.pending_action) |action| {
-                    switch (action) {
-                        .adopt_choose => {
-                            // Handle picker result for selecting orphaned pane
-                            if (state.popups.getPickerResult()) |selected| {
-                                if (selected < state.adopt_orphan_count) {
-                                    state.adopt_selected_uuid = state.adopt_orphans[selected].uuid;
-                                    // Now show confirm dialog
-                                    state.pending_action = .adopt_confirm;
-                                    state.popups.clearResults();
-                                    state.popups.showConfirm("Destroy current pane?", .{}) catch {};
-                                } else {
-                                    state.pending_action = null;
-                                }
-                            } else if (state.popups.wasPickerCancelled()) {
-                                state.pending_action = null;
-                                state.popups.clearResults();
-                            }
-                        },
-                        .adopt_confirm => {
-                            // Handle confirm result for adopt action
-                            if (state.popups.getConfirmResult()) |destroy_current| {
-                                if (state.adopt_selected_uuid) |uuid| {
-                                    actions.performAdopt(state, uuid, destroy_current);
-                                }
-                            }
-                            state.pending_action = null;
-                            state.adopt_selected_uuid = null;
-                            state.popups.clearResults();
-                        },
-                        else => {
-                            // Handle other confirm dialogs (exit/detach/disown/close)
-                            if (state.popups.getConfirmResult()) |confirmed| {
-                                if (confirmed) {
-                                    switch (action) {
-                                        .exit => state.running = false,
-                                        .exit_intent => {
-                                            // Shell will exit itself; we only approve.
-                                            // Arm a short window to skip the later "Shell exited" confirm.
-                                            state.exit_intent_deadline_ms = std.time.milliTimestamp() + 5000;
-                                        },
-                                        .detach => actions.performDetach(state),
-                                        .disown => actions.performDisown(state),
-                                        .close => actions.performClose(state),
-                                        .pane_close => {
-                                            // Close split pane only (not tab).
-                                            const layout = state.currentLayout();
-                                            if (layout.splitCount() > 1) {
-                                                _ = layout.closePane(layout.focused_split_id);
-                                                if (layout.getFocusedPane()) |new_pane| {
-                                                    state.syncPaneFocus(new_pane, null);
-                                                }
-                                                state.syncStateToSes();
-                                            }
-                                        },
-                                        else => {},
-                                    }
-                                } else {
-                                    // User cancelled - if exit was from shell death, defer respawn
-                                    if (action == .exit and state.exit_from_shell_death) {
-                                        state.needs_respawn = true;
-                                    }
-                                }
-
-                                // Reply to a pending exit_intent request via SES.
-                                if (action == .exit_intent) {
-                                    loop_ipc.sendExitIntentResultPub(state, confirmed);
-                                    state.pending_exit_intent = false;
-                                }
-                            }
-                            state.pending_action = null;
-                            state.exit_from_shell_death = false;
-                            state.popups.clearResults();
-                        },
-                    }
-                } else {
-                    loop_ipc.sendPopResponse(state);
-                }
-            }
-            state.needs_render = true;
-            return;
-        }
-
-        // ==========================================================================
-        // LEVEL 2: TAB-level popup - allows tab switching, blocks rest
-        // ==========================================================================
-        const current_tab = &state.tabs.items[state.active_tab];
-        if (current_tab.popups.isBlocked()) {
-            const parsed_tab = parseEventHead(state, inp);
-            const parsed_tab_event: ?vaxis.Event = if (parsed_tab) |p| p.event else null;
-
-            // Allow only tab switching while a tab popup is open.
-            if (parsed_tab) |p| {
-                if (parsed_tab_event != null) {
-                    if (input.keyEventFromVaxisEvent(parsed_tab_event.?, p.n)) |ev| {
-                        if (keybinds.handleKeyEvent(state, ev.mods, ev.key, ev.when, true)) {
-                            return;
-                        }
-                    }
-                }
-            }
-            // Block everything else - handle popup input.
-            if (handleBlockedPopupInput(&current_tab.popups, parsed_tab_event)) {
-                loop_ipc.sendPopResponse(state);
-            }
-            state.needs_render = true;
-            return;
-        }
+        if (handleMuxLevelPopup(state, inp)) return;
+        if (handleTabLevelPopup(state, inp)) return;
 
         // ==========================================================================
         // LEVEL 2.5: Pane select mode - captures all input
@@ -486,50 +534,7 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
         var i: usize = 0;
         while (i < inp.len) {
-            // Inline float title rename mode consumes keyboard input.
-            if (state.float_rename_uuid != null) {
-                const b = inp[i];
-
-                // Do not intercept SGR mouse sequences.
-                if (b == 0x1b and i + 2 < inp.len and inp[i + 1] == '[' and inp[i + 2] == '<') {
-                    // Let mouse handler parse it below.
-                } else {
-                    // ESC cancels.
-                    if (b == 0x1b) {
-                        state.clearFloatRename();
-                        i += 1;
-                        continue;
-                    }
-                    // Enter commits.
-                    if (b == '\r') {
-                        state.commitFloatRename();
-                        i += 1;
-                        continue;
-                    }
-                    // Backspace.
-                    if (b == 0x7f or b == 0x08) {
-                        if (state.float_rename_buf.items.len > 0) {
-                            _ = state.float_rename_buf.pop();
-                            state.needs_render = true;
-                        }
-                        i += 1;
-                        continue;
-                    }
-                    // Printable ASCII.
-                    if (b >= 32 and b < 127) {
-                        if (state.float_rename_buf.items.len < 64) {
-                            state.float_rename_buf.append(state.allocator, b) catch {};
-                            state.needs_render = true;
-                        }
-                        i += 1;
-                        continue;
-                    }
-
-                    // Ignore everything else while renaming.
-                    i += 1;
-                    continue;
-                }
-            }
+            if (handleFloatRenameByte(state, inp, &i)) continue;
 
             var parsed_event_for_popup: ?vaxis.Event = null;
 
