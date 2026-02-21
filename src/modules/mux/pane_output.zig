@@ -8,7 +8,6 @@ pub fn processOutput(self: *Pane, data: []const u8) void {
     if (self.capture_output) {
         pane_capture.appendCapturedOutput(self, data);
     }
-    handleTerminalQueries(self, data);
     forwardOsc(self, data);
 
     if (containsClearSeq(self.esc_tail[0..self.esc_tail_len], data)) {
@@ -118,127 +117,6 @@ fn handleOscQuery(self: *Pane, seq: []const u8, code: u32) bool {
     const resp = std.fmt.bufPrint(&buf, "\x1b]{d};rgb:{s}\x07", .{ code, color }) catch return true;
     self.write(resp) catch {};
     return true;
-}
-
-fn handleTerminalQueries(self: *Pane, data: []const u8) void {
-    for (data) |b| {
-        switch (self.query_state) {
-            .idle => {
-                if (b == 0x1b) self.query_state = .esc;
-            },
-            .esc => {
-                if (b == '[') {
-                    self.query_state = .csi;
-                    self.query_len = 0;
-                } else if (b == 'P') {
-                    self.query_state = .dcs;
-                    self.query_len = 0;
-                } else {
-                    self.query_state = .idle;
-                }
-            },
-            .csi => {
-                if (b >= 0x40 and b <= 0x7e) {
-                    handleCsiQuery(self, b, self.query_buf[0..self.query_len]);
-                    self.query_state = .idle;
-                } else if (self.query_len < self.query_buf.len) {
-                    self.query_buf[self.query_len] = b;
-                    self.query_len += 1;
-                } else {
-                    self.query_state = .idle;
-                }
-            },
-            .dcs => {
-                if (b == 0x1b) {
-                    self.query_state = .dcs_esc;
-                } else if (self.query_len < self.query_buf.len) {
-                    self.query_buf[self.query_len] = b;
-                    self.query_len += 1;
-                } else {
-                    self.query_state = .idle;
-                }
-            },
-            .dcs_esc => {
-                if (b == '\\') {
-                    handleDcsQuery(self, self.query_buf[0..self.query_len]);
-                    self.query_state = .idle;
-                } else {
-                    if (self.query_len + 2 <= self.query_buf.len) {
-                        self.query_buf[self.query_len] = 0x1b;
-                        self.query_len += 1;
-                        self.query_buf[self.query_len] = b;
-                        self.query_len += 1;
-                        self.query_state = .dcs;
-                    } else {
-                        self.query_state = .idle;
-                    }
-                }
-            },
-        }
-    }
-}
-
-fn handleCsiQuery(self: *Pane, final: u8, params: []const u8) void {
-    if (final == 'n') {
-        var p = params;
-        if (p.len > 0 and p[0] == '?') {
-            p = p[1..];
-        }
-        if (p.len == 0) return;
-
-        const first = std.mem.indexOfScalar(u8, p, ';') orelse p.len;
-        const value = std.fmt.parseInt(u16, p[0..first], 10) catch return;
-
-        if (value == 5 or value == 0 or value == 1) {
-            self.write("\x1b[0n") catch {};
-            return;
-        }
-        if (value == 6) {
-            const cursor = self.vt.getCursor();
-            var buf: [32]u8 = undefined;
-            const row: u16 = cursor.y + 1;
-            const col: u16 = cursor.x + 1;
-            const resp = std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{ row, col }) catch return;
-            self.write(resp) catch {};
-        }
-        return;
-    }
-
-    if (final == 'c') {
-        const is_secondary = params.len > 0 and params[0] == '>';
-        var buf: [32]u8 = undefined;
-        if (is_secondary) {
-            const resp = std.fmt.bufPrint(&buf, "\x1b[>0;0;0c", .{}) catch return;
-            self.write(resp) catch {};
-        } else {
-            const resp = std.fmt.bufPrint(&buf, "\x1b[?1;2c", .{}) catch return;
-            self.write(resp) catch {};
-        }
-    }
-}
-
-fn handleDcsQuery(self: *Pane, params: []const u8) void {
-    if (!std.mem.startsWith(u8, params, "$q")) return;
-    const query = std.mem.trim(u8, params[2..], " ");
-
-    if (std.mem.eql(u8, query, "q")) {
-        const style = self.vt.getCursorStyle();
-        var buf: [64]u8 = undefined;
-        const resp = std.fmt.bufPrint(&buf, "\x1bP1$r q{d}\x1b\\", .{style}) catch return;
-        self.write(resp) catch {};
-        return;
-    }
-
-    if (std.mem.eql(u8, query, "m")) {
-        self.write("\x1bP1$r 0m\x1b\\") catch {};
-        return;
-    }
-
-    if (std.mem.eql(u8, query, "r")) {
-        var buf: [64]u8 = undefined;
-        const resp = std.fmt.bufPrint(&buf, "\x1bP1$r 1;{d}r\x1b\\", .{self.height}) catch return;
-        self.write(resp) catch {};
-    }
 }
 
 fn parseOscCode(seq: []const u8) ?u32 {

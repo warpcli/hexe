@@ -12,14 +12,6 @@ const widgets = pop.widgets;
 const pop = @import("pop");
 const NotificationManager = pop.notification.NotificationManager;
 
-const QueryState = enum {
-    idle,
-    esc,
-    csi,
-    dcs,
-    dcs_esc,
-};
-
 const Backend = union(enum) {
     local: core.Pty,
     /// Pod-backed pane — VT routed through SES.
@@ -105,11 +97,6 @@ pub const Pane = struct {
     // Keep last bytes so we can detect escape sequences across boundaries.
     esc_tail: [3]u8 = .{ 0, 0, 0 },
     esc_tail_len: u8 = 0,
-
-    // Track terminal query sequences (DSR/DECRQSS).
-    query_state: QueryState = .idle,
-    query_buf: [64]u8 = undefined,
-    query_len: u8 = 0,
 
     // OSC passthrough (clipboard, colors, etc.)
     osc_buf: std.ArrayList(u8) = .empty,
