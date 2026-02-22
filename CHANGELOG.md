@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.0.13] - 2026-02-22
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Make float query reply handling deterministic
+
 ## [0.0.12] - 2026-02-22
 
 ### <!-- 1 -->🐛 Bug Fixes
