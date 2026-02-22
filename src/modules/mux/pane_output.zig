@@ -84,7 +84,10 @@ fn shouldForwardCsiQuery(final: u8, params: []const u8) bool {
         return std.mem.eql(u8, p, "5") or std.mem.eql(u8, p, "6");
     }
     if (final == 'c') {
-        return params.len == 0 or std.mem.eql(u8, params, ">");
+        if (params.len == 0) return true;
+        if (std.mem.eql(u8, params, "0")) return true;
+        if (params[0] == '>') return true;
+        return false;
     }
     return false;
 }

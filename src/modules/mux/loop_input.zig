@@ -91,6 +91,15 @@ fn mergeStdinTail(state: *State, input_bytes: []const u8) struct { merged: []con
     return .{ .merged = tmp, .owned = tmp };
 }
 
+fn shouldDropInputBatchForFloatHandoff(input_bytes: []const u8) bool {
+    // Keep terminal reply/control traffic (CSI/OSC and friends); only drop
+    // plain key batches used to trigger float handoff.
+    if (std.mem.indexOfScalar(u8, input_bytes, 0x1b) != null) return false;
+    if (std.mem.indexOfScalar(u8, input_bytes, 0x9b) != null) return false; // CSI C1
+    if (std.mem.indexOfScalar(u8, input_bytes, 0x9d) != null) return false; // OSC C1
+    return true;
+}
+
 fn stashIncompleteParserTail(state: *State, inp: []const u8) []const u8 {
     var i: usize = 0;
     while (i < inp.len) {
@@ -636,48 +645,79 @@ fn routeCapturedCsiReply(state: *State) void {
     }
 }
 
+fn currentInputPane(state: *State) ?*Pane {
+    if (state.active_floating) |idx| {
+        if (idx < state.floats.items.len) {
+            const fp = state.floats.items[idx];
+            const can_interact = if (fp.parent_tab) |parent| parent == state.active_tab else true;
+            if (fp.isVisibleOnTab(state.active_tab) and can_interact) return fp;
+        }
+    }
+    return state.currentLayout().getFocusedPane();
+}
+
+fn queuePaneCsiExpected(state: *State, pane: *Pane) bool {
+    const n = pane.takeCsiExpectedResponses();
+    if (n == 0) return false;
+    var j: u16 = 0;
+    while (j < n) : (j += 1) {
+        state.enqueueCsiReplyTarget(pane.uuid);
+    }
+    return true;
+}
+
+fn queuePaneOscExpected(state: *State, pane: *Pane) bool {
+    const n = pane.takeOscExpectedResponses();
+    if (n == 0) return false;
+    var j: u16 = 0;
+    while (j < n) : (j += 1) {
+        state.enqueueOscReplyTarget(pane.uuid);
+    }
+    return true;
+}
+
 fn harvestPendingCsiReplies(state: *State) void {
-    var split_it = state.currentLayout().splitIterator();
-    while (split_it.next()) |pane| {
-        const n = pane.*.takeCsiExpectedResponses();
-        if (n > 0) {
-            var j: u16 = 0;
-            while (j < n) : (j += 1) {
-                state.enqueueCsiReplyTarget(pane.*.uuid);
-            }
+    var queued = false;
+
+    if (state.active_floating) |idx| {
+        if (idx < state.floats.items.len) {
+            queued = queuePaneCsiExpected(state, state.floats.items[idx]);
         }
     }
 
-    for (state.floats.items) |fp| {
-        const n = fp.takeCsiExpectedResponses();
-        if (n > 0) {
-            var j: u16 = 0;
-            while (j < n) : (j += 1) {
-                state.enqueueCsiReplyTarget(fp.uuid);
-            }
+    if (!queued) {
+        if (state.currentLayout().getFocusedPane()) |pane| {
+            queued = queuePaneCsiExpected(state, pane);
+        }
+    }
+
+    if (!queued) {
+        for (state.floats.items) |fp| {
+            if (!fp.isVisibleOnTab(state.active_tab)) continue;
+            if (queuePaneCsiExpected(state, fp)) break;
         }
     }
 }
 
 fn harvestPendingOscReplies(state: *State) void {
-    var split_it = state.currentLayout().splitIterator();
-    while (split_it.next()) |pane| {
-        const n = pane.*.takeOscExpectedResponses();
-        if (n > 0) {
-            var j: u16 = 0;
-            while (j < n) : (j += 1) {
-                state.enqueueOscReplyTarget(pane.*.uuid);
-            }
+    var queued = false;
+
+    if (state.active_floating) |idx| {
+        if (idx < state.floats.items.len) {
+            queued = queuePaneOscExpected(state, state.floats.items[idx]);
         }
     }
 
-    for (state.floats.items) |fp| {
-        const n = fp.takeOscExpectedResponses();
-        if (n > 0) {
-            var j: u16 = 0;
-            while (j < n) : (j += 1) {
-                state.enqueueOscReplyTarget(fp.uuid);
-            }
+    if (!queued) {
+        if (state.currentLayout().getFocusedPane()) |pane| {
+            queued = queuePaneOscExpected(state, pane);
+        }
+    }
+
+    if (!queued) {
+        for (state.floats.items) |fp| {
+            if (!fp.isVisibleOnTab(state.active_tab)) continue;
+            if (queuePaneOscExpected(state, fp)) break;
         }
     }
 }
@@ -686,10 +726,14 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
     if (input_bytes.len == 0) return;
 
     if (state.drop_next_input_batch) {
+        if (shouldDropInputBatchForFloatHandoff(input_bytes)) {
+            state.drop_next_input_batch = false;
+            state.stdin_tail_len = 0;
+            vaxis_parser = .{};
+            return;
+        }
+        // Input contains control/reply traffic; keep it.
         state.drop_next_input_batch = false;
-        state.stdin_tail_len = 0;
-        vaxis_parser = .{};
-        return;
     }
 
     // Stdin reads can split escape sequences. Merge with any pending tail first.
@@ -880,9 +924,6 @@ fn consumeCsiReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
     harvestPendingCsiReplies(state);
 
     if (inp.len == 0) return .{ .bytes = inp };
-    if (!state.csi_reply_in_progress and state.csi_reply_targets.items.len == 0) {
-        return .{ .bytes = inp };
-    }
 
     const ESC: u8 = 0x1b;
     const CSI_C1: u8 = 0x9b;
@@ -893,6 +934,15 @@ fn consumeCsiReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
 
     var i: usize = 0;
     while (i < inp.len) {
+        if (!state.csi_reply_in_progress and state.csi_reply_targets.items.len == 0) {
+            const starts_esc_csi = i + 1 < inp.len and inp[i] == ESC and inp[i + 1] == '[';
+            const starts_c1_csi = inp[i] == CSI_C1;
+            if (starts_esc_csi or starts_c1_csi) {
+                // Reply can race ahead of bookkeeping in the same loop tick.
+                harvestPendingCsiReplies(state);
+            }
+        }
+
         if (!state.csi_reply_in_progress and state.csi_reply_targets.items.len > 0) {
             const starts_esc_csi = i + 1 < inp.len and inp[i] == ESC and inp[i + 1] == '[';
             const starts_c1_csi = inp[i] == CSI_C1;
