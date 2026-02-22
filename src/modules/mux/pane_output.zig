@@ -57,44 +57,36 @@ fn handleCsiQueries(self: *Pane, data: []const u8) void {
 }
 
 fn handleCsiQueryFinal(self: *Pane, final: u8, params: []const u8) void {
+    if (!shouldForwardCsiQuery(final, params)) return;
+
+    var seq_buf: [80]u8 = undefined;
+    var n: usize = 0;
+    seq_buf[n] = 0x1b;
+    n += 1;
+    seq_buf[n] = '[';
+    n += 1;
+    if (params.len > 0) {
+        @memcpy(seq_buf[n .. n + params.len], params);
+        n += params.len;
+    }
+    seq_buf[n] = final;
+    n += 1;
+
+    self.csi_expected_responses +|= 1;
+    const stdout = std.fs.File.stdout();
+    stdout.writeAll(seq_buf[0..n]) catch {};
+}
+
+fn shouldForwardCsiQuery(final: u8, params: []const u8) bool {
     if (final == 'n') {
         var p = params;
-        const private = p.len > 0 and p[0] == '?';
-        if (private) p = p[1..];
-        if (p.len == 0) return;
-
-        const first = std.mem.indexOfScalar(u8, p, ';') orelse p.len;
-        const value = std.fmt.parseInt(u16, p[0..first], 10) catch return;
-
-        if (value == 5 or value == 0 or value == 1) {
-            self.write("\x1b[0n") catch {};
-            return;
-        }
-        if (value == 6) {
-            const cursor = self.vt.getCursor();
-            var buf: [32]u8 = undefined;
-            const row: u16 = cursor.y + 1;
-            const col: u16 = cursor.x + 1;
-            const resp = if (private)
-                std.fmt.bufPrint(&buf, "\x1b[?{d};{d}R", .{ row, col }) catch return
-            else
-                std.fmt.bufPrint(&buf, "\x1b[{d};{d}R", .{ row, col }) catch return;
-            self.write(resp) catch {};
-        }
-        return;
+        if (p.len > 0 and p[0] == '?') p = p[1..];
+        return std.mem.eql(u8, p, "5") or std.mem.eql(u8, p, "6");
     }
-
     if (final == 'c') {
-        const is_secondary = params.len > 0 and params[0] == '>';
-        var buf: [32]u8 = undefined;
-        if (is_secondary) {
-            const resp = std.fmt.bufPrint(&buf, "\x1b[>0;0;0c", .{}) catch return;
-            self.write(resp) catch {};
-        } else {
-            const resp = std.fmt.bufPrint(&buf, "\x1b[?1;2c", .{}) catch return;
-            self.write(resp) catch {};
-        }
+        return params.len == 0 or std.mem.eql(u8, params, ">");
     }
+    return false;
 }
 
 fn handleDcsQueries(self: *Pane, data: []const u8) void {

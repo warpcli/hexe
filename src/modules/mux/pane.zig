@@ -127,6 +127,7 @@ pub const Pane = struct {
     csi_query_state: CsiQueryState = .idle,
     csi_query_buf: [32]u8 = undefined,
     csi_query_len: u8 = 0,
+    csi_expected_responses: u16 = 0,
 
     // Pane-local notifications (PANE realm - renders at bottom of pane)
     notifications: NotificationManager = undefined,
@@ -150,6 +151,12 @@ pub const Pane = struct {
     pub fn takeOscExpectedResponses(self: *Pane) u16 {
         const v = self.osc_expected_responses;
         self.osc_expected_responses = 0;
+        return v;
+    }
+
+    pub fn takeCsiExpectedResponses(self: *Pane) u16 {
+        const v = self.csi_expected_responses;
+        self.csi_expected_responses = 0;
         return v;
     }
 

@@ -177,6 +177,11 @@ pub const State = struct {
     osc_reply_in_progress: bool,
     osc_reply_prev_esc: bool,
 
+    csi_reply_target_uuid: ?[32]u8,
+    csi_reply_targets: std.ArrayList([32]u8),
+    csi_reply_buf: std.ArrayList(u8),
+    csi_reply_in_progress: bool,
+
     // Stdin input can arrive split across reads. When using escape-sequence based
     // encodings (CSI-u, mouse events, etc) we must not forward partial sequences
     // into the focused pane. Keep a small tail buffer to stitch reads.
@@ -331,6 +336,11 @@ pub const State = struct {
             .osc_reply_in_progress = false,
             .osc_reply_prev_esc = false,
 
+            .csi_reply_target_uuid = null,
+            .csi_reply_targets = .empty,
+            .csi_reply_buf = .empty,
+            .csi_reply_in_progress = false,
+
             .terminal_query_in_flight = false,
             .terminal_query_deadline_ms = 0,
             .terminal_caps_ready = false,
@@ -472,6 +482,8 @@ pub const State = struct {
         ses_cfg.deinit(self.allocator);
         self.osc_reply_targets.deinit(self.allocator);
         self.osc_reply_buf.deinit(self.allocator);
+        self.csi_reply_targets.deinit(self.allocator);
+        self.csi_reply_buf.deinit(self.allocator);
         self.renderer.deinit();
         self.ses_client.deinit();
         self.notifications.deinit();
@@ -499,6 +511,17 @@ pub const State = struct {
         if (self.osc_reply_targets.items.len == 0) return null;
         const next = self.osc_reply_targets.items[0];
         _ = self.osc_reply_targets.orderedRemove(0);
+        return next;
+    }
+
+    pub fn enqueueCsiReplyTarget(self: *State, uuid: [32]u8) void {
+        self.csi_reply_targets.append(self.allocator, uuid) catch {};
+    }
+
+    pub fn dequeueCsiReplyTarget(self: *State) ?[32]u8 {
+        if (self.csi_reply_targets.items.len == 0) return null;
+        const next = self.csi_reply_targets.items[0];
+        _ = self.csi_reply_targets.orderedRemove(0);
         return next;
     }
 

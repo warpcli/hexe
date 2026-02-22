@@ -622,6 +622,43 @@ fn routeCapturedOscReply(state: *State) void {
     }
 }
 
+fn clearCsiReplyCapture(state: *State) void {
+    state.csi_reply_in_progress = false;
+    state.csi_reply_target_uuid = null;
+    state.csi_reply_buf.clearRetainingCapacity();
+}
+
+fn routeCapturedCsiReply(state: *State) void {
+    if (state.csi_reply_target_uuid) |uuid| {
+        if (state.findPaneByUuid(uuid)) |pane| {
+            pane.write(state.csi_reply_buf.items) catch {};
+        }
+    }
+}
+
+fn harvestPendingCsiReplies(state: *State) void {
+    var split_it = state.currentLayout().splitIterator();
+    while (split_it.next()) |pane| {
+        const n = pane.*.takeCsiExpectedResponses();
+        if (n > 0) {
+            var j: u16 = 0;
+            while (j < n) : (j += 1) {
+                state.enqueueCsiReplyTarget(pane.*.uuid);
+            }
+        }
+    }
+
+    for (state.floats.items) |fp| {
+        const n = fp.takeCsiExpectedResponses();
+        if (n > 0) {
+            var j: u16 = 0;
+            while (j < n) : (j += 1) {
+                state.enqueueCsiReplyTarget(fp.uuid);
+            }
+        }
+    }
+}
+
 fn harvestPendingOscReplies(state: *State) void {
     var split_it = state.currentLayout().splitIterator();
     while (split_it.next()) |pane| {
@@ -661,7 +698,9 @@ pub fn handleInput(state: *State, input_bytes: []const u8) void {
 
     const osc_res = consumeOscReplyFromTerminal(state, merged_res.merged);
     defer if (osc_res.owned) |m| state.allocator.free(m);
-    const slice = osc_res.bytes;
+    const csi_res = consumeCsiReplyFromTerminal(state, osc_res.bytes);
+    defer if (csi_res.owned) |m| state.allocator.free(m);
+    const slice = csi_res.bytes;
     if (slice.len == 0) return;
 
     // Don't process (or forward) partial parser events.
@@ -837,6 +876,116 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
     return .{ .bytes = trimmed, .owned = trimmed };
 }
 
+fn consumeCsiReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult {
+    harvestPendingCsiReplies(state);
+
+    if (inp.len == 0) return .{ .bytes = inp };
+    if (!state.csi_reply_in_progress and state.csi_reply_targets.items.len == 0) {
+        return .{ .bytes = inp };
+    }
+
+    const ESC: u8 = 0x1b;
+    const CSI_C1: u8 = 0x9b;
+
+    const out = state.allocator.alloc(u8, inp.len) catch return .{ .bytes = inp };
+    var out_i: usize = 0;
+    var consumed_any = false;
+
+    var i: usize = 0;
+    while (i < inp.len) {
+        if (!state.csi_reply_in_progress and state.csi_reply_targets.items.len > 0) {
+            const starts_esc_csi = i + 1 < inp.len and inp[i] == ESC and inp[i + 1] == '[';
+            const starts_c1_csi = inp[i] == CSI_C1;
+            if (!starts_esc_csi and !starts_c1_csi) {
+                out[out_i] = inp[i];
+                out_i += 1;
+                i += 1;
+                continue;
+            }
+
+            state.csi_reply_target_uuid = state.dequeueCsiReplyTarget();
+            state.csi_reply_in_progress = true;
+            state.csi_reply_buf.clearRetainingCapacity();
+
+            if (starts_esc_csi) {
+                state.csi_reply_buf.append(state.allocator, ESC) catch {
+                    clearCsiReplyCapture(state);
+                    out[out_i] = inp[i];
+                    out_i += 1;
+                    i += 1;
+                    continue;
+                };
+                state.csi_reply_buf.append(state.allocator, '[') catch {
+                    clearCsiReplyCapture(state);
+                    out[out_i] = inp[i];
+                    out_i += 1;
+                    i += 1;
+                    continue;
+                };
+                consumed_any = true;
+                i += 2;
+                continue;
+            }
+
+            state.csi_reply_buf.append(state.allocator, CSI_C1) catch {
+                clearCsiReplyCapture(state);
+                out[out_i] = inp[i];
+                out_i += 1;
+                i += 1;
+                continue;
+            };
+            consumed_any = true;
+            i += 1;
+            continue;
+        }
+
+        if (!state.csi_reply_in_progress) {
+            out[out_i] = inp[i];
+            out_i += 1;
+            i += 1;
+            continue;
+        }
+
+        const b = inp[i];
+        state.csi_reply_buf.append(state.allocator, b) catch {
+            clearCsiReplyCapture(state);
+            i += 1;
+            continue;
+        };
+        consumed_any = true;
+
+        if (b >= 0x40 and b <= 0x7e) {
+            routeCapturedCsiReply(state);
+            clearCsiReplyCapture(state);
+        } else if (state.csi_reply_buf.items.len > 512) {
+            clearCsiReplyCapture(state);
+        }
+
+        i += 1;
+    }
+
+    if (!consumed_any) {
+        state.allocator.free(out);
+        return .{ .bytes = inp };
+    }
+    if (out_i == 0) {
+        state.allocator.free(out);
+        return .{ .bytes = &[_]u8{} };
+    }
+    if (out_i == inp.len) {
+        state.allocator.free(out);
+        return .{ .bytes = inp };
+    }
+
+    const trimmed = state.allocator.alloc(u8, out_i) catch {
+        state.allocator.free(out);
+        return .{ .bytes = inp };
+    };
+    @memcpy(trimmed, out[0..out_i]);
+    state.allocator.free(out);
+    return .{ .bytes = trimmed, .owned = trimmed };
+}
+
 fn parseCprReportLen(inp: []const u8, start: usize) usize {
     var i = start;
     const CSI_C1: u8 = 0x9b;
@@ -867,6 +1016,7 @@ fn parseCprReportLen(inp: []const u8, start: usize) usize {
 }
 
 fn consumeCprRepliesFromTerminal(state: *State, inp: []const u8) OscConsumeResult {
+    if (!state.terminal_query_in_flight) return .{ .bytes = inp };
     if (inp.len == 0) return .{ .bytes = inp };
 
     const out = state.allocator.alloc(u8, inp.len) catch return .{ .bytes = inp };
