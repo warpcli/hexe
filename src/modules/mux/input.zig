@@ -74,7 +74,10 @@ pub fn scrollActionFromVaxisEvent(event: vaxis.Event) ?ScrollAction {
 fn parseVaxisKey(vk: vaxis.Key, when: core.Config.BindWhen) ?KeyEvent {
     var mods = modsMaskFromVaxis(vk.mods);
     const bind_key = vaxisKeyToBindKey(vk, &mods) orelse return null;
-    const text_cp = textCodepointForForwarding(vk);
+    const text_cp = switch (@as(core.Config.BindKeyKind, bind_key)) {
+        .char, .space => textCodepointForForwarding(vk),
+        else => null,
+    };
     return .{
         .mods = mods,
         .key = bind_key,

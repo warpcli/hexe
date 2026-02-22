@@ -70,6 +70,18 @@ pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
 pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_codepoint: ?u21) void {
     var out: [64]u8 = undefined;
 
+    // For plain Ctrl+letter keys, prefer canonical C0 control bytes.
+    // This guarantees signals like Ctrl+C (ETX) reach apps reliably.
+    if (mods == 2 and @as(BindKeyKind, key) == .char) {
+        const ch = key.char;
+        if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z')) {
+            const lc = std.ascii.toLower(ch);
+            out[0] = (lc - 'a') + 1;
+            forwardInputToFocusedPaneWithEvent(state, out[0..1], null);
+            return;
+        }
+    }
+
     if (@as(BindKeyKind, key) == .char) {
         if (text_codepoint) |cp| {
             // For text-producing keys, prefer forwarding the produced codepoint

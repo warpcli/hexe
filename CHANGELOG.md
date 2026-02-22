@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.0.12] - 2026-02-22
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Stabilize terminal query routing for float panes
+- Route CSI query replies back to panes
+- Improve terminal query handling and OSC parsing
+- Restore terminal key forwarding in mux
+- Add minimal CPR query handling for pane apps
+- Harvest pending OSC query targets before stdin routing
+- Reliably route OSC color query replies per pane
+
 ## [0.0.11] - 2026-02-21
 
 ### <!-- 0 -->⛰️  Features
