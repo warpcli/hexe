@@ -141,7 +141,10 @@ pub const Server = struct {
             self.processPendingWatcherUpdates();
             self.processPendingCtlCloses();
             self.processPendingVtCloses();
-            try loop.run(.once);
+            loop.run(.once) catch |err| {
+                ses.debugLog("event loop error (continuing): {s}", .{@errorName(err)});
+                continue;
+            };
         }
     }
 
@@ -618,12 +621,17 @@ pub const Server = struct {
             .len = payload_len,
         };
         wire.writeAll(mux_vt_fd, std.mem.asBytes(&mux_hdr)) catch {
+            ses.debugLog("vt pod->mux: mux_vt_fd write failed, queuing close", .{});
             self.skipBytes(pod_vt_fd, payload_len);
+            self.queueVtClose(mux_vt_fd, null);
             return true;
         };
 
         // Splice payload: read from pod, write to mux.
-        self.spliceData(pod_vt_fd, mux_vt_fd, payload_len) catch return false;
+        self.spliceData(pod_vt_fd, mux_vt_fd, payload_len) catch {
+            self.queueVtClose(mux_vt_fd, null);
+            return true;
+        };
         return true;
     }
 
@@ -651,12 +659,17 @@ pub const Server = struct {
         pod_hdr[0] = mux_hdr.frame_type;
         std.mem.writeInt(u32, pod_hdr[1..5], mux_hdr.len, .big);
         wire.writeAll(pod_vt_fd, &pod_hdr) catch {
+            ses.debugLog("vt mux->pod: pod_vt_fd write failed, queuing close", .{});
             self.skipBytes(mux_vt_fd, mux_hdr.len);
+            self.queueVtClose(pod_vt_fd, null);
             return true;
         };
 
         // Splice payload: read from mux, write to pod.
-        self.spliceData(mux_vt_fd, pod_vt_fd, mux_hdr.len) catch return false;
+        self.spliceData(mux_vt_fd, pod_vt_fd, mux_hdr.len) catch {
+            self.queueVtClose(pod_vt_fd, null);
+            return true;
+        };
         return true;
     }
 
