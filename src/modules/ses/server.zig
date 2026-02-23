@@ -149,7 +149,11 @@ pub const Server = struct {
     }
 
     fn processPendingCtlCloses(self: *Server) void {
+        if (self.pending_ctl_close_fds.items.len > 0) {
+            ses.debugLog("processPendingCtlCloses: {d} pending", .{self.pending_ctl_close_fds.items.len});
+        }
         for (self.pending_ctl_close_fds.items) |pending| {
+            ses.debugLog("processPendingCtlCloses: fd={d}", .{pending.fd});
             if (!self.disarmCtlWatcherMatching(pending.fd, pending.watcher)) continue;
             _ = self.binary_ctl_fds.remove(pending.fd);
 
@@ -162,7 +166,9 @@ pub const Server = struct {
             }
             var closed_by_client_remove = false;
             if (client_id) |cid| {
+                ses.debugLog("processPendingCtlCloses: removing client_id={d}", .{cid});
                 self.removeClientWithWatcherCleanup(cid);
+                ses.debugLog("processPendingCtlCloses: client removed", .{});
                 closed_by_client_remove = true;
             }
 
@@ -221,18 +227,28 @@ pub const Server = struct {
     }
 
     fn processPendingWatcherUpdates(self: *Server) void {
-        for (self.ses_state.pending_poll_fds.items) |fd| {
-            self.armVtWatcher(fd, .pod_to_mux);
+        // Disarm old watchers BEFORE arming new ones to prevent fd-reuse
+        // collisions. When a closed fd number is reused by a new connection,
+        // armVtWatcher would skip it if the old watcher entry still exists.
+        if (self.ses_state.pending_remove_poll_fds.items.len > 0 or self.ses_state.pending_poll_fds.items.len > 0) {
+            ses.debugLog("processPendingWatcherUpdates: remove={d} add={d}", .{
+                self.ses_state.pending_remove_poll_fds.items.len,
+                self.ses_state.pending_poll_fds.items.len,
+            });
         }
-
         for (self.ses_state.pending_remove_poll_fds.items) |fd| {
+            ses.debugLog("processPendingWatcherUpdates: disarm fd={d}", .{fd});
             if (self.binary_ctl_fds.contains(fd)) {
                 self.disarmCtlWatcher(fd);
             }
             self.disarmVtWatcher(fd);
         }
-
         self.ses_state.pending_remove_poll_fds.clearRetainingCapacity();
+
+        for (self.ses_state.pending_poll_fds.items) |fd| {
+            ses.debugLog("processPendingWatcherUpdates: arm fd={d}", .{fd});
+            self.armVtWatcher(fd, .pod_to_mux);
+        }
         self.ses_state.pending_poll_fds.clearRetainingCapacity();
     }
 
@@ -267,8 +283,15 @@ pub const Server = struct {
     }
 
     fn armVtWatcher(self: *Server, fd: posix.fd_t, direction: VtDirection) void {
-        if (self.loop_ptr == null) return;
-        if (self.vt_watchers.contains(fd)) return;
+        if (self.loop_ptr == null) {
+            ses.debugLog("armVtWatcher: SKIP fd={d} (no loop)", .{fd});
+            return;
+        }
+        if (self.vt_watchers.contains(fd)) {
+            ses.debugLog("armVtWatcher: SKIP fd={d} (already armed)", .{fd});
+            return;
+        }
+        ses.debugLog("armVtWatcher: ARMED fd={d} dir={s}", .{ fd, @tagName(direction) });
 
         const node = self.allocator.create(VtWatcher) catch return;
         node.* = .{ .srv = @ptrCast(self), .fd = fd, .direction = direction };

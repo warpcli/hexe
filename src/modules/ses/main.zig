@@ -186,9 +186,12 @@ pub fn run(args: SesArgs) !void {
     }
 
     // Run server
+    debugLog("ses: entering event loop", .{});
     srv.run() catch |err| {
+        debugLog("ses: event loop FAILED: {s}", .{@errorName(err)});
         return err;
     };
+    debugLog("ses: event loop exited normally (self.running=false)", .{});
 }
 
 pub fn main() !void {
@@ -642,7 +645,13 @@ fn setupSignalHandlers(srv: *server.Server) void {
 }
 
 fn signalHandler(sig: c_int) callconv(.c) void {
-    _ = sig;
+    // Write directly to stderr (fd=2) since debugLog may not be safe in signal context
+    const msg = switch (sig) {
+        std.posix.SIG.TERM => "ses: received SIGTERM, stopping\n",
+        std.posix.SIG.INT => "ses: received SIGINT, stopping\n",
+        else => "ses: received unknown signal, stopping\n",
+    };
+    _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
     if (global_server.load(.acquire)) |srv| {
         srv.stop();
     }

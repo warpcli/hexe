@@ -539,11 +539,36 @@ const Pod = struct {
         _ = result catch return .rearm;
 
         while (accept_ctx.pod.server.tryAccept() catch null) |conn| {
+            debugLog("acceptCallback: new conn fd={d}, client_before={?d}, watched_fd={?d}, pty_paused={}, pty_armed={}", .{
+                conn.fd,
+                if (accept_ctx.pod.client) |cl| cl.fd else null,
+                accept_ctx.client_ctx.watched_fd,
+                accept_ctx.pod.pty_paused,
+                accept_ctx.pty_ctx.armed.*,
+            });
             accept_ctx.pod.handleAcceptedConnection(conn, accept_ctx.backlog_tmp);
+            debugLog("acceptCallback: after handle, client={?d}, watched_fd={?d}, pty_paused={}, pty_armed={}", .{
+                if (accept_ctx.pod.client) |cl| cl.fd else null,
+                accept_ctx.client_ctx.watched_fd,
+                accept_ctx.pod.pty_paused,
+                accept_ctx.pty_ctx.armed.*,
+            });
+            // If the client fd changed (old was closed+replaced by acceptVtClient),
+            // clear the stale watched_fd. The old fd was closed so epoll silently
+            // deregistered it — clientCallback will never fire to clear watched_fd.
+            if (accept_ctx.client_ctx.watched_fd) |old_watched| {
+                const cur_fd = if (accept_ctx.pod.client) |cl| cl.fd else null;
+                if (cur_fd == null or cur_fd.? != old_watched) {
+                    debugLog("acceptCallback: clearing stale watched_fd={d} (client now={?d})", .{ old_watched, cur_fd });
+                    accept_ctx.client_ctx.watched_fd = null;
+                }
+            }
             if (accept_ctx.pod.client) |client| {
                 armClientWatcher(accept_ctx.client_ctx, client.fd);
             }
+            debugLog("acceptCallback: after armClient, watched_fd={?d}", .{accept_ctx.client_ctx.watched_fd});
             if (accept_ctx.pod.client != null and accept_ctx.pod.pty_paused) {
+                debugLog("acceptCallback: re-arming pty watcher (was paused)", .{});
                 accept_ctx.pod.pty_paused = false;
                 armPtyWatcher(accept_ctx.pty_ctx);
             }
@@ -553,7 +578,11 @@ const Pod = struct {
     }
 
     fn armClientWatcher(ctx: *ClientContext, client_fd: posix.fd_t) void {
-        if (ctx.watched_fd != null) return;
+        if (ctx.watched_fd != null) {
+            debugLog("armClientWatcher: SKIP fd={d} (watched_fd={?d} still set)", .{ client_fd, ctx.watched_fd });
+            return;
+        }
+        debugLog("armClientWatcher: ARMED fd={d}", .{client_fd});
         ctx.watched_fd = client_fd;
 
         ctx.slot.* = .{ .parent = ctx, .fd = client_fd };
@@ -571,38 +600,67 @@ const Pod = struct {
     ) xev.CallbackAction {
         const slot = ctx orelse return .disarm;
         const client_ctx = slot.parent;
-        _ = result catch return .disarm;
+        _ = result catch {
+            debugLog("clientCallback: ERROR on slot.fd={d}, watched_fd={?d}, client={?d}", .{
+                slot.fd,
+                client_ctx.watched_fd,
+                if (client_ctx.pod.client) |cl| cl.fd else null,
+            });
+            // Poll error (fd closed). Clear tracked fd so a replacement
+            // client can be armed. If the client was already replaced by
+            // acceptVtClient, arm the watcher for the new fd now.
+            if (client_ctx.watched_fd) |w| {
+                if (w == slot.fd) client_ctx.watched_fd = null;
+            }
+            if (client_ctx.pod.client) |cur| {
+                if (cur.fd != slot.fd) {
+                    debugLog("clientCallback: client replaced, re-arming for fd={d}", .{cur.fd});
+                    armClientWatcher(client_ctx, cur.fd);
+                }
+            }
+            return .disarm;
+        };
 
         const current = client_ctx.pod.client orelse {
+            debugLog("clientCallback: no client, disarming slot.fd={d}", .{slot.fd});
             if (client_ctx.watched_fd == slot.fd) client_ctx.watched_fd = null;
             return .disarm;
         };
         if (current.fd != slot.fd) {
+            debugLog("clientCallback: stale fd={d}, current={d}, re-arming", .{ slot.fd, current.fd });
             if (client_ctx.watched_fd == slot.fd) client_ctx.watched_fd = null;
+            armClientWatcher(client_ctx, current.fd);
             return .disarm;
         }
 
         const n = posix.read(slot.fd, client_ctx.io_buf) catch |err| switch (err) {
             error.WouldBlock => 0,
             else => {
+                debugLog("clientCallback: read error on fd={d}: {s}", .{ slot.fd, @errorName(err) });
                 client_ctx.callback_error.* = err;
                 return .disarm;
             },
         };
 
         if (n == 0) {
+            debugLog("clientCallback: EOF on fd={d}, closing client", .{slot.fd});
             if (client_ctx.pod.client) |*conn| conn.close();
             client_ctx.pod.client = null;
             client_ctx.watched_fd = null;
             return .disarm;
         }
 
+        debugLog("clientCallback: read {d} bytes from fd={d}", .{ n, slot.fd });
         client_ctx.pod.reader.feed(client_ctx.io_buf[0..n], @ptrCast(client_ctx.pod), podFrameCallback);
         return .rearm;
     }
 
     fn armPtyWatcher(ctx: *PtyContext) void {
-        if (ctx.armed.* or ctx.pod.pty_paused) return;
+        if (ctx.armed.* or ctx.pod.pty_paused) {
+            debugLog("armPtyWatcher: SKIP (armed={}, pty_paused={})", .{ ctx.armed.*, ctx.pod.pty_paused });
+            return;
+        }
+        debugLog("armPtyWatcher: ARMED", .{});
         ctx.watcher.poll(ctx.loop, ctx.completion, .read, PtyContext, ctx, ptyCallback);
         ctx.armed.* = true;
     }
@@ -616,6 +674,7 @@ const Pod = struct {
     ) xev.CallbackAction {
         const pty_ctx = ctx orelse return .disarm;
         _ = result catch {
+            debugLog("ptyCallback: ERROR, disarming, stopping", .{});
             pty_ctx.armed.* = false;
             pty_ctx.should_stop.* = true;
             return .disarm;
@@ -681,9 +740,12 @@ const Pod = struct {
         pty_ctx.pod.backlog.append(data);
         if (pty_ctx.pod.client) |*client| {
             pod_protocol.writeFrame(client, .output, data) catch {
+                debugLog("ptyCallback: writeFrame FAILED, closing client fd={d}", .{client.fd});
                 client.close();
                 pty_ctx.pod.client = null;
             };
+        } else {
+            debugLog("ptyCallback: no client, data goes to backlog only ({d} bytes)", .{data.len});
         }
 
         return .rearm;
@@ -813,7 +875,10 @@ const Pod = struct {
         pod_protocol.writeFrame(&self.client.?, .backlog_end, &[_]u8{}) catch {};
 
         self.backlog.clear();
-        self.pty_paused = false;
+        // Note: do NOT reset pty_paused here. The acceptCallback caller
+        // checks pty_paused and calls armPtyWatcher. If we clear the flag
+        // here, the caller sees pty_paused=false and skips re-arming,
+        // leaving the PTY watcher permanently disarmed after reconnect.
     }
 
     /// Handle a binary SHP control connection (channel ⑤).
