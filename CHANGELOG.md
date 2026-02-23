@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.0.14] - 2026-02-23
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Improve session detachment and error handling
+
+### <!-- 2 -->🚜 Refactor
+
+- Rename voidbox to libvoid everywhere
+
 ## [0.0.13] - 2026-02-22
 
 ### <!-- 1 -->🐛 Bug Fixes

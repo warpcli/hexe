@@ -1889,7 +1889,7 @@ pub export fn hexe_ses_layout_define(L: ?*LuaState) callconv(.c) c_int {
 
 /// Lua C function: hexe.ses.session.setup(opts)
 /// hexe.ses.isolation.set({ profile = "balanced", memory = "1G", ... })
-/// Configure POD isolation settings (voidbox)
+/// Configure POD isolation settings (libvoid)
 pub export fn hexe_ses_isolation_set(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
 

@@ -524,10 +524,10 @@ fn handleParsedKeyEvent(state: *State, ev: input.KeyEvent) KeyDispatchResult {
     }
 
     // Some terminals collapse Ctrl+Alt+letter into Alt+letter.
-    // If Alt variant didn't match, retry as Ctrl+Alt for ASCII letters.
+    // If Alt variant didn't match, retry as Ctrl+Alt for ASCII letters only.
     if (ev.mods == 1 and @as(core.Config.BindKeyKind, ev.key) == .char and ev.when == .press) {
         const ch = ev.key.char;
-        if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9')) {
+        if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z')) {
             if (keybinds.handleKeyEvent(state, ev.mods | 2, ev.key, ev.when, false)) {
                 return .consumed;
             }

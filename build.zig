@@ -19,11 +19,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
-    // Get voidbox dependency for sandboxing
-    const voidbox_mod = if (b.lazyDependency("voidbox", .{
+    // Get libvoid dependency for sandboxing
+    const libvoid_mod = if (b.lazyDependency("libvoid", .{
         .target = target,
         .optimize = optimize,
-    })) |voidbox_dep| voidbox_dep.module("voidbox") else null;
+    })) |libvoid_dep| libvoid_dep.module("libvoid") else null;
 
     // Get libxev dependency (required event loop backend)
     const xev_mod = b.dependency("libxev", .{
@@ -51,8 +51,8 @@ pub fn build(b: *std.Build) void {
         const zlua_mod = dep.module("zlua");
         core_module.addImport("zlua", zlua_mod);
     }
-    if (voidbox_mod) |vb| {
-        core_module.addImport("voidbox", vb);
+    if (libvoid_mod) |vb| {
+        core_module.addImport("libvoid", vb);
     }
     core_module.addImport("vaxis", vaxis_mod);
     core_module.addImport("xev", xev_mod);
@@ -98,8 +98,8 @@ pub fn build(b: *std.Build) void {
     });
     ses_module.addImport("core", core_module);
     ses_module.addImport("xev", xev_mod);
-    if (voidbox_mod) |vb| {
-        ses_module.addImport("voidbox", vb);
+    if (libvoid_mod) |vb| {
+        ses_module.addImport("libvoid", vb);
     }
 
     // Create pod module (per-pane PTY + scrollback; launched via `hexe pod daemon`)
@@ -111,8 +111,8 @@ pub fn build(b: *std.Build) void {
     });
     pod_module.addImport("core", core_module);
     pod_module.addImport("xev", xev_mod);
-    if (voidbox_mod) |vb| {
-        pod_module.addImport("voidbox", vb);
+    if (libvoid_mod) |vb| {
+        pod_module.addImport("libvoid", vb);
     }
 
     // Build unified hexe CLI executable

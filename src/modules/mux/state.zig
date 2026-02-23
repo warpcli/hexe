@@ -427,6 +427,15 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State) void {
+        // If the terminal is gone (window closed, SSH dropped), auto-detach to
+        // preserve sessions even when SIGTERM arrived instead of SIGHUP.
+        // tcgetattr returns EIO on a dead PTY slave.
+        if (!self.detach_mode) {
+            _ = posix.tcgetattr(posix.STDIN_FILENO) catch {
+                self.detach_mode = true;
+            };
+        }
+
         // When exiting normally (not detach), tell SES to kill our panes.
         // When detaching, panes stay alive for later reattach.
         if (!self.detach_mode and self.ses_client.isConnected()) {
