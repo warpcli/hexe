@@ -460,6 +460,9 @@ pub const Server = struct {
         }
 
         if (now_ms - periodic.last_cleanup >= 1000) {
+            // Retry any deferred backlog reconnects. This avoids attach-time
+            // races where a pod VT endpoint is not ready on the first attempt.
+            periodic.server.ses_state.processBacklogReplays();
             periodic.server.ses_state.cleanupOrphanedPanes();
             periodic.server.ses_state.cleanupExpiredDetachedSessions();
             periodic.last_cleanup = now_ms;
@@ -849,12 +852,11 @@ pub const Server = struct {
             },
             .replay_backlogs => {
                 // MUX signals it's ready for backlog replay after reattach.
-                // Send ok FIRST so MUX can return to its event loop and start
-                // reading VT data. Otherwise MUX blocks waiting for ok while
-                // we fill its VT buffer, causing deadlock.
-                ses.debugLog("replay_backlogs: sending ok, then processing", .{});
+                // Ack immediately and let periodic loop perform replay.
+                // Running replay inline here can block on pod VT reconnect
+                // handshake and freeze the event loop for seconds.
+                ses.debugLog("replay_backlogs: sending ok (deferred processing)", .{});
                 wire.writeControl(fd, .ok, &.{}) catch {};
-                self.ses_state.processBacklogReplays();
             },
             .kill_pane => {
                 self.handleBinaryKillPane(fd, hdr.payload_len, &buf);

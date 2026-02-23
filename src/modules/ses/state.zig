@@ -502,29 +502,30 @@ pub const SesState = struct {
 
     /// Connect the VT data channel (③) to a POD socket.
     /// On success, stores the fd in the pane and populates routing tables.
-    pub fn connectPodVt(self: *SesState, uuid: [32]u8, pod_socket_path: []const u8, pane_id: u16) void {
+    /// Returns true when the VT channel is fully connected.
+    pub fn connectPodVt(self: *SesState, uuid: [32]u8, pod_socket_path: []const u8, pane_id: u16) bool {
         const client = core.ipc.Client.connect(pod_socket_path) catch {
             ses.debugLog("connectPodVt: failed to connect to {s}", .{pod_socket_path});
-            return;
+            return false;
         };
         const fd = client.fd;
 
         // Send versioned handshake.
         wire.sendHandshake(fd, wire.POD_HANDSHAKE_SES_VT) catch {
             posix.close(fd);
-            return;
+            return false;
         };
 
         // Wait for acknowledgment from POD to avoid race during init.
         const ack_hdr = wire.readControlHeader(fd) catch {
             posix.close(fd);
-            return;
+            return false;
         };
         const ack_type: wire.MsgType = @enumFromInt(ack_hdr.msg_type);
         if (ack_type != .ok) {
             ses.debugLog("connectPodVt: unexpected ack {x}, closing", .{ack_hdr.msg_type});
             posix.close(fd);
-            return;
+            return false;
         }
 
         // Store in pane.
@@ -548,6 +549,7 @@ pub const SesState = struct {
         self.pending_poll_fds.append(self.allocator, fd) catch {};
 
         ses.debugLog("connectPodVt: pane_id={d} fd={d}", .{ pane_id, fd });
+        return true;
     }
 
     pub fn markDirty(self: *SesState) void {
@@ -778,6 +780,17 @@ pub const SesState = struct {
                 _ = pane.transitionState(.detached, "session detach");
                 pane.session_id = session_id;
                 pane.attached_to = null;
+
+                // Detach SES<->POD VT while session is detached so POD can
+                // retain output in backlog for replay on reattach.
+                if (pane.pod_vt_fd) |vt_fd| {
+                    _ = self.pod_vt_to_pane_id.remove(vt_fd);
+                    _ = self.pane_id_to_pod_vt.remove(pane.pane_id);
+                    self.pending_remove_poll_fds.append(self.allocator, vt_fd) catch {};
+                    posix.close(vt_fd);
+                    pane.pod_vt_fd = null;
+                }
+
                 pane_uuids_list.append(self.allocator, uuid) catch continue;
             }
         }
@@ -872,6 +885,19 @@ pub const SesState = struct {
                         _ = pane.transitionState(.detached, "atomic detach");
                         pane.session_id = session_id;
                         pane.attached_to = null;
+
+                        // Detach SES<->POD VT channel while session is detached.
+                        // This prevents SES from draining and discarding output
+                        // when no mux is attached, so POD can replay backlog on
+                        // reattach.
+                        if (pane.pod_vt_fd) |vt_fd| {
+                            _ = self.pod_vt_to_pane_id.remove(vt_fd);
+                            _ = self.pane_id_to_pod_vt.remove(pane.pane_id);
+                            self.pending_remove_poll_fds.append(self.allocator, vt_fd) catch {};
+                            posix.close(vt_fd);
+                            pane.pod_vt_fd = null;
+                        }
+
                         pane_uuids_list.append(self.allocator, uuid) catch continue;
                     }
                 }
@@ -1093,7 +1119,7 @@ pub const SesState = struct {
         self.dirty = true;
 
         // Connect VT channel (③) to POD — best-effort.
-        self.connectPodVt(uuid, pod_socket_path, pane_id);
+        _ = self.connectPodVt(uuid, pod_socket_path, pane_id);
 
         // Add to client's pane list
         if (self.getClient(client_id)) |client| {
@@ -1336,11 +1362,16 @@ pub const SesState = struct {
             return error.PaneAlreadyAttached;
         }
 
-        // Mark for deferred backlog replay. The VT reconnection happens
-        // in the server loop after all adopt messages are processed,
-        // avoiding deadlock from socket buffer filling during sync calls.
-        pane.needs_backlog_replay = true;
-        ses.debugLog("attachPane: marked for deferred backlog replay", .{});
+        // Only request deferred VT reconnect/backlog replay when we currently
+        // have no pod VT channel. In the common detach/reattach path SES keeps
+        // pod_vt_fd alive, so reconnecting here would unnecessarily replace a
+        // healthy stream and can stall old panes during attach.
+        pane.needs_backlog_replay = (pane.pod_vt_fd == null);
+        if (pane.needs_backlog_replay) {
+            ses.debugLog("attachPane: marked for deferred backlog replay", .{});
+        } else {
+            ses.debugLog("attachPane: pod VT already connected, replay not needed", .{});
+        }
 
         _ = pane.transitionState(.attached, "pane attached to client");
         pane.attached_to = client_id;
@@ -1367,8 +1398,13 @@ pub const SesState = struct {
                     pane.pane_id,
                 });
                 // Reconnect VT channel to trigger backlog replay
-                self.connectPodVt(entry.key_ptr.*, pane.pod_socket_path, pane.pane_id);
-                pane.needs_backlog_replay = false;
+                if (self.connectPodVt(entry.key_ptr.*, pane.pod_socket_path, pane.pane_id)) {
+                    pane.needs_backlog_replay = false;
+                } else {
+                    // Keep the flag set so periodic retries can reconnect once
+                    // the pod VT endpoint is ready.
+                    ses.debugLog("processBacklogReplays: deferred retry uuid={s}", .{entry.key_ptr[0..8]});
+                }
             }
         }
     }
