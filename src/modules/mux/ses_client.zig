@@ -27,6 +27,7 @@ pub const SesClient = struct {
 
     // Pending async request tracking
     pending_cwd_uuid: ?[32]u8 = null,
+    pending_pane_exits: std.ArrayList([32]u8),
 
     pub fn init(allocator: std.mem.Allocator, session_id: [32]u8, session_name: []const u8, keepalive: bool, debug: bool, log_file: ?[]const u8) SesClient {
         return .{
@@ -39,6 +40,7 @@ pub const SesClient = struct {
             .session_id = session_id,
             .session_name = session_name,
             .keepalive = keepalive,
+            .pending_pane_exits = .empty,
         };
     }
 
@@ -46,9 +48,24 @@ pub const SesClient = struct {
         if (self.ctl_fd) |fd| posix.close(fd);
         if (self.vt_fd) |fd| posix.close(fd);
         if (self.resolved_name) |rn| self.allocator.free(rn);
+        self.pending_pane_exits.deinit(self.allocator);
         self.ctl_fd = null;
         self.vt_fd = null;
         self.resolved_name = null;
+    }
+
+    fn queuePendingPaneExit(self: *SesClient, uuid: [32]u8) void {
+        for (self.pending_pane_exits.items) |existing| {
+            if (std.mem.eql(u8, &existing, &uuid)) return;
+        }
+        self.pending_pane_exits.append(self.allocator, uuid) catch {};
+    }
+
+    /// Move queued pane-exit messages captured during sync calls into `out`.
+    pub fn drainPendingPaneExits(self: *SesClient, out: *std.ArrayList([32]u8)) void {
+        if (self.pending_pane_exits.items.len == 0) return;
+        out.appendSlice(self.allocator, self.pending_pane_exits.items) catch return;
+        self.pending_pane_exits.clearRetainingCapacity();
     }
 
     /// Connect to the ses daemon, starting it if necessary.
@@ -919,6 +936,20 @@ pub const SesClient = struct {
                     self.skipPayload(fd, hdr.payload_len);
                     continue;
                 },
+                .pane_exited => {
+                    if (hdr.payload_len >= @sizeOf(wire.PaneUuid)) {
+                        const pu = wire.readStruct(wire.PaneUuid, fd) catch {
+                            self.skipPayload(fd, hdr.payload_len);
+                            continue;
+                        };
+                        self.queuePendingPaneExit(pu.uuid);
+                        const rem = hdr.payload_len - @sizeOf(wire.PaneUuid);
+                        if (rem > 0) self.skipPayload(fd, rem);
+                    } else {
+                        self.skipPayload(fd, hdr.payload_len);
+                    }
+                    continue;
+                },
                 // Return pane_info directly — this is what we're waiting for.
                 else => return hdr,
             }
@@ -947,6 +978,20 @@ pub const SesClient = struct {
                         continue;
                     }
                     return hdr;
+                },
+                .pane_exited => {
+                    if (hdr.payload_len >= @sizeOf(wire.PaneUuid)) {
+                        const pu = wire.readStruct(wire.PaneUuid, fd) catch {
+                            self.skipPayload(fd, hdr.payload_len);
+                            continue;
+                        };
+                        self.queuePendingPaneExit(pu.uuid);
+                        const rem = hdr.payload_len - @sizeOf(wire.PaneUuid);
+                        if (rem > 0) self.skipPayload(fd, rem);
+                    } else {
+                        self.skipPayload(fd, hdr.payload_len);
+                    }
+                    continue;
                 },
                 else => return hdr,
             }

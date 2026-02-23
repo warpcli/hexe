@@ -77,6 +77,25 @@ fn logTerminalCapabilities(state: *State, timed_out: bool) void {
     }
 }
 
+fn applyDeferredPaneExits(state: *State) void {
+    var pending: std.ArrayList([32]u8) = .empty;
+    defer pending.deinit(state.allocator);
+    state.ses_client.drainPendingPaneExits(&pending);
+    if (pending.items.len == 0) return;
+
+    for (pending.items) |uuid| {
+        if (state.findPaneByUuid(uuid)) |pane| {
+            switch (pane.backend) {
+                .pod => |*pod| {
+                    pod.dead = true;
+                    state.needs_render = true;
+                },
+                else => {},
+            }
+        }
+    }
+}
+
 fn finalizeTerminalQueryIfReady(state: *State, now_ms: i64) void {
     if (!state.terminal_query_in_flight) return;
 
@@ -363,11 +382,8 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
 
     float_completion.handleBlockingFloatCompletion(state, pane);
 
-    if (state.ses_client.isConnected()) {
-        state.ses_client.killPane(pane.uuid) catch |e| {
-            core.logging.logError("mux", "killPane failed for float", e);
-        };
-    }
+    // Float is already dead (detected via isAlive/pane_exited), so avoid
+    // sending another synchronous kill request on the shared control channel.
 
     pane.deinit();
     state.allocator.destroy(pane);
@@ -506,6 +522,7 @@ pub fn runMainLoop(state: *State) !void {
 
     // Main loop.
     while (state.running) {
+        applyDeferredPaneExits(state);
         ensureSesVtWatcherArmed(state, &ses_vt_watcher, &ses_vt_buffer);
         ensureSesCtlWatcherArmed(state, &ses_ctl_watcher, &ses_ctl_buffer);
         ensureStdinWatcherArmed(state, &stdin_watcher, &stdin_buffer);

@@ -6,6 +6,8 @@ const wire = core.wire;
 const ses = @import("main.zig");
 const txlog = @import("txlog.zig");
 
+const POD_VT_ACK_TIMEOUT_MS: i32 = 100;
+
 /// Pane state machine for session lifecycle management.
 /// See /doc/code/hexa/SESSION_LIFECYCLE.md for complete documentation.
 ///
@@ -517,7 +519,7 @@ pub const SesState = struct {
         };
 
         // Wait for acknowledgment from POD to avoid race during init.
-        const ack_hdr = wire.readControlHeader(fd) catch {
+        const ack_hdr = wire.readControlHeaderTimeout(fd, POD_VT_ACK_TIMEOUT_MS) catch {
             posix.close(fd);
             return false;
         };

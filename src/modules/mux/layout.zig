@@ -608,9 +608,13 @@ pub const Layout = struct {
 
         // Remove pane
         if (self.splits.fetchRemove(id_to_close)) |kv| {
-            // Tell ses to kill the pane
+            // Tell ses to kill only if the pane is still alive.
+            // Dead panes already reported by SES should be removed locally
+            // without another synchronous kill request.
             if (self.ses_client) |ses| {
-                ses.killPane(kv.value.uuid) catch {};
+                if (kv.value.isAlive()) {
+                    ses.killPane(kv.value.uuid) catch {};
+                }
             }
             kv.value.deinit();
             self.allocator.destroy(kv.value);
@@ -639,7 +643,9 @@ pub const Layout = struct {
 
         if (self.splits.fetchRemove(id_to_close)) |kv| {
             if (self.ses_client) |ses| {
-                ses.killPane(kv.value.uuid) catch {};
+                if (kv.value.isAlive()) {
+                    ses.killPane(kv.value.uuid) catch {};
+                }
             }
             kv.value.deinit();
             self.allocator.destroy(kv.value);

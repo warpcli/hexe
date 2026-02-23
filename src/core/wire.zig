@@ -676,6 +676,13 @@ pub fn readControlHeader(fd: posix.fd_t) !ControlHeader {
     return std.mem.bytesToValue(ControlHeader, &buf);
 }
 
+/// Timeout-bounded ControlHeader read.
+pub fn readControlHeaderTimeout(fd: posix.fd_t, timeout_ms: i32) !ControlHeader {
+    var buf: [@sizeOf(ControlHeader)]u8 = undefined;
+    try readExactTimeout(fd, &buf, timeout_ms);
+    return std.mem.bytesToValue(ControlHeader, &buf);
+}
+
 /// Non-blocking variant: returns WouldBlock if no data available on first byte,
 /// but waits on remaining bytes (header in-flight).
 pub fn tryReadControlHeader(fd: posix.fd_t) !ControlHeader {

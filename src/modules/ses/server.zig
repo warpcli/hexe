@@ -7,6 +7,10 @@ const state = @import("state.zig");
 const ses = @import("main.zig");
 const xev = @import("xev").Dynamic;
 
+// Keep VT routing I/O short to avoid blocking the whole SES event loop when a
+// peer dies mid-frame on stream sockets.
+const VT_ROUTE_IO_TIMEOUT_MS: i32 = 2000;
+
 /// Maximum number of concurrent client connections (MUX instances).
 const MAX_CLIENTS: usize = core.constants.Limits.max_clients;
 
@@ -646,13 +650,14 @@ pub const Server = struct {
     }
 
     /// Route VT data from POD → MUX.
-    /// Reads a 5-byte pod_protocol frame header + payload from pod_vt_fd,
-    /// wraps it in a 7-byte MuxVtHeader, and writes to the MUX VT channel.
+    /// Reads a full pod frame first, then writes MUX header+payload.
+    /// This avoids emitting a header with missing payload when POD exits
+    /// mid-frame (which would desync MUX VT parser and drop the whole channel).
     /// Returns false if the connection should be removed.
     fn routePodToMux(self: *Server, pod_vt_fd: posix.fd_t) bool {
         // Read 5-byte pod_protocol header (type:u8 + len:u32 big-endian).
         var hdr: [5]u8 = undefined;
-        wire.readExact(pod_vt_fd, &hdr) catch return false;
+        wire.readExactTimeout(pod_vt_fd, &hdr, VT_ROUTE_IO_TIMEOUT_MS) catch return false;
 
         const frame_type = hdr[0];
         const payload_len = std.mem.readInt(u32, hdr[1..5], .big);
@@ -671,22 +676,39 @@ pub const Server = struct {
             return true;
         };
 
+        // Read the full payload before sending any MUX header.
+        const payload = self.allocator.alloc(u8, payload_len) catch {
+            self.skipBytes(pod_vt_fd, payload_len);
+            return true;
+        };
+        defer self.allocator.free(payload);
+
+        wire.readExactTimeout(pod_vt_fd, payload, VT_ROUTE_IO_TIMEOUT_MS) catch {
+            self.queueVtClose(pod_vt_fd, null);
+            return true;
+        };
+
         // Write 7-byte MuxVtHeader to MUX.
         var mux_hdr: wire.MuxVtHeader = .{
             .pane_id = pane_id,
             .frame_type = frame_type,
             .len = payload_len,
         };
-        wire.writeAll(mux_vt_fd, std.mem.asBytes(&mux_hdr)) catch {
-            ses.debugLog("vt pod->mux: mux_vt_fd write failed, queuing close", .{});
-            self.skipBytes(pod_vt_fd, payload_len);
-            self.queueVtClose(mux_vt_fd, null);
+        wire.writeAllTimeout(mux_vt_fd, std.mem.asBytes(&mux_hdr), VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
+            ses.debugLog("vt pod->mux: mux header write failed: {s}", .{@errorName(err)});
+            switch (err) {
+                error.ConnectionClosed, error.BrokenPipe => self.queueVtClose(mux_vt_fd, null),
+                else => {},
+            }
             return true;
         };
 
-        // Splice payload: read from pod, write to mux.
-        self.spliceData(pod_vt_fd, mux_vt_fd, payload_len) catch {
-            self.queueVtClose(mux_vt_fd, null);
+        wire.writeAllTimeout(mux_vt_fd, payload, VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
+            ses.debugLog("vt pod->mux: mux payload write failed: {s}", .{@errorName(err)});
+            switch (err) {
+                error.ConnectionClosed, error.BrokenPipe => self.queueVtClose(mux_vt_fd, null),
+                else => {},
+            }
             return true;
         };
         return true;
@@ -698,7 +720,9 @@ pub const Server = struct {
     /// Returns false if the connection should be removed.
     fn routeMuxToPod(self: *Server, mux_vt_fd: posix.fd_t) bool {
         // Read 7-byte MuxVtHeader.
-        const mux_hdr = wire.readMuxVtHeader(mux_vt_fd) catch return false;
+        var mux_hdr_buf: [@sizeOf(wire.MuxVtHeader)]u8 = undefined;
+        wire.readExactTimeout(mux_vt_fd, &mux_hdr_buf, VT_ROUTE_IO_TIMEOUT_MS) catch return false;
+        const mux_hdr = std.mem.bytesToValue(wire.MuxVtHeader, &mux_hdr_buf);
         ses.debugLog("vt mux->pod: pane_id={d} type={d} len={d}", .{ mux_hdr.pane_id, mux_hdr.frame_type, mux_hdr.len });
 
         // Safety cap.
@@ -796,8 +820,8 @@ pub const Server = struct {
         var buf: [16 * 1024]u8 = undefined;
         while (remaining > 0) {
             const chunk = @min(remaining, buf.len);
-            wire.readExact(src, buf[0..chunk]) catch return error.ConnectionClosed;
-            wire.writeAll(dst, buf[0..chunk]) catch return error.ConnectionClosed;
+            wire.readExactTimeout(src, buf[0..chunk], VT_ROUTE_IO_TIMEOUT_MS) catch return error.ConnectionClosed;
+            wire.writeAllTimeout(dst, buf[0..chunk], VT_ROUTE_IO_TIMEOUT_MS) catch return error.ConnectionClosed;
             remaining -= chunk;
         }
     }
@@ -808,7 +832,7 @@ pub const Server = struct {
         var buf: [4096]u8 = undefined;
         while (remaining > 0) {
             const chunk = @min(remaining, buf.len);
-            wire.readExact(fd, buf[0..chunk]) catch return;
+            wire.readExactTimeout(fd, buf[0..chunk], VT_ROUTE_IO_TIMEOUT_MS) catch return;
             remaining -= chunk;
         }
     }

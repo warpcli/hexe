@@ -103,6 +103,47 @@ fn validateMuxStateJson(value: *const std.json.Value) bool {
     return true;
 }
 
+fn applyDeferredPaneExits(self: anytype) void {
+    var pending: std.ArrayList([32]u8) = .empty;
+    defer pending.deinit(self.allocator);
+    self.ses_client.drainPendingPaneExits(&pending);
+
+    for (pending.items) |uuid| {
+        var marked = false;
+
+        for (self.tabs.items) |*tab| {
+            var it = tab.layout.splits.valueIterator();
+            while (it.next()) |pane_ptr| {
+                if (std.mem.eql(u8, &pane_ptr.*.uuid, &uuid)) {
+                    switch (pane_ptr.*.backend) {
+                        .pod => |*pod| {
+                            pod.dead = true;
+                            marked = true;
+                        },
+                        else => {},
+                    }
+                }
+            }
+        }
+
+        for (self.floats.items) |pane| {
+            if (std.mem.eql(u8, &pane.uuid, &uuid)) {
+                switch (pane.backend) {
+                    .pod => |*pod| {
+                        pod.dead = true;
+                        marked = true;
+                    },
+                    else => {},
+                }
+            }
+        }
+
+        if (marked) {
+            mux.debugLog("reattachSession: applied deferred pane_exited uuid={s}", .{uuid[0..8]});
+        }
+    }
+}
+
 /// Reattach to a detached session, restoring full state.
 pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     mux.debugLog("reattachSession: starting with prefix={s}", .{session_id_prefix});
@@ -780,6 +821,11 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         mux.debugLog("reattachSession: requestBacklogReplay FAILED: {s}", .{@errorName(e)});
     };
     mux.debugLog("reattachSession: requestBacklogReplay done", .{});
+
+    // Sync-phase reads can consume async pane_exited messages before the IPC
+    // loop starts. Apply those exits now so dead panes/floats are not kept
+    // around in a frozen state.
+    applyDeferredPaneExits(self);
 
     // Final timeout check after backlog replay
     {
