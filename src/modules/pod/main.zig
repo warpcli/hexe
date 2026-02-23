@@ -51,7 +51,10 @@ var pod_debug: bool = false;
 
 fn debugLog(comptime fmt: []const u8, args: anytype) void {
     if (!pod_debug) return;
-    std.debug.print("[pod] " ++ fmt ++ "\n", args);
+    const ms = std.time.milliTimestamp();
+    const secs = @divTrunc(ms, 1000);
+    const frac = @mod(ms, 1000);
+    std.debug.print("{d}.{d:0>3} [pod] " ++ fmt ++ "\n", .{ secs, frac } ++ args);
 }
 
 fn setBlocking(fd: posix.fd_t) void {

@@ -38,7 +38,10 @@ fn sigtermHandler(_: c_int) callconv(.c) void {
 
 pub fn debugLog(comptime fmt: []const u8, args: anytype) void {
     if (!debug_enabled) return;
-    std.debug.print("[mux] " ++ fmt ++ "\n", args);
+    const ms = std.time.milliTimestamp();
+    const secs = @divTrunc(ms, 1000);
+    const frac = @mod(ms, 1000);
+    std.debug.print("{d}.{d:0>3} [mux] " ++ fmt ++ "\n", .{ secs, frac } ++ args);
 }
 
 /// Arguments for mux commands.

@@ -24,13 +24,19 @@ pub var log_file_path: ?[]const u8 = null;
 
 pub fn debugLog(comptime fmt: []const u8, args: anytype) void {
     if (!debug_enabled) return;
-    std.debug.print("[ses] " ++ fmt ++ "\n", args);
+    const ms = std.time.milliTimestamp();
+    const secs = @divTrunc(ms, 1000);
+    const frac = @mod(ms, 1000);
+    std.debug.print("{d}.{d:0>3} [ses] " ++ fmt ++ "\n", .{ secs, frac } ++ args);
 }
 
 pub fn debugLogUuid(uuid: []const u8, comptime fmt: []const u8, args: anytype) void {
     if (!debug_enabled) return;
     const short_uuid = if (uuid.len >= 8) uuid[0..8] else uuid;
-    std.debug.print("[ses][{s}] " ++ fmt ++ "\n", .{short_uuid} ++ args);
+    const ms = std.time.milliTimestamp();
+    const secs = @divTrunc(ms, 1000);
+    const frac = @mod(ms, 1000);
+    std.debug.print("{d}.{d:0>3} [ses][{s}] " ++ fmt ++ "\n", .{ secs, frac, short_uuid } ++ args);
 }
 
 /// Recover from incomplete transactions after crash.

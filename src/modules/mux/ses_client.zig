@@ -547,7 +547,9 @@ pub const SesClient = struct {
         var msg: wire.PaneUuid = .{ .uuid = uuid };
         wire.writeControl(fd, .pane_info, std.mem.asBytes(&msg)) catch return null;
 
-        const hdr = self.readSyncResponse(fd) catch return null;
+        // Read response directly — do NOT use readSyncResponse which skips
+        // large pane_info responses (treating them as async noise).
+        const hdr = self.readPaneInfoResponse(fd) catch return null;
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type != .pane_info or hdr.payload_len < @sizeOf(wire.PaneInfoResp)) {
             self.skipPayload(fd, hdr.payload_len);
@@ -906,6 +908,23 @@ pub const SesClient = struct {
 
     /// Read a response from the CTL fd, skipping any fire-and-forget response
     /// types that may have arrived before our expected response.
+    /// Read a pane_info response, skipping unrelated async messages but NOT
+    /// skipping pane_info responses (which readSyncResponse incorrectly skips).
+    fn readPaneInfoResponse(self: *SesClient, fd: posix.fd_t) !wire.ControlHeader {
+        while (true) {
+            const hdr = try wire.readControlHeader(fd);
+            const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+            switch (msg_type) {
+                .ok, .get_pane_cwd => {
+                    self.skipPayload(fd, hdr.payload_len);
+                    continue;
+                },
+                // Return pane_info directly — this is what we're waiting for.
+                else => return hdr,
+            }
+        }
+    }
+
     fn readSyncResponse(self: *SesClient, fd: posix.fd_t) !wire.ControlHeader {
         while (true) {
             const hdr = try wire.readControlHeader(fd);

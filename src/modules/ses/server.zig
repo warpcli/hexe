@@ -53,6 +53,11 @@ pub const Server = struct {
     pending_ctl_close_fds: std.ArrayList(PendingCtlClose),
     vt_watchers: std.AutoHashMap(posix.fd_t, *VtWatcher),
     pending_vt_close_fds: std.ArrayList(PendingVtClose),
+    // Deferred watcher destruction: nodes are kept alive for one loop iteration
+    // after disarm so xev can finish processing their completions. Freeing
+    // immediately causes use-after-free in ReleaseFast (xev still holds refs).
+    deferred_destroy_ctl: std.ArrayList(*CtlWatcher),
+    deferred_destroy_vt: std.ArrayList(*VtWatcher),
     loop_ptr: ?*xev.Loop = null,
     // CLI fd waiting for exit_intent response.
     pending_exit_intent_cli_fd: ?posix.fd_t = null,
@@ -82,6 +87,8 @@ pub const Server = struct {
             .pending_ctl_close_fds = .empty,
             .vt_watchers = std.AutoHashMap(posix.fd_t, *VtWatcher).init(page_alloc),
             .pending_vt_close_fds = .empty,
+            .deferred_destroy_ctl = .empty,
+            .deferred_destroy_vt = .empty,
             .pending_float_cli_fds = std.AutoHashMap([32]u8, posix.fd_t).init(page_alloc),
             .resource_monitor = core.resource_limits.ResourceMonitor.init(limits),
         };
@@ -106,6 +113,9 @@ pub const Server = struct {
         }
         self.vt_watchers.deinit();
         self.pending_vt_close_fds.deinit(self.allocator);
+        self.flushDeferredDestroys();
+        self.deferred_destroy_ctl.deinit(self.allocator);
+        self.deferred_destroy_vt.deinit(self.allocator);
 
         self.binary_ctl_fds.deinit();
         self.socket.deinit();
@@ -138,6 +148,10 @@ pub const Server = struct {
         ticker.run(&loop, &timer_completion, 100, PeriodicContext, &periodic_ctx, periodicCallback);
 
         while (self.running) {
+            // Free watcher nodes that were disarmed in a previous iteration.
+            // We defer destruction by one loop iteration so xev can finish
+            // processing completions that reference the node memory.
+            self.flushDeferredDestroys();
             self.processPendingWatcherUpdates();
             self.processPendingCtlCloses();
             self.processPendingVtCloses();
@@ -226,6 +240,17 @@ pub const Server = struct {
         self.pending_vt_close_fds.append(self.allocator, .{ .fd = fd, .watcher = watcher }) catch {};
     }
 
+    fn flushDeferredDestroys(self: *Server) void {
+        for (self.deferred_destroy_ctl.items) |node| {
+            self.allocator.destroy(node);
+        }
+        self.deferred_destroy_ctl.clearRetainingCapacity();
+        for (self.deferred_destroy_vt.items) |node| {
+            self.allocator.destroy(node);
+        }
+        self.deferred_destroy_vt.clearRetainingCapacity();
+    }
+
     fn processPendingWatcherUpdates(self: *Server) void {
         // Disarm old watchers BEFORE arming new ones to prevent fd-reuse
         // collisions. When a closed fd number is reused by a new connection,
@@ -269,7 +294,10 @@ pub const Server = struct {
 
     fn disarmCtlWatcher(self: *Server, fd: posix.fd_t) void {
         if (self.ctl_watchers.fetchRemove(fd)) |kv| {
-            self.allocator.destroy(kv.value);
+            // Defer destruction: xev may still reference the completion struct
+            self.deferred_destroy_ctl.append(self.allocator, kv.value) catch {
+                // If append fails, leak rather than use-after-free
+            };
         }
     }
 
@@ -306,7 +334,10 @@ pub const Server = struct {
 
     fn disarmVtWatcher(self: *Server, fd: posix.fd_t) void {
         if (self.vt_watchers.fetchRemove(fd)) |kv| {
-            self.allocator.destroy(kv.value);
+            // Defer destruction: xev may still reference the completion struct
+            self.deferred_destroy_vt.append(self.allocator, kv.value) catch {
+                // If append fails, leak rather than use-after-free
+            };
         }
     }
 
