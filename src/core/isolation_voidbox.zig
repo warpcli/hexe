@@ -1,7 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
-const voidbox = @import("voidbox");
+const voidbox = @import("libvoid");
 
 // ============================================================================
 // Public API

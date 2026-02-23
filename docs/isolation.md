@@ -1,16 +1,16 @@
 # Hexe Isolation Guide
 
-Complete guide to process, resource, and filesystem isolation in Hexe using [voidbox](https://github.com/bresilla/voidbox).
+Complete guide to process, resource, and filesystem isolation in Hexe using [libvoid](https://github.com/bresilla/libvoid).
 
 ## Overview
 
-Hexe uses **voidbox** for Linux sandboxing with three types of isolation:
+Hexe uses **libvoid** for Linux sandboxing with three types of isolation:
 
 1. **Process Isolation** - Namespaces (user, PID, mount, network, UTS, IPC)
 2. **Resource Isolation** - Cgroups (CPU, memory, process limits)
 3. **Filesystem Isolation** - Chroot-style bind mounts with private /tmp
 
-Filesystem isolation works by creating a **chroot-style environment** using bind mounts inside a mount namespace. Instead of the traditional `chroot()` syscall, voidbox selectively bind-mounts only the directories each profile needs into a fresh mount namespace — giving you a restricted root filesystem view without the security pitfalls of classic chroot.
+Filesystem isolation works by creating a **chroot-style environment** using bind mounts inside a mount namespace. Instead of the traditional `chroot()` syscall, libvoid selectively bind-mounts only the directories each profile needs into a fresh mount namespace — giving you a restricted root filesystem view without the security pitfalls of classic chroot.
 
 ## Isolation Profiles
 
@@ -426,7 +426,7 @@ sudo sysctl -w kernel.unprivileged_userns_clone=1
 
 ### Custom Filesystem Actions
 
-For advanced users, voidbox supports custom filesystem actions via environment variables (future feature) or direct voidbox configuration.
+For advanced users, libvoid supports custom filesystem actions via environment variables (future feature) or direct libvoid configuration.
 
 ### Overlay Filesystems
 
@@ -456,6 +456,6 @@ Future enhancement: Custom network namespaces with virtual interfaces for contro
 
 ## See Also
 
-- [Voidbox Documentation](https://github.com/bresilla/voidbox) - Underlying sandboxing library
+- [Libvoid Documentation](https://github.com/bresilla/libvoid) - Underlying sandboxing library
 - [Linux Namespaces](https://man7.org/linux/man-pages/man7/namespaces.7.html) - Kernel isolation primitives
 - [Cgroups v2](https://www.kernel.org/doc/html/latest/admin-guide/cgroup-v2.html) - Resource limits

@@ -9,7 +9,7 @@ const c = @cImport({
 });
 
 const isolation_voidbox = @import("isolation_voidbox.zig");
-const voidbox = @import("voidbox");
+const voidbox = @import("libvoid");
 
 // External declaration for environ (modified by setenv)
 extern var environ: [*:null]?[*:0]u8;
@@ -166,7 +166,7 @@ pub const Pty = struct {
             posix.close(sync_pipe[0]);
 
             // Write uid_map and gid_map from parent side
-            const ns = @import("voidbox").namespace;
+            const ns = @import("libvoid").namespace;
             ns.writeUserRootMappings(std.heap.c_allocator, pid) catch {};
 
             // Signal child that mapping is done

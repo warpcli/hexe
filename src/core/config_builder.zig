@@ -314,7 +314,7 @@ pub const SesConfigBuilder = struct {
     auto_restore: ?bool = null,
     save_on_detach: ?bool = null,
 
-    // Isolation config (voidbox)
+    // Isolation config (libvoid)
     isolation_profile: ?[]const u8 = null,
     isolation_memory: ?[]const u8 = null,
     isolation_cpu: ?[]const u8 = null,

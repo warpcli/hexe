@@ -22,9 +22,9 @@
             .url = "git+https://github.com/natecraddock/ziglua#0.6.0",
             .hash = "zlua-0.1.0-hGRpCww-BQCx3cX6zbKWfTgOx6B7Peo4P17RK2hm7-xV",
         },
-        .voidbox = .{
-            .url = "git+https://github.com/bresilla/voidbox#0.0.9",
-            .hash = "voidbox-0.0.9-fHvjRQsrBQCmQlJfs8hfE5HzK2r1rOEq9fkSznXY53FO",
+        .libvoid = .{
+            .url = "git+https://github.com/bresilla/libvoid#0.0.11",
+            .hash = "libvoid-0.0.11-gWw8RXaGBQDtudLae9j3ixad0ZS13KLmrK-lDAdOcuGo",
         },
         .libvaxis = .{
             .url = "git+https://github.com/rockorager/libvaxis#67bbc1ee072aa390838c66caf4ed47edee282dc4",

@@ -401,7 +401,7 @@ pub const LayoutDef = struct {
 };
 
 /// Ses configuration
-/// POD isolation configuration (voidbox settings)
+/// POD isolation configuration (libvoid settings)
 pub const IsolationConfig = struct {
     /// Isolation profile: none, minimal, default, balanced, full
     profile: []const u8 = "default",
