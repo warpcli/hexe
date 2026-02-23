@@ -730,9 +730,17 @@ pub fn runMainLoop(state: *State) !void {
 
         // Remove dead splits (skip if just respawned a shell).
         if (!state.skip_dead_check) {
-            for (dead_splits.items) |dead_id| {
+            var dead_idx: usize = 0;
+            while (dead_idx < dead_splits.items.len) : (dead_idx += 1) {
+                const dead_id = dead_splits.items[dead_idx];
                 // Find the dead pane to get exit status and determine if notification is needed
                 const dead_pane = state.currentLayout().splits.get(dead_id);
+                // Dead-id snapshots can become stale after tab/layout mutations.
+                // Ignore IDs that no longer exist in the active layout.
+                if (dead_pane == null) continue;
+                // Only handle panes that are actually dead.
+                if (dead_pane.?.isAlive()) continue;
+
                 const was_focused = if (state.currentLayout().getFocusedPane()) |fp| fp.id == dead_id else false;
                 const exit_code = if (dead_pane) |p| p.getExitCode() else 0;
 
@@ -762,6 +770,9 @@ pub fn runMainLoop(state: *State) !void {
                 } else if (state.tabs.items.len > 1) {
                     _ = state.closeCurrentTab();
                     state.needs_render = true;
+                    // Active tab changed; remaining dead_ids were collected from
+                    // the old tab context and must be discarded this iteration.
+                    break;
                 } else {
                     // If the shell asked permission to exit and we confirmed,
                     // don't ask again when it actually dies.
