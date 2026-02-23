@@ -1393,6 +1393,23 @@ pub const SesState = struct {
         while (iter.next()) |entry| {
             const pane = entry.value_ptr;
             if (pane.needs_backlog_replay) {
+                // Wait until the owning mux VT channel is attached before
+                // reconnecting to POD VT. If we reconnect too early, POD will
+                // stream backlog immediately and SES may discard it because no
+                // mux VT fd exists yet.
+                const owner_id = pane.attached_to orelse {
+                    ses.debugLog("processBacklogReplays: skip uuid={s} (no owner)", .{entry.key_ptr[0..8]});
+                    continue;
+                };
+                const owner = self.getClient(owner_id) orelse {
+                    ses.debugLog("processBacklogReplays: skip uuid={s} (owner missing)", .{entry.key_ptr[0..8]});
+                    continue;
+                };
+                if (owner.mux_vt_fd == null) {
+                    ses.debugLog("processBacklogReplays: defer uuid={s} (mux VT not ready)", .{entry.key_ptr[0..8]});
+                    continue;
+                }
+
                 ses.debugLog("processBacklogReplays: uuid={s} pane_id={d}", .{
                     entry.key_ptr[0..8],
                     pane.pane_id,

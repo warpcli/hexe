@@ -877,7 +877,9 @@ const Pod = struct {
         }
         pod_protocol.writeFrame(&self.client.?, .backlog_end, &[_]u8{}) catch {};
 
-        self.backlog.clear();
+        // Keep backlog after replay so repeated detach/reattach cycles can
+        // still restore scrollback for panes that stayed idle between
+        // attaches. Ring capacity naturally bounds history size.
         // Note: do NOT reset pty_paused here. The acceptCallback caller
         // checks pty_paused and calls armPtyWatcher. If we clear the flag
         // here, the caller sees pty_paused=false and skips re-arming,
