@@ -3,41 +3,34 @@ const focus_nav = @import("focus_nav.zig");
 const State = @import("state.zig").State;
 const actions = @import("loop_actions.zig");
 
-/// Move focus across splits + floats in the given direction.
+/// Move focus across splits in the given direction.
 ///
 /// This is shared by both keybindings and IPC/CLI requests to avoid
 /// dependency cycles between modules.
 ///
 /// Behavior depends on current focus:
-/// - Non-navigatable float: left/right switches tabs directly (up/down ignored)
-/// - Navigatable float or split: directional navigation, tab switch at edge
+/// - Float: left/right switches tabs directly (up/down ignored).
+///   Floats have dedicated toggle keys so directional nav skips them.
+/// - Split: directional navigation among splits, tab switch at edge.
 pub fn perform(state: *State, dir: layout_mod.Layout.Direction) bool {
-    // Check if we're on a non-navigatable float
+    // Floats have dedicated toggle keys — directional navigation skips them.
+    // Left/right switches tabs, up/down ignored.
     if (state.active_floating) |idx| {
         if (idx < state.floats.items.len) {
-            const float_pane = state.floats.items[idx];
-            if (!float_pane.navigatable) {
-                // Non-navigatable float: left/right switches tabs, up/down ignored
-                // Restore cursor when switching away from float
-                state.cursor_needs_restore = true;
-                switch (dir) {
-                    .left => actions.switchToPrevTab(state),
-                    .right => actions.switchToNextTab(state),
-                    .up, .down => {}, // Ignore vertical navigation
-                }
-                state.needs_render = true;
-                return true;
+            state.cursor_needs_restore = true;
+            switch (dir) {
+                .left => actions.switchToPrevTab(state),
+                .right => actions.switchToNextTab(state),
+                .up, .down => {},
             }
+            state.needs_render = true;
+            return true;
         }
     }
 
-    // Navigatable float or split: use directional navigation
+    // Split navigation
     const old_uuid = state.getCurrentFocusedUuid();
     const cursor = blk: {
-        if (state.active_floating) |idx| {
-            const pos = state.floats.items[idx].getCursorPos();
-            break :blk @as(?layout_mod.CursorPos, .{ .x = pos.x, .y = pos.y });
-        }
         if (state.currentLayout().getFocusedPane()) |pane| {
             const pos = pane.getCursorPos();
             break :blk @as(?layout_mod.CursorPos, .{ .x = pos.x, .y = pos.y });
@@ -45,23 +38,13 @@ pub fn perform(state: *State, dir: layout_mod.Layout.Direction) bool {
         break :blk @as(?layout_mod.CursorPos, null);
     };
 
-    // Track if we're moving FROM a float - may need cursor restoration
-    const was_on_float = state.active_floating != null;
-
     if (focus_nav.focusDirectionAny(state, dir, cursor)) |target| {
-        if (target.kind == .float) {
-            state.active_floating = target.float_index;
-        } else {
-            state.active_floating = null;
-            // Moving from float to split - restore cursor in case float hid it
-            if (was_on_float) state.cursor_needs_restore = true;
-        }
+        state.active_floating = null;
         state.syncPaneFocus(target.pane, old_uuid);
         state.renderer.invalidate();
         state.force_full_render = true;
     } else {
-        // No split/float found in that direction.
-        // For left/right, switch to prev/next tab for seamless navigation.
+        // No split found in that direction — switch tabs at the edge.
         switch (dir) {
             .left => actions.switchToPrevTab(state),
             .right => actions.switchToNextTab(state),

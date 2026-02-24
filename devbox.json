@@ -6,6 +6,7 @@
     "clang@latest",
     "clang-tools@latest",
     "stdenv@latest",
+    "nix-ld@latest"
   ],
   "shell": {
     "init_hook": [
