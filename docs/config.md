@@ -10,7 +10,7 @@ Hexa reads config from (in order):
 
 1. `$XDG_CONFIG_HOME/hexe/init.lua`
 2. `~/.config/hexe/init.lua` (default if XDG not set)
-3. `./.hexe.lua` (optional local override in current directory)
+3. `./.hexe.lua` (optional local override in current directory, or session config — see [session_manager](session_manager.md))
 
 State is stored under:
 

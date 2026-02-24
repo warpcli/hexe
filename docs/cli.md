@@ -88,6 +88,16 @@ hexe ses stats
 ```
 Show resource usage for all sessions and pods.
 
+```sh
+hexe ses open <target>[:<tab>] [--debug] [--logfile <path>]
+```
+Open a session from a `.hexe.lua` config. Target can be a directory, `.lua` file, or session name. See [session_manager](session_manager.md).
+
+```sh
+hexe ses freeze
+```
+Snapshot current session as `.hexe.lua` to stdout.
+
 ---
 
 ## hexe pod

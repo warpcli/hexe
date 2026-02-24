@@ -115,7 +115,7 @@ fn printHelpRoot() void {
 fn printHelpCommand(command: []const u8) void {
     if (std.mem.eql(u8, command, "session")) {
         print("{s}{s}session{s} {s}(alias: ses){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-        print("Subcommands: daemon, status, list, kill, clear, export, stats\n", .{});
+        print("Subcommands: daemon, status, list, kill, clear, export, stats, open, freeze\n", .{});
         return;
     }
     if (std.mem.eql(u8, command, "multiplexer")) {
@@ -206,6 +206,15 @@ pub fn main() !void {
     var ses_stats_cmd = app.createCommand("stats", "Show resource usage statistics");
     try ses_stats_cmd.addArg(Arg.singleValueOption("instance", 'I', null));
 
+    var ses_open = app.createCommand("open", "Open a session from .hexe.lua config");
+    try ses_open.addArg(Arg.positional("target", null, null));
+    try ses_open.addArg(Arg.booleanOption("debug", 'd', null));
+    try ses_open.addArg(Arg.singleValueOption("logfile", 'L', null));
+    try ses_open.addArg(Arg.singleValueOption("instance", 'I', null));
+
+    var ses_freeze = app.createCommand("freeze", "Snapshot current session as .hexe.lua");
+    try ses_freeze.addArg(Arg.singleValueOption("instance", 'I', null));
+
     try ses_cmd.addSubcommands(&[_]yazap.Command{
         ses_daemon,
         ses_status_cmd,
@@ -214,6 +223,8 @@ pub fn main() !void {
         ses_clear,
         ses_export_cmd,
         ses_stats_cmd,
+        ses_open,
+        ses_freeze,
     });
 
     // POD subcommands
@@ -491,6 +502,24 @@ pub fn main() !void {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
             try ses_stats.run(allocator);
+            return;
+        }
+        if (ses_matches.subcommandMatches("open")) |m| {
+            const instance = m.getSingleValue("instance") orelse "";
+            if (instance.len > 0) setInstanceFromCli(instance);
+            try cli_cmds.runSesOpen(
+                allocator,
+                m.getSingleValue("target") orelse ".",
+                m.containsArg("debug"),
+                m.getSingleValue("logfile") orelse "",
+                instance,
+            );
+            return;
+        }
+        if (ses_matches.subcommandMatches("freeze")) |m| {
+            const instance = m.getSingleValue("instance") orelse "";
+            if (instance.len > 0) setInstanceFromCli(instance);
+            try cli_cmds.runSesFreeze(allocator);
             return;
         }
     } else if (matches.subcommandMatches("pod")) |pod_matches| {

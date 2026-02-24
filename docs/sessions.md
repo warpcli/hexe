@@ -156,4 +156,8 @@ hexe ses clear           # Kill all detached sessions
 hexe ses export <uuid>   # Export session state as JSON
 hexe ses stats           # Resource usage statistics
 hexe ses status          # Daemon info
+hexe ses open <target>   # Open session from .hexe.lua config
+hexe ses freeze          # Snapshot session as .hexe.lua to stdout
 ```
+
+For declarative per-project session configs, see [session_manager](session_manager.md).

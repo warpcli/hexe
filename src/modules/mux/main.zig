@@ -61,6 +61,8 @@ pub const MuxArgs = struct {
     list: bool = false,
     debug: bool = false,
     log_file: ?[]const u8 = null,
+    session_config_path: ?[]const u8 = null,
+    session_tab_filter: ?[]const u8 = null,
 };
 
 /// Entry point for mux - can be called directly from unified CLI.
@@ -285,6 +287,28 @@ pub fn run(mux_args: MuxArgs) !void {
             std.debug.print("Use 'hexe mux list' to see available sessions\n", .{});
             return; // Exit without entering main loop
         }
+    } else if (mux_args.session_config_path) |config_path| {
+        // Launch from session config (.hexe.lua)
+        debugLog("applying session config from: {s}", .{config_path});
+        const session_config = core.session_config;
+        const config = session_config.parseSessionLua(allocator, config_path) catch |err| {
+            if (err == error.FileNotFound) {
+                std.debug.print("Session config not found: {s}\n", .{config_path});
+            } else {
+                std.debug.print("Error parsing session config: {s}\n", .{@errorName(err)});
+            }
+            // Fall back to default tab
+            try state.createTab();
+            state.adoptStickyPanes();
+            try loop_core.runMainLoop(&state);
+            return;
+        };
+        state.applySessionConfig(config, mux_args.session_tab_filter) catch |err| {
+            debugLog("applySessionConfig failed: {s}", .{@errorName(err)});
+            std.debug.print("Error applying session config: {s}\n", .{@errorName(err)});
+            // Fall back to default tab
+            try state.createTab();
+        };
     } else {
         // Create first tab with one pane (will use ses if connected).
         try state.createTab();

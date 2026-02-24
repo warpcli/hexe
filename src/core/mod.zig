@@ -19,8 +19,10 @@ pub const sprites_embedded = @import("sprites_embedded.zig");
 pub const constants = @import("constants.zig");
 pub const resource_limits = @import("resource_limits.zig");
 pub const isolation_voidbox = @import("isolation_voidbox.zig");
+pub const session_config = @import("session_config.zig");
 
 pub const LuaRuntime = lua_runtime.LuaRuntime;
+pub const SessionConfig = session_config.SessionConfig;
 pub const ConfigStatus = lua_runtime.ConfigStatus;
 
 pub const Pty = pty.Pty;

@@ -32,6 +32,7 @@ pub const FocusContext = enum { split, float };
 const state_tabs = @import("state_tabs.zig");
 const state_serialize = @import("state_serialize.zig");
 const state_sync = @import("state_sync.zig");
+const state_session = @import("state_session.zig");
 const mouse_selection = @import("mouse_selection.zig");
 
 pub const TabFocusKind = enum { split, float };
@@ -606,6 +607,10 @@ pub const State = struct {
 
     pub fn attachOrphanedPane(self: *State, uuid_prefix: []const u8) bool {
         return state_tabs.attachOrphanedPane(self, uuid_prefix);
+    }
+
+    pub fn applySessionConfig(self: *State, config: core.SessionConfig, tab_filter: ?[]const u8) !void {
+        return state_session.applySessionConfig(self, config, tab_filter);
     }
 
     pub fn serializeState(self: *State) ![]const u8 {
