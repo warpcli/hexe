@@ -440,8 +440,11 @@ const Pod = struct {
         var should_stop = false;
         var callback_error: ?anyerror = null;
         var pty_armed = false;
-        var client_completion: xev.Completion = .{};
-        var client_slot: ClientSlot = .{ .parent = undefined, .fd = -1 };
+        var client_completion_0: xev.Completion = .{};
+        var client_completion_1: xev.Completion = .{};
+        var client_slot_0: ClientSlot = .{ .parent = undefined, .fd = -1 };
+        var client_slot_1: ClientSlot = .{ .parent = undefined, .fd = -1 };
+        var client_gen: u1 = 0;
 
         var pty_ctx = PtyContext{
             .pod = self,
@@ -459,8 +462,9 @@ const Pod = struct {
             .io_buf = buf,
             .loop = &loop,
             .callback_error = &callback_error,
-            .completion = &client_completion,
-            .slot = &client_slot,
+            .completions = .{ &client_completion_0, &client_completion_1 },
+            .slots = .{ &client_slot_0, &client_slot_1 },
+            .gen = &client_gen,
         };
 
         var accept_ctx = AcceptContext{
@@ -520,8 +524,13 @@ const Pod = struct {
         io_buf: []u8,
         loop: *xev.Loop,
         callback_error: *?anyerror,
-        completion: *xev.Completion,
-        slot: *ClientSlot,
+        /// Two completion/slot pairs to alternate between during VT client
+        /// replacement. When a new client replaces an old one, the old
+        /// io_uring POLL_ADD CQE may still reference the previous completion.
+        /// Switching to the alternate pair avoids overwriting a live entry.
+        completions: [2]*xev.Completion,
+        slots: [2]*ClientSlot,
+        gen: *u1,
         watched_fd: ?posix.fd_t = null,
     };
 
@@ -585,13 +594,19 @@ const Pod = struct {
             debugLog("armClientWatcher: SKIP fd={d} (watched_fd={?d} still set)", .{ client_fd, ctx.watched_fd });
             return;
         }
-        debugLog("armClientWatcher: ARMED fd={d}", .{client_fd});
+        // Alternate between two completion/slot pairs so we never overwrite
+        // a completion that io_uring still references from a previous poll.
+        ctx.gen.* ^= 1;
+        const completion = ctx.completions[ctx.gen.*];
+        const slot = ctx.slots[ctx.gen.*];
+
+        debugLog("armClientWatcher: ARMED fd={d} gen={d}", .{ client_fd, ctx.gen.* });
         ctx.watched_fd = client_fd;
 
-        ctx.slot.* = .{ .parent = ctx, .fd = client_fd };
+        slot.* = .{ .parent = ctx, .fd = client_fd };
         const watcher = xev.File.initFd(client_fd);
-        ctx.completion.* = .{};
-        watcher.poll(ctx.loop, ctx.completion, .read, ClientSlot, ctx.slot, clientCallback);
+        completion.* = .{};
+        watcher.poll(ctx.loop, completion, .read, ClientSlot, slot, clientCallback);
     }
 
     fn clientCallback(

@@ -272,18 +272,18 @@ fn sesVtCallback(
 
         if (slot.state.findPaneByPaneId(hdr.pane_id)) |pane| {
             if (hdr.frame_type == @intFromEnum(pod_protocol.FrameType.output)) {
-                mux.debugLog("vt recv: pane_id={d} output len={d}", .{ hdr.pane_id, hdr.len });
+                mux.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} output len={d}", .{ hdr.pane_id, hdr.len });
                 pane.feedPodOutput(slot.buffer[0..hdr.len]);
                 pane.vt.invalidateRenderState();
                 slot.state.needs_render = true;
             } else if (hdr.frame_type == @intFromEnum(pod_protocol.FrameType.backlog_end)) {
-                mux.debugLog("vt recv: pane_id={d} backlog_end", .{hdr.pane_id});
+                mux.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} backlog_end", .{hdr.pane_id});
                 pane.vt.invalidateRenderState();
                 slot.state.needs_render = true;
                 slot.state.force_full_render = true;
             }
         } else {
-            mux.debugLog("vt recv: unknown pane_id={d}", .{hdr.pane_id});
+            mux.debugLog("vt recv: UNKNOWN pane_id={d} type={d} len={d} — no matching pane!", .{ hdr.pane_id, hdr.frame_type, hdr.len });
         }
     }
 

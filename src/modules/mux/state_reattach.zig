@@ -389,7 +389,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             failed_adoptions += 1;
             continue;
         };
-        mux.debugLog("reattachSession: adoptPane success, pane_id={d}", .{adopt_result.pane_id});
+        mux.debugLogUuid(&uuid, "reattachSession: adoptPane ok pane_id={d} vt_fd={?d}", .{ adopt_result.pane_id, self.ses_client.vt_fd });
         uuid_pane_map.put(uuid, .{ .pane_id = adopt_result.pane_id }) catch {
             failed_adoptions += 1;
             continue;

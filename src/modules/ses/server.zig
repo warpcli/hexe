@@ -215,17 +215,38 @@ pub const Server = struct {
     }
 
     fn processPendingVtCloses(self: *Server) void {
+        if (self.pending_vt_close_fds.items.len > 0) {
+            ses.debugLog("processPendingVtCloses: {d} pending", .{self.pending_vt_close_fds.items.len});
+        }
         for (self.pending_vt_close_fds.items) |pending| {
-            if (!self.disarmVtWatcherMatching(pending.fd, pending.watcher)) continue;
+            ses.debugLog("processPendingVtCloses: fd={d} is_pod_vt={} is_mux_vt={}", .{
+                pending.fd,
+                self.ses_state.pod_vt_to_pane_id.contains(pending.fd),
+                self.isMuxVtFd(pending.fd),
+            });
+            if (!self.disarmVtWatcherMatching(pending.fd, pending.watcher)) {
+                ses.debugLog("processPendingVtCloses: fd={d} disarm failed, skipping", .{pending.fd});
+                // Watcher was already removed from map (e.g. by
+                // processPendingWatcherUpdates during detach). Its callback
+                // already returned .disarm so no CQE is pending. Free now.
+                if (pending.watcher) |w| self.allocator.destroy(w);
+                continue;
+            }
+
+            // Callback already returned .disarm, free the node now.
+            if (pending.watcher) |w| self.allocator.destroy(w);
 
             if (self.ses_state.pod_vt_to_pane_id.contains(pending.fd)) {
+                ses.debugLog("processPendingVtCloses: fd={d} removing pod VT", .{pending.fd});
                 self.removePodVtFd(pending.fd);
             }
             if (self.isMuxVtFd(pending.fd)) {
+                ses.debugLog("processPendingVtCloses: fd={d} removing MUX VT", .{pending.fd});
                 self.removeMuxVtFd(pending.fd);
             }
 
             posix.close(pending.fd);
+            ses.debugLog("processPendingVtCloses: fd={d} closed", .{pending.fd});
         }
         self.pending_vt_close_fds.clearRetainingCapacity();
     }
@@ -337,12 +358,10 @@ pub const Server = struct {
     }
 
     fn disarmVtWatcher(self: *Server, fd: posix.fd_t) void {
-        if (self.vt_watchers.fetchRemove(fd)) |kv| {
-            // Defer destruction: xev may still reference the completion struct
-            self.deferred_destroy_vt.append(self.allocator, kv.value) catch {
-                // If append fails, leak rather than use-after-free
-            };
-        }
+        // Remove from map but do NOT free — the io_uring POLL_ADD may still
+        // be pending. The stale CQE will fire eventually and vtWatcherCallback
+        // will detect the orphaned node (map miss) and free it.
+        _ = self.vt_watchers.fetchRemove(fd);
     }
 
     fn disarmVtWatcherMatching(self: *Server, fd: posix.fd_t, expected: ?*VtWatcher) bool {
@@ -413,6 +432,16 @@ pub const Server = struct {
     ) xev.CallbackAction {
         const watch = ctx orelse return .disarm;
         const server: *Server = @ptrCast(@alignCast(watch.srv));
+
+        // If this watcher was disarmed (removed from vt_watchers map) but its
+        // io_uring poll was still pending, this is a stale CQE. Free the
+        // orphaned node and stop polling.
+        const current = server.vt_watchers.get(watch.fd);
+        if (current == null or current.? != watch) {
+            server.allocator.destroy(watch);
+            return .disarm;
+        }
+
         _ = result catch {
             server.queueVtClose(watch.fd, watch);
             return .disarm;
@@ -423,6 +452,7 @@ pub const Server = struct {
             .mux_to_pod => server.routeMuxToPod(watch.fd),
         };
         if (!ok) {
+            ses.debugLog("vtWatcher: fd={d} dir={s} returned false, queueing close", .{ watch.fd, @tagName(watch.direction) });
             server.queueVtClose(watch.fd, watch);
             return .disarm;
         }
@@ -666,8 +696,12 @@ pub const Server = struct {
         if (payload_len > wire.MAX_PAYLOAD_LEN) return false;
 
         // Look up pane_id.
-        const pane_id = self.ses_state.pod_vt_to_pane_id.get(pod_vt_fd) orelse return false;
-        ses.debugLog("vt pod->mux: pane_id={d} type={d} len={d}", .{ pane_id, frame_type, payload_len });
+        const pane_id = self.ses_state.pod_vt_to_pane_id.get(pod_vt_fd) orelse {
+            ses.debugLog("vt pod->mux: pod_vt_fd={d} NOT in routing table, draining {d} bytes", .{ pod_vt_fd, payload_len });
+            self.skipBytes(pod_vt_fd, payload_len);
+            return true;
+        };
+        ses.debugLog("vt pod->mux: pane_id={d} type={d} len={d} pod_vt_fd={d}", .{ pane_id, frame_type, payload_len, pod_vt_fd });
 
         // Find the MUX VT fd for this pane.
         const mux_vt_fd = self.findMuxVtForPane(pane_id) orelse {
@@ -721,9 +755,12 @@ pub const Server = struct {
     fn routeMuxToPod(self: *Server, mux_vt_fd: posix.fd_t) bool {
         // Read 7-byte MuxVtHeader.
         var mux_hdr_buf: [@sizeOf(wire.MuxVtHeader)]u8 = undefined;
-        wire.readExactTimeout(mux_vt_fd, &mux_hdr_buf, VT_ROUTE_IO_TIMEOUT_MS) catch return false;
+        wire.readExactTimeout(mux_vt_fd, &mux_hdr_buf, VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
+            ses.debugLog("vt mux->pod: mux disconnected: {s}", .{@errorName(err)});
+            return false;
+        };
         const mux_hdr = std.mem.bytesToValue(wire.MuxVtHeader, &mux_hdr_buf);
-        ses.debugLog("vt mux->pod: pane_id={d} type={d} len={d}", .{ mux_hdr.pane_id, mux_hdr.frame_type, mux_hdr.len });
+        ses.debugLog("vt mux->pod: pane_id={d} type={d} len={d} mux_vt_fd={d}", .{ mux_hdr.pane_id, mux_hdr.frame_type, mux_hdr.len, mux_vt_fd });
 
         // Safety cap.
         if (mux_hdr.len > wire.MAX_PAYLOAD_LEN) return false;
@@ -1247,9 +1284,17 @@ pub const Server = struct {
             return;
         }
         const pu = wire.readStruct(wire.PaneUuid, fd) catch return;
-        self.ses_state.killPane(pu.uuid) catch {};
+        const hex_uuid: [32]u8 = std.fmt.bytesToHex(pu.uuid[0..16], .lower);
+        ses.debugLog("handleBinaryKillPane: uuid={s} ctl_fd={d}", .{ hex_uuid[0..8], fd });
+        self.ses_state.killPane(pu.uuid) catch |e| {
+            ses.debugLog("handleBinaryKillPane: killPane error: {s}", .{@errorName(e)});
+        };
         self.ses_state.markDirty();
-        wire.writeControl(fd, .ok, &.{}) catch {};
+        ses.debugLog("handleBinaryKillPane: sending .ok response", .{});
+        wire.writeControl(fd, .ok, &.{}) catch |e| {
+            ses.debugLog("handleBinaryKillPane: writeControl .ok failed: {s}", .{@errorName(e)});
+        };
+        ses.debugLog("handleBinaryKillPane: done", .{});
     }
 
     fn handleBinarySetSticky(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {

@@ -651,7 +651,7 @@ fn handlePaneExited(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
         return;
     }
     const pu = wire.readStruct(wire.PaneUuid, fd) catch return;
-    mux.debugLog("pane_exited: uuid={s}", .{pu.uuid[0..8]});
+    mux.debugLogUuid(&pu.uuid, "pane_exited received from SES", .{});
 
     // Mark the pane as dead in all tabs and floats.
     for (state.tabs.items) |*tab| {

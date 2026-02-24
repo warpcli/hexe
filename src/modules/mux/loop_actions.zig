@@ -3,6 +3,7 @@ const posix = std.posix;
 const core = @import("core");
 const vaxis = @import("vaxis");
 const wire = core.wire;
+const mux = @import("main.zig");
 
 const layout_mod = @import("layout.zig");
 const SplitDir = layout_mod.SplitDir;
@@ -256,11 +257,19 @@ pub fn performClose(state: *State) void {
     if (state.active_floating) |idx| {
         const old_uuid = state.getCurrentFocusedUuid();
         const pane = state.floats.orderedRemove(idx);
+        mux.debugLogUuid(&pane.uuid, "performClose: float pane_id={?d} vt_fd={?d}", .{
+            pane.getPaneId(),
+            state.ses_client.vt_fd,
+        });
         state.syncPaneUnfocus(pane);
         float_completion.handleBlockingFloatCompletion(state, pane);
         // Kill in ses.
         if (state.ses_client.isConnected()) {
-            state.ses_client.killPane(pane.uuid) catch {};
+            mux.debugLogUuid(&pane.uuid, "performClose: sending killPane to SES", .{});
+            state.ses_client.killPane(pane.uuid) catch |e| {
+                mux.debugLogUuid(&pane.uuid, "performClose: killPane error: {s}", .{@errorName(e)});
+            };
+            mux.debugLogUuid(&pane.uuid, "performClose: killPane done", .{});
         }
         pane.deinit();
         state.allocator.destroy(pane);

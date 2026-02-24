@@ -377,8 +377,10 @@ pub const SesClient = struct {
     /// Kill a pane.
     pub fn killPane(self: *SesClient, uuid: [32]u8) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
+        mux.debugLogUuid(&uuid, "killPane: sending to SES ctl_fd={d} vt_fd={?d}", .{ fd, self.vt_fd });
         var msg: wire.PaneUuid = .{ .uuid = uuid };
         try wire.writeControl(fd, .kill_pane, std.mem.asBytes(&msg));
+        mux.debugLogUuid(&uuid, "killPane: sent ok", .{});
     }
 
     /// Request pane CWD from ses (fire-and-forget; response handled in handleSesMessage).

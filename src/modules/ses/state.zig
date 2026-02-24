@@ -550,7 +550,8 @@ pub const SesState = struct {
         // Queue fd for poll set addition by the server loop.
         self.pending_poll_fds.append(self.allocator, fd) catch {};
 
-        ses.debugLog("connectPodVt: pane_id={d} fd={d}", .{ pane_id, fd });
+        const hex_uuid: [32]u8 = std.fmt.bytesToHex(uuid[0..16], .lower);
+        ses.debugLog("connectPodVt: uuid={s} pane_id={d} fd={d}", .{ hex_uuid[0..8], pane_id, fd });
         return true;
     }
 
@@ -1461,8 +1462,19 @@ pub const SesState = struct {
 
     /// Kill a pane
     pub fn killPane(self: *SesState, uuid: [32]u8) !void {
-        var pane = self.panes.fetchRemove(uuid) orelse return error.PaneNotFound;
+        const hex_uuid: [32]u8 = std.fmt.bytesToHex(uuid[0..16], .lower);
+        var pane = self.panes.fetchRemove(uuid) orelse {
+            ses.debugLog("killPane: {s} NOT FOUND", .{hex_uuid[0..8]});
+            return error.PaneNotFound;
+        };
         self.dirty = true;
+        ses.debugLog("killPane: {s} pane_id={d} pod_pid={d} pod_vt_fd={?d} state={s}", .{
+            hex_uuid[0..8],
+            pane.value.pane_id,
+            pane.value.pod_pid,
+            pane.value.pod_vt_fd,
+            @tagName(pane.value.state),
+        });
 
         // Remove from client's pane_uuids list if attached
         if (pane.value.attached_to) |client_id| {
@@ -1478,11 +1490,24 @@ pub const SesState = struct {
             }
         }
 
+        if (pane.value.pod_vt_fd) |vt_fd| {
+            ses.debugLog("killPane: {s} closing pod_vt_fd={d}, removing from routing tables", .{ hex_uuid[0..8], vt_fd });
+            _ = self.pod_vt_to_pane_id.remove(vt_fd);
+            _ = self.pane_id_to_pod_vt.remove(pane.value.pane_id);
+            self.pending_remove_poll_fds.append(self.allocator, vt_fd) catch {};
+            posix.close(vt_fd);
+        } else {
+            ses.debugLog("killPane: {s} pod_vt_fd=null, removing pane_id from routing", .{hex_uuid[0..8]});
+            _ = self.pane_id_to_pod_vt.remove(pane.value.pane_id);
+        }
+
         // Stop pod process (which owns PTY)
+        ses.debugLog("killPane: {s} sending SIGTERM to pid={d}", .{ hex_uuid[0..8], pane.value.pod_pid });
         _ = std.c.kill(pane.value.pod_pid, std.c.SIG.TERM);
 
         // Clean up
         pane.value.deinit();
+        ses.debugLog("killPane: {s} done", .{hex_uuid[0..8]});
     }
 
     /// Get all orphaned panes

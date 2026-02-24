@@ -44,6 +44,15 @@ pub fn debugLog(comptime fmt: []const u8, args: anytype) void {
     std.debug.print("{d}.{d:0>3} [mux] " ++ fmt ++ "\n", .{ secs, frac } ++ args);
 }
 
+pub fn debugLogUuid(uuid: []const u8, comptime fmt: []const u8, args: anytype) void {
+    if (!debug_enabled) return;
+    const short_uuid = if (uuid.len >= 8) uuid[0..8] else uuid;
+    const ms = std.time.milliTimestamp();
+    const secs = @divTrunc(ms, 1000);
+    const frac = @mod(ms, 1000);
+    std.debug.print("{d}.{d:0>3} [mux][{s}] " ++ fmt ++ "\n", .{ secs, frac, short_uuid } ++ args);
+}
+
 /// Arguments for mux commands.
 pub const MuxArgs = struct {
     name: ?[]const u8 = null,
