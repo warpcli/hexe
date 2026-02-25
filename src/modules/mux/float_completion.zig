@@ -9,6 +9,11 @@ const Pane = @import("pane.zig").Pane;
 pub fn handleBlockingFloatCompletion(state: *State, pane: *Pane) void {
     const entry = state.pending_float_requests.fetchRemove(pane.uuid) orelse return;
 
+    if (entry.value.cursor_snapshot) |snapshot| {
+        state.cursor_restore_snapshot = snapshot;
+        state.cursor_needs_restore = false;
+    }
+
     // If closed via exit key, return error exit code (130 = terminated by signal)
     const exit_code: i32 = if (pane.closed_by_exit_key) 130 else pane.getExitCode();
     var stdout: ?[]u8 = null;

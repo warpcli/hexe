@@ -8,6 +8,7 @@ const state_types = @import("state_types.zig");
 pub const PendingAction = state_types.PendingAction;
 pub const Tab = state_types.Tab;
 pub const PendingFloatRequest = state_types.PendingFloatRequest;
+pub const CursorSnapshot = state_types.CursorSnapshot;
 
 const layout_mod = @import("layout.zig");
 const Layout = layout_mod.Layout;
@@ -136,6 +137,8 @@ pub const State = struct {
     force_full_render: bool,
     /// When true, force cursor visible on next render (set after float death)
     cursor_needs_restore: bool,
+    /// One-shot cursor snapshot restored after transient CLI float exits.
+    cursor_restore_snapshot: ?CursorSnapshot,
     term_width: u16,
     term_height: u16,
     status_height: u16,
@@ -307,6 +310,7 @@ pub const State = struct {
             .needs_render = true,
             .force_full_render = true,
             .cursor_needs_restore = false,
+            .cursor_restore_snapshot = null,
             .term_width = width,
             .term_height = height,
             .status_height = status_h,

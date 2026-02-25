@@ -61,4 +61,12 @@ pub const Tab = struct {
 
 pub const PendingFloatRequest = struct {
     result_path: ?[]u8,
+    cursor_snapshot: ?CursorSnapshot = null,
+};
+
+pub const CursorSnapshot = struct {
+    x: u16,
+    y: u16,
+    style: u8,
+    visible: bool,
 };

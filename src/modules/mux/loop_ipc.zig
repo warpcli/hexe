@@ -7,6 +7,7 @@ const pop = @import("pop");
 const mux = @import("main.zig");
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
+const CursorSnapshot = @import("state.zig").CursorSnapshot;
 
 const actions = @import("loop_actions.zig");
 const layout_mod = @import("layout.zig");
@@ -589,6 +590,26 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         }
     }
 
+    // Save cursor state before opening wait-for-exit CLI float so we can
+    // restore even when float process exits without cleaning cursor state.
+    var cursor_snapshot: ?CursorSnapshot = null;
+    if (wait_for_exit) {
+        const source_pane = if (state.active_floating) |idx| blk: {
+            if (idx < state.floats.items.len) break :blk state.floats.items[idx];
+            break :blk @as(?*Pane, null);
+        } else state.currentLayout().getFocusedPane();
+
+        if (source_pane) |pane| {
+            const pos = pane.getCursorPos();
+            cursor_snapshot = .{
+                .x = pos.x,
+                .y = pos.y,
+                .style = pane.getCursorStyle(),
+                .visible = pane.isCursorVisible(),
+            };
+        }
+    }
+
     // Unfocus current pane.
     const old_uuid = state.getCurrentFocusedUuid();
     if (state.active_floating) |idx| {
@@ -641,7 +662,10 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
             state.floats.items[state.floats.items.len - 1].capture_output = true;
         }
         const stored_path = if (result_path_slice.len > 0) state.allocator.dupe(u8, result_path_slice) catch null else null;
-        state.pending_float_requests.put(new_uuid, .{ .result_path = stored_path }) catch {};
+        state.pending_float_requests.put(new_uuid, .{
+            .result_path = stored_path,
+            .cursor_snapshot = cursor_snapshot,
+        }) catch {};
     }
 }
 

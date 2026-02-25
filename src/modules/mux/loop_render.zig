@@ -353,8 +353,18 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         cursor.visible = pane.isCursorVisible();
     }
 
-    // If cursor_needs_restore is set (e.g., after float death), force cursor visible
-    if (state.cursor_needs_restore) {
+    // Explicit one-shot cursor restore (position + style + visibility) captured
+    // before opening a transient CLI float.
+    if (state.cursor_restore_snapshot) |saved| {
+        cursor.x = @min(saved.x, state.term_width -| 1);
+        cursor.y = @min(saved.y, state.term_height -| 1);
+        cursor.style = saved.style;
+        cursor.visible = saved.visible;
+        state.cursor_restore_snapshot = null;
+        state.cursor_needs_restore = false;
+    } else if (state.cursor_needs_restore) {
+        // Legacy restore path (e.g., tab switch or non-CLI float death):
+        // force visibility for one frame.
         cursor.visible = true;
         state.cursor_needs_restore = false;
     }
