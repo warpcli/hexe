@@ -600,10 +600,11 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         } else state.currentLayout().getFocusedPane();
 
         if (source_pane) |pane| {
-            const pos = pane.getCursorPos();
+            const rel = pane.vt.getCursor();
             cursor_snapshot = .{
-                .x = pos.x,
-                .y = pos.y,
+                .source_uuid = pane.uuid,
+                .rel_x = rel.x,
+                .rel_y = rel.y,
                 .style = pane.getCursorStyle(),
                 .visible = pane.isCursorVisible(),
             };

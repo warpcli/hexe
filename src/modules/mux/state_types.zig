@@ -65,8 +65,9 @@ pub const PendingFloatRequest = struct {
 };
 
 pub const CursorSnapshot = struct {
-    x: u16,
-    y: u16,
+    source_uuid: [32]u8,
+    rel_x: u16,
+    rel_y: u16,
     style: u8,
     visible: bool,
 };

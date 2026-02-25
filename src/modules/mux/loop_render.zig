@@ -356,10 +356,19 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     // Explicit one-shot cursor restore (position + style + visibility) captured
     // before opening a transient CLI float.
     if (state.cursor_restore_snapshot) |saved| {
-        cursor.x = @min(saved.x, state.term_width -| 1);
-        cursor.y = @min(saved.y, state.term_height -| 1);
-        cursor.style = saved.style;
-        cursor.visible = saved.visible;
+        const focused_uuid = state.getCurrentFocusedUuid();
+        if (focused_uuid) |focused| {
+            if (std.mem.eql(u8, &focused, &saved.source_uuid)) {
+                if (state.findPaneByUuid(saved.source_uuid)) |pane| {
+                    const abs_x = pane.x + saved.rel_x;
+                    const abs_y = pane.y + saved.rel_y;
+                    cursor.x = @min(abs_x, state.term_width -| 1);
+                    cursor.y = @min(abs_y, state.term_height -| 1);
+                    cursor.style = saved.style;
+                    cursor.visible = saved.visible;
+                }
+            }
+        }
         state.cursor_restore_snapshot = null;
         state.cursor_needs_restore = false;
     } else if (state.cursor_needs_restore) {
