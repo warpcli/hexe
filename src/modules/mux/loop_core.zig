@@ -281,6 +281,20 @@ fn sesVtCallback(
             if (hdr.frame_type == @intFromEnum(pod_protocol.FrameType.output)) {
                 mux.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} output len={d}", .{ hdr.pane_id, hdr.len });
                 pane.feedPodOutput(slot.buffer[0..hdr.len]);
+                const osc_responses = pane.takeOscExpectedResponses();
+                if (osc_responses > 0) {
+                    var j: u16 = 0;
+                    while (j < osc_responses) : (j += 1) {
+                        slot.state.enqueueOscReplyTarget(pane.uuid);
+                    }
+                }
+                const csi_responses = pane.takeCsiExpectedResponses();
+                if (csi_responses > 0) {
+                    var j: u16 = 0;
+                    while (j < csi_responses) : (j += 1) {
+                        slot.state.enqueueCsiReplyTarget(pane.uuid);
+                    }
+                }
                 pane.vt.invalidateRenderState();
                 slot.state.needs_render = true;
             } else if (hdr.frame_type == @intFromEnum(pod_protocol.FrameType.backlog_end)) {

@@ -285,19 +285,11 @@ fn parseOscCode(seq: []const u8) ?u32 {
 }
 
 fn handleOscQuery(self: *Pane, code: u32) bool {
-    if (!(code == 10 or code == 11 or code == 12)) return false;
-
-    const color = switch (code) {
-        10 => "ffff/ffff/ffff",
-        11 => "0000/0000/0000",
-        12 => "ffff/ffff/ffff",
-        else => "0000/0000/0000",
-    };
-
-    var buf: [48]u8 = undefined;
-    const resp = std.fmt.bufPrint(&buf, "\x1b]{d};rgb:{s}\x07", .{ code, color }) catch return true;
-    self.write(resp) catch {};
-    return true;
+    // All color queries (OSC 10/11/12 and others) are forwarded to the
+    // real terminal so child applications receive the actual palette.
+    _ = self;
+    _ = code;
+    return false;
 }
 
 fn shouldPassthroughOsc(seq: []const u8) bool {
