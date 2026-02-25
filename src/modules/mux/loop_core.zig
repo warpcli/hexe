@@ -22,6 +22,7 @@ const keybinds = @import("keybinds.zig");
 
 const LoopTimerContext = struct {
     state: *State,
+    ticker: xev.Timer,
     last_pane_sync: i64,
     last_heartbeat: i64,
     pane_sync_interval: i64,
@@ -120,12 +121,16 @@ fn finalizeTerminalQueryIfReady(state: *State, now_ms: i64) void {
 
 fn loopTimerCallback(
     ctx: ?*LoopTimerContext,
-    _: *xev.Loop,
-    _: *xev.Completion,
+    loop: *xev.Loop,
+    completion: *xev.Completion,
     result: xev.Timer.RunError!void,
 ) xev.CallbackAction {
     const timer_ctx = ctx orelse return .disarm;
-    _ = result catch return .rearm;
+    _ = result catch {
+        // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
+        timer_ctx.ticker.run(loop, completion, 100, LoopTimerContext, timer_ctx, loopTimerCallback);
+        return .disarm;
+    };
 
     const now = std.time.milliTimestamp();
     if (now - timer_ctx.last_pane_sync >= timer_ctx.pane_sync_interval) {
@@ -137,7 +142,9 @@ fn loopTimerCallback(
         _ = timer_ctx.state.ses_client.sendPing();
     }
 
-    return .rearm;
+    // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
+    timer_ctx.ticker.run(loop, completion, 100, LoopTimerContext, timer_ctx, loopTimerCallback);
+    return .disarm;
 }
 
 const SesVtSlot = struct {
@@ -506,6 +513,7 @@ pub fn runMainLoop(state: *State) !void {
 
     var timer_ctx = LoopTimerContext{
         .state = state,
+        .ticker = loop_timer,
         .last_pane_sync = last_render,
         .last_heartbeat = last_render,
         .pane_sync_interval = pane_sync_interval,

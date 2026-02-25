@@ -145,6 +145,7 @@ pub const Server = struct {
 
         var periodic_ctx = PeriodicContext{
             .server = self,
+            .ticker = ticker,
             .last_save = std.time.milliTimestamp(),
             .last_stats_update = std.time.milliTimestamp(),
             .last_cleanup = std.time.milliTimestamp(),
@@ -379,6 +380,7 @@ pub const Server = struct {
 
     const PeriodicContext = struct {
         server: *Server,
+        ticker: xev.Timer,
         last_save: i64,
         last_stats_update: i64,
         last_cleanup: i64,
@@ -462,12 +464,16 @@ pub const Server = struct {
 
     fn periodicCallback(
         ctx: ?*PeriodicContext,
-        _: *xev.Loop,
-        _: *xev.Completion,
+        loop: *xev.Loop,
+        completion: *xev.Completion,
         result: xev.Timer.RunError!void,
     ) xev.CallbackAction {
         const periodic = ctx orelse return .disarm;
-        _ = result catch return .rearm;
+        _ = result catch {
+            // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
+            periodic.ticker.run(loop, completion, 100, PeriodicContext, periodic, periodicCallback);
+            return .disarm;
+        };
 
         const now_ms = std.time.milliTimestamp();
 
@@ -502,7 +508,9 @@ pub const Server = struct {
             periodic.last_cleanup = now_ms;
         }
 
-        return .rearm;
+        // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
+        periodic.ticker.run(loop, completion, 100, PeriodicContext, periodic, periodicCallback);
+        return .disarm;
     }
 
     /// Dispatch a newly accepted connection based on its handshake bytes.

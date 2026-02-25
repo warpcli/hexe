@@ -479,6 +479,7 @@ const Pod = struct {
         var timer_ctx = TimerContext{
             .pod = self,
             .opts = opts,
+            .ticker = ticker,
         };
         ticker.run(&loop, &timer_completion, 100, TimerContext, &timer_ctx, timerCallback);
 
@@ -537,6 +538,7 @@ const Pod = struct {
     const TimerContext = struct {
         pod: *Pod,
         opts: RunOptions,
+        ticker: xev.Timer,
         last_meta_ms: i64 = 0,
     };
 
@@ -771,12 +773,16 @@ const Pod = struct {
 
     fn timerCallback(
         ctx: ?*TimerContext,
-        _: *xev.Loop,
-        _: *xev.Completion,
+        loop: *xev.Loop,
+        completion: *xev.Completion,
         result: xev.Timer.RunError!void,
     ) xev.CallbackAction {
         const timer_ctx = ctx orelse return .disarm;
-        _ = result catch return .rearm;
+        _ = result catch {
+            // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
+            timer_ctx.ticker.run(loop, completion, 100, TimerContext, timer_ctx, timerCallback);
+            return .disarm;
+        };
 
         timer_ctx.pod.uplink.tick(timer_ctx.pod.pty.child_pid);
 
@@ -798,7 +804,9 @@ const Pod = struct {
             }
         }
 
-        return .rearm;
+        // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
+        timer_ctx.ticker.run(loop, completion, 100, TimerContext, timer_ctx, timerCallback);
+        return .disarm;
     }
 
     fn handleAcceptedConnection(self: *Pod, conn: core.IpcConnection, backlog_tmp: []u8) void {

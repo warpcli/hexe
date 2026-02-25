@@ -356,21 +356,28 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     // Explicit one-shot cursor restore (position + style + visibility) captured
     // before opening a transient CLI float.
     if (state.cursor_restore_snapshot) |saved| {
-        const focused_uuid = state.getCurrentFocusedUuid();
-        if (focused_uuid) |focused| {
-            if (std.mem.eql(u8, &focused, &saved.source_uuid)) {
-                if (state.findPaneByUuid(saved.source_uuid)) |pane| {
-                    const abs_x = pane.x + saved.rel_x;
-                    const abs_y = pane.y + saved.rel_y;
+        if (state.findPaneByUuid(saved.source_uuid)) |pane| {
+            const focused_uuid = state.getCurrentFocusedUuid();
+            if (focused_uuid) |focused| {
+                if (std.mem.eql(u8, &focused, &saved.source_uuid)) {
+                    const rel_x = @min(saved.rel_x, pane.width -| 1);
+                    const rel_y = @min(saved.rel_y, pane.height -| 1);
+                    const abs_x = pane.x + rel_x;
+                    const abs_y = pane.y + rel_y;
                     cursor.x = @min(abs_x, state.term_width -| 1);
                     cursor.y = @min(abs_y, state.term_height -| 1);
                     cursor.style = saved.style;
                     cursor.visible = saved.visible;
+                    state.cursor_restore_snapshot = null;
+                    state.cursor_needs_restore = false;
                 }
             }
+        } else {
+            // Source pane no longer exists; drop stale snapshot and keep legacy
+            // visibility restore behavior.
+            state.cursor_restore_snapshot = null;
+            state.cursor_needs_restore = true;
         }
-        state.cursor_restore_snapshot = null;
-        state.cursor_needs_restore = false;
     } else if (state.cursor_needs_restore) {
         // Legacy restore path (e.g., tab switch or non-CLI float death):
         // force visibility for one frame.
