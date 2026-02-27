@@ -675,28 +675,52 @@ fn queuePaneOscExpected(state: *State, pane: *Pane) bool {
 }
 
 fn harvestPendingCsiReplies(state: *State) void {
-    // Deterministically prioritize the active interactive pane.
-    if (state.active_floating) |idx| {
-        if (idx < state.floats.items.len) {
-            if (queuePaneCsiExpected(state, state.floats.items[idx])) return;
+    // Drain pending CSI reply expectations from all panes.
+    for (state.tabs.items) |*tab| {
+        var pane_it = tab.layout.splitIterator();
+        while (pane_it.next()) |p| {
+            const n = p.*.takeCsiExpectedResponses();
+            if (n > 0) {
+                var j: u16 = 0;
+                while (j < n) : (j += 1) {
+                    state.enqueueCsiReplyTarget(p.*.uuid);
+                }
+            }
         }
     }
-
-    if (state.currentLayout().getFocusedPane()) |pane| {
-        _ = queuePaneCsiExpected(state, pane);
+    for (state.floats.items) |fp| {
+        const n = fp.takeCsiExpectedResponses();
+        if (n > 0) {
+            var j: u16 = 0;
+            while (j < n) : (j += 1) {
+                state.enqueueCsiReplyTarget(fp.uuid);
+            }
+        }
     }
 }
 
 fn harvestPendingOscReplies(state: *State) void {
-    // Deterministically prioritize the active interactive pane.
-    if (state.active_floating) |idx| {
-        if (idx < state.floats.items.len) {
-            if (queuePaneOscExpected(state, state.floats.items[idx])) return;
+    // Drain pending OSC reply expectations from all panes.
+    for (state.tabs.items) |*tab| {
+        var pane_it = tab.layout.splitIterator();
+        while (pane_it.next()) |p| {
+            const n = p.*.takeOscExpectedResponses();
+            if (n > 0) {
+                var j: u16 = 0;
+                while (j < n) : (j += 1) {
+                    state.enqueueOscReplyTarget(p.*.uuid);
+                }
+            }
         }
     }
-
-    if (state.currentLayout().getFocusedPane()) |pane| {
-        _ = queuePaneOscExpected(state, pane);
+    for (state.floats.items) |fp| {
+        const n = fp.takeOscExpectedResponses();
+        if (n > 0) {
+            var j: u16 = 0;
+            while (j < n) : (j += 1) {
+                state.enqueueOscReplyTarget(fp.uuid);
+            }
+        }
     }
 }
 

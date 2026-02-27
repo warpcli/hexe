@@ -177,12 +177,14 @@ pub const State = struct {
 
     osc_reply_target_uuid: ?[32]u8,
     osc_reply_targets: std.ArrayList([32]u8),
+    osc_reply_target_enqueued_ms: std.ArrayList(i64),
     osc_reply_buf: std.ArrayList(u8),
     osc_reply_in_progress: bool,
     osc_reply_prev_esc: bool,
 
     csi_reply_target_uuid: ?[32]u8,
     csi_reply_targets: std.ArrayList([32]u8),
+    csi_reply_target_enqueued_ms: std.ArrayList(i64),
     csi_reply_buf: std.ArrayList(u8),
     csi_reply_in_progress: bool,
 
@@ -338,12 +340,14 @@ pub const State = struct {
 
             .osc_reply_target_uuid = null,
             .osc_reply_targets = .empty,
+            .osc_reply_target_enqueued_ms = .empty,
             .osc_reply_buf = .empty,
             .osc_reply_in_progress = false,
             .osc_reply_prev_esc = false,
 
             .csi_reply_target_uuid = null,
             .csi_reply_targets = .empty,
+            .csi_reply_target_enqueued_ms = .empty,
             .csi_reply_buf = .empty,
             .csi_reply_in_progress = false,
 
@@ -497,8 +501,10 @@ pub const State = struct {
         var ses_cfg = self.ses_config;
         ses_cfg.deinit(self.allocator);
         self.osc_reply_targets.deinit(self.allocator);
+        self.osc_reply_target_enqueued_ms.deinit(self.allocator);
         self.osc_reply_buf.deinit(self.allocator);
         self.csi_reply_targets.deinit(self.allocator);
+        self.csi_reply_target_enqueued_ms.deinit(self.allocator);
         self.csi_reply_buf.deinit(self.allocator);
         self.renderer.deinit();
         self.ses_client.deinit();
@@ -521,24 +527,59 @@ pub const State = struct {
 
     pub fn enqueueOscReplyTarget(self: *State, uuid: [32]u8) void {
         self.osc_reply_targets.append(self.allocator, uuid) catch {};
+        self.osc_reply_target_enqueued_ms.append(self.allocator, std.time.milliTimestamp()) catch {
+            if (self.osc_reply_targets.items.len > 0) {
+                _ = self.osc_reply_targets.pop();
+            }
+        };
     }
 
     pub fn dequeueOscReplyTarget(self: *State) ?[32]u8 {
-        if (self.osc_reply_targets.items.len == 0) return null;
-        const next = self.osc_reply_targets.items[0];
-        _ = self.osc_reply_targets.orderedRemove(0);
-        return next;
+        const now_ms = std.time.milliTimestamp();
+        while (self.osc_reply_targets.items.len > 0) {
+            const queued_at = if (self.osc_reply_target_enqueued_ms.items.len > 0)
+                self.osc_reply_target_enqueued_ms.items[0]
+            else
+                now_ms;
+            const next = self.osc_reply_targets.items[0];
+            _ = self.osc_reply_targets.orderedRemove(0);
+            if (self.osc_reply_target_enqueued_ms.items.len > 0) {
+                _ = self.osc_reply_target_enqueued_ms.orderedRemove(0);
+            }
+
+            // Drop stale expected replies so old panes cannot monopolize routing.
+            if (now_ms - queued_at > 1200) continue;
+            return next;
+        }
+        return null;
     }
 
     pub fn enqueueCsiReplyTarget(self: *State, uuid: [32]u8) void {
         self.csi_reply_targets.append(self.allocator, uuid) catch {};
+        self.csi_reply_target_enqueued_ms.append(self.allocator, std.time.milliTimestamp()) catch {
+            if (self.csi_reply_targets.items.len > 0) {
+                _ = self.csi_reply_targets.pop();
+            }
+        };
     }
 
     pub fn dequeueCsiReplyTarget(self: *State) ?[32]u8 {
-        if (self.csi_reply_targets.items.len == 0) return null;
-        const next = self.csi_reply_targets.items[0];
-        _ = self.csi_reply_targets.orderedRemove(0);
-        return next;
+        const now_ms = std.time.milliTimestamp();
+        while (self.csi_reply_targets.items.len > 0) {
+            const queued_at = if (self.csi_reply_target_enqueued_ms.items.len > 0)
+                self.csi_reply_target_enqueued_ms.items[0]
+            else
+                now_ms;
+            const next = self.csi_reply_targets.items[0];
+            _ = self.csi_reply_targets.orderedRemove(0);
+            if (self.csi_reply_target_enqueued_ms.items.len > 0) {
+                _ = self.csi_reply_target_enqueued_ms.orderedRemove(0);
+            }
+
+            if (now_ms - queued_at > 1200) continue;
+            return next;
+        }
+        return null;
     }
 
     pub const PendingKeyTimerKind = enum { delayed_press, tap_pending, hold, hold_fired, repeat_wait, repeat_active, repeat_locked };
