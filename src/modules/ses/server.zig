@@ -1175,7 +1175,25 @@ pub const Server = struct {
             offset += cp.isolation_profile_len;
             break :blk p;
         } else null;
+        const inherit_env_parent_uuid: ?[32]u8 = if (cp.inherit_env_parent_uuid_len == 32 and offset + 32 <= trail_len) blk: {
+            var uuid: [32]u8 = undefined;
+            @memcpy(&uuid, buf[offset .. offset + 32]);
+            offset += 32;
+            break :blk uuid;
+        } else null;
         const sticky_key: ?u8 = if (cp.sticky_key != 0) cp.sticky_key else null;
+
+        // Resolve parent environment if inherit_env was requested.
+        var parent_env: ?[]const []const u8 = null;
+        defer if (parent_env) |env_entries| {
+            for (env_entries) |e| self.allocator.free(e);
+            self.allocator.free(env_entries);
+        };
+        if (inherit_env_parent_uuid) |parent_uuid| {
+            if (self.ses_state.getPane(parent_uuid)) |parent_pane| {
+                parent_env = parent_pane.getProcEnviron(self.allocator);
+            }
+        }
 
         const client_id = self.findClientForCtlFd(fd) orelse blk: {
             const cid = self.ses_state.addClient(fd) catch {
@@ -1185,7 +1203,7 @@ pub const Server = struct {
             break :blk cid;
         };
 
-        const pane = self.ses_state.createPane(client_id, shell, cwd, sticky_pwd, sticky_key, null, isolation_profile) catch {
+        const pane = self.ses_state.createPane(client_id, shell, cwd, sticky_pwd, sticky_key, parent_env, isolation_profile) catch {
             self.sendBinaryError(fd, "create_failed");
             return;
         };

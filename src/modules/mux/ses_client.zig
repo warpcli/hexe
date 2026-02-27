@@ -4,6 +4,9 @@ const core = @import("core");
 const wire = core.wire;
 const mux = @import("main.zig");
 
+/// Static buffer for synchronous CWD fetch (getPaneCwdSync).
+var sync_cwd_buf: [4096]u8 = undefined;
+
 /// Client for communicating with the ses daemon using binary protocol.
 /// Opens two channels:
 ///   - ctl_fd (handshake 0x01): binary control messages
@@ -271,6 +274,8 @@ pub const SesClient = struct {
 
     /// Create a new pane via ses.
     /// Returns the pane UUID, pane_id (for VT routing), and pod PID.
+    /// If inherit_env_parent_uuid is set, SES will read environment from that pane's process
+    /// and pass it to the new pod.
     pub fn createPane(
         self: *SesClient,
         shell: ?[]const u8,
@@ -279,6 +284,7 @@ pub const SesClient = struct {
         sticky_key: ?u8,
         _: ?[]const []const u8, // env (unused in binary protocol — pod inherits)
         isolation_profile: ?[]const u8,
+        inherit_env_parent_uuid: ?[32]u8,
     ) !struct { uuid: [32]u8, pane_id: u16, pid: posix.pid_t } {
         const fd = self.ctl_fd orelse return error.NotConnected;
 
@@ -286,6 +292,7 @@ pub const SesClient = struct {
         const cwd_bytes = cwd orelse "";
         const sticky_pwd_bytes = sticky_pwd orelse "";
         const isolation_profile_bytes = isolation_profile orelse "";
+        const parent_uuid_bytes: []const u8 = if (inherit_env_parent_uuid) |*u| u[0..] else "";
 
         var msg: wire.CreatePane = .{
             .shell_len = @intCast(shell_bytes.len),
@@ -293,8 +300,9 @@ pub const SesClient = struct {
             .sticky_key = sticky_key orelse 0,
             .sticky_pwd_len = @intCast(sticky_pwd_bytes.len),
             .isolation_profile_len = @intCast(isolation_profile_bytes.len),
+            .inherit_env_parent_uuid_len = @intCast(parent_uuid_bytes.len),
         };
-        const trails: []const []const u8 = &.{ shell_bytes, cwd_bytes, sticky_pwd_bytes, isolation_profile_bytes };
+        const trails: []const []const u8 = &.{ shell_bytes, cwd_bytes, sticky_pwd_bytes, isolation_profile_bytes, parent_uuid_bytes };
         mux.debugLog("createPane: shell={s} cwd={s} isolation={s}", .{ shell_bytes, cwd_bytes, isolation_profile_bytes });
         try wire.writeControlMsg(fd, .create_pane, std.mem.asBytes(&msg), trails);
 
@@ -389,6 +397,54 @@ pub const SesClient = struct {
         self.pending_cwd_uuid = uuid;
         var msg: wire.GetPaneCwd = .{ .uuid = uuid };
         wire.writeControl(fd, .get_pane_cwd, std.mem.asBytes(&msg)) catch return;
+    }
+
+    /// Synchronous CWD fetch — blocks until SES responds.
+    /// Returns a slice into a static buffer (valid until next call).
+    pub fn getPaneCwdSync(self: *SesClient, uuid: [32]u8) ?[]const u8 {
+        const fd = self.ctl_fd orelse return null;
+        var msg: wire.GetPaneCwd = .{ .uuid = uuid };
+        wire.writeControl(fd, .get_pane_cwd, std.mem.asBytes(&msg)) catch return null;
+
+        // Block-read response, skipping pending .ok / .get_pane_cwd (from earlier fire-and-forget).
+        const hdr = blk: {
+            while (true) {
+                const h = wire.readControlHeader(fd) catch return null;
+                const mt: wire.MsgType = @enumFromInt(h.msg_type);
+                if (mt == .ok) {
+                    self.skipPayload(fd, h.payload_len);
+                    continue;
+                }
+                if (mt == .pane_exited) {
+                    if (h.payload_len >= @sizeOf(wire.PaneUuid)) {
+                        const pu = wire.readStruct(wire.PaneUuid, fd) catch {
+                            self.skipPayload(fd, h.payload_len);
+                            continue;
+                        };
+                        self.queuePendingPaneExit(pu.uuid);
+                        const rem = h.payload_len - @sizeOf(wire.PaneUuid);
+                        if (rem > 0) self.skipPayload(fd, rem);
+                    } else {
+                        self.skipPayload(fd, h.payload_len);
+                    }
+                    continue;
+                }
+                break :blk h;
+            }
+        };
+        const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+        if (resp_type != .get_pane_cwd or hdr.payload_len < @sizeOf(wire.PaneCwd)) {
+            self.skipPayload(fd, hdr.payload_len);
+            return null;
+        }
+        const resp = wire.readStruct(wire.PaneCwd, fd) catch return null;
+        if (resp.cwd_len == 0) return null;
+        if (resp.cwd_len > sync_cwd_buf.len) {
+            self.skipPayload(fd, resp.cwd_len);
+            return null;
+        }
+        wire.readExact(fd, sync_cwd_buf[0..resp.cwd_len]) catch return null;
+        return sync_cwd_buf[0..resp.cwd_len];
     }
 
     /// Ping ses to check if it's alive.

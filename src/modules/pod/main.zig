@@ -63,6 +63,11 @@ fn setBlocking(fd: posix.fd_t) void {
     _ = posix.fcntl(fd, posix.F.SETFL, new_flags) catch {};
 }
 
+fn setNonBlocking(fd: posix.fd_t) void {
+    const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch return;
+    _ = posix.fcntl(fd, posix.F.SETFL, flags | @as(usize, @intCast(c.O_NONBLOCK))) catch {};
+}
+
 pub const PodArgs = struct {
     daemon: bool = true,
     uuid: []const u8,
@@ -352,6 +357,10 @@ fn redirectStderrToLog(log_path: []const u8) void {
     if (logfd > 2) posix.close(logfd);
 }
 
+/// Write buffer capacity for non-blocking PTY writes.
+/// Large enough to absorb typical clipboard pastes without dropping data.
+const PTY_WRITE_BUF_CAP: usize = 256 * 1024;
+
 const Pod = struct {
     allocator: std.mem.Allocator,
     uuid: [32]u8,
@@ -363,6 +372,11 @@ const Pod = struct {
     pty_paused: bool = false,
 
     uplink: PodUplink,
+
+    // Non-blocking PTY write buffer: absorbs data when master_fd would block.
+    pty_wbuf: []u8,
+    pty_wbuf_len: usize = 0,
+    pty_drain_ctx: ?*PtyDrainContext = null,
 
     // OSC 7 CWD tracking
     osc7_scanner: Osc7Scanner = .{},
@@ -396,6 +410,13 @@ const Pod = struct {
         var reader = try pod_protocol.Reader.init(allocator, pod_protocol.MAX_FRAME_LEN);
         errdefer reader.deinit(allocator);
 
+        const pty_wbuf = try allocator.alloc(u8, PTY_WRITE_BUF_CAP);
+        errdefer allocator.free(pty_wbuf);
+
+        // Make PTY master non-blocking so writes never stall the event loop
+        // (e.g. during large clipboard pastes when the shell is slow to consume).
+        setNonBlocking(pty.master_fd);
+
         return .{
             .allocator = allocator,
             .uuid = uuid,
@@ -403,6 +424,7 @@ const Pod = struct {
             .server = server,
             .backlog = backlog,
             .reader = reader,
+            .pty_wbuf = pty_wbuf,
             .uplink = PodUplink.init(allocator, uuid),
         };
     }
@@ -415,6 +437,7 @@ const Pod = struct {
         self.pty.close();
         self.backlog.deinit(self.allocator);
         self.reader.deinit(self.allocator);
+        self.allocator.free(self.pty_wbuf);
         self.uplink.deinit();
         if (self.osc7_cwd) |cwd| self.allocator.free(cwd);
     }
@@ -428,9 +451,12 @@ const Pod = struct {
         const pty_watcher = xev.File.initFd(self.pty.master_fd);
         var server_completion: xev.Completion = .{};
         var pty_completion: xev.Completion = .{};
+        var pty_drain_completion: xev.Completion = .{};
         var timer_completion: xev.Completion = .{};
         var ticker = try xev.Timer.init();
         defer ticker.deinit();
+        var drain_ticker = try xev.Timer.init();
+        defer drain_ticker.deinit();
 
         const buf = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
         defer self.allocator.free(buf);
@@ -456,6 +482,15 @@ const Pod = struct {
             .callback_error = &callback_error,
             .armed = &pty_armed,
         };
+
+        var pty_drain_ctx = PtyDrainContext{
+            .pod = self,
+            .loop = &loop,
+            .timer = drain_ticker,
+            .completion = &pty_drain_completion,
+        };
+        self.pty_drain_ctx = &pty_drain_ctx;
+        defer self.pty_drain_ctx = null;
 
         var client_ctx = ClientContext{
             .pod = self,
@@ -513,6 +548,14 @@ const Pod = struct {
         should_stop: *bool,
         callback_error: *?anyerror,
         armed: *bool,
+    };
+
+    const PtyDrainContext = struct {
+        pod: *Pod,
+        loop: *xev.Loop,
+        timer: xev.Timer,
+        completion: *xev.Completion,
+        armed: bool = false,
     };
 
     const ClientSlot = struct {
@@ -771,6 +814,97 @@ const Pod = struct {
         return .rearm;
     }
 
+    /// Queue data for non-blocking write to the PTY master fd.
+    /// Tries to write directly first; any remainder is buffered and
+    /// an xev write-readiness watcher drains it asynchronously.
+    fn queuePtyWrite(self: *Pod, data: []const u8) void {
+        // Try to drain any previously buffered data first.
+        self.drainPtyWriteBuf();
+
+        var remaining = data;
+
+        // If the buffer is empty, attempt a direct write.
+        if (self.pty_wbuf_len == 0 and remaining.len > 0) {
+            const n = self.pty.write(remaining) catch |err| switch (err) {
+                error.WouldBlock => 0,
+                else => {
+                    debugLog("queuePtyWrite: pty write error: {s}", .{@errorName(err)});
+                    return;
+                },
+            };
+            remaining = remaining[n..];
+        }
+
+        // Buffer whatever could not be written.
+        if (remaining.len > 0) {
+            const space = self.pty_wbuf.len - self.pty_wbuf_len;
+            const to_copy = @min(remaining.len, space);
+            if (to_copy > 0) {
+                @memcpy(self.pty_wbuf[self.pty_wbuf_len..][0..to_copy], remaining[0..to_copy]);
+                self.pty_wbuf_len += to_copy;
+            }
+            if (to_copy < remaining.len) {
+                debugLog("queuePtyWrite: write buffer full, dropped {d} bytes", .{remaining.len - to_copy});
+            }
+            self.armPtyDrainTimer();
+        }
+    }
+
+    /// Try to write as much of the PTY write buffer as possible.
+    fn drainPtyWriteBuf(self: *Pod) void {
+        while (self.pty_wbuf_len > 0) {
+            const n = self.pty.write(self.pty_wbuf[0..self.pty_wbuf_len]) catch |err| switch (err) {
+                error.WouldBlock => return,
+                else => {
+                    debugLog("drainPtyWriteBuf: pty write error: {s}, discarding {d} bytes", .{ @errorName(err), self.pty_wbuf_len });
+                    self.pty_wbuf_len = 0;
+                    return;
+                },
+            };
+            if (n == 0) return;
+            const leftover = self.pty_wbuf_len - n;
+            if (leftover > 0) {
+                std.mem.copyForwards(u8, self.pty_wbuf[0..leftover], self.pty_wbuf[n..self.pty_wbuf_len]);
+            }
+            self.pty_wbuf_len = leftover;
+        }
+    }
+
+    fn armPtyDrainTimer(self: *Pod) void {
+        const ctx = self.pty_drain_ctx orelse return;
+        if (ctx.armed) return;
+        debugLog("armPtyDrainTimer: ARMED (buffered={d})", .{self.pty_wbuf_len});
+        ctx.armed = true;
+        // Use fresh timer.run() to avoid xev io_uring absolute-timestamp re-arm bug.
+        ctx.timer.run(ctx.loop, ctx.completion, 1, PtyDrainContext, ctx, ptyDrainCallback);
+    }
+
+    fn ptyDrainCallback(
+        ctx: ?*PtyDrainContext,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        result: xev.Timer.RunError!void,
+    ) xev.CallbackAction {
+        const drain_ctx = ctx orelse return .disarm;
+        drain_ctx.armed = false;
+
+        _ = result catch {
+            // Timer error; re-arm if there's still data.
+            if (drain_ctx.pod.pty_wbuf_len > 0) {
+                drain_ctx.pod.armPtyDrainTimer();
+            }
+            return .disarm;
+        };
+
+        drain_ctx.pod.drainPtyWriteBuf();
+
+        if (drain_ctx.pod.pty_wbuf_len > 0) {
+            // Still have data — re-arm with a fresh absolute timestamp.
+            drain_ctx.pod.armPtyDrainTimer();
+        }
+        return .disarm;
+    }
+
     fn timerCallback(
         ctx: ?*TimerContext,
         loop: *xev.Loop,
@@ -858,7 +992,7 @@ const Pod = struct {
     fn handleFrame(self: *Pod, frame: pod_protocol.Frame) void {
         switch (frame.frame_type) {
             .input => {
-                _ = self.pty.write(frame.payload) catch {};
+                self.queuePtyWrite(frame.payload);
             },
             .resize => {
                 if (frame.payload.len >= 4) {
@@ -982,7 +1116,7 @@ const Pod = struct {
                 off += 5;
                 if (payload_len > n - off) break;
                 if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.input)) {
-                    _ = self.pty.write(buf[off .. off + payload_len]) catch {};
+                    self.queuePtyWrite(buf[off .. off + payload_len]);
                 } else if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.resize)) {
                     if (payload_len >= 4) {
                         const cols = std.mem.readInt(u16, buf[off..][0..2], .big);

@@ -228,6 +228,73 @@ pub const Pane = struct {
         return link;
     }
 
+    /// Read environment variables from /proc/<child_pid>/environ.
+    /// Returns owned slice of "KEY=VALUE" strings. Caller must free with the same allocator.
+    pub fn getProcEnviron(self: *const Pane, allocator: std.mem.Allocator) ?[]const []const u8 {
+        if (self.child_pid == 0) return null;
+
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/environ", .{self.child_pid}) catch return null;
+        const file = std.fs.openFileAbsolute(path, .{}) catch return null;
+        defer file.close();
+
+        // Read up to 128KB of environ data.
+        const max_size: usize = 128 * 1024;
+        const data = file.readToEndAlloc(allocator, max_size) catch return null;
+        defer allocator.free(data);
+
+        if (data.len == 0) return null;
+
+        // Count NUL-separated entries.
+        var count: usize = 0;
+        for (data) |b| {
+            if (b == 0) count += 1;
+        }
+        // Handle missing trailing NUL.
+        if (data.len > 0 and data[data.len - 1] != 0) count += 1;
+
+        const entries = allocator.alloc([]const u8, count) catch return null;
+        errdefer allocator.free(entries);
+
+        var idx: usize = 0;
+        var start: usize = 0;
+        for (data, 0..) |b, i| {
+            if (b == 0) {
+                if (i > start) {
+                    entries[idx] = allocator.dupe(u8, data[start..i]) catch {
+                        // Free already-duped entries on failure.
+                        for (entries[0..idx]) |e| allocator.free(e);
+                        allocator.free(entries);
+                        return null;
+                    };
+                    idx += 1;
+                }
+                start = i + 1;
+            }
+        }
+        // Handle entry without trailing NUL.
+        if (start < data.len) {
+            entries[idx] = allocator.dupe(u8, data[start..]) catch {
+                for (entries[0..idx]) |e| allocator.free(e);
+                allocator.free(entries);
+                return null;
+            };
+            idx += 1;
+        }
+
+        if (idx == 0) {
+            allocator.free(entries);
+            return null;
+        }
+
+        // Shrink if we skipped empty entries.
+        if (idx < count) {
+            const shrunk = allocator.realloc(entries, idx) catch return entries[0..idx];
+            return shrunk;
+        }
+        return entries;
+    }
+
     fn readProcComm(self: *const Pane, pid: i32) ?[]const u8 {
         _ = self;
         if (pid <= 0) return null;

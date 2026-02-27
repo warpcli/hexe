@@ -168,6 +168,8 @@ pub const FloatAttributes = struct {
     /// If true, directional navigation (left/right/up/down) works like splits.
     /// If false (default), left/right switches tabs directly.
     navigatable: bool = false,
+    /// Inherit environment variables from the parent pane's shell process.
+    inherit_env: bool = false,
 };
 
 pub const FloatDef = struct {
@@ -1270,6 +1272,7 @@ fn parseFloat(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocato
         if (runtime.getBool(-1, "global")) |v| config.float_default_attributes.global = v;
         if (runtime.getBool(-1, "destroy")) |v| config.float_default_attributes.destroy = v;
         if (runtime.getBool(-1, "isolated")) |v| config.float_default_attributes.isolated = v;
+        if (runtime.getBool(-1, "inherit_env")) |v| config.float_default_attributes.inherit_env = v;
         runtime.pop();
     }
 

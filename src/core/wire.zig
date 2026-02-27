@@ -167,13 +167,15 @@ pub const Registered = extern struct {
 };
 
 /// CreatePane: lengths of variable fields.
-/// Followed by: shell bytes, cwd bytes, sticky_pwd bytes.
+/// Followed by: shell bytes, cwd bytes, sticky_pwd bytes, isolation_profile bytes,
+/// and optionally inherit_env_parent_uuid bytes (32 bytes when inherit_env_parent_uuid_len > 0).
 pub const CreatePane = extern struct {
     shell_len: u16 align(1),
     cwd_len: u16 align(1),
     sticky_key: u8 align(1),
     sticky_pwd_len: u16 align(1),
     isolation_profile_len: u8 align(1),
+    inherit_env_parent_uuid_len: u8 align(1) = 0,
 };
 
 /// PaneCreated (response to CreatePane).

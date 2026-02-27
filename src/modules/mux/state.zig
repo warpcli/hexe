@@ -278,6 +278,7 @@ pub const State = struct {
                         merged.attributes.destroy = cfg.float_default_attributes.destroy or float_def.attributes.destroy;
                         merged.attributes.isolated = cfg.float_default_attributes.isolated or float_def.attributes.isolated;
                         merged.attributes.per_cwd = cfg.float_default_attributes.per_cwd or float_def.attributes.per_cwd;
+                        merged.attributes.inherit_env = cfg.float_default_attributes.inherit_env or float_def.attributes.inherit_env;
                     }
                     floats_with_defaults[i] = merged;
                 }
@@ -852,7 +853,7 @@ pub const State = struct {
             const pane = self.allocator.create(Pane) catch break;
             if (tab.layout.ses_client) |ses| {
                 if (ses.isConnected()) {
-                    if (ses.createPane(null, cwd, null, null, null, null)) |result| {
+                    if (ses.createPane(null, cwd, null, null, null, null, null)) |result| {
                         if (ses.getVtFd()) |vt_fd| {
                             pane.initWithPod(self.allocator, next_id, 0, 0, tab.layout.width, tab.layout.height, result.pane_id, vt_fd, result.uuid) catch {
                                 self.allocator.destroy(pane);

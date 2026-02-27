@@ -1510,6 +1510,12 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
             float_def.attributes.isolated = lua.toBoolean(-1);
         }
         lua.pop(1);
+
+        _ = lua.getField(-1, "inherit_env");
+        if (lua.typeOf(-1) == .boolean) {
+            float_def.attributes.inherit_env = lua.toBoolean(-1);
+        }
+        lua.pop(1);
     }
     lua.pop(1); // pop attributes table
 

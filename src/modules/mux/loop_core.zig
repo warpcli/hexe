@@ -854,7 +854,7 @@ pub fn runMainLoop(state: *State) !void {
                             .focused_from = null,
                         };
                         state.ses_client.killPane(pane.uuid) catch {};
-                        if (state.ses_client.createPane(null, cwd, null, null, null, null)) |result| {
+                        if (state.ses_client.createPane(null, cwd, null, null, null, null, null)) |result| {
                             const vt_fd = state.ses_client.getVtFd();
                             var replaced = true;
                             if (vt_fd) |fd| {

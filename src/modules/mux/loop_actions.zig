@@ -195,7 +195,7 @@ pub fn performDisown(state: *State) void {
                 state.ses_client.orphanPane(p.uuid) catch {};
 
                 // Create a new shell via ses in the same directory and replace the pane's backend.
-                if (state.ses_client.createPane(null, cwd, null, null, null, null)) |result| {
+                if (state.ses_client.createPane(null, cwd, null, null, null, null, null)) |result| {
                     const vt_fd = state.ses_client.getVtFd() orelse {
                         state.notifications.show("Disown failed: no VT channel");
                         state.needs_render = true;
@@ -613,7 +613,7 @@ pub fn createAdhocFloatWithSize(
     const id: u16 = @intCast(100 + state.floats.items.len);
 
     if (use_pod and state.ses_client.isConnected()) {
-        if (state.ses_client.createPane(command, cwd, null, null, env, isolation_profile)) |result| {
+        if (state.ses_client.createPane(command, cwd, null, null, env, isolation_profile, null)) |result| {
             if (state.ses_client.getVtFd()) |vt_fd| {
                 try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
             } else {
@@ -733,7 +733,8 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
 
     // Try to create pane via ses if available.
     if (state.ses_client.isConnected()) {
-        if (state.ses_client.createPane(float_def.command, current_dir, null, null, null, isolation_profile)) |result| {
+        const env_parent = if (float_def.attributes.inherit_env) parent_uuid else null;
+        if (state.ses_client.createPane(float_def.command, current_dir, null, null, null, isolation_profile, env_parent)) |result| {
             if (state.ses_client.getVtFd()) |vt_fd| {
                 try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
             } else {

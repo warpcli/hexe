@@ -168,7 +168,7 @@ fn collectLeafPanes(self: anytype, layout: *Layout, config: SplitConfig, panes: 
 
             if (layout.ses_client) |ses| {
                 if (ses.isConnected()) {
-                    if (ses.createPane(null, cwd, null, null, null, null)) |result| {
+                    if (ses.createPane(null, cwd, null, null, null, null, null)) |result| {
                         if (ses.getVtFd()) |vt_fd| {
                             try pane.initWithPod(self.allocator, id, 0, 0, layout.width, layout.height, result.pane_id, vt_fd, result.uuid);
                         } else {

@@ -271,19 +271,26 @@ pub fn getSpawnCwd(_: anytype, pane: *Pane) ?[]const u8 {
 /// This is more robust than refreshPaneCwd alone since it tries fallbacks.
 /// Returns null only if ALL sources fail.
 pub fn getReliableCwd(self: anytype, pane: *Pane) ?[]const u8 {
-    // 1. Try refreshPaneCwd (VT OSC7 / /proc / ses_cwd cache)
+    // 1. For pod panes, try synchronous CWD fetch from SES (authoritative /proc read).
+    if (pane.backend == .pod) {
+        if (self.ses_client.getPaneCwdSync(pane.uuid)) |cwd| {
+            return cwd;
+        }
+    }
+
+    // 2. Try refreshPaneCwd (VT OSC7 / /proc / ses_cwd cache)
     if (self.refreshPaneCwd(pane)) |cwd| {
         return cwd;
     }
 
-    // 2. Try shell integration CWD (updated by shell hooks)
+    // 3. Try shell integration CWD (updated by shell hooks)
     if (self.pane_shell.get(pane.uuid)) |shell_info| {
         if (shell_info.cwd) |cwd| {
             return cwd;
         }
     }
 
-    // 3. All sources failed - return null, let caller provide fallback
+    // 4. All sources failed - return null, let caller provide fallback
     return null;
 }
 
