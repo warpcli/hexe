@@ -731,12 +731,30 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     else
         null;
 
+    // Sticky metadata is what SES uses to decide sticky vs orphaned on disown.
+    // For sticky/per_cwd floats, carry cwd+key into SES on creation.
+    const sticky_pwd: ?[]const u8 = if ((float_def.attributes.sticky or float_def.attributes.per_cwd) and current_dir != null)
+        current_dir.?
+    else
+        null;
+    const sticky_key: ?u8 = if (float_def.attributes.sticky or float_def.attributes.per_cwd)
+        float_def.key
+    else
+        null;
+
     // Try to create pane via ses if available.
     if (state.ses_client.isConnected()) {
         const env_parent = if (float_def.attributes.inherit_env) parent_uuid else null;
-        if (state.ses_client.createPane(float_def.command, current_dir, null, null, null, isolation_profile, env_parent)) |result| {
+        if (state.ses_client.createPane(float_def.command, current_dir, sticky_pwd, sticky_key, null, isolation_profile, env_parent)) |result| {
             if (state.ses_client.getVtFd()) |vt_fd| {
                 try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
+
+                // Persist sticky affinity metadata for better reclaim preference.
+                if (sticky_pwd) |pwd| {
+                    if (sticky_key) |key| {
+                        state.ses_client.setSticky(result.uuid, pwd, key) catch {};
+                    }
+                }
             } else {
                 try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command, current_dir, null);
             }

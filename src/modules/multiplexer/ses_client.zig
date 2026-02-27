@@ -538,8 +538,8 @@ pub const SesClient = struct {
         var msg: wire.PaneUuid = .{ .uuid = uuid };
         wire.writeControl(fd, .pane_info, std.mem.asBytes(&msg)) catch return error.WriteFailed;
 
-        // Read response, skipping async messages.
-        const hdr = self.readSyncResponse(fd) catch return .{ .created_from = null, .focused_from = null };
+        // Read pane_info response, skipping unrelated async messages.
+        const hdr = self.readPaneInfoResponse(fd) catch return .{ .created_from = null, .focused_from = null };
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type != .pane_info or hdr.payload_len < @sizeOf(wire.PaneInfoResp)) {
             self.skipPayload(fd, hdr.payload_len);

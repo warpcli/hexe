@@ -1421,7 +1421,9 @@ pub const SesState = struct {
 
         var iter = self.panes.valueIterator();
         while (iter.next()) |pane| {
-            if (pane.state == .sticky) {
+            // Sticky candidates can be idle (.sticky) or currently active
+            // (.attached). Active ones may be taken over by another mux.
+            if (pane.state == .sticky or pane.state == .attached) {
                 if (pane.sticky_pwd) |spwd| {
                     if (pane.sticky_key) |skey| {
                         if (skey == key and std.mem.eql(u8, spwd, pwd)) {
@@ -1454,6 +1456,42 @@ pub const SesState = struct {
         return fallback_pane;
     }
 
+    /// Transfer a pane from its current owner to another client.
+    /// Sends pane_exited to the previous owner so it tears down renderer state.
+    pub fn stealAttachedPane(self: *SesState, uuid: [32]u8, new_client_id: usize) bool {
+        const pane = self.panes.getPtr(uuid) orelse return false;
+        const old_client_id = pane.attached_to orelse return true;
+        if (old_client_id == new_client_id) return true;
+
+        if (self.getClient(old_client_id)) |old_client| {
+            // Tell previous mux this pane is gone from its viewport.
+            if (old_client.mux_ctl_fd) |ctl_fd| {
+                var msg: wire.PaneUuid = .{ .uuid = uuid };
+                wire.writeControl(ctl_fd, .pane_exited, std.mem.asBytes(&msg)) catch {};
+            }
+
+            // Remove pane from previous owner's list.
+            var i: usize = 0;
+            while (i < old_client.pane_uuids.items.len) {
+                if (std.mem.eql(u8, &old_client.pane_uuids.items[i], &uuid)) {
+                    _ = old_client.pane_uuids.orderedRemove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        pane.attached_to = null;
+        if (pane.sticky_pwd != null and pane.sticky_key != null) {
+            _ = pane.transitionState(.sticky, "sticky pane takeover");
+        } else {
+            _ = pane.transitionState(.orphaned, "pane takeover");
+        }
+        pane.orphaned_at = std.time.timestamp();
+        self.dirty = true;
+        return true;
+    }
+
     /// Attach an orphaned/detached pane to a client.
     /// Marks pane for deferred backlog replay (processed by server loop).
     pub fn attachPane(self: *SesState, uuid: [32]u8, client_id: usize) !*Pane {
@@ -1466,6 +1504,11 @@ pub const SesState = struct {
         });
 
         if (pane.state == .attached) {
+            return error.PaneAlreadyAttached;
+        }
+
+        // Defensive: if ownership is still set, do not steal silently.
+        if (pane.attached_to != null and pane.attached_to.? != client_id) {
             return error.PaneAlreadyAttached;
         }
 
