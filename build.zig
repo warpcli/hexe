@@ -66,25 +66,25 @@ pub fn build(b: *std.Build) void {
         core_module.addImport("liblink", ll);
     }
 
-    // Create shp module (shell prompt/status bar segments)
+    // Create shell module (shell prompt/status bar segments)
     const shp_module = b.createModule(.{
-        .root_source_file = b.path("src/modules/shp/mod.zig"),
+        .root_source_file = b.path("src/modules/shell/mod.zig"),
         .target = target,
         .optimize = optimize,
     });
     shp_module.addImport("core", core_module);
 
-    // Create pop module (popup/overlay system)
+    // Create popup module (popup/overlay system)
     const pop_module = b.createModule(.{
-        .root_source_file = b.path("src/modules/pop/mod.zig"),
+        .root_source_file = b.path("src/modules/popup/mod.zig"),
         .target = target,
         .optimize = optimize,
     });
     pop_module.addImport("core", core_module);
 
-    // Create mux module for unified CLI
+    // Create multiplexer module for unified CLI
     const mux_module = b.createModule(.{
-        .root_source_file = b.path("src/modules/mux/main.zig"),
+        .root_source_file = b.path("src/modules/multiplexer/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -98,9 +98,9 @@ pub fn build(b: *std.Build) void {
     }
     mux_module.addImport("vaxis", vaxis_mod);
 
-    // Create ses module for unified CLI
+    // Create session module for unified CLI
     const ses_module = b.createModule(.{
-        .root_source_file = b.path("src/modules/ses/main.zig"),
+        .root_source_file = b.path("src/modules/session/main.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -155,9 +155,9 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run hexe");
     run_step.dependOn(&run_hexe.step);
 
-    // Test step for SES module error handling tests
+    // Test step for session module error handling tests
     const ses_test_module = b.createModule(.{
-        .root_source_file = b.path("src/modules/ses/state_test.zig"),
+        .root_source_file = b.path("src/modules/session/state_test.zig"),
         .target = target,
         .optimize = optimize,
     });
