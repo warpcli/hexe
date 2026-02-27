@@ -4,31 +4,16 @@ const core = @import("core");
 const lua_runtime = core.lua_runtime;
 const LuaRuntime = core.LuaRuntime;
 const segment = core.segments;
-const segments_mod = core.segments;
-const Style = core.style.Style;
 const config_builder = core.config_builder;
+const render_modules = @import("render_modules.zig");
 
 const bash_init = @import("shell/bash.zig");
 const zsh_init = @import("shell/zsh.zig");
 const fish_init = @import("shell/fish.zig");
 
-// Config structures for Lua parsing
-const OutputDef = struct {
-    style: []const u8,
-    format: []const u8,
-};
-
-const ModuleDef = struct {
-    name: []const u8,
-    priority: i64,
-    outputs: []const OutputDef,
-    command: ?[]const u8,
-    when: ?core.WhenDef,
-};
-
 const ShpConfig = struct {
-    left: []const ModuleDef,
-    right: []const ModuleDef,
+    left: []const core.Segment,
+    right: []const core.Segment,
     has_config: bool,
 };
 
@@ -215,7 +200,7 @@ fn renderPrompt(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (config.has_config) {
         const modules = if (is_right) config.right else config.left;
         if (modules.len > 0) {
-            try renderModulesSimple(&ctx, modules, stdout, is_zsh);
+            try render_modules.renderModulesSimple(allocator, &ctx, modules, stdout, is_zsh);
             return;
         }
     }
@@ -230,10 +215,10 @@ fn deinitShpConfig(config: *ShpConfig, allocator: std.mem.Allocator) void {
     deinitModules(config.right, allocator);
     if (config.left.len > 0) allocator.free(config.left);
     if (config.right.len > 0) allocator.free(config.right);
-    config.* = .{ .left = &[_]ModuleDef{}, .right = &[_]ModuleDef{}, .has_config = false };
+    config.* = .{ .left = &[_]core.Segment{}, .right = &[_]core.Segment{}, .has_config = false };
 }
 
-fn deinitModules(mods: []const ModuleDef, allocator: std.mem.Allocator) void {
+fn deinitModules(mods: []const core.Segment, allocator: std.mem.Allocator) void {
     for (mods) |m| {
         allocator.free(m.name);
         if (m.command) |c| allocator.free(c);
@@ -266,94 +251,8 @@ fn renderDefaultPrompt(ctx: *segment.Context, is_right: bool, stdout: std.fs.Fil
     }
 }
 
-fn evalLuaWhen(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bool {
-    // Provide ctx as a global table.
-    runtime.lua.createTable(0, 6);
-    _ = runtime.lua.pushString(ctx.cwd);
-    runtime.lua.setField(-2, "cwd");
-
-    if (ctx.exit_status) |st| {
-        runtime.lua.pushInteger(st);
-        runtime.lua.setField(-2, "exit_status");
-    }
-    if (ctx.cmd_duration_ms) |d| {
-        runtime.lua.pushInteger(@intCast(d));
-        runtime.lua.setField(-2, "cmd_duration_ms");
-    }
-    runtime.lua.pushInteger(ctx.jobs);
-    runtime.lua.setField(-2, "jobs");
-    runtime.lua.pushInteger(ctx.terminal_width);
-    runtime.lua.setField(-2, "terminal_width");
-    runtime.lua.setGlobal("ctx");
-
-    const code_z = runtime.allocator.dupeZ(u8, code) catch return false;
-    defer runtime.allocator.free(code_z);
-
-    // Load and execute chunk. Must return boolean.
-    runtime.lua.loadString(code_z) catch return false;
-    runtime.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
-        runtime.lua.pop(1);
-        return false;
-    };
-    defer runtime.lua.pop(1);
-
-    if (runtime.lua.typeOf(-1) == .boolean) {
-        return runtime.lua.toBoolean(-1);
-    }
-    return false;
-}
-
-fn evalPromptWhen(allocator: std.mem.Allocator, lua_rt: *?LuaRuntime, ctx: *segment.Context, when: core.WhenDef) bool {
-    if (when.any) |clauses| {
-        for (clauses) |c| {
-            if (evalPromptWhenClause(allocator, lua_rt, ctx, c)) return true;
-        }
-        return false;
-    }
-    return evalPromptWhenClause(allocator, lua_rt, ctx, when);
-}
-
-fn evalPromptWhenClause(allocator: std.mem.Allocator, lua_rt: *?LuaRuntime, ctx: *segment.Context, when: core.WhenDef) bool {
-    // Fast path: check env var without spawning any process
-    if (when.env) |env_name| {
-        const val = std.posix.getenv(env_name);
-        if (val == null or val.?.len == 0) return false;
-    }
-
-    // Fast path: check env var is NOT set
-    if (when.env_not) |env_name| {
-        const val = std.posix.getenv(env_name);
-        if (val != null and val.?.len > 0) return false;
-    }
-
-    if (when.lua) |lua_code| {
-        if (lua_rt.* == null) {
-            lua_rt.* = LuaRuntime.init(allocator) catch null;
-        }
-        if (lua_rt.* == null) return false;
-        if (!evalLuaWhen(&lua_rt.*.?, ctx, lua_code)) return false;
-    }
-
-    if (when.bash) |bash_code| {
-        // Use -c instead of -lc to avoid slow login shell initialization
-        const res = std.process.Child.run(.{
-            .allocator = allocator,
-            .argv = &.{ "/bin/bash", "-c", bash_code },
-        }) catch return false;
-        allocator.free(res.stdout);
-        allocator.free(res.stderr);
-        const ok = switch (res.term) {
-            .Exited => |code| code == 0,
-            else => false,
-        };
-        if (!ok) return false;
-    }
-
-    return true;
-}
-
-fn convertSegments(segments: []const config_builder.ShpConfigBuilder.SegmentDef, allocator: std.mem.Allocator) []const ModuleDef {
-    const modules = allocator.alloc(ModuleDef, segments.len) catch return &[_]ModuleDef{};
+fn convertSegments(segments: []const config_builder.ShpConfigBuilder.SegmentDef, allocator: std.mem.Allocator) []const core.Segment {
+    const modules = allocator.alloc(core.Segment, segments.len) catch return &[_]core.Segment{};
     var built_count: usize = 0;
     errdefer {
         for (modules[0..built_count]) |m| deinitModuleDefOwned(m, allocator);
@@ -361,19 +260,19 @@ fn convertSegments(segments: []const config_builder.ShpConfigBuilder.SegmentDef,
     }
 
     for (segments, 0..) |seg, i| {
-        const name_copy = allocator.dupe(u8, seg.name) catch return &[_]ModuleDef{};
+        const name_copy = allocator.dupe(u8, seg.name) catch return &[_]core.Segment{};
         errdefer allocator.free(name_copy);
 
         const command_copy = if (seg.command) |cmd|
-            allocator.dupe(u8, cmd) catch return &[_]ModuleDef{}
+            allocator.dupe(u8, cmd) catch return &[_]core.Segment{}
         else
             null;
         errdefer if (command_copy) |cmd| allocator.free(cmd);
 
         const outputs = if (seg.outputs.len == 0)
-            &[_]OutputDef{}
+            &[_]core.OutputDef{}
         else blk: {
-            const out_array = allocator.alloc(OutputDef, seg.outputs.len) catch return &[_]ModuleDef{};
+            const out_array = allocator.alloc(core.OutputDef, seg.outputs.len) catch return &[_]core.Segment{};
             var out_count: usize = 0;
             errdefer {
                 for (out_array[0..out_count]) |o| {
@@ -384,10 +283,10 @@ fn convertSegments(segments: []const config_builder.ShpConfigBuilder.SegmentDef,
             }
 
             for (seg.outputs, 0..) |out, j| {
-                const style_copy = allocator.dupe(u8, out.style) catch return &[_]ModuleDef{};
+                const style_copy = allocator.dupe(u8, out.style) catch return &[_]core.Segment{};
                 errdefer allocator.free(style_copy);
 
-                const format_copy = allocator.dupe(u8, out.format) catch return &[_]ModuleDef{};
+                const format_copy = allocator.dupe(u8, out.format) catch return &[_]core.Segment{};
 
                 out_array[j] = .{
                     .style = style_copy,
@@ -401,7 +300,7 @@ fn convertSegments(segments: []const config_builder.ShpConfigBuilder.SegmentDef,
 
         modules[i] = .{
             .name = name_copy,
-            .priority = seg.priority,
+            .priority = @intCast(@max(@as(i64, 0), @min(seg.priority, 255))),
             .outputs = outputs,
             .command = command_copy,
             .when = seg.when,
@@ -412,7 +311,7 @@ fn convertSegments(segments: []const config_builder.ShpConfigBuilder.SegmentDef,
     return modules;
 }
 
-fn deinitModuleDefOwned(m: ModuleDef, allocator: std.mem.Allocator) void {
+fn deinitModuleDefOwned(m: core.Segment, allocator: std.mem.Allocator) void {
     allocator.free(m.name);
     if (m.command) |c| allocator.free(c);
     for (m.outputs) |o| {
@@ -424,8 +323,8 @@ fn deinitModuleDefOwned(m: ModuleDef, allocator: std.mem.Allocator) void {
 
 fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
     var config = ShpConfig{
-        .left = &[_]ModuleDef{},
-        .right = &[_]ModuleDef{},
+        .left = &[_]core.Segment{},
+        .right = &[_]core.Segment{},
         .has_config = false,
     };
 
@@ -513,13 +412,13 @@ fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
     return config;
 }
 
-fn parseModules(runtime: *LuaRuntime, allocator: std.mem.Allocator, key: [:0]const u8) []const ModuleDef {
+fn parseModules(runtime: *LuaRuntime, allocator: std.mem.Allocator, key: [:0]const u8) []const core.Segment {
     if (!runtime.pushTable(-1, key)) {
-        return &[_]ModuleDef{};
+        return &[_]core.Segment{};
     }
     defer runtime.pop();
 
-    var list = std.ArrayList(ModuleDef).empty;
+    var list = std.ArrayList(core.Segment).empty;
     const len = runtime.getArrayLen(-1);
 
     for (1..len + 1) |i| {
@@ -531,10 +430,10 @@ fn parseModules(runtime: *LuaRuntime, allocator: std.mem.Allocator, key: [:0]con
         }
     }
 
-    return list.toOwnedSlice(allocator) catch &[_]ModuleDef{};
+    return list.toOwnedSlice(allocator) catch &[_]core.Segment{};
 }
 
-fn parseModule(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?ModuleDef {
+fn parseModule(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?core.Segment {
     const name = runtime.getStringAlloc(-1, "name") orelse return null;
 
     const when_ty = runtime.fieldType(-1, "when");
@@ -545,9 +444,10 @@ fn parseModule(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?ModuleDef {
         return null;
     }
 
-    return ModuleDef{
+    const priority_i64 = runtime.getInt(i64, -1, "priority") orelse 50;
+    return core.Segment{
         .name = name,
-        .priority = runtime.getInt(i64, -1, "priority") orelse 50,
+        .priority = @intCast(@max(@as(i64, 0), @min(priority_i64, 255))),
         .outputs = parseOutputs(runtime, allocator),
         .command = runtime.getStringAlloc(-1, "command"),
         .when = parseWhenPrompt(runtime),
@@ -580,13 +480,13 @@ fn parseWhenPrompt(runtime: *LuaRuntime) ?core.WhenDef {
     return when;
 }
 
-fn parseOutputs(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const OutputDef {
+fn parseOutputs(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const core.OutputDef {
     if (!runtime.pushTable(-1, "outputs")) {
-        return &[_]OutputDef{};
+        return &[_]core.OutputDef{};
     }
     defer runtime.pop();
 
-    var list = std.ArrayList(OutputDef).empty;
+    var list = std.ArrayList(core.OutputDef).empty;
     const len = runtime.getArrayLen(-1);
 
     for (1..len + 1) |i| {
@@ -623,388 +523,5 @@ fn parseOutputs(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const Outp
         }
     }
 
-    return list.toOwnedSlice(allocator) catch &[_]OutputDef{};
-}
-
-fn renderModulesSimple(ctx: *segment.Context, modules: []const ModuleDef, stdout: std.fs.File, is_zsh: bool) !void {
-    const alloc = std.heap.page_allocator;
-
-    // Known built-in segments that return null when they have nothing to show
-    const conditional_segments = [_][]const u8{ "status", "sudo", "git_branch", "git_status", "jobs", "duration", "pod_name" };
-
-    const ModuleResult = struct {
-        when_passed: bool = true,
-        needs_bash_check: bool = false,
-        output: ?[]const u8 = null,
-        width: u16 = 0,
-        should_render: bool = true,
-        visible: bool = true, // After priority filtering
-    };
-
-    var results: [32]ModuleResult = [_]ModuleResult{.{}} ** 32;
-    const mod_count = @min(modules.len, 32);
-
-    // PHASE 1: Fast checks on main thread (env vars, lua)
-    // These are instant - no process spawning
-    var lua_rt: ?LuaRuntime = null;
-    defer if (lua_rt) |*rt| rt.deinit();
-
-    for (modules[0..mod_count], 0..) |mod, i| {
-        if (mod.when) |w| {
-            // Fast path: env checks (instant, no process spawn)
-            if (w.env) |env_name| {
-                const val = std.posix.getenv(env_name);
-                if (val == null or val.?.len == 0) {
-                    results[i].when_passed = false;
-                    continue;
-                }
-            }
-            if (w.env_not) |env_name| {
-                const val = std.posix.getenv(env_name);
-                if (val != null and val.?.len > 0) {
-                    results[i].when_passed = false;
-                    continue;
-                }
-            }
-
-            // Lua checks (fast, embedded VM)
-            if (w.lua) |lua_code| {
-                if (lua_rt == null) {
-                    lua_rt = LuaRuntime.init(alloc) catch null;
-                }
-                if (lua_rt == null or !evalLuaWhen(&lua_rt.?, ctx, lua_code)) {
-                    results[i].when_passed = false;
-                    continue;
-                }
-            }
-
-            // Mark for bash check in parallel phase
-            if (w.bash != null) {
-                results[i].needs_bash_check = true;
-            }
-        }
-    }
-
-    // PHASE 2: Parallel execution of bash conditions AND commands
-    const ThreadContext = struct {
-        mod: *const ModuleDef,
-        result: *ModuleResult,
-        alloc: std.mem.Allocator,
-    };
-
-    const thread_fn = struct {
-        fn run(tctx: ThreadContext) void {
-            // Run bash condition if needed
-            if (tctx.result.needs_bash_check) {
-                if (tctx.mod.when) |w| {
-                    if (w.bash) |bash_code| {
-                        const res = std.process.Child.run(.{
-                            .allocator = tctx.alloc,
-                            .argv = &.{ "/bin/bash", "-c", bash_code },
-                        }) catch {
-                            tctx.result.when_passed = false;
-                            return;
-                        };
-                        tctx.alloc.free(res.stdout);
-                        tctx.alloc.free(res.stderr);
-                        const ok = switch (res.term) {
-                            .Exited => |code| code == 0,
-                            else => false,
-                        };
-                        if (!ok) {
-                            tctx.result.when_passed = false;
-                            return;
-                        }
-                    }
-                }
-            }
-
-            if (!tctx.result.when_passed) return;
-
-            // Run command
-            if (tctx.mod.command) |cmd| {
-                const cmd_result = std.process.Child.run(.{
-                    .allocator = tctx.alloc,
-                    .argv = &.{ "/bin/bash", "-c", cmd },
-                }) catch return;
-                tctx.alloc.free(cmd_result.stderr);
-
-                const exit_ok = switch (cmd_result.term) {
-                    .Exited => |code| code == 0,
-                    else => false,
-                };
-                if (!exit_ok) {
-                    tctx.alloc.free(cmd_result.stdout);
-                    return;
-                }
-
-                const trimmed = std.mem.trimRight(u8, cmd_result.stdout, "\n\r");
-                if (trimmed.len > 0) {
-                    tctx.result.output = trimmed;
-                } else {
-                    tctx.alloc.free(cmd_result.stdout);
-                }
-            }
-        }
-    }.run;
-
-    // Spawn threads for modules that need bash checks or have commands
-    var threads: [32]?std.Thread = [_]?std.Thread{null} ** 32;
-    for (modules[0..mod_count], 0..) |*mod, i| {
-        // Only spawn thread if: needs bash check, or has command and when_passed
-        if (results[i].needs_bash_check or (mod.command != null and results[i].when_passed)) {
-            threads[i] = std.Thread.spawn(.{}, thread_fn, .{ThreadContext{
-                .mod = mod,
-                .result = &results[i],
-                .alloc = alloc,
-            }}) catch null;
-        }
-    }
-
-    // Wait for all threads
-    for (threads[0..mod_count]) |maybe_thread| {
-        if (maybe_thread) |thread| {
-            thread.join();
-        }
-    }
-
-    // First pass: calculate output text, width, and should_render for each module
-    for (modules[0..mod_count], 0..) |mod, i| {
-        if (!results[i].when_passed) {
-            results[i].should_render = false;
-            continue;
-        }
-
-        var output_text: []const u8 = "";
-
-        if (mod.command != null) {
-            if (results[i].output) |out| {
-                output_text = out;
-            } else {
-                results[i].should_render = false;
-                continue;
-            }
-        } else {
-            var is_conditional = false;
-            for (conditional_segments) |cs| {
-                if (std.mem.eql(u8, mod.name, cs)) {
-                    is_conditional = true;
-                    break;
-                }
-            }
-
-            if (ctx.renderSegment(mod.name)) |segs| {
-                if (segs.len > 0) {
-                    output_text = segs[0].text;
-                }
-            } else if (is_conditional) {
-                results[i].should_render = false;
-                continue;
-            }
-        }
-
-        // Store output for later rendering
-        results[i].output = output_text;
-
-        // Calculate width from outputs
-        for (mod.outputs) |out| {
-            results[i].width += calcFormatWidth(out.format, output_text);
-        }
-    }
-
-    // Priority-based width filtering
-    // Use half terminal width as budget (left/right prompts share the space)
-    const width_budget = ctx.terminal_width / 2;
-    var used_width: u16 = 0;
-
-    // Create sorted index array by priority (lower priority number = higher importance)
-    var priority_order: [32]usize = undefined;
-    for (0..mod_count) |i| {
-        priority_order[i] = i;
-    }
-
-    // Sort by priority (insertion sort - small array)
-    for (1..mod_count) |i| {
-        const key = priority_order[i];
-        const key_priority = modules[key].priority;
-        var j: usize = i;
-        while (j > 0) {
-            const prev_priority = modules[priority_order[j - 1]].priority;
-            if (prev_priority <= key_priority) break;
-            priority_order[j] = priority_order[j - 1];
-            j -= 1;
-        }
-        priority_order[j] = key;
-    }
-
-    // Mark modules as visible based on priority until budget exhausted
-    for (priority_order[0..mod_count]) |idx| {
-        if (!results[idx].should_render) continue;
-        if (used_width + results[idx].width <= width_budget) {
-            results[idx].visible = true;
-            used_width += results[idx].width;
-        } else {
-            results[idx].visible = false;
-        }
-    }
-
-    // Render modules in original order, but only visible ones
-    for (modules[0..mod_count], 0..) |mod, i| {
-        if (!results[i].should_render or !results[i].visible) continue;
-
-        const output_text = results[i].output orelse "";
-
-        for (mod.outputs) |out| {
-            const style = Style.parse(out.style);
-
-            try writeStyleDirect(stdout, style, is_zsh);
-            try writeFormat(stdout, out.format, output_text);
-
-            if (!style.isEmpty()) {
-                if (is_zsh) try stdout.writeAll("%{");
-                try stdout.writeAll("\x1b[0m");
-                if (is_zsh) try stdout.writeAll("%}");
-            }
-        }
-    }
-}
-
-/// Calculate the visible width of a format string with $output substituted
-fn calcFormatWidth(format: []const u8, output: []const u8) u16 {
-    var width: u16 = 0;
-    var i: usize = 0;
-    while (i < format.len) {
-        if (i + 6 < format.len and std.mem.eql(u8, format[i .. i + 7], "$output")) {
-            width += @intCast(output.len);
-            i += 7;
-        } else {
-            width += 1;
-            i += 1;
-        }
-    }
-    return width;
-}
-
-fn writeStyleDirect(stdout: std.fs.File, style: Style, is_zsh: bool) !void {
-    if (style.isEmpty()) return;
-
-    if (is_zsh) try stdout.writeAll("%{");
-
-    // Build ANSI sequence
-    var buf: [64]u8 = undefined;
-    var len: usize = 0;
-
-    buf[0] = '\x1b';
-    buf[1] = '[';
-    len = 2;
-
-    var need_semi = false;
-
-    if (style.bold) {
-        buf[len] = '1';
-        len += 1;
-        need_semi = true;
-    }
-    if (style.dim) {
-        if (need_semi) {
-            buf[len] = ';';
-            len += 1;
-        }
-        buf[len] = '2';
-        len += 1;
-        need_semi = true;
-    }
-    if (style.italic) {
-        if (need_semi) {
-            buf[len] = ';';
-            len += 1;
-        }
-        buf[len] = '3';
-        len += 1;
-        need_semi = true;
-    }
-    if (style.underline) {
-        if (need_semi) {
-            buf[len] = ';';
-            len += 1;
-        }
-        buf[len] = '4';
-        len += 1;
-        need_semi = true;
-    }
-
-    // Foreground color
-    switch (style.fg) {
-        .none => {},
-        .palette => |p| {
-            if (need_semi) {
-                buf[len] = ';';
-                len += 1;
-            }
-            const code = if (p < 8)
-                std.fmt.bufPrint(buf[len..], "{d}", .{30 + p}) catch ""
-            else if (p < 16)
-                std.fmt.bufPrint(buf[len..], "{d}", .{90 + p - 8}) catch ""
-            else
-                std.fmt.bufPrint(buf[len..], "38;5;{d}", .{p}) catch "";
-            len += code.len;
-            need_semi = true;
-        },
-        .rgb => |rgb| {
-            if (need_semi) {
-                buf[len] = ';';
-                len += 1;
-            }
-            const code = std.fmt.bufPrint(buf[len..], "38;2;{d};{d};{d}", .{ rgb.r, rgb.g, rgb.b }) catch "";
-            len += code.len;
-            need_semi = true;
-        },
-    }
-
-    // Background color
-    switch (style.bg) {
-        .none => {},
-        .palette => |p| {
-            if (need_semi) {
-                buf[len] = ';';
-                len += 1;
-            }
-            const code = if (p < 8)
-                std.fmt.bufPrint(buf[len..], "{d}", .{40 + p}) catch ""
-            else if (p < 16)
-                std.fmt.bufPrint(buf[len..], "{d}", .{100 + p - 8}) catch ""
-            else
-                std.fmt.bufPrint(buf[len..], "48;5;{d}", .{p}) catch "";
-            len += code.len;
-        },
-        .rgb => |rgb| {
-            if (need_semi) {
-                buf[len] = ';';
-                len += 1;
-            }
-            const code = std.fmt.bufPrint(buf[len..], "48;2;{d};{d};{d}", .{ rgb.r, rgb.g, rgb.b }) catch "";
-            len += code.len;
-        },
-    }
-
-    buf[len] = 'm';
-    len += 1;
-
-    try stdout.writeAll(buf[0..len]);
-    if (is_zsh) try stdout.writeAll("%}");
-}
-
-fn writeFormat(stdout: std.fs.File, format: []const u8, output: []const u8) !void {
-    var i: usize = 0;
-    while (i < format.len) {
-        if (i + 7 <= format.len and std.mem.eql(u8, format[i..][0..7], "$output")) {
-            try stdout.writeAll(output);
-            i += 7;
-        } else {
-            const char_len = std.unicode.utf8ByteSequenceLength(format[i]) catch 1;
-            const end = @min(i + char_len, format.len);
-            try stdout.writeAll(format[i..end]);
-            i = end;
-        }
-    }
+    return list.toOwnedSlice(allocator) catch &[_]core.OutputDef{};
 }
