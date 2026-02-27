@@ -1307,6 +1307,8 @@ pub const Server = struct {
             if (self.ses_state.getPane(pane.uuid)) |p| {
                 p.needs_backlog_replay = true;
             }
+            // Try replay immediately (periodic retry remains as fallback).
+            self.ses_state.processBacklogReplays();
 
             var resp = wire.PaneFound{
                 .uuid = pane.uuid,
@@ -1348,6 +1350,12 @@ pub const Server = struct {
             self.sendBinaryError(fd, "adopt_pane: pane not found or already attached");
             return;
         };
+
+        // Adopt into a fresh mux view: force backlog replay so screen state
+        // is restored immediately instead of waiting for new output.
+        pane.needs_backlog_replay = true;
+        self.ses_state.processBacklogReplays();
+
         self.ses_state.markDirty();
 
         var resp = wire.PaneFound{
