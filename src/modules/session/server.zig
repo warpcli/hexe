@@ -1203,6 +1203,49 @@ pub const Server = struct {
             break :blk cid;
         };
 
+        // Sticky/per-cwd pane reuse: if a matching sticky pane already exists,
+        // attach/take over it instead of spawning a new pod.
+        if (sticky_pwd) |pwd| {
+            if (sticky_key) |key| {
+                const preferred_session = if (self.ses_state.getClient(client_id)) |client|
+                    client.session_name
+                else
+                    null;
+
+                if (self.ses_state.findStickyPaneWithAffinity(pwd, key, preferred_session)) |existing| {
+                    if (existing.attached_to) |owner_id| {
+                        if (owner_id != client_id) {
+                            _ = self.ses_state.stealAttachedPane(existing.uuid, client_id);
+                            _ = self.ses_state.attachPane(existing.uuid, client_id) catch {
+                                self.sendBinaryError(fd, "attach_existing_failed");
+                                return;
+                            };
+                        }
+                    } else {
+                        _ = self.ses_state.attachPane(existing.uuid, client_id) catch {
+                            self.sendBinaryError(fd, "attach_existing_failed");
+                            return;
+                        };
+                    }
+
+                    // Force backlog replay for fresh renderer state in the new mux.
+                    if (self.ses_state.getPane(existing.uuid)) |p| {
+                        p.needs_backlog_replay = true;
+                    }
+
+                    self.ses_state.markDirty();
+                    var existing_resp = wire.PaneCreated{
+                        .uuid = existing.uuid,
+                        .pid = existing.child_pid,
+                        .pane_id = existing.pane_id,
+                        .socket_path_len = @intCast(existing.pod_socket_path.len),
+                    };
+                    wire.writeControlWithTrail(fd, .pane_created, std.mem.asBytes(&existing_resp), existing.pod_socket_path) catch {};
+                    return;
+                }
+            }
+        }
+
         const pane = self.ses_state.createPane(client_id, shell, cwd, sticky_pwd, sticky_key, parent_env, isolation_profile) catch {
             self.sendBinaryError(fd, "create_failed");
             return;
@@ -1249,10 +1292,22 @@ pub const Server = struct {
             null;
 
         if (self.ses_state.findStickyPaneWithAffinity(pwd, fs.key, preferred_session)) |pane| {
+            if (pane.attached_to) |owner_id| {
+                if (owner_id != client_id) {
+                    _ = self.ses_state.stealAttachedPane(pane.uuid, client_id);
+                }
+            }
+
             _ = self.ses_state.attachPane(pane.uuid, client_id) catch {
                 wire.writeControl(fd, .pane_not_found, &.{}) catch {};
                 return;
             };
+
+            // New mux needs a full screen restore for sticky adoption/takeover.
+            if (self.ses_state.getPane(pane.uuid)) |p| {
+                p.needs_backlog_replay = true;
+            }
+
             var resp = wire.PaneFound{
                 .uuid = pane.uuid,
                 .pid = pane.child_pid,
@@ -1355,7 +1410,11 @@ pub const Server = struct {
                 break :blk null;
             } else null;
 
-            if (pane.sticky_pwd != null) _ = pane.transitionState(.sticky, "set_sticky command");
+            // set_sticky sets sticky metadata, but must not force attached panes
+            // into sticky state. Sticky state is entered on suspend/disown.
+            if (pane.sticky_pwd != null and pane.attached_to == null) {
+                _ = pane.transitionState(.sticky, "set_sticky command");
+            }
             self.ses_state.markDirty();
         }
         wire.writeControl(fd, .ok, &.{}) catch {};
