@@ -1558,8 +1558,8 @@ pub const Server = struct {
             return;
         }
 
-        // Phase 2: No UUID match, try exact session name match.
-        // Collect all matching sessions for disambiguation.
+        // Phase 2: No detached UUID match, try exact DETACHED session name match.
+        // Collect all matching detached sessions for disambiguation.
         var name_matches: [16]struct {
             session_id: [16]u8,
             name: []const u8,
@@ -1584,7 +1584,92 @@ pub const Server = struct {
         }
 
         if (name_match_count == 0) {
-            self.sendBinaryError(fd, "session_not_found");
+            // Phase 3: Session may be actively attached elsewhere.
+            // If matched, force-detach owner and continue attach here.
+
+            // 3a) UUID prefix among attached sessions.
+            var attached_uuid_match: ?[16]u8 = null;
+            var attached_uuid_count: usize = 0;
+            for (self.ses_state.clients.items) |client| {
+                if (client.session_id) |sid| {
+                    const sid_hex: [32]u8 = std.fmt.bytesToHex(&sid, .lower);
+                    if (std.mem.startsWith(u8, &sid_hex, id_prefix)) {
+                        attached_uuid_match = sid;
+                        attached_uuid_count += 1;
+                    }
+                }
+            }
+
+            if (attached_uuid_count == 1) {
+                const session_id = attached_uuid_match.?;
+                if (!self.ses_state.forceDetachAttachedSession(session_id)) {
+                    self.sendBinaryError(fd, "reattach_failed");
+                    return;
+                }
+
+                const client_id = self.findClientForCtlFd(fd) orelse {
+                    self.sendBinaryError(fd, "no_client");
+                    return;
+                };
+                self.completeReattach(fd, session_id, client_id);
+                return;
+            }
+
+            if (attached_uuid_count > 1) {
+                self.sendBinaryError(fd, "ambiguous_uuid_prefix: provide more characters");
+                return;
+            }
+
+            // 3b) Exact attached session name match.
+            var attached_name_matches: [16]struct {
+                session_id: [16]u8,
+                name: []const u8,
+            } = undefined;
+            var attached_name_count: usize = 0;
+
+            for (self.ses_state.clients.items) |client| {
+                const sid = client.session_id orelse continue;
+                const sname = client.session_name orelse continue;
+                if (std.ascii.eqlIgnoreCase(sname, id_prefix)) {
+                    if (attached_name_count < attached_name_matches.len) {
+                        attached_name_matches[attached_name_count] = .{
+                            .session_id = sid,
+                            .name = sname,
+                        };
+                        attached_name_count += 1;
+                    }
+                }
+            }
+
+            if (attached_name_count == 0) {
+                self.sendBinaryError(fd, "session_not_found");
+                return;
+            }
+
+            if (attached_name_count == 1) {
+                const session_id = attached_name_matches[0].session_id;
+                if (!self.ses_state.forceDetachAttachedSession(session_id)) {
+                    self.sendBinaryError(fd, "reattach_failed");
+                    return;
+                }
+
+                const client_id = self.findClientForCtlFd(fd) orelse {
+                    self.sendBinaryError(fd, "no_client");
+                    return;
+                };
+                self.completeReattach(fd, session_id, client_id);
+                return;
+            }
+
+            var attached_err_buf: [512]u8 = undefined;
+            var attached_stream = std.io.fixedBufferStream(&attached_err_buf);
+            const attached_writer = attached_stream.writer();
+            attached_writer.print("ambiguous: multiple sessions named '{s}'. Use UUID prefix:\n", .{id_prefix}) catch {};
+            for (attached_name_matches[0..attached_name_count]) |match| {
+                const hex_id = std.fmt.bytesToHex(&match.session_id, .lower);
+                attached_writer.print("  {s} ({s})\n", .{ hex_id[0..8], match.name }) catch {};
+            }
+            self.sendBinaryError(fd, attached_stream.getWritten());
             return;
         }
 

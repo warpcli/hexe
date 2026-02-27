@@ -112,6 +112,7 @@ pub const MsgType = enum(u16) {
     get_layout = 0x0134, // CLI → SES: get mux state for layout save
     apply_layout = 0x0135, // CLI → SES → MUX: apply saved layout tree
     get_session_state = 0x0136, // CLI → SES: export detached session to JSON
+    session_stolen = 0x0137, // SES → MUX: this session was attached elsewhere
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,

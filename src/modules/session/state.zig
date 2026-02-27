@@ -1072,6 +1072,43 @@ pub const SesState = struct {
         };
     }
 
+    /// Force-detach an actively attached session so another mux can attach.
+    /// Returns true when an attached owner was found and detached.
+    pub fn forceDetachAttachedSession(self: *SesState, session_id: [16]u8) bool {
+        var owner_index: ?usize = null;
+
+        for (self.clients.items, 0..) |client, i| {
+            if (client.session_id) |sid| {
+                if (std.mem.eql(u8, &sid, &session_id)) {
+                    owner_index = i;
+                    break;
+                }
+            }
+        }
+
+        const idx = owner_index orelse return false;
+        const owner = &self.clients.items[idx];
+        const mux_state = owner.last_mux_state orelse "{}";
+
+        // Tell the current owner mux to terminate cleanly.
+        if (owner.mux_ctl_fd) |mfd| {
+            wire.writeControl(mfd, .session_stolen, &.{}) catch {};
+        }
+
+        // Move all panes/session metadata into detached storage.
+        self.detachSessionDirect(owner, session_id, mux_state);
+
+        // Close owner channels and remove the owner client.
+        posix.close(owner.fd);
+        if (owner.mux_ctl_fd) |fd| posix.close(fd);
+        if (owner.mux_vt_fd) |fd| posix.close(fd);
+        owner.deinit();
+        _ = self.clients.orderedRemove(idx);
+
+        self.dirty = true;
+        return true;
+    }
+
     /// Remove a detached session after successful reattach.
     pub fn removeDetachedSession(self: *SesState, session_id: [16]u8) void {
         if (self.detached_sessions.fetchRemove(session_id)) |kv| {

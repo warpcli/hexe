@@ -56,6 +56,9 @@ pub fn handleSesMessage(state: *State, buffer: []u8) void {
             .pane_exited => {
                 handlePaneExited(state, fd, hdr.payload_len, buffer);
             },
+            .session_stolen => {
+                handleSessionStolen(state, fd, hdr.payload_len, buffer);
+            },
             // Async responses from fire-and-forget requests:
             .ok, .pong => {
                 skipPayload(fd, hdr.payload_len, buffer);
@@ -78,6 +81,15 @@ pub fn handleSesMessage(state: *State, buffer: []u8) void {
             },
         }
     }
+}
+
+fn handleSessionStolen(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+    skipPayload(fd, payload_len, buffer);
+
+    state.detach_mode = true;
+    state.notifications.showFor("Session attached elsewhere; this client is closing", 3500);
+    state.running = false;
+    state.needs_render = true;
 }
 
 fn handleNotify(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
