@@ -266,12 +266,16 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
 }
 
 fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
-    rt.lua.createTable(0, 16);
+    rt.lua.createTable(0, 20);
 
     rt.lua.pushBoolean(ctx.shell_running);
     rt.lua.setField(-2, "shell_running");
+    rt.lua.pushBoolean(ctx.shell_running);
+    rt.lua.setField(-2, "process_running");
     rt.lua.pushBoolean(ctx.alt_screen);
     rt.lua.setField(-2, "alt_screen");
+    rt.lua.pushBoolean(!ctx.alt_screen);
+    rt.lua.setField(-2, "not_alt_screen");
     rt.lua.pushBoolean(ctx.focus_is_float);
     rt.lua.setField(-2, "focus_is_float");
     rt.lua.pushInteger(ctx.float_key);
@@ -496,16 +500,32 @@ fn evalLuaCommand(code: []const u8, ctx: *shp.Context) LuaEval {
 }
 
 const BuiltinDesc = struct {
-    name: ?[]const u8 = null,
+    name_buf: [64]u8 = [_]u8{0} ** 64,
+    name_len: usize = 0,
     style: shp.Style = .{},
-    prefix: []const u8 = "",
-    suffix: []const u8 = "",
+    prefix_buf: [32]u8 = [_]u8{0} ** 32,
+    prefix_len: usize = 0,
+    suffix_buf: [32]u8 = [_]u8{0} ** 32,
+    suffix_len: usize = 0,
     spinner_kind: ?[]const u8 = null,
     spinner_width: ?u8 = null,
     spinner_step_ms: ?u64 = null,
     spinner_hold_frames: ?u8 = null,
     spinner_bg: ?u8 = null,
     spinner_placeholder: ?u8 = null,
+
+    fn name(self: *const BuiltinDesc) ?[]const u8 {
+        if (self.name_len == 0) return null;
+        return self.name_buf[0..self.name_len];
+    }
+
+    fn prefix(self: *const BuiltinDesc) []const u8 {
+        return self.prefix_buf[0..self.prefix_len];
+    }
+
+    fn suffix(self: *const BuiltinDesc) []const u8 {
+        return self.suffix_buf[0..self.suffix_len];
+    }
 };
 
 fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
@@ -531,7 +551,11 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
         .string => {
             const s = rt.lua.toString(-1) catch return desc;
             const t = std.mem.trim(u8, s, " \t\r\n");
-            if (t.len > 0) desc.name = t;
+            if (t.len > 0) {
+                const n = @min(t.len, desc.name_buf.len);
+                @memcpy(desc.name_buf[0..n], t[0..n]);
+                desc.name_len = n;
+            }
             return desc;
         },
         .table => {
@@ -539,7 +563,11 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
             if (rt.lua.typeOf(-1) == .string) {
                 const s = rt.lua.toString(-1) catch "";
                 const t = std.mem.trim(u8, s, " \t\r\n");
-                if (t.len > 0) desc.name = t;
+                if (t.len > 0) {
+                    const n = @min(t.len, desc.name_buf.len);
+                    @memcpy(desc.name_buf[0..n], t[0..n]);
+                    desc.name_len = n;
+                }
             }
             rt.lua.pop(1);
 
@@ -566,13 +594,19 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
 
             _ = rt.lua.getField(-1, "prefix");
             if (rt.lua.typeOf(-1) == .string) {
-                desc.prefix = rt.lua.toString(-1) catch "";
+                const s = rt.lua.toString(-1) catch "";
+                const n = @min(s.len, desc.prefix_buf.len);
+                @memcpy(desc.prefix_buf[0..n], s[0..n]);
+                desc.prefix_len = n;
             }
             rt.lua.pop(1);
 
             _ = rt.lua.getField(-1, "suffix");
             if (rt.lua.typeOf(-1) == .string) {
-                desc.suffix = rt.lua.toString(-1) catch "";
+                const s = rt.lua.toString(-1) catch "";
+                const n = @min(s.len, desc.suffix_buf.len);
+                @memcpy(desc.suffix_buf[0..n], s[0..n]);
+                desc.suffix_len = n;
             }
             rt.lua.pop(1);
 
@@ -1434,6 +1468,9 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
             var cfg = cfg_in;
             cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
             output_segs = animations.renderSegments(ctx, cfg);
+            if (output_segs) |segs| {
+                if (segs.len == 0) output_segs = null;
+            }
             if (output_segs == null) {
                 output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
                 if (output_text.len == 0) {
@@ -1444,7 +1481,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
             if (!command_output_ready) {
                 if (mod.kind == .builtin) {
                     const bdesc = evalLuaBuiltinDesc(cmd, ctx);
-                    if (bdesc.name) |builtin_name| {
+                    if (bdesc.name()) |builtin_name| {
                         if (std.mem.eql(u8, builtin_name, "spinner")) {
                             var cfg = core.config.SpinnerDef{};
                             cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
@@ -1455,6 +1492,9 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                             if (bdesc.spinner_bg) |v| cfg.bg_color = v;
                             if (bdesc.spinner_placeholder) |v| cfg.placeholder_color = v;
                             output_segs = animations.renderSegments(ctx, cfg);
+                            if (output_segs) |segs| {
+                                if (segs.len == 0) output_segs = null;
+                            }
                             if (output_segs == null) {
                                 output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
                                 if (output_text.len == 0) {
@@ -1467,9 +1507,10 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                             var styled: [16]shp.Segment = undefined;
                             var text_buf: [16][96]u8 = undefined;
                             var count: usize = 0;
-                            if (bdesc.prefix.len > 0 and count < styled.len) {
-                                const pn = @min(bdesc.prefix.len, text_buf[count].len);
-                                @memcpy(text_buf[count][0..pn], bdesc.prefix[0..pn]);
+                            const pref = bdesc.prefix();
+                            if (pref.len > 0 and count < styled.len) {
+                                const pn = @min(pref.len, text_buf[count].len);
+                                @memcpy(text_buf[count][0..pn], pref[0..pn]);
                                 styled[count] = .{ .text = text_buf[count][0..pn], .style = bdesc.style };
                                 count += 1;
                             }
@@ -1480,9 +1521,10 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                                 styled[count] = .{ .text = text_buf[count][0..tn], .style = mergeStyle(seg.style, bdesc.style) };
                                 count += 1;
                             }
-                            if (bdesc.suffix.len > 0 and count < styled.len) {
-                                const sn = @min(bdesc.suffix.len, text_buf[count].len);
-                                @memcpy(text_buf[count][0..sn], bdesc.suffix[0..sn]);
+                            const suff = bdesc.suffix();
+                            if (suff.len > 0 and count < styled.len) {
+                                const sn = @min(suff.len, text_buf[count].len);
+                                @memcpy(text_buf[count][0..sn], suff[0..sn]);
                                 styled[count] = .{ .text = text_buf[count][0..sn], .style = bdesc.style };
                                 count += 1;
                             }
@@ -1626,6 +1668,9 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
             var cfg = cfg_in;
             cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
             output_segs = animations.renderSegments(ctx, cfg);
+            if (output_segs) |segs| {
+                if (segs.len == 0) output_segs = null;
+            }
             if (output_segs == null) {
                 output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
                 if (output_text.len == 0) {
@@ -1636,7 +1681,7 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
             if (!command_output_ready) {
                 if (mod.kind == .builtin) {
                     const bdesc = evalLuaBuiltinDesc(cmd, ctx);
-                    if (bdesc.name) |builtin_name| {
+                    if (bdesc.name()) |builtin_name| {
                         if (std.mem.eql(u8, builtin_name, "spinner")) {
                             var cfg = core.config.SpinnerDef{};
                             cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
@@ -1647,6 +1692,9 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
                             if (bdesc.spinner_bg) |v| cfg.bg_color = v;
                             if (bdesc.spinner_placeholder) |v| cfg.placeholder_color = v;
                             output_segs = animations.renderSegments(ctx, cfg);
+                            if (output_segs) |segs| {
+                                if (segs.len == 0) output_segs = null;
+                            }
                             if (output_segs == null) {
                                 output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
                                 if (output_text.len == 0) {
@@ -1660,9 +1708,10 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
                             var styled: [16]shp.Segment = undefined;
                             var text_buf: [16][96]u8 = undefined;
                             var count: usize = 0;
-                            if (bdesc.prefix.len > 0 and count < styled.len) {
-                                const pn = @min(bdesc.prefix.len, text_buf[count].len);
-                                @memcpy(text_buf[count][0..pn], bdesc.prefix[0..pn]);
+                            const pref = bdesc.prefix();
+                            if (pref.len > 0 and count < styled.len) {
+                                const pn = @min(pref.len, text_buf[count].len);
+                                @memcpy(text_buf[count][0..pn], pref[0..pn]);
                                 styled[count] = .{ .text = text_buf[count][0..pn], .style = bdesc.style };
                                 count += 1;
                             }
@@ -1673,9 +1722,10 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
                                 styled[count] = .{ .text = text_buf[count][0..tn], .style = mergeStyle(seg.style, bdesc.style) };
                                 count += 1;
                             }
-                            if (bdesc.suffix.len > 0 and count < styled.len) {
-                                const sn = @min(bdesc.suffix.len, text_buf[count].len);
-                                @memcpy(text_buf[count][0..sn], bdesc.suffix[0..sn]);
+                            const suff = bdesc.suffix();
+                            if (suff.len > 0 and count < styled.len) {
+                                const sn = @min(suff.len, text_buf[count].len);
+                                @memcpy(text_buf[count][0..sn], suff[0..sn]);
                                 styled[count] = .{ .text = text_buf[count][0..sn], .style = bdesc.style };
                                 count += 1;
                             }
