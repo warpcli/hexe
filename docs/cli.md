@@ -157,6 +157,30 @@ Render the prompt for the given context. Called automatically by the shell integ
 
 ---
 
+## hexe record
+
+```sh
+hexe record start --scope pod [--uuid <u>|--name <n>|--socket <path>] [--out <file.cast>] [--capture-input]
+```
+Start background recording for the given scope/target.
+
+```sh
+hexe record stop --scope pod
+```
+Stop background recording for the given scope.
+
+```sh
+hexe record status --scope pod [--json]
+```
+Print `1` when active and `0` when inactive (or JSON with `--json`).
+
+```sh
+hexe record toggle --scope pod [--uuid <u>|--name <n>|--socket <path>] [--out <file.cast>] [--capture-input]
+```
+Toggle background recording for the given scope/target.
+
+---
+
 ## hexe config
 
 ```sh

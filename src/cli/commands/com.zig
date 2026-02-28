@@ -12,6 +12,10 @@ pub const runPodAttach = @import("pod_attach.zig").runPodAttach;
 pub const runPodRecord = @import("pod_record.zig").runPodRecord;
 pub const runPodKill = @import("pod_kill.zig").runPodKill;
 pub const runPodGc = @import("pod_gc.zig").runPodGc;
+pub const runRecordStart = @import("record_ctl.zig").runRecordStart;
+pub const runRecordStop = @import("record_ctl.zig").runRecordStop;
+pub const runRecordStatus = @import("record_ctl.zig").runRecordStatus;
+pub const runRecordToggle = @import("record_ctl.zig").runRecordToggle;
 
 const print = std.debug.print;
 
