@@ -30,6 +30,15 @@ threadlocal var randomdo_state: ?std.AutoHashMap(usize, RandomdoState) = null;
 threadlocal var hover_x: ?u16 = null;
 threadlocal var hover_y: ?u16 = null;
 
+const BUILTIN_MARKER_PREFIX = "__hexe_builtin:";
+
+fn builtinNameFromMarker(s: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, s, BUILTIN_MARKER_PREFIX)) return null;
+    const name = std.mem.trim(u8, s[BUILTIN_MARKER_PREFIX.len..], " \t\r\n");
+    if (name.len == 0) return null;
+    return name;
+}
+
 pub fn updateHover(term_height: u16, x: u16, y: u16) bool {
     const old_x = hover_x;
     const old_y = hover_y;
@@ -1163,6 +1172,10 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                 command_output_ready = true;
             }
             output_text = command_output;
+            if (builtinNameFromMarker(output_text)) |builtin_name| {
+                output_segs = ctx.renderSegment(builtin_name);
+                output_text = "";
+            }
         } else {
             output_segs = ctx.renderSegment(mod.name);
         }
@@ -1235,6 +1248,10 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
                 command_output_ready = true;
             }
             output_text = command_output;
+            if (builtinNameFromMarker(output_text)) |builtin_name| {
+                output_segs = ctx.renderSegment(builtin_name);
+                output_text = "";
+            }
         } else {
             output_segs = ctx.renderSegment(mod.name);
         }

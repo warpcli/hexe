@@ -1367,6 +1367,12 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         break :blk null;
     };
 
+    if (value_code == null) {
+        setParseError(allocator, "config: segment requires a non-empty 'value'");
+        allocator.free(name);
+        return null;
+    }
+
     return Segment{
         .name = name,
         .priority = lua_runtime.parseConstrainedInt(runtime, u8, -1, "priority", 1, 255, 50),

@@ -4,6 +4,14 @@ const core = @import("core");
 const LuaRuntime = core.LuaRuntime;
 const segment = core.segments;
 const Style = core.style.Style;
+const BUILTIN_MARKER_PREFIX = "__hexe_builtin:";
+
+fn builtinNameFromMarker(s: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, s, BUILTIN_MARKER_PREFIX)) return null;
+    const name = std.mem.trim(u8, s[BUILTIN_MARKER_PREFIX.len..], " \t\r\n");
+    if (name.len == 0) return null;
+    return name;
+}
 
 fn populateLuaContext(runtime: *LuaRuntime, ctx: *segment.Context) void {
     runtime.lua.createTable(0, 8);
@@ -231,6 +239,19 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
         if (mod.command != null) {
             if (results[i].output) |out| {
                 output_text = std.mem.trimRight(u8, out, "\n\r");
+                if (builtinNameFromMarker(output_text)) |builtin_name| {
+                    if (ctx.renderSegment(builtin_name)) |segs| {
+                        if (segs.len > 0) {
+                            output_text = segs[0].text;
+                        } else {
+                            results[i].should_render = false;
+                            continue;
+                        }
+                    } else {
+                        results[i].should_render = false;
+                        continue;
+                    }
+                }
             } else {
                 results[i].should_render = false;
                 continue;

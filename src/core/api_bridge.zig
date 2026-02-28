@@ -1367,6 +1367,10 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
         segment.command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
     }
     lua.pop(1);
+    if (segment.command == null) {
+        _ = lua.pushString("segment requires a non-empty 'value'");
+        lua.raiseError();
+    }
 
     // Parse optional click actions.
     _ = lua.getField(idx, "on_click");
@@ -2246,6 +2250,10 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
         command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
     }
     lua.pop(1);
+    if (command == null) {
+        _ = lua.pushString("segment requires a non-empty 'value'");
+        lua.raiseError();
+    }
 
     return config_builder.ShpConfigBuilder.SegmentDef{
         .name = name.?,
