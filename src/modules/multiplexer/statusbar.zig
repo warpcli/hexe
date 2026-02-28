@@ -28,6 +28,12 @@ const RandomdoState = struct {
 };
 
 threadlocal var randomdo_state: ?std.AutoHashMap(usize, RandomdoState) = null;
+const ProgressCacheEntry = struct {
+    last_eval_ms: u64,
+    text: [256]u8,
+    len: usize,
+};
+threadlocal var progress_text_cache: ?std.AutoHashMap(usize, ProgressCacheEntry) = null;
 threadlocal var hover_x: ?u16 = null;
 threadlocal var hover_y: ?u16 = null;
 
@@ -104,6 +110,22 @@ pub fn deinitThreadlocals() void {
         state.deinit();
         randomdo_state = null;
     }
+
+    if (progress_text_cache) |*cache| {
+        cache.deinit();
+        progress_text_cache = null;
+    }
+}
+
+fn getProgressTextCache() *std.AutoHashMap(usize, ProgressCacheEntry) {
+    if (progress_text_cache == null) {
+        progress_text_cache = std.AutoHashMap(usize, ProgressCacheEntry).init(std.heap.page_allocator);
+    }
+    return &progress_text_cache.?;
+}
+
+fn progressKey(mod: core.config.Segment) usize {
+    return (@intFromPtr(mod.name.ptr) << 1) ^ @as(usize, mod.priority) ^ @as(usize, @intFromEnum(mod.kind));
 }
 
 fn getRandomdoStateMap() *std.AutoHashMap(usize, RandomdoState) {
@@ -357,6 +379,16 @@ fn builtinCommandName(command: []const u8) ?[]const u8 {
     const body = std.mem.trim(u8, command[8..], " \t\r\n");
     if (body.len == 0) return null;
     return body;
+}
+
+fn progressVisible(mod: core.config.Segment, ctx: *shp.Context) bool {
+    if (mod.progress_show_when) |expr| {
+        if (luaCommandCode(expr)) |code| {
+            return evalLuaWhen(code, ctx, 150);
+        }
+        return false;
+    }
+    return true;
 }
 
 const LuaEval = struct {
@@ -1281,9 +1313,36 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
             }
         } else if (mod.command) |cmd| {
             if (!command_output_ready) {
-                if (luaCommandCode(cmd)) |code| {
-                    command_eval = evalLuaCommand(code, ctx);
-                    command_output = command_eval.textSlice();
+                if (mod.kind == .progress and !progressVisible(mod, ctx)) {
+                    command_output = "";
+                } else if (luaCommandCode(cmd)) |code| {
+                    if (mod.kind == .progress and mod.progress_every_ms > 0) {
+                        const key = progressKey(mod);
+                        const cache = getProgressTextCache();
+                        if (cache.getPtr(key)) |entry| {
+                            if (ctx.now_ms - entry.last_eval_ms < mod.progress_every_ms) {
+                                command_output = entry.text[0..entry.len];
+                            } else {
+                                command_eval = evalLuaCommand(code, ctx);
+                                command_output = command_eval.textSlice();
+                                const n = @min(command_output.len, entry.text.len);
+                                @memcpy(entry.text[0..n], command_output[0..n]);
+                                entry.len = n;
+                                entry.last_eval_ms = ctx.now_ms;
+                                command_output = entry.text[0..entry.len];
+                            }
+                        } else {
+                            command_eval = evalLuaCommand(code, ctx);
+                            command_output = command_eval.textSlice();
+                            var buf: [256]u8 = [_]u8{0} ** 256;
+                            const n = @min(command_output.len, buf.len);
+                            @memcpy(buf[0..n], command_output[0..n]);
+                            cache.put(key, .{ .last_eval_ms = ctx.now_ms, .text = buf, .len = n }) catch {};
+                        }
+                    } else {
+                        command_eval = evalLuaCommand(code, ctx);
+                        command_output = command_eval.textSlice();
+                    }
                 } else if (builtinCommandName(cmd)) |builtin_name| {
                     command_output = std.fmt.bufPrint(command_eval.text[0..], "{s}{s}", .{ BUILTIN_MARKER_PREFIX, builtin_name }) catch "";
                     command_eval.text_len = command_output.len;
@@ -1399,9 +1458,36 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
             }
         } else if (mod.command) |cmd| {
             if (!command_output_ready) {
-                if (luaCommandCode(cmd)) |code| {
-                    command_eval = evalLuaCommand(code, ctx);
-                    command_output = command_eval.textSlice();
+                if (mod.kind == .progress and !progressVisible(mod, ctx)) {
+                    command_output = "";
+                } else if (luaCommandCode(cmd)) |code| {
+                    if (mod.kind == .progress and mod.progress_every_ms > 0) {
+                        const key = progressKey(mod);
+                        const cache = getProgressTextCache();
+                        if (cache.getPtr(key)) |entry| {
+                            if (ctx.now_ms - entry.last_eval_ms < mod.progress_every_ms) {
+                                command_output = entry.text[0..entry.len];
+                            } else {
+                                command_eval = evalLuaCommand(code, ctx);
+                                command_output = command_eval.textSlice();
+                                const n = @min(command_output.len, entry.text.len);
+                                @memcpy(entry.text[0..n], command_output[0..n]);
+                                entry.len = n;
+                                entry.last_eval_ms = ctx.now_ms;
+                                command_output = entry.text[0..entry.len];
+                            }
+                        } else {
+                            command_eval = evalLuaCommand(code, ctx);
+                            command_output = command_eval.textSlice();
+                            var buf: [256]u8 = [_]u8{0} ** 256;
+                            const n = @min(command_output.len, buf.len);
+                            @memcpy(buf[0..n], command_output[0..n]);
+                            cache.put(key, .{ .last_eval_ms = ctx.now_ms, .text = buf, .len = n }) catch {};
+                        }
+                    } else {
+                        command_eval = evalLuaCommand(code, ctx);
+                        command_output = command_eval.textSlice();
+                    }
                 } else if (builtinCommandName(cmd)) |builtin_name| {
                     command_output = std.fmt.bufPrint(command_eval.text[0..], "{s}{s}", .{ BUILTIN_MARKER_PREFIX, builtin_name }) catch "";
                     command_eval.text_len = command_output.len;

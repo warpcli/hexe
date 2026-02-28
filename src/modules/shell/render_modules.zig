@@ -194,6 +194,26 @@ fn evalLuaCommand(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8)
     }
 }
 
+fn evalLuaGate(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bool {
+    populateLuaContext(runtime, ctx);
+
+    const code_z = runtime.allocator.dupeZ(u8, code) catch return false;
+    defer runtime.allocator.free(code_z);
+
+    runtime.lua.loadString(code_z) catch return false;
+    runtime.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
+        runtime.lua.pop(1);
+        return false;
+    };
+    defer runtime.lua.pop(1);
+    return switch (runtime.lua.typeOf(-1)) {
+        .boolean => runtime.lua.toBoolean(-1),
+        .number => (runtime.lua.toNumber(-1) catch 0) != 0,
+        .string => (runtime.lua.toString(-1) catch "").len > 0,
+        else => false,
+    };
+}
+
 fn luaCommandCode(command: []const u8) ?[]const u8 {
     if (!std.mem.startsWith(u8, command, "lua:")) return null;
     const body = std.mem.trim(u8, command[4..], " \t\r\n");
@@ -228,6 +248,21 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
 
     for (modules[0..mod_count], 0..) |mod, i| {
         if (mod.command) |cmd| {
+            if (mod.kind == .progress) {
+                if (mod.progress_show_when) |gate| {
+                    if (lua_rt == null) lua_rt = LuaRuntime.init(alloc) catch null;
+                    if (lua_rt == null) {
+                        results[i].when_passed = false;
+                        continue;
+                    }
+                    if (luaCommandCode(gate)) |code| {
+                        if (!evalLuaGate(&lua_rt.?, ctx, code)) {
+                            results[i].when_passed = false;
+                            continue;
+                        }
+                    }
+                }
+            }
             if (luaCommandCode(cmd)) |lua_code| {
                 if (lua_rt == null) lua_rt = LuaRuntime.init(alloc) catch null;
                 if (lua_rt == null) {
