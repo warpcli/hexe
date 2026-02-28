@@ -214,20 +214,6 @@ fn evalLuaGate(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bo
     };
 }
 
-fn luaCommandCode(command: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, command, "lua:")) return null;
-    const body = std.mem.trim(u8, command[4..], " \t\r\n");
-    if (body.len == 0) return null;
-    return body;
-}
-
-fn builtinCommandName(command: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, command, "builtin:")) return null;
-    const body = std.mem.trim(u8, command[8..], " \t\r\n");
-    if (body.len == 0) return null;
-    return body;
-}
-
 pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, modules: []const core.Segment, stdout: std.fs.File, is_zsh: bool) !void {
     const alloc = std.heap.page_allocator;
     _ = allocator;
@@ -255,43 +241,36 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
                         results[i].when_passed = false;
                         continue;
                     }
-                    if (luaCommandCode(gate)) |code| {
-                        if (!evalLuaGate(&lua_rt.?, ctx, code)) {
-                            results[i].when_passed = false;
-                            continue;
-                        }
+                    if (!evalLuaGate(&lua_rt.?, ctx, gate)) {
+                        results[i].when_passed = false;
+                        continue;
                     }
                 }
             }
-            if (luaCommandCode(cmd)) |lua_code| {
-                if (lua_rt == null) lua_rt = LuaRuntime.init(alloc) catch null;
-                if (lua_rt == null) {
-                    results[i].when_passed = false;
-                    continue;
-                }
-                results[i].output = evalLuaCommand(&lua_rt.?, ctx, lua_code);
-            } else if (builtinCommandName(cmd)) |builtin_name| {
-                var bi = LuaValue{};
-                if (ctx.renderSegment(builtin_name)) |segs| {
-                    if (segs.len > 0) {
-                        for (segs) |seg_out| {
-                            if (bi.block_count >= bi.blocks.len) break;
-                            if (seg_out.text.len == 0) continue;
-                            var blk = LuaBlock{};
-                            const tn = @min(seg_out.text.len, blk.text.len);
-                            @memcpy(blk.text[0..tn], seg_out.text[0..tn]);
-                            blk.len = tn;
-                            blk.style = seg_out.style;
-                            bi.blocks[bi.block_count] = blk;
-                            bi.block_count += 1;
-                        }
-                    }
-                }
-                results[i].output = bi;
-            } else {
-                // Segments are value-only; non-lua command forms are unsupported.
+            if (lua_rt == null) lua_rt = LuaRuntime.init(alloc) catch null;
+            if (lua_rt == null) {
                 results[i].when_passed = false;
+                continue;
             }
+            results[i].output = evalLuaCommand(&lua_rt.?, ctx, cmd);
+        } else if (mod.builtin) |builtin_name| {
+            var bi = LuaValue{};
+            if (ctx.renderSegment(builtin_name)) |segs| {
+                if (segs.len > 0) {
+                    for (segs) |seg_out| {
+                        if (bi.block_count >= bi.blocks.len) break;
+                        if (seg_out.text.len == 0) continue;
+                        var blk = LuaBlock{};
+                        const tn = @min(seg_out.text.len, blk.text.len);
+                        @memcpy(blk.text[0..tn], seg_out.text[0..tn]);
+                        blk.len = tn;
+                        blk.style = seg_out.style;
+                        bi.blocks[bi.block_count] = blk;
+                        bi.block_count += 1;
+                    }
+                }
+            }
+            results[i].output = bi;
         } else if (ctx.renderSegment(mod.name)) |segs| {
             if (segs.len > 0) {
                 var bi = results[i].output;

@@ -1340,20 +1340,20 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
         _ = lua.getField(-1, "lua");
         if (parseLuaChunkValue(lua, allocator, false)) |code| {
             defer allocator.free(code);
-            value_command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+            value_command = allocator.dupe(u8, code) catch null;
         }
         lua.pop(1);
         _ = lua.getField(-1, "fn");
         if (value_command == null) {
             if (parseLuaChunkValue(lua, allocator, false)) |code| {
                 defer allocator.free(code);
-                value_command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+                value_command = allocator.dupe(u8, code) catch null;
             }
         }
         lua.pop(1);
     } else if (parseLuaChunkValue(lua, allocator, false)) |code| {
         defer allocator.free(code);
-        value_command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+        value_command = allocator.dupe(u8, code) catch null;
     }
     lua.pop(1);
 
@@ -1378,6 +1378,40 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     }
     lua.pop(1);
 
+    _ = lua.getField(idx, "source");
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "builtin");
+        if (segment.builtin == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.builtin = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "name");
+        if (segment.builtin == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.builtin = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "segment");
+        if (segment.builtin == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.builtin = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "value");
+        if (value_command == null) {
+            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+                defer allocator.free(code);
+                value_command = allocator.dupe(u8, code) catch null;
+            }
+        }
+        lua.pop(1);
+    }
+    lua.pop(1);
+
     // Parse progress controls
     _ = lua.getField(idx, "every_ms");
     if (lua.typeOf(-1) == .number) {
@@ -1389,7 +1423,7 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     _ = lua.getField(idx, "show_when");
     if (parseLuaChunkValue(lua, allocator, true)) |code| {
         defer allocator.free(code);
-        segment.progress_show_when = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+        segment.progress_show_when = allocator.dupe(u8, code) catch null;
     }
     lua.pop(1);
 
@@ -1406,7 +1440,7 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
         if (parseLuaChunkValue(lua, allocator, true)) |code| {
             defer allocator.free(code);
             if (segment.progress_show_when) |old| allocator.free(old);
-            segment.progress_show_when = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch segment.progress_show_when;
+            segment.progress_show_when = allocator.dupe(u8, code) catch segment.progress_show_when;
         }
         lua.pop(1);
 
@@ -1421,10 +1455,39 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
         if (value_command == null) {
             if (parseLuaChunkValue(lua, allocator, false)) |code| {
                 defer allocator.free(code);
-                value_command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+                value_command = allocator.dupe(u8, code) catch null;
             }
         }
         lua.pop(1);
+    }
+    lua.pop(1);
+
+    var progress_every_ms: u64 = 1000;
+    var progress_show_when: ?[]const u8 = null;
+    _ = lua.getField(idx, "every_ms");
+    if (lua.typeOf(-1) == .number) {
+        const v = lua.toNumber(-1) catch 1000;
+        if (std.math.isFinite(v)) progress_every_ms = @intFromFloat(std.math.clamp(v, 1, 60000));
+    }
+    lua.pop(1);
+    _ = lua.getField(idx, "show_when");
+    if (parseLuaChunkValue(lua, allocator, true)) |code| {
+        defer allocator.free(code);
+        progress_show_when = allocator.dupe(u8, code) catch null;
+    }
+    lua.pop(1);
+
+    _ = lua.getField(idx, "every_ms");
+    if (lua.typeOf(-1) == .number) {
+        const v = lua.toNumber(-1) catch 1000;
+        if (std.math.isFinite(v)) progress_every_ms = @intFromFloat(std.math.clamp(v, 1, 60000));
+    }
+    lua.pop(1);
+
+    _ = lua.getField(idx, "show_when");
+    if (parseLuaChunkValue(lua, allocator, true)) |code| {
+        defer allocator.free(code);
+        progress_show_when = allocator.dupe(u8, code) catch null;
     }
     lua.pop(1);
 
@@ -1452,17 +1515,11 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
 
     segment.command = switch (segment.kind) {
         .value => value_command,
-        .builtin => blk: {
-            if (segment.builtin) |b| break :blk std.fmt.allocPrint(allocator, "builtin:{s}", .{b}) catch null;
-            break :blk null;
-        },
-        .button, .progress => blk: {
-            if (segment.builtin) |b| break :blk std.fmt.allocPrint(allocator, "builtin:{s}", .{b}) catch null;
-            break :blk value_command;
-        },
+        .builtin => null,
+        .button, .progress => value_command,
     };
 
-    if (segment.command == null) {
+    if (segment.command == null and segment.builtin == null) {
         const msg = switch (segment.kind) {
             .value => "value segment requires a non-empty 'value'",
             .builtin => "builtin segment requires non-empty 'builtin'",
@@ -1529,7 +1586,7 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
         if (value_command == null) {
             if (parseLuaChunkValue(lua, allocator, false)) |code| {
                 defer allocator.free(code);
-                value_command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+                value_command = allocator.dupe(u8, code) catch null;
             }
         }
         lua.pop(1);
@@ -2363,6 +2420,8 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     var outputs = std.ArrayList(config_builder.ShpConfigBuilder.OutputDef){};
     var command: ?[]const u8 = null;
     var builtin: ?[]const u8 = null;
+    var progress_every_ms: u64 = 1000;
+    var progress_show_when: ?[]const u8 = null;
     defer if (builtin) |b| allocator.free(b);
 
     // Parse name (required)
@@ -2397,20 +2456,20 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
         _ = lua.getField(-1, "lua");
         if (parseLuaChunkValue(lua, allocator, false)) |code| {
             defer allocator.free(code);
-            command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+            command = allocator.dupe(u8, code) catch null;
         }
         lua.pop(1);
         _ = lua.getField(-1, "fn");
         if (command == null) {
             if (parseLuaChunkValue(lua, allocator, false)) |code| {
                 defer allocator.free(code);
-                command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+                command = allocator.dupe(u8, code) catch null;
             }
         }
         lua.pop(1);
     } else if (parseLuaChunkValue(lua, allocator, false)) |code| {
         defer allocator.free(code);
-        command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+        command = allocator.dupe(u8, code) catch null;
     }
     lua.pop(1);
 
@@ -2444,10 +2503,7 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
         _ = lua.getField(idx, "progress");
         const is_tbl = lua.typeOf(-1) == .table;
         lua.pop(1);
-        _ = lua.getField(idx, "show_when");
-        const has_show_when = lua.typeOf(-1) != .nil;
-        lua.pop(1);
-        break :blk is_tbl or has_show_when;
+        break :blk is_tbl or progress_show_when != null;
     };
     const kind: config.SegmentKind = if (has_progress)
         .progress
@@ -2458,19 +2514,27 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     else
         .value;
 
-    if (kind == .builtin or kind == .button or kind == .progress) {
-        if (builtin) |b| {
-            command = std.fmt.allocPrint(allocator, "builtin:{s}", .{b}) catch command;
-        }
-    }
-
     _ = lua.getField(idx, "progress");
     if (kind == .progress and lua.typeOf(-1) == .table and command == null) {
         _ = lua.getField(-1, "builtin");
         if (lua.typeOf(-1) == .string) {
             const b = lua.toString(-1) catch "";
             if (b.len > 0) {
-                command = std.fmt.allocPrint(allocator, "builtin:{s}", .{b}) catch null;
+                if (builtin == null) builtin = allocator.dupe(u8, b) catch null;
+            }
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "every_ms");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch 1000;
+            if (std.math.isFinite(v)) progress_every_ms = @intFromFloat(std.math.clamp(v, 1, 60000));
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "show_when");
+        if (progress_show_when == null) {
+            if (parseLuaChunkValue(lua, allocator, true)) |code| {
+                defer allocator.free(code);
+                progress_show_when = allocator.dupe(u8, code) catch null;
             }
         }
         lua.pop(1);
@@ -2478,14 +2542,27 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
         if (command == null) {
             if (parseLuaChunkValue(lua, allocator, false)) |code| {
                 defer allocator.free(code);
-                command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+                command = allocator.dupe(u8, code) catch null;
             }
         }
         lua.pop(1);
     }
     lua.pop(1);
 
-    if (command == null) {
+    var inverse_on_hover: bool = true;
+    _ = lua.getField(idx, "inverse_on_hover");
+    if (lua.typeOf(-1) == .boolean) inverse_on_hover = lua.toBoolean(-1);
+    lua.pop(1);
+
+    _ = lua.getField(idx, "button");
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "inverse_on_hover");
+        if (lua.typeOf(-1) == .boolean) inverse_on_hover = lua.toBoolean(-1);
+        lua.pop(1);
+    }
+    lua.pop(1);
+
+    if (command == null and builtin == null) {
         const msg = switch (kind) {
             .builtin => "builtin segment requires non-empty 'builtin'",
             .value => "value segment requires a non-empty 'value'",
@@ -2498,9 +2575,14 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
 
     return config_builder.ShpConfigBuilder.SegmentDef{
         .name = name.?,
+        .kind = kind,
         .priority = priority,
         .outputs = outputs.toOwnedSlice(allocator) catch &[_]config_builder.ShpConfigBuilder.OutputDef{},
         .command = command,
+        .builtin = builtin,
+        .progress_every_ms = progress_every_ms,
+        .progress_show_when = progress_show_when,
+        .inverse_on_hover = inverse_on_hover,
         .when = null,
     };
 }

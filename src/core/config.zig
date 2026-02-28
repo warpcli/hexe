@@ -1379,32 +1379,53 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         if (runtime.getString(-1, "value")) |v| {
             const trimmed = std.mem.trim(u8, v, " \t\r\n");
             if (trimmed.len == 0) break :blk null;
-            break :blk std.fmt.allocPrint(allocator, "lua:{s}", .{trimmed}) catch null;
+            break :blk allocator.dupe(u8, trimmed) catch null;
         }
         if (runtime.pushTable(-1, "value")) {
             defer runtime.pop();
             if (runtime.getString(-1, "lua")) |v| {
                 const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                if (trimmed.len > 0) break :blk std.fmt.allocPrint(allocator, "lua:{s}", .{trimmed}) catch null;
+                if (trimmed.len > 0) break :blk allocator.dupe(u8, trimmed) catch null;
             }
             if (runtime.getString(-1, "fn")) |v| {
                 const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                if (trimmed.len > 0) break :blk std.fmt.allocPrint(allocator, "lua:{s}", .{trimmed}) catch null;
+                if (trimmed.len > 0) break :blk allocator.dupe(u8, trimmed) catch null;
             }
         }
         break :blk null;
     };
+
+    var source_builtin: ?[]const u8 = null;
+    var source_value: ?[]const u8 = null;
+    if (runtime.pushTable(-1, "source")) {
+        defer runtime.pop();
+        source_builtin = runtime.getStringAlloc(-1, "builtin") orelse runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
+        if (runtime.getString(-1, "value")) |v| {
+            const trimmed = std.mem.trim(u8, v, " \t\r\n");
+            if (trimmed.len > 0) source_value = allocator.dupe(u8, trimmed) catch null;
+        }
+    }
 
     var builtin_name: ?[]const u8 = runtime.getStringAlloc(-1, "builtin");
     if (builtin_name == null and runtime.pushTable(-1, "builtin")) {
         defer runtime.pop();
         builtin_name = runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
     }
+    if (builtin_name == null) {
+        builtin_name = source_builtin;
+    } else if (source_builtin) |b| {
+        allocator.free(b);
+    }
+    if (value_code == null) {
+        value_code = source_value;
+    } else if (source_value) |v| {
+        allocator.free(v);
+    }
     var show_when_code: ?[]const u8 = blk: {
         if (runtime.getString(-1, "show_when")) |v| {
             const trimmed = std.mem.trim(u8, v, " \t\r\n");
             if (trimmed.len == 0) break :blk null;
-            break :blk std.fmt.allocPrint(allocator, "lua:{s}", .{trimmed}) catch null;
+            break :blk allocator.dupe(u8, trimmed) catch null;
         }
         break :blk null;
     };
@@ -1417,16 +1438,27 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         if (show_when_code == null) {
             if (runtime.getString(-1, "show_when")) |v| {
                 const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                if (trimmed.len > 0) show_when_code = std.fmt.allocPrint(allocator, "lua:{s}", .{trimmed}) catch null;
+                if (trimmed.len > 0) show_when_code = allocator.dupe(u8, trimmed) catch null;
             }
         }
         if (builtin_name == null) {
             builtin_name = runtime.getStringAlloc(-1, "builtin");
         }
+        if (builtin_name == null and runtime.pushTable(-1, "source")) {
+            defer runtime.pop();
+            builtin_name = runtime.getStringAlloc(-1, "builtin") orelse runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
+        }
         if (value_code == null) {
             if (runtime.getString(-1, "value")) |v| {
                 const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                if (trimmed.len > 0) value_code = std.fmt.allocPrint(allocator, "lua:{s}", .{trimmed}) catch null;
+                if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+            }
+            if (value_code == null and runtime.pushTable(-1, "source")) {
+                defer runtime.pop();
+                if (runtime.getString(-1, "value")) |v| {
+                    const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                    if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+                }
             }
         }
     }
@@ -1455,10 +1487,21 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         if (button_active_bash == null) button_active_bash = runtime.getStringAlloc(-1, "active_when");
         if (runtime.getBool(-1, "inverse_on_hover")) |v| inverse_on_hover = v;
         if (builtin_name == null) builtin_name = runtime.getStringAlloc(-1, "builtin");
+        if (builtin_name == null and runtime.pushTable(-1, "source")) {
+            defer runtime.pop();
+            builtin_name = runtime.getStringAlloc(-1, "builtin") orelse runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
+        }
         if (value_code == null) {
             if (runtime.getString(-1, "value")) |v| {
                 const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                if (trimmed.len > 0) value_code = std.fmt.allocPrint(allocator, "lua:{s}", .{trimmed}) catch null;
+                if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+            }
+            if (value_code == null and runtime.pushTable(-1, "source")) {
+                defer runtime.pop();
+                if (runtime.getString(-1, "value")) |v| {
+                    const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                    if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+                }
             }
         }
     }
@@ -1473,18 +1516,8 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
 
     const command: ?[]const u8 = switch (kind) {
         .value => value_code,
-        .builtin => blk: {
-            if (builtin_name) |b| {
-                break :blk std.fmt.allocPrint(allocator, "builtin:{s}", .{b}) catch null;
-            }
-            break :blk null;
-        },
-        .button, .progress => blk: {
-            if (builtin_name) |b| {
-                break :blk std.fmt.allocPrint(allocator, "builtin:{s}", .{b}) catch null;
-            }
-            break :blk value_code;
-        },
+        .builtin => null,
+        .button, .progress => value_code,
     };
 
     if (runtime.fieldType(-1, "outputs") != .nil) {
@@ -1494,7 +1527,8 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         return null;
     }
 
-    if (command == null) {
+    const has_source = command != null or builtin_name != null;
+    if (!has_source) {
         const err_msg = switch (kind) {
             .builtin => "config: builtin segment requires non-empty 'builtin'",
             .value => "config: value segment requires a non-empty 'value'",
