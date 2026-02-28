@@ -1358,16 +1358,25 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         return null;
     };
 
+    const value_code: ?[]const u8 = blk: {
+        if (runtime.getString(-1, "value")) |v| {
+            const trimmed = std.mem.trim(u8, v, " \t\r\n");
+            if (trimmed.len == 0) break :blk null;
+            break :blk std.fmt.allocPrint(allocator, "lua:{s}", .{trimmed}) catch null;
+        }
+        break :blk null;
+    };
+
     return Segment{
         .name = name,
         .priority = lua_runtime.parseConstrainedInt(runtime, u8, -1, "priority", 1, 255, 50),
         .outputs = parseOutputs(runtime, allocator),
-        .command = runtime.getStringAlloc(-1, "command"),
+        .command = value_code,
         .on_click = runtime.getStringAlloc(-1, "on_click"),
         .on_right_click = runtime.getStringAlloc(-1, "on_right_click"),
         .on_middle_click = runtime.getStringAlloc(-1, "on_middle_click"),
         .button_active_bash = runtime.getStringAlloc(-1, "button_active_bash"),
-        .when = parseWhenTable(runtime, allocator, true),
+        .when = null,
         .spinner = parseSpinner(runtime, allocator),
         .active_style = runtime.getStringAlloc(-1, "active_style") orelse "bg:1 fg:0",
         .inactive_style = runtime.getStringAlloc(-1, "inactive_style") orelse "bg:237 fg:250",

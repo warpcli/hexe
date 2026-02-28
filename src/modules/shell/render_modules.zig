@@ -129,33 +129,6 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
     defer if (lua_rt) |*rt| rt.deinit();
 
     for (modules[0..mod_count], 0..) |mod, i| {
-        if (mod.when) |w| {
-            if (w.env) |env_name| {
-                const val = std.posix.getenv(env_name);
-                if (val == null or val.?.len == 0) {
-                    results[i].when_passed = false;
-                    continue;
-                }
-            }
-            if (w.env_not) |env_name| {
-                const val = std.posix.getenv(env_name);
-                if (val != null and val.?.len > 0) {
-                    results[i].when_passed = false;
-                    continue;
-                }
-            }
-
-            if (w.lua) |lua_code| {
-                if (lua_rt == null) lua_rt = LuaRuntime.init(alloc) catch null;
-                if (lua_rt == null or !evalLuaWhen(&lua_rt.?, ctx, lua_code)) {
-                    results[i].when_passed = false;
-                    continue;
-                }
-            }
-
-            if (w.bash != null) results[i].needs_bash_check = true;
-        }
-
         if (mod.command) |cmd| {
             if (luaCommandCode(cmd)) |lua_code| {
                 if (lua_rt == null) lua_rt = LuaRuntime.init(alloc) catch null;
@@ -164,6 +137,9 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
                     continue;
                 }
                 results[i].output = evalLuaCommand(&lua_rt.?, ctx, lua_code);
+            } else {
+                // Segments are value-only; non-lua command forms are unsupported.
+                results[i].when_passed = false;
             }
         }
     }

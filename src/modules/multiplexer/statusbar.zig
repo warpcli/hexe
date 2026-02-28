@@ -1117,8 +1117,7 @@ fn measureTabsWidth(tab_names: []const []const u8, separator: []const u8, left_a
 
 pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment, start_x: u16, y: u16, hovered: bool) u16 {
     var x = start_x;
-
-    if (!passesWhen(ctx, query, mod)) return x;
+    _ = query;
 
     const clickable = isClickable(&mod);
     const active = if (clickable) isButtonActive(&mod, ctx) else false;
@@ -1160,8 +1159,6 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
             if (!command_output_ready) {
                 if (luaCommandCode(cmd)) |code| {
                     command_output = evalLuaCommandToBuf(code, ctx, command_output_buf[0..]);
-                } else {
-                    command_output = runSegment(&mod, command_output_buf[0..]) catch "";
                 }
                 command_output_ready = true;
             }
@@ -1200,7 +1197,7 @@ pub fn drawFormatted(renderer: *Renderer, start_x: u16, y: u16, format: []const 
 }
 
 pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment) u16 {
-    if (!passesWhen(ctx, query, mod)) return 0;
+    _ = query;
     var width: u16 = 0;
 
     var command_output: []const u8 = "";
@@ -1234,8 +1231,6 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
             if (!command_output_ready) {
                 if (luaCommandCode(cmd)) |code| {
                     command_output = evalLuaCommandToBuf(code, ctx, command_output_buf[0..]);
-                } else {
-                    command_output = runSegment(&mod, command_output_buf[0..]) catch "";
                 }
                 command_output_ready = true;
             }
