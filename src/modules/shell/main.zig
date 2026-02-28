@@ -444,12 +444,19 @@ fn parseModule(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?core.Segment
         return null;
     }
 
+    var command = runtime.getStringAlloc(-1, "command");
+    if (command == null) {
+        if (runtime.getString(-1, "lua")) |code| {
+            command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+        }
+    }
+
     const priority_i64 = runtime.getInt(i64, -1, "priority") orelse 50;
     return core.Segment{
         .name = name,
         .priority = @intCast(@max(@as(i64, 0), @min(priority_i64, 255))),
         .outputs = parseOutputs(runtime, allocator),
-        .command = runtime.getStringAlloc(-1, "command"),
+        .command = command,
         .when = parseWhenPrompt(runtime),
     };
 }

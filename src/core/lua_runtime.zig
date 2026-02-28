@@ -47,6 +47,10 @@ pub const ConfigResult = struct {
 
 /// Check if unsafe config mode is enabled
 pub fn isUnsafeMode() bool {
+    if (posix.getenv("HEXE_UNRESTRICTED_CONFIG")) |v| {
+        return std.mem.eql(u8, v, "1");
+    }
+    // Backward compatibility with legacy env var.
     if (posix.getenv("HEXE_UNSAFE_CONFIG")) |v| {
         return std.mem.eql(u8, v, "1");
     }

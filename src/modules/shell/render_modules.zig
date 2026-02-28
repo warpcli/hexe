@@ -5,10 +5,15 @@ const LuaRuntime = core.LuaRuntime;
 const segment = core.segments;
 const Style = core.style.Style;
 
-fn evalLuaWhen(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bool {
-    runtime.lua.createTable(0, 6);
+fn populateLuaContext(runtime: *LuaRuntime, ctx: *segment.Context) void {
+    runtime.lua.createTable(0, 8);
     _ = runtime.lua.pushString(ctx.cwd);
     runtime.lua.setField(-2, "cwd");
+
+    if (ctx.home) |home| {
+        _ = runtime.lua.pushString(home);
+        runtime.lua.setField(-2, "home");
+    }
 
     if (ctx.exit_status) |st| {
         runtime.lua.pushInteger(st);
@@ -22,7 +27,31 @@ fn evalLuaWhen(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bo
     runtime.lua.setField(-2, "jobs");
     runtime.lua.pushInteger(ctx.terminal_width);
     runtime.lua.setField(-2, "terminal_width");
+    runtime.lua.pushInteger(@intCast(ctx.now_ms));
+    runtime.lua.setField(-2, "now_ms");
+
+    var env_map = std.process.getEnvMap(runtime.allocator) catch {
+        runtime.lua.createTable(0, 0);
+        runtime.lua.setField(-2, "env");
+        runtime.lua.setGlobal("ctx");
+        return;
+    };
+    defer env_map.deinit();
+
+    runtime.lua.createTable(0, @intCast(env_map.count()));
+    var it = env_map.iterator();
+    while (it.next()) |entry| {
+        _ = runtime.lua.pushString(entry.key_ptr.*);
+        _ = runtime.lua.pushString(entry.value_ptr.*);
+        runtime.lua.setTable(-3);
+    }
+    runtime.lua.setField(-2, "env");
+
     runtime.lua.setGlobal("ctx");
+}
+
+fn evalLuaWhen(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bool {
+    populateLuaContext(runtime, ctx);
 
     const code_z = runtime.allocator.dupeZ(u8, code) catch return false;
     defer runtime.allocator.free(code_z);
@@ -38,6 +67,44 @@ fn evalLuaWhen(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bo
         return runtime.lua.toBoolean(-1);
     }
     return false;
+}
+
+fn evalLuaCommand(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) ?[]const u8 {
+    populateLuaContext(runtime, ctx);
+
+    const code_z = runtime.allocator.dupeZ(u8, code) catch return null;
+    defer runtime.allocator.free(code_z);
+
+    runtime.lua.loadString(code_z) catch return null;
+    runtime.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
+        runtime.lua.pop(1);
+        return null;
+    };
+    defer runtime.lua.pop(1);
+
+    switch (runtime.lua.typeOf(-1)) {
+        .string => {
+            const s = runtime.lua.toString(-1) catch return null;
+            if (s.len == 0) return null;
+            return runtime.allocator.dupe(u8, s) catch null;
+        },
+        .number => {
+            const n = runtime.lua.toNumber(-1) catch return null;
+            return std.fmt.allocPrint(runtime.allocator, "{d}", .{n}) catch null;
+        },
+        .boolean => {
+            if (!runtime.lua.toBoolean(-1)) return null;
+            return runtime.allocator.dupe(u8, "true") catch null;
+        },
+        else => return null,
+    }
+}
+
+fn luaCommandCode(command: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, command, "lua:")) return null;
+    const body = std.mem.trim(u8, command[4..], " \t\r\n");
+    if (body.len == 0) return null;
+    return body;
 }
 
 pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, modules: []const core.Segment, stdout: std.fs.File, is_zsh: bool) !void {
@@ -87,6 +154,17 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
             }
 
             if (w.bash != null) results[i].needs_bash_check = true;
+        }
+
+        if (mod.command) |cmd| {
+            if (luaCommandCode(cmd)) |lua_code| {
+                if (lua_rt == null) lua_rt = LuaRuntime.init(alloc) catch null;
+                if (lua_rt == null) {
+                    results[i].when_passed = false;
+                    continue;
+                }
+                results[i].output = evalLuaCommand(&lua_rt.?, ctx, lua_code);
+            }
         }
     }
 
@@ -152,7 +230,8 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
 
     var threads: [32]?std.Thread = [_]?std.Thread{null} ** 32;
     for (modules[0..mod_count], 0..) |*mod, i| {
-        if (results[i].needs_bash_check or (mod.command != null and results[i].when_passed)) {
+        const has_bash_command = if (mod.command) |cmd| luaCommandCode(cmd) == null else false;
+        if (results[i].needs_bash_check or (has_bash_command and results[i].when_passed)) {
             threads[i] = std.Thread.spawn(.{}, thread_fn, .{ThreadContext{
                 .mod = mod,
                 .result = &results[i],
@@ -175,7 +254,7 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
 
         if (mod.command != null) {
             if (results[i].output) |out| {
-                output_text = out;
+                output_text = std.mem.trimRight(u8, out, "\n\r");
             } else {
                 results[i].should_render = false;
                 continue;

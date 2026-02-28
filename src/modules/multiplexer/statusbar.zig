@@ -198,6 +198,63 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     return false;
 }
 
+fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
+    rt.lua.createTable(0, 13);
+
+    rt.lua.pushBoolean(ctx.shell_running);
+    rt.lua.setField(-2, "shell_running");
+    rt.lua.pushBoolean(ctx.alt_screen);
+    rt.lua.setField(-2, "alt_screen");
+
+    _ = rt.lua.pushString(ctx.cwd);
+    rt.lua.setField(-2, "cwd");
+    if (ctx.home) |home| {
+        _ = rt.lua.pushString(home);
+        rt.lua.setField(-2, "home");
+    }
+
+    if (ctx.exit_status) |st| {
+        rt.lua.pushInteger(st);
+        rt.lua.setField(-2, "exit_status");
+        rt.lua.pushInteger(st);
+        rt.lua.setField(-2, "last_status");
+    }
+    if (ctx.last_command) |c| {
+        _ = rt.lua.pushString(c);
+        rt.lua.setField(-2, "last_command");
+    }
+    if (ctx.cmd_duration_ms) |d| {
+        rt.lua.pushInteger(@intCast(d));
+        rt.lua.setField(-2, "cmd_duration_ms");
+    }
+
+    rt.lua.pushInteger(ctx.jobs);
+    rt.lua.setField(-2, "jobs");
+    rt.lua.pushInteger(ctx.terminal_width);
+    rt.lua.setField(-2, "terminal_width");
+    rt.lua.pushInteger(@intCast(ctx.now_ms));
+    rt.lua.setField(-2, "now_ms");
+
+    var env_map = std.process.getEnvMap(rt.allocator) catch {
+        rt.lua.createTable(0, 0);
+        rt.lua.setField(-2, "env");
+        rt.lua.setGlobal("ctx");
+        return;
+    };
+    defer env_map.deinit();
+
+    rt.lua.createTable(0, @intCast(env_map.count()));
+    var it = env_map.iterator();
+    while (it.next()) |entry| {
+        _ = rt.lua.pushString(entry.key_ptr.*);
+        _ = rt.lua.pushString(entry.value_ptr.*);
+        rt.lua.setTable(-3);
+    }
+    rt.lua.setField(-2, "env");
+
+    rt.lua.setGlobal("ctx");
+}
+
 fn evalLuaWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     const now = ctx.now_ms;
     const key = whenKey(code);
@@ -215,27 +272,7 @@ fn evalLuaWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     }
     const rt = &when_lua_rt.?;
 
-    // ctx table
-    rt.lua.createTable(0, 8);
-    rt.lua.pushBoolean(ctx.shell_running);
-    rt.lua.setField(-2, "shell_running");
-    rt.lua.pushBoolean(ctx.alt_screen);
-    rt.lua.setField(-2, "alt_screen");
-    rt.lua.pushInteger(ctx.jobs);
-    rt.lua.setField(-2, "jobs");
-    if (ctx.exit_status) |st| {
-        rt.lua.pushInteger(st);
-        rt.lua.setField(-2, "last_status");
-    }
-    if (ctx.last_command) |c| {
-        _ = rt.lua.pushString(c);
-        rt.lua.setField(-2, "last_command");
-    }
-    _ = rt.lua.pushString(ctx.cwd);
-    rt.lua.setField(-2, "cwd");
-    rt.lua.pushInteger(@intCast(ctx.now_ms));
-    rt.lua.setField(-2, "now_ms");
-    rt.lua.setGlobal("ctx");
+    populateLuaContext(rt, ctx);
 
     const code_z = rt.allocator.dupeZ(u8, code) catch {
         map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
@@ -256,6 +293,48 @@ fn evalLuaWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     rt.lua.pop(1);
     map.put(key, .{ .last_eval_ms = now, .last_result = ok }) catch {};
     return ok;
+}
+
+fn luaCommandCode(command: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, command, "lua:")) return null;
+    const body = std.mem.trim(u8, command[4..], " \t\r\n");
+    if (body.len == 0) return null;
+    return body;
+}
+
+fn evalLuaCommandToBuf(code: []const u8, ctx: *shp.Context, out_buf: []u8) []const u8 {
+    if (when_lua_rt == null) {
+        when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch null;
+        if (when_lua_rt == null) return "";
+    }
+    const rt = &when_lua_rt.?;
+    populateLuaContext(rt, ctx);
+
+    const code_z = rt.allocator.dupeZ(u8, code) catch return "";
+    defer rt.allocator.free(code_z);
+
+    rt.lua.loadString(code_z) catch return "";
+    rt.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
+        rt.lua.pop(1);
+        return "";
+    };
+    defer rt.lua.pop(1);
+
+    return switch (rt.lua.typeOf(-1)) {
+        .string => blk: {
+            const s = rt.lua.toString(-1) catch break :blk "";
+            const n = @min(s.len, out_buf.len);
+            @memcpy(out_buf[0..n], s[0..n]);
+            break :blk out_buf[0..n];
+        },
+        .number => blk: {
+            const n = rt.lua.toNumber(-1) catch break :blk "";
+            const rendered = std.fmt.bufPrint(out_buf, "{d}", .{n}) catch "";
+            break :blk rendered;
+        },
+        .boolean => if (rt.lua.toBoolean(-1)) "true" else "",
+        else => "",
+    };
 }
 
 fn passesWhen(ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment) bool {
@@ -413,6 +492,7 @@ pub fn draw(
     var ctx = shp.Context.init(allocator);
     defer ctx.deinit();
     ctx.terminal_width = width;
+    ctx.home = std.posix.getenv("HOME");
 
     ctx.now_ms = @intCast(std.time.milliTimestamp());
 
@@ -797,6 +877,10 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
 
     if (!passesWhen(ctx, query, mod)) return x;
 
+    var command_output: []const u8 = "";
+    var command_output_ready = false;
+    var command_output_buf: [256]u8 = undefined;
+
     for (mod.outputs) |out| {
         const style = shp.Style.parse(out.style);
         ctx.module_default_style = style;
@@ -819,6 +903,16 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
             output_text = ctx.session_name;
         } else if (std.mem.eql(u8, mod.name, "randomdo")) {
             output_text = randomdoTextFor(ctx, mod, true);
+        } else if (mod.command) |cmd| {
+            if (!command_output_ready) {
+                if (luaCommandCode(cmd)) |code| {
+                    command_output = evalLuaCommandToBuf(code, ctx, command_output_buf[0..]);
+                } else {
+                    command_output = runSegment(&mod, command_output_buf[0..]) catch "";
+                }
+                command_output_ready = true;
+            }
+            output_text = command_output;
         } else {
             output_segs = ctx.renderSegment(mod.name);
         }
@@ -856,6 +950,10 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
     if (!passesWhen(ctx, query, mod)) return 0;
     var width: u16 = 0;
 
+    var command_output: []const u8 = "";
+    var command_output_ready = false;
+    var command_output_buf: [256]u8 = undefined;
+
     for (mod.outputs) |out| {
         const style = shp.Style.parse(out.style);
         ctx.module_default_style = style;
@@ -879,6 +977,16 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
         } else if (std.mem.eql(u8, mod.name, "randomdo")) {
             width += calcFormattedWidthMax(out.format, randomdo_mod.MAX_LEN);
             continue;
+        } else if (mod.command) |cmd| {
+            if (!command_output_ready) {
+                if (luaCommandCode(cmd)) |code| {
+                    command_output = evalLuaCommandToBuf(code, ctx, command_output_buf[0..]);
+                } else {
+                    command_output = runSegment(&mod, command_output_buf[0..]) catch "";
+                }
+                command_output_ready = true;
+            }
+            output_text = command_output;
         } else {
             output_segs = ctx.renderSegment(mod.name);
         }

@@ -1288,6 +1288,19 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     }
     lua.pop(1);
 
+    // Parse lua output expression/script (optional).
+    // Sugar so statusbar and prompt can both use `lua = "return ..."`.
+    if (segment.command == null) {
+        _ = lua.getField(idx, "lua");
+        if (lua.typeOf(-1) == .string) {
+            const lua_code = lua.toString(-1) catch null;
+            if (lua_code) |code| {
+                segment.command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+            }
+        }
+        lua.pop(1);
+    }
+
     // Parse when
     _ = lua.getField(idx, "when");
     if (lua.typeOf(-1) != .nil) {
@@ -2111,20 +2124,24 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     }
     lua.pop(1);
 
-    // Parse when (optional) - simplified for now
-    _ = lua.getField(idx, "when");
-    if (lua.typeOf(-1) == .table) {
-        _ = lua.getField(-1, "env");
+    // Parse lua output expression/script (optional).
+    // User-facing sugar in Lua config: `lua = "return ..."`
+    // Internally encoded as a command prefix consumed by SHP renderer.
+    if (command == null) {
+        _ = lua.getField(idx, "lua");
         if (lua.typeOf(-1) == .string) {
-            const env = lua.toString(-1) catch null;
-            if (env) |e| {
-                const env_copy = allocator.dupe(u8, e) catch null;
-                if (env_copy) |ec| {
-                    when = config.WhenDef{ .env = ec };
-                }
+            const lua_str = lua.toString(-1) catch null;
+            if (lua_str) |code| {
+                command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
             }
         }
         lua.pop(1);
+    }
+
+    // Parse when (optional) - full parser supports all/any/bash/lua/env/env_not.
+    _ = lua.getField(idx, "when");
+    if (lua.typeOf(-1) != .nil) {
+        when = parseWhen(lua, -1, allocator);
     }
     lua.pop(1);
 
