@@ -2613,3 +2613,157 @@ pub export fn hexe_pop_widgets_digits(L: ?*LuaState) callconv(.c) c_int {
 
     return 0;
 }
+
+fn shellQuote(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out = std.array_list.Managed(u8).init(allocator);
+    defer out.deinit();
+    try out.append('\'');
+    for (text) |ch| {
+        if (ch == '\'') {
+            try out.appendSlice("'\"'\"'");
+        } else {
+            try out.append(ch);
+        }
+    }
+    try out.append('\'');
+    return out.toOwnedSlice();
+}
+
+fn buildRecordCommand(lua: *Lua, action: enum { start, stop, toggle, status }) ?[]u8 {
+    if (lua.typeOf(1) != .table) return null;
+    const allocator = std.heap.page_allocator;
+
+    _ = lua.getField(1, "scope");
+    const scope = if (lua.typeOf(-1) == .string) (lua.toString(-1) catch "pod") else "pod";
+    lua.pop(1);
+    if (!std.mem.eql(u8, scope, "pod")) return null;
+
+    _ = lua.getField(1, "uuid");
+    const uuid = if (lua.typeOf(-1) == .string) (lua.toString(-1) catch "") else "";
+    lua.pop(1);
+    _ = lua.getField(1, "name");
+    const name = if (lua.typeOf(-1) == .string) (lua.toString(-1) catch "") else "";
+    lua.pop(1);
+    _ = lua.getField(1, "socket");
+    const socket = if (lua.typeOf(-1) == .string) (lua.toString(-1) catch "") else "";
+    lua.pop(1);
+
+    _ = lua.getField(1, "out");
+    const out = if (lua.typeOf(-1) == .string) (lua.toString(-1) catch "") else "/tmp/hexe-pod.cast";
+    lua.pop(1);
+
+    _ = lua.getField(1, "capture_input");
+    const capture_input = if (lua.typeOf(-1) == .boolean) lua.toBoolean(-1) else false;
+    lua.pop(1);
+
+    var target_flag: []const u8 = "";
+    var target_value: []const u8 = "";
+    if (uuid.len > 0) {
+        target_flag = "--uuid";
+        target_value = uuid;
+    } else if (name.len > 0) {
+        target_flag = "--name";
+        target_value = name;
+    } else if (socket.len > 0) {
+        target_flag = "--socket";
+        target_value = socket;
+    }
+
+    const qout = shellQuote(allocator, out) catch return null;
+    defer allocator.free(qout);
+
+    var start_cmd: []u8 = undefined;
+    var match_pattern: []u8 = undefined;
+
+    if (target_flag.len > 0) {
+        const qtarget = shellQuote(allocator, target_value) catch return null;
+        defer allocator.free(qtarget);
+        start_cmd = std.fmt.allocPrint(allocator, "hexe pod record {s} {s} --out {s}{s}", .{
+            target_flag,
+            qtarget,
+            qout,
+            if (capture_input) " --capture-input" else "",
+        }) catch return null;
+        match_pattern = std.fmt.allocPrint(allocator, "hexe pod record {s} {s} --out {s}", .{ target_flag, target_value, out }) catch {
+            allocator.free(start_cmd);
+            return null;
+        };
+    } else {
+        start_cmd = std.fmt.allocPrint(allocator, "__hx_uuid=\"$(hexe mux info --last 2>/dev/null)\"; [ -z \"$__hx_uuid\" ] && __hx_uuid=\"$HEXE_PANE_UUID\"; [ -n \"$__hx_uuid\" ] && hexe pod record --uuid \"$__hx_uuid\" --out {s}{s}", .{
+            qout,
+            if (capture_input) " --capture-input" else "",
+        }) catch return null;
+        match_pattern = std.fmt.allocPrint(allocator, "hexe pod record --out {s}", .{out}) catch {
+            allocator.free(start_cmd);
+            return null;
+        };
+    }
+    defer allocator.free(match_pattern);
+
+    const qpat = shellQuote(allocator, match_pattern) catch {
+        allocator.free(start_cmd);
+        return null;
+    };
+    defer allocator.free(qpat);
+
+    return switch (action) {
+        .start => start_cmd,
+        .stop => blk: {
+            allocator.free(start_cmd);
+            break :blk std.fmt.allocPrint(allocator, "pkill -f -- {s}", .{qpat}) catch null;
+        },
+        .toggle => blk: {
+            const out_cmd = std.fmt.allocPrint(allocator, "if pgrep -f -- {s} >/dev/null; then pkill -f -- {s}; else {s}; fi", .{ qpat, qpat, start_cmd }) catch null;
+            allocator.free(start_cmd);
+            break :blk out_cmd;
+        },
+        .status => blk: {
+            allocator.free(start_cmd);
+            break :blk std.fmt.allocPrint(allocator, "pgrep -f -- {s} >/dev/null && echo 1 || echo 0", .{qpat}) catch null;
+        },
+    };
+}
+
+pub export fn hexe_record_start(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+    const cmd = buildRecordCommand(lua, .start) orelse {
+        _ = lua.pushString("record.start: expected opts table with scope='pod'");
+        lua.raiseError();
+    };
+    defer std.heap.page_allocator.free(cmd);
+    _ = lua.pushString(cmd);
+    return 1;
+}
+
+pub export fn hexe_record_stop(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+    const cmd = buildRecordCommand(lua, .stop) orelse {
+        _ = lua.pushString("record.stop: expected opts table with scope='pod'");
+        lua.raiseError();
+    };
+    defer std.heap.page_allocator.free(cmd);
+    _ = lua.pushString(cmd);
+    return 1;
+}
+
+pub export fn hexe_record_toggle(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+    const cmd = buildRecordCommand(lua, .toggle) orelse {
+        _ = lua.pushString("record.toggle: expected opts table with scope='pod'");
+        lua.raiseError();
+    };
+    defer std.heap.page_allocator.free(cmd);
+    _ = lua.pushString(cmd);
+    return 1;
+}
+
+pub export fn hexe_record_status(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+    const cmd = buildRecordCommand(lua, .status) orelse {
+        _ = lua.pushString("record.status: expected opts table with scope='pod'");
+        lua.raiseError();
+    };
+    defer std.heap.page_allocator.free(cmd);
+    _ = lua.pushString(cmd);
+    return 1;
+}
