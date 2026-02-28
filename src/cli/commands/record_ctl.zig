@@ -2,7 +2,7 @@ const std = @import("std");
 
 const print = std.debug.print;
 
-const Scope = enum { pod };
+const Scope = enum { pod, mux };
 
 const RecordState = struct {
     pid: i32 = 0,
@@ -18,6 +18,7 @@ const RecordState = struct {
 pub fn runRecordStart(
     allocator: std.mem.Allocator,
     scope_raw: []const u8,
+    target: []const u8,
     uuid: []const u8,
     name: []const u8,
     socket: []const u8,
@@ -25,7 +26,7 @@ pub fn runRecordStart(
     capture_input: bool,
 ) !void {
     const scope = parseScope(scope_raw) orelse {
-        print("Error: unsupported scope '{s}' (supported: pod)\n", .{scope_raw});
+        print("Error: unsupported scope '{s}' (supported: pod|mux)\n", .{scope_raw});
         return;
     };
 
@@ -44,22 +45,40 @@ pub fn runRecordStart(
     const exe = try std.fs.selfExePathAlloc(allocator);
     defer allocator.free(exe);
 
-    const out_final = if (out.len > 0) out else "/tmp/hexe-pod.cast";
+    const out_final = if (out.len > 0) out else (if (scope == .pod) "/tmp/hexe-pod.cast" else "/tmp/hexe-mux.cast");
 
     var argv = std.ArrayList([]const u8).empty;
     defer argv.deinit(allocator);
     try argv.append(allocator, exe);
-    try argv.append(allocator, "pod");
-    try argv.append(allocator, "record");
-    if (uuid.len > 0) {
-        try argv.append(allocator, "--uuid");
-        try argv.append(allocator, uuid);
-    } else if (name.len > 0) {
-        try argv.append(allocator, "--name");
-        try argv.append(allocator, name);
-    } else if (socket.len > 0) {
-        try argv.append(allocator, "--socket");
-        try argv.append(allocator, socket);
+    var target_uuid: []const u8 = uuid;
+    var owned_target_uuid: ?[]u8 = null;
+    defer if (owned_target_uuid) |v| allocator.free(v);
+
+    if (scope == .pod and target_uuid.len == 0 and name.len == 0 and socket.len == 0 and (target.len == 0 or std.mem.eql(u8, target, "active"))) {
+        owned_target_uuid = try resolveActivePodUuid(allocator);
+        if (owned_target_uuid == null) {
+            print("Error: no active pod target found (use --uuid/--name/--socket)\n", .{});
+            return;
+        }
+        target_uuid = owned_target_uuid.?;
+    }
+
+    if (scope == .pod) {
+        try argv.append(allocator, "pod");
+        try argv.append(allocator, "record");
+        if (target_uuid.len > 0) {
+            try argv.append(allocator, "--uuid");
+            try argv.append(allocator, target_uuid);
+        } else if (name.len > 0) {
+            try argv.append(allocator, "--name");
+            try argv.append(allocator, name);
+        } else if (socket.len > 0) {
+            try argv.append(allocator, "--socket");
+            try argv.append(allocator, socket);
+        }
+    } else {
+        try argv.append(allocator, "multiplexer");
+        try argv.append(allocator, "record");
     }
     try argv.append(allocator, "--out");
     try argv.append(allocator, out_final);
@@ -75,7 +94,7 @@ pub fn runRecordStart(
     const state = RecordState{
         .pid = pid,
         .scope = scope,
-        .uuid = uuid,
+        .uuid = target_uuid,
         .name = name,
         .socket = socket,
         .out = out_final,
@@ -88,7 +107,7 @@ pub fn runRecordStart(
 
 pub fn runRecordStop(allocator: std.mem.Allocator, scope_raw: []const u8) !void {
     const scope = parseScope(scope_raw) orelse {
-        print("Error: unsupported scope '{s}' (supported: pod)\n", .{scope_raw});
+        print("Error: unsupported scope '{s}' (supported: pod|mux)\n", .{scope_raw});
         return;
     };
     const state_path = try getStatePath(allocator, scope);
@@ -139,7 +158,7 @@ pub fn runRecordStatus(allocator: std.mem.Allocator, scope_raw: []const u8, json
     }
 
     if (json) {
-        print("{{\"active\":true,\"pid\":{d},\"scope\":\"pod\",\"out\":\"{s}\",\"started_ms\":{d}}}\n", .{ st.pid, st.out, st.started_ms });
+        print("{{\"active\":true,\"pid\":{d},\"scope\":\"{s}\",\"out\":\"{s}\",\"started_ms\":{d}}}\n", .{ st.pid, @tagName(st.scope), st.out, st.started_ms });
     } else {
         print("1\n", .{});
     }
@@ -148,6 +167,7 @@ pub fn runRecordStatus(allocator: std.mem.Allocator, scope_raw: []const u8, json
 pub fn runRecordToggle(
     allocator: std.mem.Allocator,
     scope_raw: []const u8,
+    target: []const u8,
     uuid: []const u8,
     name: []const u8,
     socket: []const u8,
@@ -155,7 +175,7 @@ pub fn runRecordToggle(
     capture_input: bool,
 ) !void {
     const scope = parseScope(scope_raw) orelse {
-        print("Error: unsupported scope '{s}' (supported: pod)\n", .{scope_raw});
+        print("Error: unsupported scope '{s}' (supported: pod|mux)\n", .{scope_raw});
         return;
     };
     const state_path = try getStatePath(allocator, scope);
@@ -169,12 +189,61 @@ pub fn runRecordToggle(
         }
         std.fs.cwd().deleteFile(state_path) catch {};
     }
-    try runRecordStart(allocator, scope_raw, uuid, name, socket, out, capture_input);
+    try runRecordStart(allocator, scope_raw, target, uuid, name, socket, out, capture_input);
 }
 
 fn parseScope(scope_raw: []const u8) ?Scope {
     if (scope_raw.len == 0 or std.mem.eql(u8, scope_raw, "pod")) return .pod;
+    if (std.mem.eql(u8, scope_raw, "mux")) return .mux;
     return null;
+}
+
+fn resolveActivePodUuid(allocator: std.mem.Allocator) !?[]u8 {
+    if (std.posix.getenv("HEXE_PANE_UUID")) |u| {
+        if (isUuid32Hex(u)) {
+            const dup = try allocator.dupe(u8, u);
+            return dup;
+        }
+    }
+
+    const exe = try std.fs.selfExePathAlloc(allocator);
+    defer allocator.free(exe);
+
+    var child = std.process.Child.init(&[_][]const u8{ exe, "multiplexer", "info", "--last" }, allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Pipe;
+    child.stderr_behavior = .Ignore;
+    try child.spawn();
+
+    const out = if (child.stdout) |stdout_file|
+        try stdout_file.readToEndAlloc(allocator, 64 * 1024)
+    else
+        return null;
+    defer allocator.free(out);
+
+    _ = child.wait() catch {};
+
+    return extractUuidFromText(allocator, out);
+}
+
+fn extractUuidFromText(allocator: std.mem.Allocator, text: []const u8) ?[]u8 {
+    if (text.len < 32) return null;
+    var i: usize = 0;
+    while (i + 32 <= text.len) : (i += 1) {
+        const cand = text[i .. i + 32];
+        if (isUuid32Hex(cand)) {
+            return allocator.dupe(u8, cand) catch null;
+        }
+    }
+    return null;
+}
+
+fn isUuid32Hex(s: []const u8) bool {
+    if (s.len != 32) return false;
+    for (s) |ch| {
+        if (!std.ascii.isHex(ch)) return false;
+    }
+    return true;
 }
 
 fn isPidAlive(pid: i32) bool {
@@ -237,7 +306,9 @@ fn loadState(allocator: std.mem.Allocator, path: []const u8) !?RecordState {
         const k = kv.first();
         const v = kv.next() orelse "";
         if (std.mem.eql(u8, k, "pid")) st.pid = std.fmt.parseInt(i32, v, 10) catch 0;
-        if (std.mem.eql(u8, k, "scope")) st.scope = .pod;
+        if (std.mem.eql(u8, k, "scope")) {
+            if (std.mem.eql(u8, v, "mux")) st.scope = .mux else st.scope = .pod;
+        }
         if (std.mem.eql(u8, k, "uuid")) st.uuid = try allocator.dupe(u8, v);
         if (std.mem.eql(u8, k, "name")) st.name = try allocator.dupe(u8, v);
         if (std.mem.eql(u8, k, "socket")) st.socket = try allocator.dupe(u8, v);

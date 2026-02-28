@@ -2716,7 +2716,11 @@ fn buildRecordCommand(lua: *Lua, action: enum { start, stop, toggle, status }) ?
     _ = lua.getField(1, "scope");
     const scope = if (lua.typeOf(-1) == .string) (lua.toString(-1) catch "pod") else "pod";
     lua.pop(1);
-    if (!std.mem.eql(u8, scope, "pod")) return null;
+    if (!std.mem.eql(u8, scope, "pod") and !std.mem.eql(u8, scope, "mux")) return null;
+
+    _ = lua.getField(1, "target");
+    _ = if (lua.typeOf(-1) == .string) (lua.toString(-1) catch "") else "";
+    lua.pop(1);
 
     _ = lua.getField(1, "uuid");
     const uuid = if (lua.typeOf(-1) == .string) (lua.toString(-1) catch "") else "";
@@ -2761,7 +2765,8 @@ fn buildRecordCommand(lua: *Lua, action: enum { start, stop, toggle, status }) ?
 
     cmd.appendSlice("hexe record ") catch return null;
     cmd.appendSlice(action_name) catch return null;
-    cmd.appendSlice(" --scope pod") catch return null;
+    cmd.appendSlice(" --scope ") catch return null;
+    cmd.appendSlice(scope) catch return null;
 
     if ((action == .start or action == .toggle) and out.len > 0) {
         const qout = shellQuote(allocator, out) catch return null;
@@ -2769,7 +2774,7 @@ fn buildRecordCommand(lua: *Lua, action: enum { start, stop, toggle, status }) ?
         cmd.appendSlice(" --out ") catch return null;
         cmd.appendSlice(qout) catch return null;
     }
-    if (target_flag.len > 0 and (action == .start or action == .toggle)) {
+    if (std.mem.eql(u8, scope, "pod") and target_flag.len > 0 and (action == .start or action == .toggle)) {
         const qtarget = shellQuote(allocator, target_value) catch return null;
         defer allocator.free(qtarget);
         cmd.appendSlice(" ") catch return null;
@@ -2780,7 +2785,6 @@ fn buildRecordCommand(lua: *Lua, action: enum { start, stop, toggle, status }) ?
     if ((action == .start or action == .toggle) and capture_input) {
         cmd.appendSlice(" --capture-input") catch return null;
     }
-
     return cmd.toOwnedSlice() catch null;
 }
 
@@ -2817,13 +2821,100 @@ pub export fn hexe_record_toggle(L: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
+fn sanitizeInstanceNameLocal(buf: []u8, input: []const u8) []const u8 {
+    var n: usize = 0;
+    for (input) |ch| {
+        if (n >= buf.len) break;
+        if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z') or (ch >= '0' and ch <= '9') or ch == '_' or ch == '-') {
+            buf[n] = ch;
+            n += 1;
+        }
+    }
+    if (n == 0) {
+        const d = "default";
+        @memcpy(buf[0..d.len], d);
+        return buf[0..d.len];
+    }
+    return buf[0..n];
+}
+
+fn recordStatePathAlloc(allocator: std.mem.Allocator, scope: []const u8) ![]u8 {
+    const inst = std.posix.getenv("HEXE_INSTANCE") orelse "default";
+    var safe_buf: [64]u8 = undefined;
+    const safe = sanitizeInstanceNameLocal(safe_buf[0..], inst);
+    return std.fmt.allocPrint(allocator, "/tmp/hexe/{s}/record-{s}.state", .{ safe, scope });
+}
+
 pub export fn hexe_record_status(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
-    const cmd = buildRecordCommand(lua, .status) orelse {
-        _ = lua.pushString("record.status: expected opts table with scope='pod'");
-        lua.raiseError();
+
+    var scope: []const u8 = "pod";
+    if (lua.typeOf(1) == .table) {
+        _ = lua.getField(1, "scope");
+        if (lua.typeOf(-1) == .string) {
+            scope = lua.toString(-1) catch "pod";
+        }
+        lua.pop(1);
+    }
+    if (!std.mem.eql(u8, scope, "pod") and !std.mem.eql(u8, scope, "mux")) {
+        scope = "pod";
+    }
+
+    const allocator = std.heap.page_allocator;
+    const state_path = recordStatePathAlloc(allocator, scope) catch {
+        lua.createTable(0, 2);
+        lua.pushBoolean(false);
+        lua.setField(-2, "active");
+        _ = lua.pushString(scope);
+        lua.setField(-2, "scope");
+        return 1;
     };
-    defer std.heap.page_allocator.free(cmd);
-    _ = lua.pushString(cmd);
+    defer allocator.free(state_path);
+
+    const data = std.fs.cwd().readFileAlloc(allocator, state_path, 16 * 1024) catch {
+        lua.createTable(0, 2);
+        lua.pushBoolean(false);
+        lua.setField(-2, "active");
+        _ = lua.pushString(scope);
+        lua.setField(-2, "scope");
+        return 1;
+    };
+    defer allocator.free(data);
+
+    var pid: i32 = 0;
+    var started_ms: i64 = 0;
+    var out: []const u8 = "";
+    var lines = std.mem.tokenizeAny(u8, data, "\n");
+    while (lines.next()) |line| {
+        var kv = std.mem.splitScalar(u8, line, '=');
+        const k = kv.first();
+        const v = kv.next() orelse "";
+        if (std.mem.eql(u8, k, "pid")) pid = std.fmt.parseInt(i32, v, 10) catch 0;
+        if (std.mem.eql(u8, k, "started_ms")) started_ms = std.fmt.parseInt(i64, v, 10) catch 0;
+        if (std.mem.eql(u8, k, "out")) out = v;
+    }
+
+    const active = pid > 0 and std.c.kill(pid, 0) == 0;
+    if (!active) {
+        std.fs.cwd().deleteFile(state_path) catch {};
+    }
+
+    lua.createTable(0, 5);
+    lua.pushBoolean(active);
+    lua.setField(-2, "active");
+    _ = lua.pushString(scope);
+    lua.setField(-2, "scope");
+    if (active) {
+        lua.pushInteger(pid);
+        lua.setField(-2, "pid");
+        if (out.len > 0) {
+            _ = lua.pushString(out);
+            lua.setField(-2, "out");
+        }
+        if (started_ms > 0) {
+            lua.pushInteger(started_ms);
+            lua.setField(-2, "started_ms");
+        }
+    }
     return 1;
 }

@@ -121,7 +121,7 @@ fn printHelpCommand(command: []const u8) void {
     }
     if (std.mem.eql(u8, command, "multiplexer")) {
         print("{s}{s}multiplexer{s} {s}(alias: mux){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-        print("Subcommands: new, attach, float, notify, send, info, layout, focus\n", .{});
+        print("Subcommands: new, attach, record, float, notify, send, info, layout, focus\n", .{});
         return;
     }
     if (std.mem.eql(u8, command, "pod")) {
@@ -318,6 +318,11 @@ pub fn main() !void {
     try mux_attach.addArg(Arg.singleValueOption("logfile", 'L', null));
     try mux_attach.addArg(Arg.singleValueOption("instance", 'I', null));
 
+    var mux_record = app.createCommand("record", "Attach to mux and record asciicast");
+    try mux_record.addArg(Arg.singleValueOption("out", 'o', null));
+    try mux_record.addArg(Arg.booleanOption("capture-input", null, null));
+    try mux_record.addArg(Arg.singleValueOption("instance", 'I', null));
+
     var mux_float = app.createCommand("float", "Spawn a transient float pane");
     try mux_float.addArg(Arg.singleValueOption("command", 'c', null));
     try mux_float.addArg(Arg.singleValueOption("title", null, null));
@@ -372,7 +377,7 @@ pub fn main() !void {
     var mux_focus = app.createCommand("focus", "Move focus to adjacent pane");
     try mux_focus.addArg(Arg.positional("dir", null, null));
 
-    try mux_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_float, mux_notify, mux_send, mux_info, mux_layout, mux_focus });
+    try mux_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_record, mux_float, mux_notify, mux_send, mux_info, mux_layout, mux_focus });
 
     // SHP subcommands
     var shp_prompt = app.createCommand("prompt", "Render shell prompt");
@@ -691,6 +696,17 @@ pub fn main() !void {
             try runMuxAttach(m.getSingleValue("name") orelse "", m.containsArg("debug"), m.getSingleValue("logfile") orelse "");
             return;
         }
+        if (mux_matches.subcommandMatches("record")) |m| {
+            const instance = m.getSingleValue("instance") orelse "";
+            if (instance.len > 0) setInstanceFromCli(instance);
+            const out = m.getSingleValue("out") orelse "";
+            if (out.len == 0) {
+                print("Error: --out is required for mux record\n", .{});
+                return;
+            }
+            try cli_cmds.runMuxRecord(out, m.containsArg("capture-input"));
+            return;
+        }
         if (mux_matches.subcommandMatches("float")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
@@ -824,6 +840,7 @@ pub fn main() !void {
             try cli_cmds.runRecordStart(
                 allocator,
                 m.getSingleValue("scope") orelse "pod",
+                "",
                 m.getSingleValue("uuid") orelse "",
                 m.getSingleValue("name") orelse "",
                 m.getSingleValue("socket") orelse "",
@@ -844,6 +861,7 @@ pub fn main() !void {
             try cli_cmds.runRecordToggle(
                 allocator,
                 m.getSingleValue("scope") orelse "pod",
+                "",
                 m.getSingleValue("uuid") orelse "",
                 m.getSingleValue("name") orelse "",
                 m.getSingleValue("socket") orelse "",
