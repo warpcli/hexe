@@ -61,6 +61,7 @@ pub fn updateHover(term_height: u16, x: u16, y: u16) bool {
 }
 
 fn isClickable(mod: *const core.Segment) bool {
+    if (mod.kind != .button) return false;
     return mod.on_click != null or mod.on_right_click != null or mod.on_middle_click != null;
 }
 

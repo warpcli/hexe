@@ -1463,7 +1463,11 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         }
     }
 
-    const has_button = runtime.fieldType(-1, "button") == .table;
+    const has_button = runtime.fieldType(-1, "button") == .table or
+        runtime.fieldType(-1, "on_click") == .string or
+        runtime.fieldType(-1, "on_left_click") == .string or
+        runtime.fieldType(-1, "on_right_click") == .string or
+        runtime.fieldType(-1, "on_middle_click") == .string;
     const has_progress = runtime.fieldType(-1, "progress") == .table or show_when_code != null or runtime.fieldType(-1, "every_ms") != .nil;
     const progress_every_ms: u64 = blk: {
         if (runtime.getInt(u64, -1, "every_ms")) |v| break :blk v;

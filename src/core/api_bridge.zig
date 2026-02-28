@@ -1495,7 +1495,19 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
         _ = lua.getField(idx, "button");
         const is_tbl = lua.typeOf(-1) == .table;
         lua.pop(1);
-        break :blk is_tbl;
+        _ = lua.getField(idx, "on_click");
+        const has_left = lua.typeOf(-1) == .string;
+        lua.pop(1);
+        _ = lua.getField(idx, "on_left_click");
+        const has_left_alias = lua.typeOf(-1) == .string;
+        lua.pop(1);
+        _ = lua.getField(idx, "on_right_click");
+        const has_right = lua.typeOf(-1) == .string;
+        lua.pop(1);
+        _ = lua.getField(idx, "on_middle_click");
+        const has_mid = lua.typeOf(-1) == .string;
+        lua.pop(1);
+        break :blk is_tbl or has_left or has_left_alias or has_right or has_mid;
     };
     const has_progress = blk: {
         _ = lua.getField(idx, "progress");
@@ -2497,7 +2509,19 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
         _ = lua.getField(idx, "button");
         const is_tbl = lua.typeOf(-1) == .table;
         lua.pop(1);
-        break :blk is_tbl;
+        _ = lua.getField(idx, "on_click");
+        const has_left = lua.typeOf(-1) == .string;
+        lua.pop(1);
+        _ = lua.getField(idx, "on_left_click");
+        const has_left_alias = lua.typeOf(-1) == .string;
+        lua.pop(1);
+        _ = lua.getField(idx, "on_right_click");
+        const has_right = lua.typeOf(-1) == .string;
+        lua.pop(1);
+        _ = lua.getField(idx, "on_middle_click");
+        const has_mid = lua.typeOf(-1) == .string;
+        lua.pop(1);
+        break :blk is_tbl or has_left or has_left_alias or has_right or has_mid;
     };
     const has_progress = blk: {
         _ = lua.getField(idx, "progress");
