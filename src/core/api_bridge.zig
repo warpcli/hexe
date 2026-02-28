@@ -2623,9 +2623,7 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     }
     lua.pop(1);
 
-    if (kind == .builtin and command == null) {
-        command = builtin_command;
-    }
+    if (kind == .builtin and command == null) command = builtin_command;
 
     var inverse_on_hover: bool = true;
     _ = lua.getField(idx, "inverse_on_hover");
