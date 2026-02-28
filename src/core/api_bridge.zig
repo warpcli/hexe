@@ -1314,14 +1314,6 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
         .name = name,
     };
 
-    // Parse kind
-    _ = lua.getField(idx, "kind");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "value";
-        segment.kind = std.meta.stringToEnum(config.SegmentKind, s) orelse .value;
-    }
-    lua.pop(1);
-
     // Parse priority
     _ = lua.getField(idx, "priority");
     if (lua.typeOf(-1) == .number) {
@@ -1344,7 +1336,22 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     // value = function(ctx) ... end OR value = "return ..."
     var value_command: ?[]const u8 = null;
     _ = lua.getField(idx, "value");
-    if (parseLuaChunkValue(lua, allocator, false)) |code| {
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "lua");
+        if (parseLuaChunkValue(lua, allocator, false)) |code| {
+            defer allocator.free(code);
+            value_command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "fn");
+        if (value_command == null) {
+            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+                defer allocator.free(code);
+                value_command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+            }
+        }
+        lua.pop(1);
+    } else if (parseLuaChunkValue(lua, allocator, false)) |code| {
         defer allocator.free(code);
         value_command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
     }
@@ -1354,9 +1361,20 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     _ = lua.getField(idx, "builtin");
     if (lua.typeOf(-1) == .string) {
         const s = lua.toString(-1) catch "";
-        if (s.len > 0) {
-            segment.builtin = allocator.dupe(u8, s) catch null;
+        if (s.len > 0) segment.builtin = allocator.dupe(u8, s) catch null;
+    } else if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "name");
+        if (lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.builtin = allocator.dupe(u8, s) catch null;
         }
+        lua.pop(1);
+        _ = lua.getField(-1, "segment");
+        if (segment.builtin == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.builtin = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
     }
     lua.pop(1);
 
@@ -1374,6 +1392,63 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
         segment.progress_show_when = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
     }
     lua.pop(1);
+
+    _ = lua.getField(idx, "progress");
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "every_ms");
+        if (lua.typeOf(-1) == .number) {
+            const v = lua.toNumber(-1) catch 1000;
+            if (std.math.isFinite(v)) segment.progress_every_ms = @intFromFloat(std.math.clamp(v, 1, 60000));
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "show_when");
+        if (parseLuaChunkValue(lua, allocator, true)) |code| {
+            defer allocator.free(code);
+            if (segment.progress_show_when) |old| allocator.free(old);
+            segment.progress_show_when = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch segment.progress_show_when;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "builtin");
+        if (lua.typeOf(-1) == .string and segment.builtin == null) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.builtin = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "value");
+        if (value_command == null) {
+            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+                defer allocator.free(code);
+                value_command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+            }
+        }
+        lua.pop(1);
+    }
+    lua.pop(1);
+
+    const has_button = blk: {
+        _ = lua.getField(idx, "button");
+        const is_tbl = lua.typeOf(-1) == .table;
+        lua.pop(1);
+        break :blk is_tbl;
+    };
+    const has_progress = blk: {
+        _ = lua.getField(idx, "progress");
+        const is_tbl = lua.typeOf(-1) == .table;
+        lua.pop(1);
+        break :blk is_tbl or segment.progress_show_when != null;
+    };
+
+    segment.kind = if (has_progress)
+        .progress
+    else if (has_button)
+        .button
+    else if (segment.builtin != null and value_command == null)
+        .builtin
+    else
+        .value;
 
     segment.command = switch (segment.kind) {
         .value => value_command,
@@ -1443,6 +1518,22 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     // button = { on_click = "...", on_right_click = "...", on_middle_click = "..." }
     _ = lua.getField(idx, "button");
     if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "builtin");
+        if (segment.builtin == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.builtin = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "value");
+        if (value_command == null) {
+            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+                defer allocator.free(code);
+                value_command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+            }
+        }
+        lua.pop(1);
+
         _ = lua.getField(-1, "on_click");
         if (segment.on_click == null and lua.typeOf(-1) == .string) {
             const s = lua.toString(-1) catch "";
@@ -2271,7 +2362,6 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     var priority: i64 = 50; // default priority
     var outputs = std.ArrayList(config_builder.ShpConfigBuilder.OutputDef){};
     var command: ?[]const u8 = null;
-    var kind: config.SegmentKind = .value;
     var builtin: ?[]const u8 = null;
     defer if (builtin) |b| allocator.free(b);
 
@@ -2292,13 +2382,6 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     }
     lua.pop(1);
 
-    _ = lua.getField(idx, "kind");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "value";
-        kind = std.meta.stringToEnum(config.SegmentKind, s) orelse .value;
-    }
-    lua.pop(1);
-
     // outputs is removed from segment schema.
     _ = lua.getField(idx, "outputs");
     if (lua.typeOf(-1) != .nil) {
@@ -2310,7 +2393,22 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     // Parse value (segment value producer).
     // value = function(ctx) ... end OR value = "return ..."
     _ = lua.getField(idx, "value");
-    if (parseLuaChunkValue(lua, allocator, false)) |code| {
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "lua");
+        if (parseLuaChunkValue(lua, allocator, false)) |code| {
+            defer allocator.free(code);
+            command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "fn");
+        if (command == null) {
+            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+                defer allocator.free(code);
+                command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+            }
+        }
+        lua.pop(1);
+    } else if (parseLuaChunkValue(lua, allocator, false)) |code| {
         defer allocator.free(code);
         command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
     }
@@ -2320,14 +2418,72 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     if (lua.typeOf(-1) == .string) {
         const b = lua.toString(-1) catch "";
         if (b.len > 0) builtin = allocator.dupe(u8, b) catch null;
+    } else if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "name");
+        if (lua.typeOf(-1) == .string) {
+            const b = lua.toString(-1) catch "";
+            if (b.len > 0) builtin = allocator.dupe(u8, b) catch null;
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "segment");
+        if (builtin == null and lua.typeOf(-1) == .string) {
+            const b = lua.toString(-1) catch "";
+            if (b.len > 0) builtin = allocator.dupe(u8, b) catch null;
+        }
+        lua.pop(1);
     }
     lua.pop(1);
+
+    const has_button = blk: {
+        _ = lua.getField(idx, "button");
+        const is_tbl = lua.typeOf(-1) == .table;
+        lua.pop(1);
+        break :blk is_tbl;
+    };
+    const has_progress = blk: {
+        _ = lua.getField(idx, "progress");
+        const is_tbl = lua.typeOf(-1) == .table;
+        lua.pop(1);
+        _ = lua.getField(idx, "show_when");
+        const has_show_when = lua.typeOf(-1) != .nil;
+        lua.pop(1);
+        break :blk is_tbl or has_show_when;
+    };
+    const kind: config.SegmentKind = if (has_progress)
+        .progress
+    else if (has_button)
+        .button
+    else if (builtin != null and command == null)
+        .builtin
+    else
+        .value;
 
     if (kind == .builtin or kind == .button or kind == .progress) {
         if (builtin) |b| {
             command = std.fmt.allocPrint(allocator, "builtin:{s}", .{b}) catch command;
         }
     }
+
+    _ = lua.getField(idx, "progress");
+    if (kind == .progress and lua.typeOf(-1) == .table and command == null) {
+        _ = lua.getField(-1, "builtin");
+        if (lua.typeOf(-1) == .string) {
+            const b = lua.toString(-1) catch "";
+            if (b.len > 0) {
+                command = std.fmt.allocPrint(allocator, "builtin:{s}", .{b}) catch null;
+            }
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "value");
+        if (command == null) {
+            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+                defer allocator.free(code);
+                command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+            }
+        }
+        lua.pop(1);
+    }
+    lua.pop(1);
 
     if (command == null) {
         const msg = switch (kind) {
