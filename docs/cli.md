@@ -160,24 +160,31 @@ Render the prompt for the given context. Called automatically by the shell integ
 ## hexe record
 
 ```sh
-hexe record start --scope pod [--uuid <u>|--name <n>|--socket <path>] [--out <file.cast>] [--capture-input]
+hexe record start --scope pod|mux [--uuid <u>|--name <n>|--socket <path>] [--out <file.cast>] [--capture-input]
 ```
 Start background recording for the given scope/target.
 
+For `--scope pod`, if no explicit target is provided, hexe tries to resolve the active pod (`HEXE_PANE_UUID`, then `hexe mux info --last`).
+
 ```sh
-hexe record stop --scope pod
+hexe record stop --scope pod|mux
 ```
 Stop background recording for the given scope.
 
 ```sh
-hexe record status --scope pod [--json]
+hexe record status --scope pod|mux [--json]
 ```
 Print `1` when active and `0` when inactive (or JSON with `--json`).
 
 ```sh
-hexe record toggle --scope pod [--uuid <u>|--name <n>|--socket <path>] [--out <file.cast>] [--capture-input]
+hexe record toggle --scope pod|mux [--uuid <u>|--name <n>|--socket <path>] [--out <file.cast>] [--capture-input]
 ```
 Toggle background recording for the given scope/target.
+
+```sh
+hexe multiplexer record --out <file.cast> [--capture-input]
+```
+Record a mux attach stream directly into asciicast output.
 
 ---
 

@@ -77,6 +77,8 @@ Clickable segments are treated as buttons and automatically render with reverse 
 
 If `button.active_when` is set and returns success, the button stays reversed while active; on hover it flips back (opposite visual) to indicate a deactivate click.
 
+When using Lua config helpers, `hx.record.status({ scope = "pod" })` now returns a table like `{ active = true|false, scope = "pod", pid = ..., out = "...", started_ms = ... }`.
+
 ## Built-in Status Segments
 
 Common built-ins used by the status bar:

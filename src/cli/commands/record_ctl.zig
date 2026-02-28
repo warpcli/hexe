@@ -292,7 +292,14 @@ fn saveState(allocator: std.mem.Allocator, path: []const u8, st: RecordState) !v
         st.started_ms,
     });
     defer allocator.free(payload);
-    try std.fs.cwd().writeFile(.{ .sub_path = path, .data = payload });
+
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{path});
+    defer allocator.free(tmp_path);
+    try std.fs.cwd().writeFile(.{ .sub_path = tmp_path, .data = payload });
+    std.fs.cwd().rename(tmp_path, path) catch {
+        std.fs.cwd().deleteFile(path) catch {};
+        try std.fs.cwd().rename(tmp_path, path);
+    };
 }
 
 fn loadState(allocator: std.mem.Allocator, path: []const u8) !?RecordState {
