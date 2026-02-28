@@ -367,6 +367,7 @@ const Pod = struct {
     pty: core.Pty,
     server: core.IpcServer,
     client: ?core.IpcConnection = null,
+    observers: std.array_list.Managed(core.IpcConnection),
     backlog: RingBuffer,
     reader: pod_protocol.Reader,
     pty_paused: bool = false,
@@ -422,6 +423,7 @@ const Pod = struct {
             .uuid = uuid,
             .pty = pty,
             .server = server,
+            .observers = std.array_list.Managed(core.IpcConnection).init(allocator),
             .backlog = backlog,
             .reader = reader,
             .pty_wbuf = pty_wbuf,
@@ -433,6 +435,8 @@ const Pod = struct {
         if (self.client) |*client| {
             client.close();
         }
+        for (self.observers.items) |*obs| obs.close();
+        self.observers.deinit();
         self.server.deinit();
         self.pty.close();
         self.backlog.deinit(self.allocator);
@@ -743,7 +747,7 @@ const Pod = struct {
             return .disarm;
         };
 
-        if (pty_ctx.pod.client == null) {
+        if (pty_ctx.pod.client == null and pty_ctx.pod.observers.items.len == 0) {
             const free = pty_ctx.pod.backlog.available();
             if (free == 0) {
                 pty_ctx.pod.pty_paused = true;
@@ -807,9 +811,10 @@ const Pod = struct {
                 client.close();
                 pty_ctx.pod.client = null;
             };
-        } else {
+        } else if (pty_ctx.pod.observers.items.len == 0) {
             debugLog("ptyCallback: no client, data goes to backlog only ({d} bytes)", .{data.len});
         }
+        pty_ctx.pod.broadcastToObservers(data);
 
         return .rearm;
     }
@@ -982,10 +987,54 @@ const Pod = struct {
         } else if (handshake[0] == wire.POD_HANDSHAKE_AUX_INPUT) {
             debugLog("accept: aux input fd={d}", .{conn.fd});
             self.handleAuxInput(conn);
+        } else if (handshake[0] == wire.POD_HANDSHAKE_AUX_OBSERVER) {
+            debugLog("accept: aux observer fd={d}", .{conn.fd});
+            self.acceptObserver(conn, backlog_tmp);
         } else {
             debugLog("accept: unknown handshake 0x{x:0>2} fd={d}", .{ handshake[0], conn.fd });
             var tmp_conn = conn;
             tmp_conn.close();
+        }
+    }
+
+    fn acceptObserver(self: *Pod, conn: core.IpcConnection, backlog_tmp: []u8) void {
+        var obs_conn = conn;
+        setBlocking(conn.fd);
+
+        // Replay current backlog to new observer.
+        const n = self.backlog.copyOut(backlog_tmp);
+        var off: usize = 0;
+        while (off < n) {
+            const chunk = @min(@as(usize, 16 * 1024), n - off);
+            pod_protocol.writeFrame(&obs_conn, .output, backlog_tmp[off .. off + chunk]) catch {
+                var tmp = obs_conn;
+                tmp.close();
+                return;
+            };
+            off += chunk;
+        }
+        pod_protocol.writeFrame(&obs_conn, .backlog_end, &[_]u8{}) catch {
+            var tmp = obs_conn;
+            tmp.close();
+            return;
+        };
+
+        self.observers.append(obs_conn) catch {
+            var tmp = obs_conn;
+            tmp.close();
+        };
+    }
+
+    fn broadcastToObservers(self: *Pod, data: []const u8) void {
+        var i: usize = 0;
+        while (i < self.observers.items.len) {
+            const obs = &self.observers.items[i];
+            pod_protocol.writeFrame(obs, .output, data) catch {
+                obs.close();
+                _ = self.observers.swapRemove(i);
+                continue;
+            };
+            i += 1;
         }
     }
 

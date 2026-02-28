@@ -204,6 +204,18 @@ pub const MuxConfigBuilder = struct {
         if (segment.command) |cmd| {
             result.command = try allocator.dupe(u8, cmd);
         }
+        if (segment.on_click) |cmd| {
+            result.on_click = try allocator.dupe(u8, cmd);
+        }
+        if (segment.on_right_click) |cmd| {
+            result.on_right_click = try allocator.dupe(u8, cmd);
+        }
+        if (segment.on_middle_click) |cmd| {
+            result.on_middle_click = try allocator.dupe(u8, cmd);
+        }
+        if (segment.button_active_bash) |cmd| {
+            result.button_active_bash = try allocator.dupe(u8, cmd);
+        }
         result.active_style = try allocator.dupe(u8, segment.active_style);
         result.inactive_style = try allocator.dupe(u8, segment.inactive_style);
         result.separator = try allocator.dupe(u8, segment.separator);

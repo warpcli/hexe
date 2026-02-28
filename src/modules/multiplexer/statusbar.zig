@@ -27,6 +27,40 @@ const RandomdoState = struct {
 };
 
 threadlocal var randomdo_state: ?std.AutoHashMap(usize, RandomdoState) = null;
+threadlocal var hover_x: ?u16 = null;
+threadlocal var hover_y: ?u16 = null;
+
+pub fn updateHover(term_height: u16, x: u16, y: u16) bool {
+    const old_x = hover_x;
+    const old_y = hover_y;
+    hover_x = x;
+    hover_y = y;
+
+    if (old_x == hover_x and old_y == hover_y) return false;
+    if (term_height == 0) return false;
+    const bar_y = term_height - 1;
+    const was_on_bar = old_y != null and old_y.? == bar_y;
+    const is_on_bar = y == bar_y;
+    return was_on_bar or is_on_bar;
+}
+
+fn isClickable(mod: *const core.Segment) bool {
+    return mod.on_click != null or mod.on_right_click != null or mod.on_middle_click != null;
+}
+
+fn isButtonActive(mod: *const core.Segment, ctx: *shp.Context) bool {
+    if (mod.button_active_bash) |code| {
+        return evalBashWhen(code, ctx, 300);
+    }
+    return false;
+}
+
+fn isHoveredRange(start_x: u16, width: u16, y: u16) bool {
+    if (hover_x == null or hover_y == null) return false;
+    const hx = hover_x.?;
+    const hy = hover_y.?;
+    return hy == y and hx >= start_x and hx < start_x +| width;
+}
 
 fn spinnerAsciiFrame(now_ms: u64, started_at_ms: u64, step_ms: u64) []const u8 {
     const frames = [_][]const u8{ "|", "/", "-", "\\" };
@@ -709,7 +743,8 @@ pub fn draw(
     var left_x: u16 = 0;
     for (0..left_count) |i| {
         if (left_modules[i].visible) {
-            left_x = drawModule(renderer, &ctx, &query, left_modules[i].mod.*, left_x, y);
+            const hovered = isHoveredRange(left_x, left_modules[i].width, y);
+            left_x = drawModule(renderer, &ctx, &query, left_modules[i].mod.*, left_x, y, hovered);
         }
     }
 
@@ -718,7 +753,8 @@ pub fn draw(
     var rx: u16 = right_start;
     for (0..right_count) |i| {
         if (right_modules[i].visible) {
-            rx = drawModule(renderer, &ctx, &query, right_modules[i].mod.*, rx, y);
+            const hovered = isHoveredRange(rx, right_modules[i].width, y);
+            rx = drawModule(renderer, &ctx, &query, right_modules[i].mod.*, rx, y, hovered);
         }
     }
 
@@ -855,6 +891,213 @@ pub fn hitTestTab(
     return null;
 }
 
+fn clickCommandFor(mod: *const core.Segment, button: u8) ?[]const u8 {
+    return switch (button) {
+        0 => mod.on_click,
+        1 => mod.on_middle_click,
+        2 => mod.on_right_click,
+        else => null,
+    };
+}
+
+pub fn hitTestAction(
+    state: *State,
+    allocator: std.mem.Allocator,
+    config: *const core.Config,
+    term_width: u16,
+    term_height: u16,
+    tabs: anytype,
+    active_tab: usize,
+    session_name: []const u8,
+    x: u16,
+    y: u16,
+    button: u8,
+) ?[]const u8 {
+    if (!config.tabs.status.enabled) return null;
+    if (term_height == 0) return null;
+    const bar_y = term_height - 1;
+    if (y != bar_y) return null;
+
+    const width = term_width;
+    const cfg = &config.tabs.status;
+
+    var ctx = shp.Context.init(allocator);
+    defer ctx.deinit();
+    ctx.terminal_width = width;
+    ctx.home = std.posix.getenv("HOME");
+    ctx.now_ms = @intCast(std.time.milliTimestamp());
+
+    // Keep context parity with draw() for consistent width/when decisions.
+    // Important: do not mutate runtime shell state during hit-testing.
+    if (state.getCurrentFocusedUuid()) |uuid| {
+        if (state.getPaneShell(uuid)) |info| {
+            if (info.cmd) |c| ctx.last_command = c;
+            if (info.cwd) |c| ctx.cwd = c;
+            if (info.status) |st| ctx.exit_status = st;
+            if (info.duration_ms) |d| ctx.cmd_duration_ms = d;
+            if (info.jobs) |j| ctx.jobs = j;
+            ctx.shell_running = info.running;
+            if (info.cmd) |c| ctx.shell_running_cmd = c;
+            ctx.shell_started_at_ms = info.started_at_ms;
+        }
+    }
+
+    ctx.tab_count = @intCast(@min(tabs.items.len, @as(usize, std.math.maxInt(u16))));
+    ctx.focus_is_float = state.active_floating != null;
+    ctx.focus_is_split = state.active_floating == null;
+
+    if (state.active_floating) |idx| {
+        if (idx < state.floats.items.len) {
+            ctx.alt_screen = state.floats.items[idx].vt.inAltScreen();
+            const fp = state.floats.items[idx];
+            ctx.float_key = fp.float_key;
+            ctx.float_sticky = fp.sticky;
+            ctx.float_global = fp.parent_tab == null;
+            if (fp.float_key != 0) {
+                if (state.getLayoutFloatByKey(fp.float_key)) |fd| {
+                    ctx.float_destroyable = fd.attributes.destroy;
+                    ctx.float_exclusive = fd.attributes.exclusive;
+                    ctx.float_per_cwd = fd.attributes.per_cwd;
+                    ctx.float_isolated = fd.attributes.isolated;
+                    ctx.float_global = ctx.float_global or fd.attributes.global;
+                }
+            }
+        }
+    } else if (state.currentLayout().getFocusedPane()) |pane| {
+        ctx.alt_screen = pane.vt.inAltScreen();
+    }
+
+    var use_basename = true;
+    for (cfg.center) |mod| {
+        if (std.mem.eql(u8, mod.name, "tabs")) {
+            use_basename = std.mem.eql(u8, mod.tab_title, "basename");
+            break;
+        }
+    }
+
+    var tab_names: [16][]const u8 = undefined;
+    var tab_count: usize = 0;
+    var active_display_tab: ?usize = null;
+    for (tabs.items, 0..) |*tab, ti| {
+        const tab_name = if (use_basename)
+            if (tab.layout.getFocusedPane()) |pane|
+                if (pane.getRealCwd()) |p| blk: {
+                    const base = std.fs.path.basename(p);
+                    break :blk if (base.len == 0) "/" else base;
+                } else tab.name
+            else
+                tab.name
+        else
+            tab.name;
+
+        if (tab_count < tab_names.len) {
+            tab_names[tab_count] = tab_name;
+            if (ti == active_tab) active_display_tab = tab_count;
+            tab_count += 1;
+        } else if (ti == active_tab) {
+            tab_names[tab_names.len - 1] = tab_name;
+            active_display_tab = tab_names.len - 1;
+        }
+    }
+    ctx.tab_names = tab_names[0..tab_count];
+    ctx.active_tab = active_display_tab orelse 0;
+    ctx.session_name = session_name;
+
+    const query = queryFromContext(&ctx);
+
+    var center_width: u16 = 0;
+    for (cfg.center) |mod| {
+        if (std.mem.eql(u8, mod.name, "tabs")) {
+            center_width = measureTabsWidth(ctx.tab_names, mod.separator, mod.left_arrow, mod.right_arrow);
+            break;
+        }
+    }
+
+    const center_start = (width -| center_width) / 2;
+    const left_budget = center_start;
+    const right_budget = width -| (center_start +| center_width);
+
+    const ModuleInfo = struct { mod: *const core.Segment, width: u16, visible: bool };
+    var left_modules: [24]ModuleInfo = undefined;
+    var left_count: usize = 0;
+    for (cfg.left) |*mod| {
+        if (left_count < 24) {
+            left_modules[left_count] = .{ .mod = mod, .width = calcModuleWidth(&ctx, &query, mod.*), .visible = false };
+            left_count += 1;
+        }
+    }
+
+    var left_order: [24]usize = undefined;
+    for (0..left_count) |i| left_order[i] = i;
+    for (1..left_count) |i| {
+        const key = left_order[i];
+        var j: usize = i;
+        while (j > 0 and left_modules[left_order[j - 1]].mod.priority > left_modules[key].mod.priority) : (j -= 1) {
+            left_order[j] = left_order[j - 1];
+        }
+        left_order[j] = key;
+    }
+    var left_used: u16 = 0;
+    for (left_order[0..left_count]) |idx| {
+        if (left_used + left_modules[idx].width <= left_budget) {
+            left_modules[idx].visible = true;
+            left_used += left_modules[idx].width;
+        }
+    }
+
+    var right_modules: [24]ModuleInfo = undefined;
+    var right_count: usize = 0;
+    for (cfg.right) |*mod| {
+        if (right_count < 24) {
+            right_modules[right_count] = .{ .mod = mod, .width = calcModuleWidth(&ctx, &query, mod.*), .visible = false };
+            right_count += 1;
+        }
+    }
+    var right_order: [24]usize = undefined;
+    for (0..right_count) |i| right_order[i] = i;
+    for (1..right_count) |i| {
+        const key = right_order[i];
+        var j: usize = i;
+        while (j > 0 and right_modules[right_order[j - 1]].mod.priority > right_modules[key].mod.priority) : (j -= 1) {
+            right_order[j] = right_order[j - 1];
+        }
+        right_order[j] = key;
+    }
+    var right_used: u16 = 0;
+    for (right_order[0..right_count]) |idx| {
+        if (right_used + right_modules[idx].width <= right_budget) {
+            right_modules[idx].visible = true;
+            right_used += right_modules[idx].width;
+        }
+    }
+
+    var lx: u16 = 0;
+    for (0..left_count) |i| {
+        const info = left_modules[i];
+        if (!info.visible or info.width == 0) continue;
+        const start = lx;
+        const end = start +| info.width;
+        if (x >= start and x < end) {
+            return clickCommandFor(info.mod, button);
+        }
+        lx = end;
+    }
+
+    var rx: u16 = width -| right_used;
+    for (0..right_count) |i| {
+        const info = right_modules[i];
+        if (!info.visible or info.width == 0) continue;
+        const start = rx;
+        const end = start +| info.width;
+        if (x >= start and x < end) {
+            return clickCommandFor(info.mod, button);
+        }
+        rx = end;
+    }
+
+    return null;
+}
+
 // Helper to measure tabs width - mirrors exact rendering logic
 fn measureTabsWidth(tab_names: []const []const u8, separator: []const u8, left_arrow: []const u8, right_arrow: []const u8) u16 {
     var w: u16 = 0;
@@ -872,10 +1115,14 @@ fn measureTabsWidth(tab_names: []const []const u8, separator: []const u8, left_a
     return w;
 }
 
-pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment, start_x: u16, y: u16) u16 {
+pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment, start_x: u16, y: u16, hovered: bool) u16 {
     var x = start_x;
 
     if (!passesWhen(ctx, query, mod)) return x;
+
+    const clickable = isClickable(&mod);
+    const active = if (clickable) isButtonActive(&mod, ctx) else false;
+    const invert_style = clickable and (hovered != active);
 
     var command_output: []const u8 = "";
     var command_output_ready = false;
@@ -883,6 +1130,12 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
 
     for (mod.outputs) |out| {
         const style = shp.Style.parse(out.style);
+        var style_final = style;
+        if (invert_style) {
+            const fg_tmp = style_final.fg;
+            style_final.fg = style_final.bg;
+            style_final.bg = fg_tmp;
+        }
         ctx.module_default_style = style;
 
         var output_segs: ?[]const shp.Segment = null;
@@ -916,7 +1169,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
         } else {
             output_segs = ctx.renderSegment(mod.name);
         }
-        x = drawFormatted(renderer, x, y, out.format, output_text, output_segs, style);
+        x = drawFormatted(renderer, x, y, out.format, output_text, output_segs, style_final);
     }
 
     return x;

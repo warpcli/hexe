@@ -3,6 +3,7 @@ const core = @import("core");
 const ipc = core.ipc;
 const wire = core.wire;
 const pod_protocol = core.pod_protocol;
+const AsciicastWriter = core.recording.asciicast.AsciicastWriter;
 const xev = @import("xev").Dynamic;
 const tty = @import("tty.zig");
 const shared = @import("shared.zig");
@@ -12,6 +13,8 @@ const print = std.debug.print;
 const AttachContext = struct {
     conn: *ipc.Connection,
     frame_reader: *pod_protocol.Reader,
+    recorder: ?*AsciicastWriter,
+    capture_input: bool,
     detach_code: u8,
     saw_prefix: bool = false,
     running: bool = true,
@@ -54,6 +57,11 @@ fn stdinCallback(
                 c.running = false;
                 return .disarm;
             };
+            if (c.capture_input) {
+                if (c.recorder) |r| {
+                    r.writeInput(tmp[0..2]) catch {};
+                }
+            }
             return .rearm;
         }
         if (c.in_buf[0] == c.detach_code) {
@@ -66,6 +74,11 @@ fn stdinCallback(
         c.running = false;
         return .disarm;
     };
+    if (c.capture_input) {
+        if (c.recorder) |r| {
+            r.writeInput(c.in_buf[0..n]) catch {};
+        }
+    }
     return .rearm;
 }
 
@@ -94,7 +107,7 @@ fn connCallback(
         return .disarm;
     }
 
-    c.frame_reader.feed(c.net_buf[0..n], @ptrCast(@alignCast(c.conn)), podFrameCallback);
+    c.frame_reader.feed(c.net_buf[0..n], @ptrCast(@alignCast(c)), podFrameCallback);
     return .rearm;
 }
 
@@ -124,6 +137,8 @@ pub fn runPodAttach(
     name: []const u8,
     socket_path: []const u8,
     detach_key: []const u8,
+    record_path: []const u8,
+    capture_input: bool,
 ) !void {
     const target_socket = try resolveTargetSocket(allocator, uuid, name, socket_path);
     defer allocator.free(target_socket);
@@ -147,7 +162,24 @@ pub fn runPodAttach(
     defer if (orig_termios) |t| tty.disableRawMode(std.posix.STDIN_FILENO, t) catch {};
 
     // Initial resize.
-    sendResize(&conn, tty.getTermSize()) catch {};
+    const term_size = tty.getTermSize();
+    sendResize(&conn, term_size) catch {};
+
+    var recorder: ?AsciicastWriter = null;
+    if (record_path.len > 0) {
+        recorder = try AsciicastWriter.init(record_path, .{
+            .width = term_size.cols,
+            .height = term_size.rows,
+            .title = "hexe pod attach",
+            .command = "hexe pod attach",
+        });
+    }
+    defer {
+        if (recorder) |*r| {
+            r.flush() catch {};
+            r.deinit();
+        }
+    }
 
     // Winch handling via a self-pipe.
     var pipe_fds: [2]std.posix.fd_t = .{ -1, -1 };
@@ -184,6 +216,8 @@ pub fn runPodAttach(
     var attach_ctx = AttachContext{
         .conn = &conn,
         .frame_reader = &frame_reader,
+        .recorder = if (recorder) |*r| r else null,
+        .capture_input = capture_input,
         .detach_code = det_code,
     };
 
@@ -228,11 +262,13 @@ fn sendResize(conn: *ipc.Connection, size: tty.TermSize) !void {
 }
 
 fn podFrameCallback(ctx: *anyopaque, frame: pod_protocol.Frame) void {
-    const conn: *ipc.Connection = @ptrCast(@alignCast(ctx));
-    _ = conn;
+    const attach: *AttachContext = @ptrCast(@alignCast(ctx));
     switch (frame.frame_type) {
         .output => {
             _ = std.posix.write(std.posix.STDOUT_FILENO, frame.payload) catch {};
+            if (attach.recorder) |r| {
+                r.writeOutput(frame.payload) catch {};
+            }
         },
         .backlog_end => {},
         else => {},

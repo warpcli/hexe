@@ -108,6 +108,7 @@ fn printHelpRoot() void {
     print("  {s}pod{s}          {s}(alias: pod){s}  Per-pane PTY daemon\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
     print("  {s}shell{s}        {s}(alias: shp){s}  Shell prompt renderer\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
     print("  {s}popup{s}        {s}(alias: pop){s}  Popup overlays\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+    print("  {s}record{s}       Record lifecycle control\n", .{ help_ansi.CMD, help_ansi.RESET });
     print("  {s}config{s}       {s}(alias: cfg){s}  Configuration management\n\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
     print("Try {s}hexe session --help{s} or {s}hexe multiplexer --help{s}\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.CMD, help_ansi.RESET });
 }
@@ -120,12 +121,12 @@ fn printHelpCommand(command: []const u8) void {
     }
     if (std.mem.eql(u8, command, "multiplexer")) {
         print("{s}{s}multiplexer{s} {s}(alias: mux){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-        print("Subcommands: new, attach, float, notify, send, info, layout, focus\n", .{});
+        print("Subcommands: new, attach, record, float, notify, send, info, layout, focus\n", .{});
         return;
     }
     if (std.mem.eql(u8, command, "pod")) {
         print("{s}{s}pod{s} {s}(alias: pod){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-        print("Subcommands: daemon, list, new, send, attach, kill, gc\n", .{});
+        print("Subcommands: daemon, list, new, send, attach, record, kill, gc\n", .{});
         return;
     }
     if (std.mem.eql(u8, command, "shell")) {
@@ -141,6 +142,11 @@ fn printHelpCommand(command: []const u8) void {
     if (std.mem.eql(u8, command, "config")) {
         print("{s}{s}config{s} {s}(alias: cfg){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
         print("Subcommands: validate\n", .{});
+        return;
+    }
+    if (std.mem.eql(u8, command, "record")) {
+        print("{s}{s}record{s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET });
+        print("Subcommands: start, stop, status, toggle\n", .{});
         return;
     }
     printHelpRoot();
@@ -173,6 +179,9 @@ pub fn main() !void {
 
     var config_cmd = app.createCommand("config", "Configuration management");
     config_cmd.setProperty(.help_on_empty_args);
+
+    var record_cmd = app.createCommand("record", "Recording lifecycle control");
+    record_cmd.setProperty(.help_on_empty_args);
 
     // SES subcommands
     var ses_daemon = app.createCommand("daemon", "Start the session daemon");
@@ -274,6 +283,15 @@ pub fn main() !void {
     try pod_attach.addArg(Arg.singleValueOption("name", 'n', null));
     try pod_attach.addArg(Arg.singleValueOption("socket", 's', null));
     try pod_attach.addArg(Arg.singleValueOption("detach", null, null));
+    try pod_attach.addArg(Arg.singleValueOption("record", null, null));
+    try pod_attach.addArg(Arg.booleanOption("capture-input", null, null));
+
+    var pod_record = app.createCommand("record", "Attach to a pod and record asciicast");
+    try pod_record.addArg(Arg.singleValueOption("uuid", 'u', null));
+    try pod_record.addArg(Arg.singleValueOption("name", 'n', null));
+    try pod_record.addArg(Arg.singleValueOption("socket", 's', null));
+    try pod_record.addArg(Arg.singleValueOption("out", 'o', null));
+    try pod_record.addArg(Arg.booleanOption("capture-input", null, null));
 
     var pod_kill = app.createCommand("kill", "Kill a pod by uuid/name");
     try pod_kill.addArg(Arg.singleValueOption("uuid", 'u', null));
@@ -284,7 +302,7 @@ pub fn main() !void {
     var pod_gc = app.createCommand("gc", "Garbage-collect stale pod metadata");
     try pod_gc.addArg(Arg.booleanOption("dry-run", 'n', null));
 
-    try pod_cmd.addSubcommands(&[_]yazap.Command{ pod_daemon, pod_list, pod_new, pod_send, pod_attach, pod_kill, pod_gc });
+    try pod_cmd.addSubcommands(&[_]yazap.Command{ pod_daemon, pod_list, pod_new, pod_send, pod_attach, pod_record, pod_kill, pod_gc });
 
     // MUX subcommands
     var mux_new = app.createCommand("new", "Create new multiplexer session");
@@ -299,6 +317,11 @@ pub fn main() !void {
     try mux_attach.addArg(Arg.booleanOption("debug", 'd', null));
     try mux_attach.addArg(Arg.singleValueOption("logfile", 'L', null));
     try mux_attach.addArg(Arg.singleValueOption("instance", 'I', null));
+
+    var mux_record = app.createCommand("record", "Attach to mux and record asciicast");
+    try mux_record.addArg(Arg.singleValueOption("out", 'o', null));
+    try mux_record.addArg(Arg.booleanOption("capture-input", null, null));
+    try mux_record.addArg(Arg.singleValueOption("instance", 'I', null));
 
     var mux_float = app.createCommand("float", "Spawn a transient float pane");
     try mux_float.addArg(Arg.singleValueOption("command", 'c', null));
@@ -354,7 +377,7 @@ pub fn main() !void {
     var mux_focus = app.createCommand("focus", "Move focus to adjacent pane");
     try mux_focus.addArg(Arg.positional("dir", null, null));
 
-    try mux_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_float, mux_notify, mux_send, mux_info, mux_layout, mux_focus });
+    try mux_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_record, mux_float, mux_notify, mux_send, mux_info, mux_layout, mux_focus });
 
     // SHP subcommands
     var shp_prompt = app.createCommand("prompt", "Render shell prompt");
@@ -412,7 +435,31 @@ pub fn main() !void {
     const config_validate_cmd = app.createCommand("validate", "Validate configuration file");
     try config_cmd.addSubcommand(config_validate_cmd);
 
-    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, pod_cmd, mux_cmd, shp_cmd, pop_cmd, config_cmd });
+    var record_start = app.createCommand("start", "Start background recording");
+    try record_start.addArg(Arg.singleValueOption("scope", null, null));
+    try record_start.addArg(Arg.singleValueOption("uuid", 'u', null));
+    try record_start.addArg(Arg.singleValueOption("name", 'n', null));
+    try record_start.addArg(Arg.singleValueOption("socket", 's', null));
+    try record_start.addArg(Arg.singleValueOption("out", 'o', null));
+    try record_start.addArg(Arg.booleanOption("capture-input", null, null));
+
+    var record_stop = app.createCommand("stop", "Stop background recording");
+    try record_stop.addArg(Arg.singleValueOption("scope", null, null));
+
+    var record_status = app.createCommand("status", "Show recording status");
+    try record_status.addArg(Arg.singleValueOption("scope", null, null));
+    try record_status.addArg(Arg.booleanOption("json", 'j', null));
+
+    var record_toggle = app.createCommand("toggle", "Toggle background recording");
+    try record_toggle.addArg(Arg.singleValueOption("scope", null, null));
+    try record_toggle.addArg(Arg.singleValueOption("uuid", 'u', null));
+    try record_toggle.addArg(Arg.singleValueOption("name", 'n', null));
+    try record_toggle.addArg(Arg.singleValueOption("socket", 's', null));
+    try record_toggle.addArg(Arg.singleValueOption("out", 'o', null));
+    try record_toggle.addArg(Arg.booleanOption("capture-input", null, null));
+    try record_cmd.addSubcommands(&[_]yazap.Command{ record_start, record_stop, record_status, record_toggle });
+
+    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, pod_cmd, mux_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd });
 
     const raw_args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, raw_args);
@@ -596,6 +643,24 @@ pub fn main() !void {
                 m.getSingleValue("name") orelse "",
                 m.getSingleValue("socket") orelse "",
                 m.getSingleValue("detach") orelse "",
+                m.getSingleValue("record") orelse "",
+                m.containsArg("capture-input"),
+            );
+            return;
+        }
+        if (pod_matches.subcommandMatches("record")) |m| {
+            const out = m.getSingleValue("out") orelse "";
+            if (out.len == 0) {
+                print("Error: --out is required for pod record\n", .{});
+                return;
+            }
+            try cli_cmds.runPodRecord(
+                allocator,
+                m.getSingleValue("uuid") orelse "",
+                m.getSingleValue("name") orelse "",
+                m.getSingleValue("socket") orelse "",
+                out,
+                m.containsArg("capture-input"),
             );
             return;
         }
@@ -629,6 +694,17 @@ pub fn main() !void {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
             try runMuxAttach(m.getSingleValue("name") orelse "", m.containsArg("debug"), m.getSingleValue("logfile") orelse "");
+            return;
+        }
+        if (mux_matches.subcommandMatches("record")) |m| {
+            const instance = m.getSingleValue("instance") orelse "";
+            if (instance.len > 0) setInstanceFromCli(instance);
+            const out = m.getSingleValue("out") orelse "";
+            if (out.len == 0) {
+                print("Error: --out is required for mux record\n", .{});
+                return;
+            }
+            try cli_cmds.runMuxRecord(out, m.containsArg("capture-input"));
             return;
         }
         if (mux_matches.subcommandMatches("float")) |m| {
@@ -757,6 +833,41 @@ pub fn main() !void {
         if (pop_matches.subcommandMatches("choose")) |m| {
             const timeout = try parseOptionalI64(m.getSingleValue("timeout"), "timeout");
             try pop_handlers.runPopChoose(allocator, m.getSingleValue("uuid") orelse "", timeout, m.getSingleValue("items") orelse "", m.getSingleValue("message") orelse "");
+            return;
+        }
+    } else if (matches.subcommandMatches("record")) |record_matches| {
+        if (record_matches.subcommandMatches("start")) |m| {
+            try cli_cmds.runRecordStart(
+                allocator,
+                m.getSingleValue("scope") orelse "pod",
+                "",
+                m.getSingleValue("uuid") orelse "",
+                m.getSingleValue("name") orelse "",
+                m.getSingleValue("socket") orelse "",
+                m.getSingleValue("out") orelse "",
+                m.containsArg("capture-input"),
+            );
+            return;
+        }
+        if (record_matches.subcommandMatches("stop")) |m| {
+            try cli_cmds.runRecordStop(allocator, m.getSingleValue("scope") orelse "pod");
+            return;
+        }
+        if (record_matches.subcommandMatches("status")) |m| {
+            try cli_cmds.runRecordStatus(allocator, m.getSingleValue("scope") orelse "pod", m.containsArg("json"));
+            return;
+        }
+        if (record_matches.subcommandMatches("toggle")) |m| {
+            try cli_cmds.runRecordToggle(
+                allocator,
+                m.getSingleValue("scope") orelse "pod",
+                "",
+                m.getSingleValue("uuid") orelse "",
+                m.getSingleValue("name") orelse "",
+                m.getSingleValue("socket") orelse "",
+                m.getSingleValue("out") orelse "",
+                m.containsArg("capture-input"),
+            );
             return;
         }
     } else if (matches.subcommandMatches("config")) |config_matches| {

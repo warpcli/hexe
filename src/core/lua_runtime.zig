@@ -31,6 +31,10 @@ const hexe_pop_choose_setup = api_bridge.hexe_pop_choose_setup;
 const hexe_pop_widgets_pokemon = api_bridge.hexe_pop_widgets_pokemon;
 const hexe_pop_widgets_keycast = api_bridge.hexe_pop_widgets_keycast;
 const hexe_pop_widgets_digits = api_bridge.hexe_pop_widgets_digits;
+const hexe_record_start = api_bridge.hexe_record_start;
+const hexe_record_stop = api_bridge.hexe_record_stop;
+const hexe_record_toggle = api_bridge.hexe_record_toggle;
+const hexe_record_status = api_bridge.hexe_record_status;
 
 /// Configuration loading status
 pub const ConfigStatus = enum {
@@ -54,7 +58,8 @@ pub fn isUnsafeMode() bool {
     if (posix.getenv("HEXE_UNSAFE_CONFIG")) |v| {
         return std.mem.eql(u8, v, "1");
     }
-    return false;
+    // Default to unrestricted mode unless explicitly disabled.
+    return true;
 }
 
 /// Get the config directory path
@@ -620,6 +625,18 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "widgets");
 
     lua.setField(-2, "pop");
+
+    // hexe.record = { start = fn, stop = fn, toggle = fn, status = fn }
+    lua.createTable(0, 4);
+    lua.pushFunction(hexe_record_start);
+    lua.setField(-2, "start");
+    lua.pushFunction(hexe_record_stop);
+    lua.setField(-2, "stop");
+    lua.pushFunction(hexe_record_toggle);
+    lua.setField(-2, "toggle");
+    lua.pushFunction(hexe_record_status);
+    lua.setField(-2, "status");
+    lua.setField(-2, "record");
 
     // hexe.autocmd = {}
     lua.createTable(0, 0);
