@@ -1324,40 +1324,13 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     }
     lua.pop(1);
 
-    // Parse outputs array
+    // outputs is removed from segment schema.
     _ = lua.getField(idx, "outputs");
-    if (lua.typeOf(-1) == .table) {
-        const outputs_len = lua.rawLen(-1);
-        var outputs_list = std.ArrayList(config.OutputDef).empty;
-
-        var i: i32 = 1;
-        while (i <= outputs_len) : (i += 1) {
-            _ = lua.rawGetIndex(-1, i);
-            if (lua.typeOf(-1) == .table) {
-                var output = config.OutputDef{};
-
-                _ = lua.getField(-1, "style");
-                if (lua.typeOf(-1) == .string) {
-                    const style_str = lua.toString(-1) catch "";
-                    output.style = allocator.dupe(u8, style_str) catch "";
-                }
-                lua.pop(1);
-
-                _ = lua.getField(-1, "format");
-                if (lua.typeOf(-1) == .string) {
-                    const format_str = lua.toString(-1) catch "$output";
-                    output.format = allocator.dupe(u8, format_str) catch "$output";
-                }
-                lua.pop(1);
-
-                outputs_list.append(allocator, output) catch {};
-            }
-            lua.pop(1); // pop output table
-        }
-
-        segment.outputs = outputs_list.toOwnedSlice(allocator) catch &[_]config.OutputDef{};
+    if (lua.typeOf(-1) != .nil) {
+        _ = lua.pushString("segment field 'outputs' is removed; style must be returned from 'value'");
+        lua.raiseError();
     }
-    lua.pop(1); // pop outputs array
+    lua.pop(1);
 
     // Parse value (segment value producer).
     // value = function(ctx) ... end OR value = "return ..."
@@ -2227,18 +2200,11 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     }
     lua.pop(1);
 
-    // Parse outputs (required array)
+    // outputs is removed from segment schema.
     _ = lua.getField(idx, "outputs");
-    if (lua.typeOf(-1) == .table) {
-        const n = lua.rawLen(-1);
-        var i: i32 = 1;
-        while (i <= n) : (i += 1) {
-            _ = lua.rawGetIndex(-1, i);
-            if (parseOutputDef(lua, -1, allocator)) |output| {
-                outputs.append(allocator, output) catch {};
-            }
-            lua.pop(1);
-        }
+    if (lua.typeOf(-1) != .nil) {
+        _ = lua.pushString("segment field 'outputs' is removed; style must be returned from 'value'");
+        lua.raiseError();
     }
     lua.pop(1);
 

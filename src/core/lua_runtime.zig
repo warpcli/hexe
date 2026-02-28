@@ -646,6 +646,14 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.createTable(0, 0);
     lua.setField(-2, "api");
 
+    // hexe.color = { fg = fn, bg = fn }
+    lua.createTable(0, 2);
+    lua.pushFunction(hexe_color_fg);
+    lua.setField(-2, "fg");
+    lua.pushFunction(hexe_color_bg);
+    lua.setField(-2, "bg");
+    lua.setField(-2, "color");
+
     // hexe.segment = { <builtin_name> = fn(ctx) -> marker }
     lua.createTable(0, 23);
     lua.pushFunction(hexe_segment_tabs);
@@ -707,6 +715,10 @@ fn injectHexeModule(lua: *Lua) !void {
     // Store in registry for safe require
     lua.pushValue(-1); // duplicate
     lua.setField(zlua.registry_index, "_hexe_module");
+
+    // Also expose as global for callback runtime convenience.
+    lua.pushValue(-1); // duplicate
+    lua.setGlobal("hexe");
 }
 
 fn hexeLoader(state: ?*LuaState) callconv(.c) c_int {
@@ -817,6 +829,36 @@ fn hexe_segment_spinner(state: ?*LuaState) callconv(.c) c_int {
 fn hexe_segment_title(state: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(state orelse return 0);
     return pushSegmentMarker(lua, "title");
+}
+
+fn hexe_color_fg(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    const n = lua.toInteger(1) catch {
+        lua.pushNil();
+        return 1;
+    };
+    const s = std.fmt.allocPrint(std.heap.page_allocator, "fg:{d}", .{n}) catch {
+        lua.pushNil();
+        return 1;
+    };
+    defer std.heap.page_allocator.free(s);
+    _ = lua.pushString(s);
+    return 1;
+}
+
+fn hexe_color_bg(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    const n = lua.toInteger(1) catch {
+        lua.pushNil();
+        return 1;
+    };
+    const s = std.fmt.allocPrint(std.heap.page_allocator, "bg:{d}", .{n}) catch {
+        lua.pushNil();
+        return 1;
+    };
+    defer std.heap.page_allocator.free(s);
+    _ = lua.pushString(s);
+    return 1;
 }
 
 // ===== Parsing helpers for configs =====

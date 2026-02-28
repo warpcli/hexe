@@ -1367,6 +1367,13 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         break :blk null;
     };
 
+    if (runtime.fieldType(-1, "outputs") != .nil) {
+        setParseError(allocator, "config: segment field 'outputs' is removed; return styled blocks from 'value'");
+        allocator.free(name);
+        if (value_code) |vc| allocator.free(vc);
+        return null;
+    }
+
     if (value_code == null) {
         setParseError(allocator, "config: segment requires a non-empty 'value'");
         allocator.free(name);

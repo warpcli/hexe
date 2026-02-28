@@ -11,6 +11,7 @@ const State = @import("state.zig").State;
 const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
 const Pane = @import("pane.zig").Pane;
+const DEFAULT_OUTPUTS = [_]core.config.OutputDef{.{ .style = "", .format = "$output" }};
 
 const WhenCacheEntry = struct {
     last_eval_ms: u64,
@@ -242,12 +243,18 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
 }
 
 fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
-    rt.lua.createTable(0, 13);
+    rt.lua.createTable(0, 16);
 
     rt.lua.pushBoolean(ctx.shell_running);
     rt.lua.setField(-2, "shell_running");
     rt.lua.pushBoolean(ctx.alt_screen);
     rt.lua.setField(-2, "alt_screen");
+    rt.lua.pushBoolean(ctx.focus_is_float);
+    rt.lua.setField(-2, "focus_is_float");
+    rt.lua.pushInteger(ctx.float_key);
+    rt.lua.setField(-2, "float_key");
+    rt.lua.pushBoolean(ctx.focus_is_float and ctx.float_key == 0);
+    rt.lua.setField(-2, "adhoc_float");
 
     _ = rt.lua.pushString(ctx.cwd);
     rt.lua.setField(-2, "cwd");
@@ -345,39 +352,124 @@ fn luaCommandCode(command: []const u8) ?[]const u8 {
     return body;
 }
 
-fn evalLuaCommandToBuf(code: []const u8, ctx: *shp.Context, out_buf: []u8) []const u8 {
+const LuaEval = struct {
+    text: [256]u8 = [_]u8{0} ** 256,
+    text_len: usize = 0,
+    segs: [16]shp.Segment = undefined,
+    seg_text: [16][64]u8 = undefined,
+    seg_count: usize = 0,
+
+    fn textSlice(self: *const LuaEval) []const u8 {
+        return self.text[0..self.text_len];
+    }
+
+    fn segSlice(self: *const LuaEval) ?[]const shp.Segment {
+        if (self.seg_count == 0) return null;
+        return self.segs[0..self.seg_count];
+    }
+};
+
+fn evalLuaCommand(code: []const u8, ctx: *shp.Context) LuaEval {
+    var out: LuaEval = .{};
     if (when_lua_rt == null) {
         when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch null;
-        if (when_lua_rt == null) return "";
+        if (when_lua_rt == null) return out;
     }
     const rt = &when_lua_rt.?;
     populateLuaContext(rt, ctx);
 
-    const code_z = rt.allocator.dupeZ(u8, code) catch return "";
+    const code_z = rt.allocator.dupeZ(u8, code) catch return out;
     defer rt.allocator.free(code_z);
 
-    rt.lua.loadString(code_z) catch return "";
+    rt.lua.loadString(code_z) catch return out;
     rt.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
         rt.lua.pop(1);
-        return "";
+        return out;
     };
     defer rt.lua.pop(1);
 
-    return switch (rt.lua.typeOf(-1)) {
-        .string => blk: {
-            const s = rt.lua.toString(-1) catch break :blk "";
-            const n = @min(s.len, out_buf.len);
-            @memcpy(out_buf[0..n], s[0..n]);
-            break :blk out_buf[0..n];
+    switch (rt.lua.typeOf(-1)) {
+        .string => {
+            const s = rt.lua.toString(-1) catch return out;
+            const n = @min(s.len, out.text.len);
+            @memcpy(out.text[0..n], s[0..n]);
+            out.text_len = n;
+            return out;
         },
-        .number => blk: {
-            const n = rt.lua.toNumber(-1) catch break :blk "";
-            const rendered = std.fmt.bufPrint(out_buf, "{d}", .{n}) catch "";
-            break :blk rendered;
+        .number => {
+            const n = rt.lua.toNumber(-1) catch return out;
+            const rendered = std.fmt.bufPrint(out.text[0..], "{d}", .{n}) catch "";
+            out.text_len = rendered.len;
+            return out;
         },
-        .boolean => if (rt.lua.toBoolean(-1)) "true" else "",
-        else => "",
-    };
+        .boolean => {
+            if (rt.lua.toBoolean(-1)) {
+                @memcpy(out.text[0..4], "true");
+                out.text_len = 4;
+            }
+            return out;
+        },
+        .table => {
+            const len: i32 = @intCast(@min(rt.lua.rawLen(-1), out.segs.len));
+            var i: i32 = 1;
+            while (i <= len) : (i += 1) {
+                _ = rt.lua.rawGetIndex(-1, i);
+                defer rt.lua.pop(1);
+                if (rt.lua.typeOf(-1) != .table) continue;
+
+                _ = rt.lua.getField(-1, "text");
+                if (rt.lua.typeOf(-1) != .string) {
+                    rt.lua.pop(1);
+                    continue;
+                }
+                const txt = rt.lua.toString(-1) catch {
+                    rt.lua.pop(1);
+                    continue;
+                };
+                rt.lua.pop(1);
+
+                if (txt.len == 0 or out.seg_count >= out.segs.len) continue;
+                const bi = out.seg_count;
+                const tn = @min(txt.len, out.seg_text[bi].len);
+                @memcpy(out.seg_text[bi][0..tn], txt[0..tn]);
+
+                var style = shp.Style{};
+                _ = rt.lua.getField(-1, "style");
+                if (rt.lua.typeOf(-1) == .string) {
+                    const ss = rt.lua.toString(-1) catch "";
+                    style = shp.Style.parse(ss);
+                }
+                rt.lua.pop(1);
+
+                _ = rt.lua.getField(-1, "fg");
+                if (rt.lua.typeOf(-1) == .number) {
+                    const fg = rt.lua.toInteger(-1) catch -1;
+                    if (fg >= 0 and fg <= 255) style.fg = .{ .palette = @intCast(fg) };
+                }
+                rt.lua.pop(1);
+
+                _ = rt.lua.getField(-1, "bg");
+                if (rt.lua.typeOf(-1) == .number) {
+                    const bg = rt.lua.toInteger(-1) catch -1;
+                    if (bg >= 0 and bg <= 255) style.bg = .{ .palette = @intCast(bg) };
+                }
+                rt.lua.pop(1);
+
+                _ = rt.lua.getField(-1, "bold");
+                if (rt.lua.typeOf(-1) == .boolean) style.bold = rt.lua.toBoolean(-1);
+                rt.lua.pop(1);
+
+                _ = rt.lua.getField(-1, "italic");
+                if (rt.lua.typeOf(-1) == .boolean) style.italic = rt.lua.toBoolean(-1);
+                rt.lua.pop(1);
+
+                out.segs[bi] = .{ .text = out.seg_text[bi][0..tn], .style = style };
+                out.seg_count += 1;
+            }
+            return out;
+        },
+        else => return out,
+    }
 }
 
 fn passesWhen(ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment) bool {
@@ -1128,16 +1220,38 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
     var x = start_x;
     _ = query;
 
+    var spinner_allowed = true;
+    if (mod.spinner != null) {
+        if (mod.command) |cmd| {
+            if (luaCommandCode(cmd)) |code| {
+                const gate_eval = evalLuaCommand(code, ctx);
+                const gate_text = gate_eval.textSlice();
+                spinner_allowed = gate_eval.seg_count > 0 or gate_text.len > 0;
+            }
+        }
+    }
+    if (mod.spinner != null and !spinner_allowed) return x;
+
     const clickable = isClickable(&mod);
     const active = if (clickable) isButtonActive(&mod, ctx) else false;
     const invert_style = clickable and (hovered != active);
 
     var command_output: []const u8 = "";
     var command_output_ready = false;
-    var command_output_buf: [256]u8 = undefined;
+    var command_eval: LuaEval = .{};
 
-    for (mod.outputs) |out| {
-        const style = shp.Style.parse(out.style);
+    const outputs = if (mod.outputs.len == 0) DEFAULT_OUTPUTS[0..] else mod.outputs;
+    for (outputs) |out| {
+        var style = shp.Style.parse(out.style);
+        var format_use = out.format;
+        if (mod.outputs.len == 0) {
+            if (std.mem.eql(u8, mod.name, "spinner")) {
+                format_use = " $output ";
+            } else if (std.mem.eql(u8, mod.name, "randomdo")) {
+                format_use = "$output ";
+                if (style.isEmpty()) style = shp.Style.parse("bg:0 fg:1");
+            }
+        }
         var style_final = style;
         if (invert_style) {
             const fg_tmp = style_final.fg;
@@ -1158,34 +1272,44 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                     output_text = spinnerAsciiFrame(ctx.now_ms, cfg.started_at_ms, cfg.step_ms);
                 }
             }
+        } else if (mod.command) |cmd| {
+            if (!command_output_ready) {
+                if (luaCommandCode(cmd)) |code| {
+                    command_eval = evalLuaCommand(code, ctx);
+                    command_output = command_eval.textSlice();
+                } else {
+                    command_output = "";
+                }
+                command_output_ready = true;
+            }
+            output_segs = command_eval.segSlice();
+            output_text = command_output;
+            if (output_segs == null) {
+                if (builtinNameFromMarker(output_text)) |builtin_name| {
+                    if (std.mem.eql(u8, builtin_name, "randomdo")) {
+                        output_text = randomdoTextFor(ctx, mod, true);
+                    } else {
+                        output_segs = ctx.renderSegment(builtin_name);
+                        output_text = "";
+                    }
+                }
+            }
         } else if (std.mem.eql(u8, mod.name, "spinner")) {
             output_text = spinnerAsciiFrame(ctx.now_ms, ctx.shell_started_at_ms orelse 0, 100);
         } else if (std.mem.eql(u8, mod.name, "session")) {
             output_text = ctx.session_name;
         } else if (std.mem.eql(u8, mod.name, "randomdo")) {
             output_text = randomdoTextFor(ctx, mod, true);
-        } else if (mod.command) |cmd| {
-            if (!command_output_ready) {
-                if (luaCommandCode(cmd)) |code| {
-                    command_output = evalLuaCommandToBuf(code, ctx, command_output_buf[0..]);
-                }
-                command_output_ready = true;
-            }
-            output_text = command_output;
-            if (builtinNameFromMarker(output_text)) |builtin_name| {
-                output_segs = ctx.renderSegment(builtin_name);
-                output_text = "";
-            }
         } else {
             output_segs = ctx.renderSegment(mod.name);
         }
-        x = drawFormatted(renderer, x, y, out.format, output_text, output_segs, style_final);
+        x = drawFormatted(renderer, ctx, x, y, format_use, output_text, output_segs, style_final);
     }
 
     return x;
 }
 
-pub fn drawFormatted(renderer: *Renderer, start_x: u16, y: u16, format: []const u8, output: []const u8, output_segs: ?[]const shp.Segment, style: shp.Style) u16 {
+pub fn drawFormatted(renderer: *Renderer, ctx: *shp.Context, start_x: u16, y: u16, format: []const u8, output: []const u8, output_segs: ?[]const shp.Segment, style: shp.Style) u16 {
     var x = start_x;
     var i: usize = 0;
 
@@ -1193,7 +1317,16 @@ pub fn drawFormatted(renderer: *Renderer, start_x: u16, y: u16, format: []const 
         if (i + 7 <= format.len and std.mem.eql(u8, format[i..][0..7], "$output")) {
             if (output_segs) |segs| {
                 for (segs) |seg| {
-                    x = drawSegment(renderer, x, y, seg, style);
+                    const seg_base_style = mergeStyle(style, seg.style);
+                    if (builtinNameFromMarker(seg.text)) |builtin_name| {
+                        if (ctx.renderSegment(builtin_name)) |built_segs| {
+                            for (built_segs) |bs| {
+                                x = drawSegment(renderer, x, y, bs, seg_base_style);
+                            }
+                        }
+                    } else {
+                        x = drawSegment(renderer, x, y, seg, style);
+                    }
                 }
             } else {
                 x = drawStyledText(renderer, x, y, output, style);
@@ -1211,14 +1344,35 @@ pub fn drawFormatted(renderer: *Renderer, start_x: u16, y: u16, format: []const 
 
 pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment) u16 {
     _ = query;
+    var spinner_allowed = true;
+    if (mod.spinner != null) {
+        if (mod.command) |cmd| {
+            if (luaCommandCode(cmd)) |code| {
+                const gate_eval = evalLuaCommand(code, ctx);
+                const gate_text = gate_eval.textSlice();
+                spinner_allowed = gate_eval.seg_count > 0 or gate_text.len > 0;
+            }
+        }
+    }
+    if (mod.spinner != null and !spinner_allowed) return 0;
     var width: u16 = 0;
 
     var command_output: []const u8 = "";
     var command_output_ready = false;
-    var command_output_buf: [256]u8 = undefined;
+    var command_eval: LuaEval = .{};
 
-    for (mod.outputs) |out| {
-        const style = shp.Style.parse(out.style);
+    const outputs = if (mod.outputs.len == 0) DEFAULT_OUTPUTS[0..] else mod.outputs;
+    for (outputs) |out| {
+        var style = shp.Style.parse(out.style);
+        var format_use = out.format;
+        if (mod.outputs.len == 0) {
+            if (std.mem.eql(u8, mod.name, "spinner")) {
+                format_use = " $output ";
+            } else if (std.mem.eql(u8, mod.name, "randomdo")) {
+                format_use = "$output ";
+                if (style.isEmpty()) style = shp.Style.parse("bg:0 fg:1");
+            }
+        }
         ctx.module_default_style = style;
 
         var output_segs: ?[]const shp.Segment = null;
@@ -1233,6 +1387,28 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
                     output_text = spinnerAsciiFrame(ctx.now_ms, cfg.started_at_ms, cfg.step_ms);
                 }
             }
+        } else if (mod.command) |cmd| {
+            if (!command_output_ready) {
+                if (luaCommandCode(cmd)) |code| {
+                    command_eval = evalLuaCommand(code, ctx);
+                    command_output = command_eval.textSlice();
+                } else {
+                    command_output = "";
+                }
+                command_output_ready = true;
+            }
+            output_segs = command_eval.segSlice();
+            output_text = command_output;
+            if (output_segs == null) {
+                if (builtinNameFromMarker(output_text)) |builtin_name| {
+                    if (std.mem.eql(u8, builtin_name, "randomdo")) {
+                        width += calcFormattedWidthMax(format_use, randomdo_mod.MAX_LEN);
+                        continue;
+                    }
+                    output_segs = ctx.renderSegment(builtin_name);
+                    output_text = "";
+                }
+            }
         } else if (std.mem.eql(u8, mod.name, "spinner")) {
             output_text = spinnerAsciiFrame(ctx.now_ms, ctx.shell_started_at_ms orelse 0, 100);
         } else if (std.mem.eql(u8, mod.name, "session")) {
@@ -1240,22 +1416,10 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
         } else if (std.mem.eql(u8, mod.name, "randomdo")) {
             width += calcFormattedWidthMax(out.format, randomdo_mod.MAX_LEN);
             continue;
-        } else if (mod.command) |cmd| {
-            if (!command_output_ready) {
-                if (luaCommandCode(cmd)) |code| {
-                    command_output = evalLuaCommandToBuf(code, ctx, command_output_buf[0..]);
-                }
-                command_output_ready = true;
-            }
-            output_text = command_output;
-            if (builtinNameFromMarker(output_text)) |builtin_name| {
-                output_segs = ctx.renderSegment(builtin_name);
-                output_text = "";
-            }
         } else {
             output_segs = ctx.renderSegment(mod.name);
         }
-        width += calcFormattedWidth(out.format, output_text, output_segs);
+        width += calcFormattedWidth(ctx, format_use, output_text, output_segs);
     }
 
     return width;
@@ -1287,7 +1451,7 @@ pub fn measureText(text: []const u8) u16 {
     return vaxis.gwidth.gwidth(text, .unicode);
 }
 
-pub fn calcFormattedWidth(format: []const u8, output: []const u8, output_segs: ?[]const shp.Segment) u16 {
+pub fn calcFormattedWidth(ctx: *shp.Context, format: []const u8, output: []const u8, output_segs: ?[]const shp.Segment) u16 {
     var width: u16 = 0;
     var i: usize = 0;
 
@@ -1295,7 +1459,13 @@ pub fn calcFormattedWidth(format: []const u8, output: []const u8, output_segs: ?
         if (i + 7 <= format.len and std.mem.eql(u8, format[i..][0..7], "$output")) {
             if (output_segs) |segs| {
                 for (segs) |seg| {
-                    width += measureText(seg.text);
+                    if (builtinNameFromMarker(seg.text)) |builtin_name| {
+                        if (ctx.renderSegment(builtin_name)) |built_segs| {
+                            for (built_segs) |bs| width += measureText(bs.text);
+                        }
+                    } else {
+                        width += measureText(seg.text);
+                    }
                 }
             } else {
                 width += measureText(output);
