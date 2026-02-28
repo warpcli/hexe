@@ -118,9 +118,9 @@ hexe pod attach [--uuid <u>] [--name <n>] [--socket <path>] [--detach <key>] [--
 Raw TTY attach to a pod (like `screen -r` but for a single PTY).
 
 ```sh
-hexe pod record [--uuid <u>] [--name <n>] [--socket <path>] --out <file.cast> [--detach <key>] [--capture-input]
+hexe pod record [--uuid <u>] [--name <n>] [--socket <path>] --out <file.cast> [--capture-input]
 ```
-Attach to a pod and write an asciicast recording.
+Observe a pod and write an asciicast recording without replacing the active VT attach client.
 
 ```sh
 hexe pod send <text> [--uuid <u>] [--name <n>] [--enter] [--ctrl]

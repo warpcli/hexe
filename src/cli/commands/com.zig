@@ -9,6 +9,7 @@ pub const runPodList = @import("pod_list.zig").runPodList;
 pub const runPodSend = @import("pod_send.zig").runPodSend;
 pub const runPodNew = @import("pod_new.zig").runPodNew;
 pub const runPodAttach = @import("pod_attach.zig").runPodAttach;
+pub const runPodRecord = @import("pod_record.zig").runPodRecord;
 pub const runPodKill = @import("pod_kill.zig").runPodKill;
 pub const runPodGc = @import("pod_gc.zig").runPodGc;
 

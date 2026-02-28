@@ -125,7 +125,7 @@ fn printHelpCommand(command: []const u8) void {
     }
     if (std.mem.eql(u8, command, "pod")) {
         print("{s}{s}pod{s} {s}(alias: pod){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-        print("Subcommands: daemon, list, new, send, attach, kill, gc\n", .{});
+        print("Subcommands: daemon, list, new, send, attach, record, kill, gc\n", .{});
         return;
     }
     if (std.mem.eql(u8, command, "shell")) {
@@ -281,7 +281,6 @@ pub fn main() !void {
     try pod_record.addArg(Arg.singleValueOption("uuid", 'u', null));
     try pod_record.addArg(Arg.singleValueOption("name", 'n', null));
     try pod_record.addArg(Arg.singleValueOption("socket", 's', null));
-    try pod_record.addArg(Arg.singleValueOption("detach", null, null));
     try pod_record.addArg(Arg.singleValueOption("out", 'o', null));
     try pod_record.addArg(Arg.booleanOption("capture-input", null, null));
 
@@ -617,12 +616,11 @@ pub fn main() !void {
                 print("Error: --out is required for pod record\n", .{});
                 return;
             }
-            try cli_cmds.runPodAttach(
+            try cli_cmds.runPodRecord(
                 allocator,
                 m.getSingleValue("uuid") orelse "",
                 m.getSingleValue("name") orelse "",
                 m.getSingleValue("socket") orelse "",
-                m.getSingleValue("detach") orelse "",
                 out,
                 m.containsArg("capture-input"),
             );

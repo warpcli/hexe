@@ -158,7 +158,6 @@ pub fn main() !void {
     const pod_record_uuid = try pod_record.string("u", "uuid", null);
     const pod_record_name = try pod_record.string("n", "name", null);
     const pod_record_socket = try pod_record.string("s", "socket", null);
-    const pod_record_detach = try pod_record.string("", "detach", null);
     const pod_record_out = try pod_record.string("o", "out", null);
     const pod_record_capture_input = try pod_record.flag("", "capture-input", null);
 
@@ -406,7 +405,7 @@ pub fn main() !void {
         } else if (found_pod and found_attach) {
             print("Usage: hexe pod attach [OPTIONS]\n\nInteractive attach to a pod socket (raw tty).\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID (32 hex chars)\n  -n, --name <NAME>        Target pod by name (via pod-*.meta scan)\n  -s, --socket <PATH>      Target pod by explicit socket path\n      --detach <key>       Detach prefix Ctrl+<key> (default: b), then press 'd'\n      --record <PATH>      Write asciicast recording (.cast)\n      --capture-input      Include typed input events in recording\n", .{});
         } else if (found_pod and found_record) {
-            print("Usage: hexe pod record [OPTIONS]\n\nAttach to a pod and write an asciicast recording.\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID (32 hex chars)\n  -n, --name <NAME>        Target pod by name (via pod-*.meta scan)\n  -s, --socket <PATH>      Target pod by explicit socket path\n      --detach <key>       Detach prefix Ctrl+<key> (default: b), then press 'd'\n  -o, --out <PATH>         Output cast file path (required)\n      --capture-input      Include typed input events in recording\n", .{});
+            print("Usage: hexe pod record [OPTIONS]\n\nObserve a pod and write an asciicast recording (non-intrusive).\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID (32 hex chars)\n  -n, --name <NAME>        Target pod by name (via pod-*.meta scan)\n  -s, --socket <PATH>      Target pod by explicit socket path\n  -o, --out <PATH>         Output cast file path (required)\n      --capture-input      Include input frames when available\n", .{});
         } else if (found_pod and found_kill) {
             print("Usage: hexe pod kill [OPTIONS]\n\nKill a pod process (reads pid from pod-*.meta).\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID\n  -n, --name <NAME>        Target pod by name (newest created_at wins)\n  -s, --signal <SIG>       Signal name or number (default: TERM)\n                           Names: TERM, KILL, INT, HUP, QUIT, STOP, CONT, TSTP, USR1, USR2\n  -f, --force              Follow with SIGKILL\n", .{});
         } else if (found_pod and found_gc) {
@@ -587,12 +586,11 @@ pub fn main() !void {
                 print("Error: --out is required for pod record\n", .{});
                 return;
             }
-            try cli_cmds.runPodAttach(
+            try cli_cmds.runPodRecord(
                 allocator,
                 pod_record_uuid.*,
                 pod_record_name.*,
                 pod_record_socket.*,
-                pod_record_detach.*,
                 pod_record_out.*,
                 pod_record_capture_input.*,
             );

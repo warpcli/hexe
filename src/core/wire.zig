@@ -50,6 +50,8 @@ pub const POD_HANDSHAKE_SES_VT: u8 = 0x01;
 pub const POD_HANDSHAKE_SHP_CTL: u8 = 0x02;
 /// Sent by CLI tools (pod send/attach) for auxiliary input (no backlog, no replace).
 pub const POD_HANDSHAKE_AUX_INPUT: u8 = 0x03;
+/// Sent by CLI tools for auxiliary output tap (observe-only, no replace).
+pub const POD_HANDSHAKE_AUX_OBSERVER: u8 = 0x04;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Control message types — carried inside ControlHeader on channels ①④⑤.
