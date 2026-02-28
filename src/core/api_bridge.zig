@@ -1544,7 +1544,7 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
         .progress
     else if (has_button)
         .button
-    else if (segment.builtin != null and value_command == null)
+    else if ((segment.builtin != null or builtin_command != null) and value_command == null)
         .builtin
     else
         .value;
@@ -1792,7 +1792,9 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
             .button => "button segment requires 'value' or 'builtin'",
             .progress => "progress segment requires 'value' or 'builtin'",
         };
-        _ = lua.pushString(msg);
+        const owned_msg = std.fmt.allocPrint(allocator, "segment '{s}': {s}", .{ segment.name, msg }) catch null;
+        defer if (owned_msg) |m| allocator.free(m);
+        _ = lua.pushString(owned_msg orelse msg);
         lua.raiseError();
     }
 
@@ -2581,7 +2583,7 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
         .progress
     else if (has_button)
         .button
-    else if (builtin != null and command == null)
+    else if ((builtin != null or builtin_command != null) and command == null)
         .builtin
     else
         .value;
@@ -2645,7 +2647,9 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
             .button => "button segment requires 'value' or 'builtin'",
             .progress => "progress segment requires 'value' or 'builtin'",
         };
-        _ = lua.pushString(msg);
+        const owned_msg = std.fmt.allocPrint(allocator, "segment '{s}': {s}", .{ name.?, msg }) catch null;
+        defer if (owned_msg) |m| allocator.free(m);
+        _ = lua.pushString(owned_msg orelse msg);
         lua.raiseError();
     }
 

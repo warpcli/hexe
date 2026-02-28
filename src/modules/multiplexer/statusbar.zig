@@ -495,43 +495,84 @@ fn evalLuaCommand(code: []const u8, ctx: *shp.Context) LuaEval {
     }
 }
 
-fn evalLuaBuiltinName(code: []const u8, ctx: *shp.Context) ?[]const u8 {
+const BuiltinDesc = struct {
+    name: ?[]const u8 = null,
+    style: shp.Style = .{},
+    prefix: []const u8 = "",
+    suffix: []const u8 = "",
+};
+
+fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
+    var desc: BuiltinDesc = .{};
     if (when_lua_rt == null) {
         when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch null;
-        if (when_lua_rt == null) return null;
+        if (when_lua_rt == null) return desc;
     }
     const rt = &when_lua_rt.?;
     populateLuaContext(rt, ctx);
 
-    const code_z = rt.allocator.dupeZ(u8, code) catch return null;
+    const code_z = rt.allocator.dupeZ(u8, code) catch return desc;
     defer rt.allocator.free(code_z);
 
-    rt.lua.loadString(code_z) catch return null;
+    rt.lua.loadString(code_z) catch return desc;
     rt.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
         rt.lua.pop(1);
-        return null;
+        return desc;
     };
     defer rt.lua.pop(1);
 
     switch (rt.lua.typeOf(-1)) {
         .string => {
-            const s = rt.lua.toString(-1) catch return null;
+            const s = rt.lua.toString(-1) catch return desc;
             const t = std.mem.trim(u8, s, " \t\r\n");
-            if (t.len == 0) return null;
-            return t;
+            if (t.len > 0) desc.name = t;
+            return desc;
         },
         .table => {
             _ = rt.lua.getField(-1, "name");
-            defer rt.lua.pop(1);
             if (rt.lua.typeOf(-1) == .string) {
-                const s = rt.lua.toString(-1) catch return null;
+                const s = rt.lua.toString(-1) catch "";
                 const t = std.mem.trim(u8, s, " \t\r\n");
-                if (t.len == 0) return null;
-                return t;
+                if (t.len > 0) desc.name = t;
             }
-            return null;
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "style");
+            if (rt.lua.typeOf(-1) == .string) {
+                const ss = rt.lua.toString(-1) catch "";
+                desc.style = shp.Style.parse(ss);
+            }
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "fg");
+            if (rt.lua.typeOf(-1) == .number) {
+                const fg = rt.lua.toInteger(-1) catch -1;
+                if (fg >= 0 and fg <= 255) desc.style.fg = .{ .palette = @intCast(fg) };
+            }
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "bg");
+            if (rt.lua.typeOf(-1) == .number) {
+                const bg = rt.lua.toInteger(-1) catch -1;
+                if (bg >= 0 and bg <= 255) desc.style.bg = .{ .palette = @intCast(bg) };
+            }
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "prefix");
+            if (rt.lua.typeOf(-1) == .string) {
+                desc.prefix = rt.lua.toString(-1) catch "";
+            }
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "suffix");
+            if (rt.lua.typeOf(-1) == .string) {
+                desc.suffix = rt.lua.toString(-1) catch "";
+            }
+            rt.lua.pop(1);
+
+            return desc;
         },
-        else => return null,
+        else => return desc,
     }
 }
 
@@ -1338,8 +1379,33 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
         } else if (mod.command) |cmd| {
             if (!command_output_ready) {
                 if (mod.kind == .builtin) {
-                    if (evalLuaBuiltinName(cmd, ctx)) |builtin_name| {
-                        output_segs = ctx.renderSegment(builtin_name);
+                    const bdesc = evalLuaBuiltinDesc(cmd, ctx);
+                    if (bdesc.name) |builtin_name| {
+                        if (ctx.renderSegment(builtin_name)) |segs| {
+                            var styled: [16]shp.Segment = undefined;
+                            var text_buf: [16][96]u8 = undefined;
+                            var count: usize = 0;
+                            if (bdesc.prefix.len > 0 and count < styled.len) {
+                                const pn = @min(bdesc.prefix.len, text_buf[count].len);
+                                @memcpy(text_buf[count][0..pn], bdesc.prefix[0..pn]);
+                                styled[count] = .{ .text = text_buf[count][0..pn], .style = bdesc.style };
+                                count += 1;
+                            }
+                            for (segs) |seg| {
+                                if (count >= styled.len) break;
+                                const tn = @min(seg.text.len, text_buf[count].len);
+                                @memcpy(text_buf[count][0..tn], seg.text[0..tn]);
+                                styled[count] = .{ .text = text_buf[count][0..tn], .style = mergeStyle(bdesc.style, seg.style) };
+                                count += 1;
+                            }
+                            if (bdesc.suffix.len > 0 and count < styled.len) {
+                                const sn = @min(bdesc.suffix.len, text_buf[count].len);
+                                @memcpy(text_buf[count][0..sn], bdesc.suffix[0..sn]);
+                                styled[count] = .{ .text = text_buf[count][0..sn], .style = bdesc.style };
+                                count += 1;
+                            }
+                            output_segs = styled[0..count];
+                        }
                     }
                 } else if (mod.kind == .progress and !progressVisible(mod, ctx)) {
                     command_output = "";
@@ -1484,8 +1550,33 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
         } else if (mod.command) |cmd| {
             if (!command_output_ready) {
                 if (mod.kind == .builtin) {
-                    if (evalLuaBuiltinName(cmd, ctx)) |builtin_name| {
-                        output_segs = ctx.renderSegment(builtin_name);
+                    const bdesc = evalLuaBuiltinDesc(cmd, ctx);
+                    if (bdesc.name) |builtin_name| {
+                        if (ctx.renderSegment(builtin_name)) |segs| {
+                            var styled: [16]shp.Segment = undefined;
+                            var text_buf: [16][96]u8 = undefined;
+                            var count: usize = 0;
+                            if (bdesc.prefix.len > 0 and count < styled.len) {
+                                const pn = @min(bdesc.prefix.len, text_buf[count].len);
+                                @memcpy(text_buf[count][0..pn], bdesc.prefix[0..pn]);
+                                styled[count] = .{ .text = text_buf[count][0..pn], .style = bdesc.style };
+                                count += 1;
+                            }
+                            for (segs) |seg| {
+                                if (count >= styled.len) break;
+                                const tn = @min(seg.text.len, text_buf[count].len);
+                                @memcpy(text_buf[count][0..tn], seg.text[0..tn]);
+                                styled[count] = .{ .text = text_buf[count][0..tn], .style = mergeStyle(bdesc.style, seg.style) };
+                                count += 1;
+                            }
+                            if (bdesc.suffix.len > 0 and count < styled.len) {
+                                const sn = @min(bdesc.suffix.len, text_buf[count].len);
+                                @memcpy(text_buf[count][0..sn], bdesc.suffix[0..sn]);
+                                styled[count] = .{ .text = text_buf[count][0..sn], .style = bdesc.style };
+                                count += 1;
+                            }
+                            output_segs = styled[0..count];
+                        }
                     }
                 } else if (mod.kind == .progress and !progressVisible(mod, ctx)) {
                     command_output = "";

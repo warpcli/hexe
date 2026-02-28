@@ -13,6 +13,17 @@ fn builtinNameFromMarker(s: []const u8) ?[]const u8 {
     return name;
 }
 
+fn mergeStyle(base: Style, override: Style) Style {
+    var out = base;
+    if (override.fg != .none) out.fg = override.fg;
+    if (override.bg != .none) out.bg = override.bg;
+    if (override.bold) out.bold = true;
+    if (override.italic) out.italic = true;
+    if (override.underline) out.underline = true;
+    if (override.dim) out.dim = true;
+    return out;
+}
+
 fn populateLuaContext(runtime: *LuaRuntime, ctx: *segment.Context) void {
     runtime.lua.createTable(0, 8);
     _ = runtime.lua.pushString(ctx.cwd);
@@ -214,38 +225,79 @@ fn evalLuaGate(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bo
     };
 }
 
-fn evalLuaBuiltinName(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) ?[]const u8 {
+const BuiltinDesc = struct {
+    name: ?[]const u8 = null,
+    style: Style = .{},
+    prefix: []const u8 = "",
+    suffix: []const u8 = "",
+};
+
+fn evalLuaBuiltinDesc(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) BuiltinDesc {
+    var desc: BuiltinDesc = .{};
     populateLuaContext(runtime, ctx);
 
-    const code_z = runtime.allocator.dupeZ(u8, code) catch return null;
+    const code_z = runtime.allocator.dupeZ(u8, code) catch return desc;
     defer runtime.allocator.free(code_z);
 
-    runtime.lua.loadString(code_z) catch return null;
+    runtime.lua.loadString(code_z) catch return desc;
     runtime.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
         runtime.lua.pop(1);
-        return null;
+        return desc;
     };
     defer runtime.lua.pop(1);
 
     switch (runtime.lua.typeOf(-1)) {
         .string => {
-            const s = runtime.lua.toString(-1) catch return null;
+            const s = runtime.lua.toString(-1) catch return desc;
             const t = std.mem.trim(u8, s, " \t\r\n");
-            if (t.len == 0) return null;
-            return t;
+            if (t.len > 0) desc.name = t;
+            return desc;
         },
         .table => {
             _ = runtime.lua.getField(-1, "name");
-            defer runtime.lua.pop(1);
             if (runtime.lua.typeOf(-1) == .string) {
-                const s = runtime.lua.toString(-1) catch return null;
+                const s = runtime.lua.toString(-1) catch "";
                 const t = std.mem.trim(u8, s, " \t\r\n");
-                if (t.len == 0) return null;
-                return t;
+                if (t.len > 0) desc.name = t;
             }
-            return null;
+            runtime.lua.pop(1);
+
+            _ = runtime.lua.getField(-1, "style");
+            if (runtime.lua.typeOf(-1) == .string) {
+                const s = runtime.lua.toString(-1) catch "";
+                desc.style = Style.parse(s);
+            }
+            runtime.lua.pop(1);
+
+            _ = runtime.lua.getField(-1, "fg");
+            if (runtime.lua.typeOf(-1) == .number) {
+                const fg = runtime.lua.toInteger(-1) catch -1;
+                if (fg >= 0 and fg <= 255) desc.style.fg = .{ .palette = @intCast(fg) };
+            }
+            runtime.lua.pop(1);
+
+            _ = runtime.lua.getField(-1, "bg");
+            if (runtime.lua.typeOf(-1) == .number) {
+                const bg = runtime.lua.toInteger(-1) catch -1;
+                if (bg >= 0 and bg <= 255) desc.style.bg = .{ .palette = @intCast(bg) };
+            }
+            runtime.lua.pop(1);
+
+            _ = runtime.lua.getField(-1, "prefix");
+            if (runtime.lua.typeOf(-1) == .string) {
+                desc.prefix = runtime.lua.toString(-1) catch "";
+            }
+            runtime.lua.pop(1);
+
+            _ = runtime.lua.getField(-1, "suffix");
+            if (runtime.lua.typeOf(-1) == .string) {
+                desc.suffix = runtime.lua.toString(-1) catch "";
+            }
+            runtime.lua.pop(1);
+
+            return desc;
         },
-        else => return null,
+        else => return desc,
     }
 }
 
@@ -288,9 +340,19 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
                 continue;
             }
             if (mod.kind == .builtin) {
-                if (evalLuaBuiltinName(&lua_rt.?, ctx, cmd)) |builtin_name| {
+                const desc = evalLuaBuiltinDesc(&lua_rt.?, ctx, cmd);
+                if (desc.name) |builtin_name| {
                     var bi = LuaValue{};
                     if (ctx.renderSegment(builtin_name)) |segs| {
+                        if (desc.prefix.len > 0 and bi.block_count < bi.blocks.len) {
+                            var pblk = LuaBlock{};
+                            const pn = @min(desc.prefix.len, pblk.text.len);
+                            @memcpy(pblk.text[0..pn], desc.prefix[0..pn]);
+                            pblk.len = pn;
+                            pblk.style = desc.style;
+                            bi.blocks[bi.block_count] = pblk;
+                            bi.block_count += 1;
+                        }
                         if (segs.len > 0) {
                             for (segs) |seg_out| {
                                 if (bi.block_count >= bi.blocks.len) break;
@@ -299,10 +361,19 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
                                 const tn = @min(seg_out.text.len, blk.text.len);
                                 @memcpy(blk.text[0..tn], seg_out.text[0..tn]);
                                 blk.len = tn;
-                                blk.style = seg_out.style;
+                                blk.style = mergeStyle(desc.style, seg_out.style);
                                 bi.blocks[bi.block_count] = blk;
                                 bi.block_count += 1;
                             }
+                        }
+                        if (desc.suffix.len > 0 and bi.block_count < bi.blocks.len) {
+                            var sblk = LuaBlock{};
+                            const sn = @min(desc.suffix.len, sblk.text.len);
+                            @memcpy(sblk.text[0..sn], desc.suffix[0..sn]);
+                            sblk.len = sn;
+                            sblk.style = desc.style;
+                            bi.blocks[bi.block_count] = sblk;
+                            bi.block_count += 1;
                         }
                     }
                     results[i].output = bi;
