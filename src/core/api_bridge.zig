@@ -1359,14 +1359,12 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     }
     lua.pop(1); // pop outputs array
 
-    // Parse command
-    _ = lua.getField(idx, "command");
-    if (lua.typeOf(-1) == .string) {
-        const cmd = lua.toString(-1) catch {
-            lua.pop(1);
-            return segment;
-        };
-        segment.command = allocator.dupe(u8, cmd) catch null;
+    // Parse value (segment value producer).
+    // value = function(ctx) ... end OR value = "return ..."
+    _ = lua.getField(idx, "value");
+    if (parseLuaChunkValue(lua, allocator, false)) |code| {
+        defer allocator.free(code);
+        segment.command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
     }
     lua.pop(1);
 
@@ -1433,24 +1431,7 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     }
     lua.pop(1);
 
-    // Parse lua output expression/script (optional).
-    // Sugar so statusbar and prompt can both use `lua = "return ..."`
-    // or `lua = function(ctx) ... end`.
-    if (segment.command == null) {
-        _ = lua.getField(idx, "lua");
-        if (parseLuaChunkValue(lua, allocator, false)) |code| {
-            defer allocator.free(code);
-            segment.command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
-        }
-        lua.pop(1);
-    }
-
-    // Parse when
-    _ = lua.getField(idx, "when");
-    if (lua.typeOf(-1) != .nil) {
-        segment.when = parseWhen(lua, -1, allocator);
-    }
-    lua.pop(1);
+    // Segment-level `when` is intentionally unsupported.
 
     // Parse spinner
     _ = lua.getField(idx, "spinner");
@@ -2224,7 +2205,6 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     var priority: i64 = 50; // default priority
     var outputs = std.ArrayList(config_builder.ShpConfigBuilder.OutputDef){};
     var command: ?[]const u8 = null;
-    var when: ?config.WhenDef = null;
 
     // Parse name (required)
     _ = lua.getField(idx, "name");
@@ -2258,33 +2238,12 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     }
     lua.pop(1);
 
-    // Parse command (optional)
-    _ = lua.getField(idx, "command");
-    if (lua.typeOf(-1) == .string) {
-        const cmd_str = lua.toString(-1) catch null;
-        if (cmd_str) |cmd| {
-            command = allocator.dupe(u8, cmd) catch null;
-        }
-    }
-    lua.pop(1);
-
-    // Parse lua output expression/script (optional).
-    // User-facing sugar in Lua config: `lua = "return ..."`
-    // or `lua = function(ctx) ... end`.
-    // Internally encoded as a command prefix consumed by SHP renderer.
-    if (command == null) {
-        _ = lua.getField(idx, "lua");
-        if (parseLuaChunkValue(lua, allocator, false)) |code| {
-            defer allocator.free(code);
-            command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
-        }
-        lua.pop(1);
-    }
-
-    // Parse when (optional) - full parser supports all/any/bash/lua/env/env_not.
-    _ = lua.getField(idx, "when");
-    if (lua.typeOf(-1) != .nil) {
-        when = parseWhen(lua, -1, allocator);
+    // Parse value (segment value producer).
+    // value = function(ctx) ... end OR value = "return ..."
+    _ = lua.getField(idx, "value");
+    if (parseLuaChunkValue(lua, allocator, false)) |code| {
+        defer allocator.free(code);
+        command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
     }
     lua.pop(1);
 
@@ -2293,7 +2252,7 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
         .priority = priority,
         .outputs = outputs.toOwnedSlice(allocator) catch &[_]config_builder.ShpConfigBuilder.OutputDef{},
         .command = command,
-        .when = when,
+        .when = null,
     };
 }
 
