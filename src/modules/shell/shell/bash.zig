@@ -28,6 +28,13 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\# Hexe shell->mux communication hooks (Bash)
         \\__hexe_last_cmd=""
         \\__hexe_start=""
+        \\__hexe_env_snapshot=""
+        \\
+        \\__hexe_refresh_env_snapshot() {
+        \\    [[ -n "$HEXE_PANE_UUID" ]] || return 0
+        \\    __hexe_env_snapshot="/tmp/hexe-env-${HEXE_PANE_UUID}"
+        \\    env -0 > "$__hexe_env_snapshot" 2>/dev/null || true
+        \\}
         \\
         \\__hexe_exit_intent() {
         \\    [[ -n "$HEXE_MUX_SOCKET" && -n "$HEXE_PANE_UUID" ]] || return 0
@@ -46,6 +53,7 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\    esac
         \\    __hexe_last_cmd="$cmd"
         \\    __hexe_start=$(date +%s%3N)
+        \\    __hexe_refresh_env_snapshot
         \\    hexe shp shell-event --phase=start --running --started-at=$__hexe_start --cmd="$__hexe_last_cmd" --cwd="$PWD" --jobs=$(jobs -p 2>/dev/null | wc -l) >/dev/null 2>/dev/null
         \\}
         \\
@@ -55,6 +63,7 @@ pub fn printInit(stdout: std.fs.File, no_comms: bool) !void {
         \\
         \\    # OSC 7 cwd sync
         \\    printf '\033]7;file://%s%s\007' "${HOSTNAME:-localhost}" "$PWD" 2>/dev/null
+        \\    __hexe_refresh_env_snapshot
         \\
         \\    local cmd="$__hexe_last_cmd"
         \\    if [[ -z "$cmd" ]]; then

@@ -228,30 +228,14 @@ pub const Pane = struct {
         return link;
     }
 
-    /// Read environment variables from /proc/<child_pid>/environ.
-    /// Returns owned slice of "KEY=VALUE" strings. Caller must free with the same allocator.
-    pub fn getProcEnviron(self: *const Pane, allocator: std.mem.Allocator) ?[]const []const u8 {
-        if (self.child_pid == 0) return null;
-
-        var path_buf: [64]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/environ", .{self.child_pid}) catch return null;
-        const file = std.fs.openFileAbsolute(path, .{}) catch return null;
-        defer file.close();
-
-        // Read up to 128KB of environ data.
-        const max_size: usize = 128 * 1024;
-        const data = file.readToEndAlloc(allocator, max_size) catch return null;
-        defer allocator.free(data);
-
+    fn parseNulSeparatedEnv(allocator: std.mem.Allocator, data: []const u8) ?[]const []const u8 {
         if (data.len == 0) return null;
 
-        // Count NUL-separated entries.
         var count: usize = 0;
         for (data) |b| {
             if (b == 0) count += 1;
         }
-        // Handle missing trailing NUL.
-        if (data.len > 0 and data[data.len - 1] != 0) count += 1;
+        if (data[data.len - 1] != 0) count += 1;
 
         const entries = allocator.alloc([]const u8, count) catch return null;
         errdefer allocator.free(entries);
@@ -259,20 +243,18 @@ pub const Pane = struct {
         var idx: usize = 0;
         var start: usize = 0;
         for (data, 0..) |b, i| {
-            if (b == 0) {
-                if (i > start) {
-                    entries[idx] = allocator.dupe(u8, data[start..i]) catch {
-                        // Free already-duped entries on failure.
-                        for (entries[0..idx]) |e| allocator.free(e);
-                        allocator.free(entries);
-                        return null;
-                    };
-                    idx += 1;
-                }
-                start = i + 1;
+            if (b != 0) continue;
+            if (i > start) {
+                entries[idx] = allocator.dupe(u8, data[start..i]) catch {
+                    for (entries[0..idx]) |e| allocator.free(e);
+                    allocator.free(entries);
+                    return null;
+                };
+                idx += 1;
             }
+            start = i + 1;
         }
-        // Handle entry without trailing NUL.
+
         if (start < data.len) {
             entries[idx] = allocator.dupe(u8, data[start..]) catch {
                 for (entries[0..idx]) |e| allocator.free(e);
@@ -287,12 +269,45 @@ pub const Pane = struct {
             return null;
         }
 
-        // Shrink if we skipped empty entries.
         if (idx < count) {
             const shrunk = allocator.realloc(entries, idx) catch return entries[0..idx];
             return shrunk;
         }
         return entries;
+    }
+
+    /// Read shell-exported environment snapshot for this pane.
+    /// The snapshot is written by shell hooks to /tmp/hexe-env-<pane_uuid>.
+    fn getSnapshotEnviron(self: *const Pane, allocator: std.mem.Allocator) ?[]const []const u8 {
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/tmp/hexe-env-{s}", .{&self.uuid}) catch return null;
+        const file = std.fs.openFileAbsolute(path, .{}) catch return null;
+        defer file.close();
+
+        const max_size: usize = 256 * 1024;
+        const data = file.readToEndAlloc(allocator, max_size) catch return null;
+        defer allocator.free(data);
+
+        return parseNulSeparatedEnv(allocator, data);
+    }
+
+    /// Read environment variables from the pane shell process.
+    /// Prefers a live shell snapshot and falls back to /proc/<child_pid>/environ.
+    /// Returns owned slice of "KEY=VALUE" strings. Caller must free with the same allocator.
+    pub fn getProcEnviron(self: *const Pane, allocator: std.mem.Allocator) ?[]const []const u8 {
+        if (self.getSnapshotEnviron(allocator)) |snapshot| return snapshot;
+        if (self.child_pid == 0) return null;
+
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/environ", .{self.child_pid}) catch return null;
+        const file = std.fs.openFileAbsolute(path, .{}) catch return null;
+        defer file.close();
+
+        const max_size: usize = 128 * 1024;
+        const data = file.readToEndAlloc(allocator, max_size) catch return null;
+        defer allocator.free(data);
+
+        return parseNulSeparatedEnv(allocator, data);
     }
 
     fn readProcComm(self: *const Pane, pid: i32) ?[]const u8 {

@@ -127,6 +127,128 @@ fn appendEnvExport(list: *std.ArrayList(u8), allocator: std.mem.Allocator, line:
     try list.appendSlice(allocator, "; ");
 }
 
+fn shouldSkipEnvSyncKey(key: []const u8) bool {
+    if (std.mem.eql(u8, key, "PWD")) return true;
+    if (std.mem.eql(u8, key, "OLDPWD")) return true;
+    if (std.mem.eql(u8, key, "SHLVL")) return true;
+    if (std.mem.eql(u8, key, "_")) return true;
+    if (std.mem.eql(u8, key, "HEXE_PANE_UUID")) return true;
+    if (std.mem.eql(u8, key, "HEXE_POD_SOCKET")) return true;
+    if (std.mem.eql(u8, key, "HEXE_POD_NAME")) return true;
+    if (std.mem.eql(u8, key, "HEXE_MUX_SOCKET")) return true;
+    if (std.mem.eql(u8, key, "TERM")) return true;
+    if (std.mem.eql(u8, key, "BOX")) return true;
+    return false;
+}
+
+fn freeEnvLines(allocator: std.mem.Allocator, lines: []const []const u8) void {
+    for (lines) |line| allocator.free(line);
+    allocator.free(lines);
+}
+
+fn parseNulSeparatedEnv(allocator: std.mem.Allocator, data: []const u8) !?[]const []const u8 {
+    if (data.len == 0) return null;
+
+    var count: usize = 0;
+    for (data) |b| {
+        if (b == 0) count += 1;
+    }
+    if (data[data.len - 1] != 0) count += 1;
+
+    var entries = try allocator.alloc([]const u8, count);
+    errdefer allocator.free(entries);
+
+    var idx: usize = 0;
+    errdefer {
+        for (entries[0..idx]) |line| allocator.free(line);
+    }
+    var start: usize = 0;
+    for (data, 0..) |b, i| {
+        if (b != 0) continue;
+        if (i > start) {
+            entries[idx] = try allocator.dupe(u8, data[start..i]);
+            idx += 1;
+        }
+        start = i + 1;
+    }
+
+    if (start < data.len) {
+        entries[idx] = try allocator.dupe(u8, data[start..]);
+        idx += 1;
+    }
+
+    if (idx == 0) {
+        allocator.free(entries);
+        return null;
+    }
+
+    if (idx < count) {
+        entries = try allocator.realloc(entries, idx);
+    }
+    return entries;
+}
+
+fn readPaneEnvSnapshot(allocator: std.mem.Allocator, uuid: [32]u8) !?[]const []const u8 {
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/tmp/hexe-env-{s}", .{&uuid});
+    const file = std.fs.openFileAbsolute(path, .{}) catch return null;
+    defer file.close();
+
+    const data = try file.readToEndAlloc(allocator, 256 * 1024);
+    defer allocator.free(data);
+
+    return parseNulSeparatedEnv(allocator, data);
+}
+
+fn readProcEnvironByPid(allocator: std.mem.Allocator, pid: i32) !?[]const []const u8 {
+    if (pid <= 0) return null;
+
+    var path_buf: [64]u8 = undefined;
+    const path = try std.fmt.bufPrint(&path_buf, "/proc/{d}/environ", .{pid});
+    const file = std.fs.openFileAbsolute(path, .{}) catch return null;
+    defer file.close();
+
+    const data = try file.readToEndAlloc(allocator, 256 * 1024);
+    defer allocator.free(data);
+
+    return parseNulSeparatedEnv(allocator, data);
+}
+
+fn syncEnvIntoExistingFloat(state: *State, pane: *Pane, parent_uuid: [32]u8) void {
+    var parent_env: ?[]const []const u8 = null;
+    if (state.ses_client.getPaneInfoSnapshot(parent_uuid)) |info| {
+        defer {
+            if (info.name) |s| state.allocator.free(s);
+            if (info.cwd) |s| state.allocator.free(s);
+            if (info.fg_name) |s| state.allocator.free(s);
+        }
+        if (info.fg_pid) |pid| {
+            parent_env = readProcEnvironByPid(state.allocator, pid) catch null;
+        }
+    }
+
+    if (parent_env == null) {
+        parent_env = readPaneEnvSnapshot(state.allocator, parent_uuid) catch null;
+    }
+    if (parent_env == null) return;
+    defer freeEnvLines(state.allocator, parent_env.?);
+
+    var cmd: std.ArrayList(u8) = .empty;
+    defer cmd.deinit(state.allocator);
+
+    for (parent_env.?) |line| {
+        const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
+        if (eq == 0) continue;
+        const key = line[0..eq];
+        if (shouldSkipEnvSyncKey(key)) continue;
+        appendEnvExport(&cmd, state.allocator, line) catch return;
+    }
+
+    if (cmd.items.len == 0) return;
+    cmd.append(state.allocator, '\n') catch return;
+    pane.write(cmd.items) catch {};
+}
+
 fn isValidEnvKey(key: []const u8) bool {
     if (key.len == 0) return false;
     const first = key[0];
@@ -449,6 +571,13 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 }
                 state.active_floating = i;
                 state.syncPaneFocus(pane, old_uuid);
+                if (float_def.attributes.inherit_env) {
+                    if (old_uuid) |parent_uuid| {
+                        if (!std.mem.eql(u8, &parent_uuid, &pane.uuid)) {
+                            syncEnvIntoExistingFloat(state, pane, parent_uuid);
+                        }
+                    }
+                }
                 // If alone mode, hide all other floats on this tab.
                 if (float_def.attributes.exclusive) {
                     var to_hide: std.ArrayList([32]u8) = .empty;

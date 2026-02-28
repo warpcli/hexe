@@ -108,8 +108,6 @@ The float runs inside a sandboxed pod (Linux namespaces + cgroups).
 
 See [isolation](isolation.md) for profiles and resource limits.
 
----
-
 ## Border style
 
 Each float can have custom border characters and colors:
