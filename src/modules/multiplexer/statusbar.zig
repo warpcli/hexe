@@ -352,6 +352,13 @@ fn luaCommandCode(command: []const u8) ?[]const u8 {
     return body;
 }
 
+fn builtinCommandName(command: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, command, "builtin:")) return null;
+    const body = std.mem.trim(u8, command[8..], " \t\r\n");
+    if (body.len == 0) return null;
+    return body;
+}
+
 const LuaEval = struct {
     text: [256]u8 = [_]u8{0} ** 256,
     text_len: usize = 0,
@@ -1234,7 +1241,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
 
     const clickable = isClickable(&mod);
     const active = if (clickable) isButtonActive(&mod, ctx) else false;
-    const invert_style = clickable and (hovered != active);
+    const invert_style = clickable and mod.inverse_on_hover and (hovered != active);
 
     var command_output: []const u8 = "";
     var command_output_ready = false;
@@ -1277,6 +1284,9 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                 if (luaCommandCode(cmd)) |code| {
                     command_eval = evalLuaCommand(code, ctx);
                     command_output = command_eval.textSlice();
+                } else if (builtinCommandName(cmd)) |builtin_name| {
+                    command_output = std.fmt.bufPrint(command_eval.text[0..], "{s}{s}", .{ BUILTIN_MARKER_PREFIX, builtin_name }) catch "";
+                    command_eval.text_len = command_output.len;
                 } else {
                     command_output = "";
                 }
@@ -1392,6 +1402,9 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
                 if (luaCommandCode(cmd)) |code| {
                     command_eval = evalLuaCommand(code, ctx);
                     command_output = command_eval.textSlice();
+                } else if (builtinCommandName(cmd)) |builtin_name| {
+                    command_output = std.fmt.bufPrint(command_eval.text[0..], "{s}{s}", .{ BUILTIN_MARKER_PREFIX, builtin_name }) catch "";
+                    command_eval.text_len = command_output.len;
                 } else {
                     command_output = "";
                 }

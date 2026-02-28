@@ -84,20 +84,35 @@ pub const WhenDef = struct {
 
 /// Segment definition for statusbar and prompt.
 /// Both statusbar modules and shell prompt segments use this unified type.
+pub const SegmentKind = enum {
+    value,
+    builtin,
+    button,
+    progress,
+};
+
 pub const Segment = struct {
     name: []const u8,
+    kind: SegmentKind = .value,
     // Priority for width-based hiding (lower = higher priority, stays longer)
     priority: u8 = 50,
     // Array of outputs (each with style + format)
     outputs: []const OutputDef = &[_]OutputDef{},
     // Optional for custom modules
     command: ?[]const u8 = null,
+    // Optional explicit builtin source name
+    builtin: ?[]const u8 = null,
+    // Progress behavior tuning
+    progress_every_ms: u64 = 1000,
+    progress_show_when: ?[]const u8 = null,
     // Optional statusbar click actions (shell commands)
     on_click: ?[]const u8 = null,
     on_right_click: ?[]const u8 = null,
     on_middle_click: ?[]const u8 = null,
     // Optional statusbar button active-state condition (bash, exit 0 = active)
     button_active_bash: ?[]const u8 = null,
+    // If true, invert button style when hovered.
+    inverse_on_hover: bool = true,
     when: ?WhenDef = null,
 
     // Optional spinner configuration
@@ -358,6 +373,8 @@ pub const LayoutFloatDef = struct {
                     allocator.free(module.outputs);
                 }
                 if (module.command) |cmd| allocator.free(@constCast(cmd));
+                if (module.builtin) |b| allocator.free(@constCast(b));
+                if (module.progress_show_when) |s| allocator.free(@constCast(s));
                 if (module.on_click) |cmd| allocator.free(@constCast(cmd));
                 if (module.on_right_click) |cmd| allocator.free(@constCast(cmd));
                 if (module.on_middle_click) |cmd| allocator.free(@constCast(cmd));
@@ -1358,6 +1375,16 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         return null;
     };
 
+    const kind = blk: {
+        const raw = runtime.getString(-1, "kind") orelse "value";
+        const k = std.meta.stringToEnum(SegmentKind, raw) orelse {
+            setParseError(allocator, "config: segment.kind must be one of: value, builtin, button, progress");
+            allocator.free(name);
+            return null;
+        };
+        break :blk k;
+    };
+
     const value_code: ?[]const u8 = blk: {
         if (runtime.getString(-1, "value")) |v| {
             const trimmed = std.mem.trim(u8, v, " \t\r\n");
@@ -1367,6 +1394,32 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         break :blk null;
     };
 
+    const builtin_name: ?[]const u8 = runtime.getStringAlloc(-1, "builtin");
+    const show_when_code: ?[]const u8 = blk: {
+        if (runtime.getString(-1, "show_when")) |v| {
+            const trimmed = std.mem.trim(u8, v, " \t\r\n");
+            if (trimmed.len == 0) break :blk null;
+            break :blk std.fmt.allocPrint(allocator, "lua:{s}", .{trimmed}) catch null;
+        }
+        break :blk null;
+    };
+
+    const command: ?[]const u8 = switch (kind) {
+        .value => value_code,
+        .builtin => blk: {
+            if (builtin_name) |b| {
+                break :blk std.fmt.allocPrint(allocator, "builtin:{s}", .{b}) catch null;
+            }
+            break :blk null;
+        },
+        .button, .progress => blk: {
+            if (builtin_name) |b| {
+                break :blk std.fmt.allocPrint(allocator, "builtin:{s}", .{b}) catch null;
+            }
+            break :blk value_code;
+        },
+    };
+
     if (runtime.fieldType(-1, "outputs") != .nil) {
         setParseError(allocator, "config: segment field 'outputs' is removed; return styled blocks from 'value'");
         allocator.free(name);
@@ -1374,21 +1427,34 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         return null;
     }
 
-    if (value_code == null) {
-        setParseError(allocator, "config: segment requires a non-empty 'value'");
+    if (command == null) {
+        const err_msg = switch (kind) {
+            .builtin => "config: builtin segment requires non-empty 'builtin'",
+            .value => "config: value segment requires a non-empty 'value'",
+            .button => "config: button segment requires 'value' or 'builtin'",
+            .progress => "config: progress segment requires 'value' or 'builtin'",
+        };
+        setParseError(allocator, err_msg);
         allocator.free(name);
+        if (builtin_name) |b| allocator.free(@constCast(b));
+        if (show_when_code) |s| allocator.free(@constCast(s));
         return null;
     }
 
     return Segment{
         .name = name,
+        .kind = kind,
         .priority = lua_runtime.parseConstrainedInt(runtime, u8, -1, "priority", 1, 255, 50),
         .outputs = parseOutputs(runtime, allocator),
-        .command = value_code,
-        .on_click = runtime.getStringAlloc(-1, "on_click"),
+        .command = command,
+        .builtin = builtin_name,
+        .progress_every_ms = runtime.getInt(u64, -1, "every_ms") orelse 1000,
+        .progress_show_when = show_when_code,
+        .on_click = runtime.getStringAlloc(-1, "on_click") orelse runtime.getStringAlloc(-1, "on_left_click"),
         .on_right_click = runtime.getStringAlloc(-1, "on_right_click"),
         .on_middle_click = runtime.getStringAlloc(-1, "on_middle_click"),
         .button_active_bash = runtime.getStringAlloc(-1, "button_active_bash"),
+        .inverse_on_hover = runtime.getBool(-1, "inverse_on_hover") orelse true,
         .when = null,
         .spinner = parseSpinner(runtime, allocator),
         .active_style = runtime.getStringAlloc(-1, "active_style") orelse "bg:1 fg:0",
