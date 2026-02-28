@@ -500,6 +500,12 @@ const BuiltinDesc = struct {
     style: shp.Style = .{},
     prefix: []const u8 = "",
     suffix: []const u8 = "",
+    spinner_kind: ?[]const u8 = null,
+    spinner_width: ?u8 = null,
+    spinner_step_ms: ?u64 = null,
+    spinner_hold_frames: ?u8 = null,
+    spinner_bg: ?u8 = null,
+    spinner_placeholder: ?u8 = null,
 };
 
 fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
@@ -567,6 +573,61 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
             _ = rt.lua.getField(-1, "suffix");
             if (rt.lua.typeOf(-1) == .string) {
                 desc.suffix = rt.lua.toString(-1) catch "";
+            }
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "kind");
+            if (rt.lua.typeOf(-1) == .string) {
+                desc.spinner_kind = rt.lua.toString(-1) catch null;
+            }
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "width");
+            if (rt.lua.typeOf(-1) == .number) {
+                const v = rt.lua.toNumber(-1) catch 0;
+                if (std.math.isFinite(v)) desc.spinner_width = @intFromFloat(std.math.clamp(v, 1, 64));
+            }
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "step");
+            if (rt.lua.typeOf(-1) == .number) {
+                const v = rt.lua.toNumber(-1) catch 0;
+                if (std.math.isFinite(v)) desc.spinner_step_ms = @intFromFloat(std.math.clamp(v, 1, 5000));
+            }
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "step_ms");
+            if (rt.lua.typeOf(-1) == .number) {
+                const v = rt.lua.toNumber(-1) catch 0;
+                if (std.math.isFinite(v)) desc.spinner_step_ms = @intFromFloat(std.math.clamp(v, 1, 5000));
+            }
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "hold");
+            if (rt.lua.typeOf(-1) == .number) {
+                const v = rt.lua.toNumber(-1) catch 0;
+                if (std.math.isFinite(v)) desc.spinner_hold_frames = @intFromFloat(std.math.clamp(v, 0, 120));
+            }
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "hold_frames");
+            if (rt.lua.typeOf(-1) == .number) {
+                const v = rt.lua.toNumber(-1) catch 0;
+                if (std.math.isFinite(v)) desc.spinner_hold_frames = @intFromFloat(std.math.clamp(v, 0, 120));
+            }
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "bg");
+            if (rt.lua.typeOf(-1) == .number) {
+                const v = rt.lua.toNumber(-1) catch 0;
+                if (std.math.isFinite(v)) desc.spinner_bg = @intFromFloat(std.math.clamp(v, 0, 255));
+            }
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "placeholder");
+            if (rt.lua.typeOf(-1) == .number) {
+                const v = rt.lua.toNumber(-1) catch 0;
+                if (std.math.isFinite(v)) desc.spinner_placeholder = @intFromFloat(std.math.clamp(v, 0, 255));
             }
             rt.lua.pop(1);
 
@@ -1326,12 +1387,15 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
 
     var spinner_allowed = true;
     if (mod.spinner != null) {
+        if (mod.kind == .progress and !progressVisible(mod, ctx)) {
+            spinner_allowed = false;
+        }
         if (mod.command) |cmd| {
             const gate_eval = evalLuaCommand(cmd, ctx);
             const gate_text = gate_eval.textSlice();
-            spinner_allowed = gate_eval.seg_count > 0 or gate_text.len > 0;
+            spinner_allowed = spinner_allowed and (gate_eval.seg_count > 0 or gate_text.len > 0);
         } else if (mod.builtin) |builtin_name| {
-            spinner_allowed = (ctx.renderSegment(builtin_name) != null);
+            spinner_allowed = spinner_allowed and (ctx.renderSegment(builtin_name) != null);
         }
     }
     if (mod.spinner != null and !spinner_allowed) return x;
@@ -1381,7 +1445,25 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                 if (mod.kind == .builtin) {
                     const bdesc = evalLuaBuiltinDesc(cmd, ctx);
                     if (bdesc.name) |builtin_name| {
-                        if (ctx.renderSegment(builtin_name)) |segs| {
+                        if (std.mem.eql(u8, builtin_name, "spinner")) {
+                            var cfg = core.config.SpinnerDef{};
+                            cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
+                            if (bdesc.spinner_kind) |k| cfg.kind = k;
+                            if (bdesc.spinner_width) |v| cfg.width = v;
+                            if (bdesc.spinner_step_ms) |v| cfg.step_ms = v;
+                            if (bdesc.spinner_hold_frames) |v| cfg.hold_frames = v;
+                            if (bdesc.spinner_bg) |v| cfg.bg_color = v;
+                            if (bdesc.spinner_placeholder) |v| cfg.placeholder_color = v;
+                            output_segs = animations.renderSegments(ctx, cfg);
+                            if (output_segs == null) {
+                                output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
+                                if (output_text.len == 0) {
+                                    output_text = spinnerAsciiFrame(ctx.now_ms, cfg.started_at_ms, cfg.step_ms);
+                                }
+                            }
+                        } else if (std.mem.eql(u8, builtin_name, "randomdo")) {
+                            output_text = randomdoTextFor(ctx, mod, true);
+                        } else if (ctx.renderSegment(builtin_name)) |segs| {
                             var styled: [16]shp.Segment = undefined;
                             var text_buf: [16][96]u8 = undefined;
                             var count: usize = 0;
@@ -1506,12 +1588,15 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
     _ = query;
     var spinner_allowed = true;
     if (mod.spinner != null) {
+        if (mod.kind == .progress and !progressVisible(mod, ctx)) {
+            spinner_allowed = false;
+        }
         if (mod.command) |cmd| {
             const gate_eval = evalLuaCommand(cmd, ctx);
             const gate_text = gate_eval.textSlice();
-            spinner_allowed = gate_eval.seg_count > 0 or gate_text.len > 0;
+            spinner_allowed = spinner_allowed and (gate_eval.seg_count > 0 or gate_text.len > 0);
         } else if (mod.builtin) |builtin_name| {
-            spinner_allowed = (ctx.renderSegment(builtin_name) != null);
+            spinner_allowed = spinner_allowed and (ctx.renderSegment(builtin_name) != null);
         }
     }
     if (mod.spinner != null and !spinner_allowed) return 0;
@@ -1552,7 +1637,26 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
                 if (mod.kind == .builtin) {
                     const bdesc = evalLuaBuiltinDesc(cmd, ctx);
                     if (bdesc.name) |builtin_name| {
-                        if (ctx.renderSegment(builtin_name)) |segs| {
+                        if (std.mem.eql(u8, builtin_name, "spinner")) {
+                            var cfg = core.config.SpinnerDef{};
+                            cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
+                            if (bdesc.spinner_kind) |k| cfg.kind = k;
+                            if (bdesc.spinner_width) |v| cfg.width = v;
+                            if (bdesc.spinner_step_ms) |v| cfg.step_ms = v;
+                            if (bdesc.spinner_hold_frames) |v| cfg.hold_frames = v;
+                            if (bdesc.spinner_bg) |v| cfg.bg_color = v;
+                            if (bdesc.spinner_placeholder) |v| cfg.placeholder_color = v;
+                            output_segs = animations.renderSegments(ctx, cfg);
+                            if (output_segs == null) {
+                                output_text = animations.renderWithOptions(cfg.kind, ctx.now_ms, cfg.started_at_ms, cfg.width, cfg.step_ms, cfg.hold_frames);
+                                if (output_text.len == 0) {
+                                    output_text = spinnerAsciiFrame(ctx.now_ms, cfg.started_at_ms, cfg.step_ms);
+                                }
+                            }
+                        } else if (std.mem.eql(u8, builtin_name, "randomdo")) {
+                            width += calcFormattedWidthMax(format_use, randomdo_mod.MAX_LEN);
+                            continue;
+                        } else if (ctx.renderSegment(builtin_name)) |segs| {
                             var styled: [16]shp.Segment = undefined;
                             var text_buf: [16][96]u8 = undefined;
                             var count: usize = 0;
