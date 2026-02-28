@@ -514,6 +514,10 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
 
     applyMouseShape(state, desiredMouseShape(state, ev, override_active));
 
+    if (statusbar.updateHover(state.term_height, ev.x, ev.y)) {
+        state.needs_render = true;
+    }
+
     const is_motion = (ev.btn & 32) != 0;
     const is_wheel = (!ev.is_release) and (ev.btn & 64) != 0;
     const is_left_btn = (ev.btn & 3) == 0;

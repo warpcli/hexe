@@ -38,6 +38,13 @@ You can also provide arrays with `left`, `center`, `right` using your preferred 
   on_click = "hexe pod record --name mypod --out /tmp/mypod.cast",
   on_right_click = "hexe mux notify \"clicked\"",
   on_middle_click = "hexe pod gc --dry-run",
+
+  -- optional sugar section
+  button = {
+    on_click = "hexe pod record --name mypod --out /tmp/mypod.cast",
+    on_right_click = "pkill -f 'hexe pod record --name mypod'",
+    active_when = "pgrep -f -- 'hexe pod record --name mypod' >/dev/null",
+  },
   when     = { ... },
   outputs  = {
     { style = "bg:1 fg:0", format = " $output " },
@@ -65,6 +72,10 @@ You can also provide arrays with `left`, `center`, `right` using your preferred 
 ```
 
 `on_click`, `on_right_click`, and `on_middle_click` run shell commands on statusbar clicks.
+
+Clickable segments are treated as buttons and automatically render with reverse colors while hovered.
+
+If `button.active_when` is set and returns success, the button stays reversed while active; on hover it flips back (opposite visual) to indicate a deactivate click.
 
 ## Built-in Status Segments
 

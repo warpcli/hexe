@@ -27,6 +27,40 @@ const RandomdoState = struct {
 };
 
 threadlocal var randomdo_state: ?std.AutoHashMap(usize, RandomdoState) = null;
+threadlocal var hover_x: ?u16 = null;
+threadlocal var hover_y: ?u16 = null;
+
+pub fn updateHover(term_height: u16, x: u16, y: u16) bool {
+    const old_x = hover_x;
+    const old_y = hover_y;
+    hover_x = x;
+    hover_y = y;
+
+    if (old_x == hover_x and old_y == hover_y) return false;
+    if (term_height == 0) return false;
+    const bar_y = term_height - 1;
+    const was_on_bar = old_y != null and old_y.? == bar_y;
+    const is_on_bar = y == bar_y;
+    return was_on_bar or is_on_bar;
+}
+
+fn isClickable(mod: *const core.Segment) bool {
+    return mod.on_click != null or mod.on_right_click != null or mod.on_middle_click != null;
+}
+
+fn isButtonActive(mod: *const core.Segment, ctx: *shp.Context) bool {
+    if (mod.button_active_bash) |code| {
+        return evalBashWhen(code, ctx, 300);
+    }
+    return false;
+}
+
+fn isHoveredRange(start_x: u16, width: u16, y: u16) bool {
+    if (hover_x == null or hover_y == null) return false;
+    const hx = hover_x.?;
+    const hy = hover_y.?;
+    return hy == y and hx >= start_x and hx < start_x +| width;
+}
 
 fn spinnerAsciiFrame(now_ms: u64, started_at_ms: u64, step_ms: u64) []const u8 {
     const frames = [_][]const u8{ "|", "/", "-", "\\" };
@@ -709,7 +743,8 @@ pub fn draw(
     var left_x: u16 = 0;
     for (0..left_count) |i| {
         if (left_modules[i].visible) {
-            left_x = drawModule(renderer, &ctx, &query, left_modules[i].mod.*, left_x, y);
+            const hovered = isHoveredRange(left_x, left_modules[i].width, y);
+            left_x = drawModule(renderer, &ctx, &query, left_modules[i].mod.*, left_x, y, hovered);
         }
     }
 
@@ -718,7 +753,8 @@ pub fn draw(
     var rx: u16 = right_start;
     for (0..right_count) |i| {
         if (right_modules[i].visible) {
-            rx = drawModule(renderer, &ctx, &query, right_modules[i].mod.*, rx, y);
+            const hovered = isHoveredRange(rx, right_modules[i].width, y);
+            rx = drawModule(renderer, &ctx, &query, right_modules[i].mod.*, rx, y, hovered);
         }
     }
 
@@ -1079,10 +1115,14 @@ fn measureTabsWidth(tab_names: []const []const u8, separator: []const u8, left_a
     return w;
 }
 
-pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment, start_x: u16, y: u16) u16 {
+pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment, start_x: u16, y: u16, hovered: bool) u16 {
     var x = start_x;
 
     if (!passesWhen(ctx, query, mod)) return x;
+
+    const clickable = isClickable(&mod);
+    const active = if (clickable) isButtonActive(&mod, ctx) else false;
+    const invert_style = clickable and (hovered != active);
 
     var command_output: []const u8 = "";
     var command_output_ready = false;
@@ -1090,6 +1130,12 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
 
     for (mod.outputs) |out| {
         const style = shp.Style.parse(out.style);
+        var style_final = style;
+        if (invert_style) {
+            const fg_tmp = style_final.fg;
+            style_final.fg = style_final.bg;
+            style_final.bg = fg_tmp;
+        }
         ctx.module_default_style = style;
 
         var output_segs: ?[]const shp.Segment = null;
@@ -1123,7 +1169,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
         } else {
             output_segs = ctx.renderSegment(mod.name);
         }
-        x = drawFormatted(renderer, x, y, out.format, output_text, output_segs, style);
+        x = drawFormatted(renderer, x, y, out.format, output_text, output_segs, style_final);
     }
 
     return x;

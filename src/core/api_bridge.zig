@@ -1310,6 +1310,47 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     }
     lua.pop(1);
 
+    _ = lua.getField(idx, "button_active_bash");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        if (s.len > 0) segment.button_active_bash = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+
+    // Parse optional button section as sugar:
+    // button = { on_click = "...", on_right_click = "...", on_middle_click = "..." }
+    _ = lua.getField(idx, "button");
+    if (lua.typeOf(-1) == .table) {
+        _ = lua.getField(-1, "on_click");
+        if (segment.on_click == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.on_click = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "on_right_click");
+        if (segment.on_right_click == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.on_right_click = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "on_middle_click");
+        if (segment.on_middle_click == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.on_middle_click = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "active_when");
+        if (segment.button_active_bash == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.button_active_bash = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+    }
+    lua.pop(1);
+
     // Parse lua output expression/script (optional).
     // Sugar so statusbar and prompt can both use `lua = "return ..."`.
     if (segment.command == null) {

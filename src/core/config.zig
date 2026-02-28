@@ -96,6 +96,8 @@ pub const Segment = struct {
     on_click: ?[]const u8 = null,
     on_right_click: ?[]const u8 = null,
     on_middle_click: ?[]const u8 = null,
+    // Optional statusbar button active-state condition (bash, exit 0 = active)
+    button_active_bash: ?[]const u8 = null,
     when: ?WhenDef = null,
 
     // Optional spinner configuration
@@ -359,6 +361,7 @@ pub const LayoutFloatDef = struct {
                 if (module.on_click) |cmd| allocator.free(@constCast(cmd));
                 if (module.on_right_click) |cmd| allocator.free(@constCast(cmd));
                 if (module.on_middle_click) |cmd| allocator.free(@constCast(cmd));
+                if (module.button_active_bash) |cmd| allocator.free(@constCast(cmd));
                 if (module.when) |*w| {
                     var when = @constCast(w);
                     when.deinit(allocator);
@@ -1363,6 +1366,7 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         .on_click = runtime.getStringAlloc(-1, "on_click"),
         .on_right_click = runtime.getStringAlloc(-1, "on_right_click"),
         .on_middle_click = runtime.getStringAlloc(-1, "on_middle_click"),
+        .button_active_bash = runtime.getStringAlloc(-1, "button_active_bash"),
         .when = parseWhenTable(runtime, allocator, true),
         .spinner = parseSpinner(runtime, allocator),
         .active_style = runtime.getStringAlloc(-1, "active_style") orelse "bg:1 fg:0",
