@@ -113,9 +113,14 @@ hexe pod new [--name <name>] [--shell <shell>] [--cwd <path>] [--alias]
 Create a standalone pod not attached to any session.
 
 ```sh
-hexe pod attach <uuid-or-name> [--detach-key <key>]
+hexe pod attach [--uuid <u>] [--name <n>] [--socket <path>] [--detach <key>] [--record <file.cast>] [--capture-input]
 ```
 Raw TTY attach to a pod (like `screen -r` but for a single PTY).
+
+```sh
+hexe pod record [--uuid <u>] [--name <n>] [--socket <path>] --out <file.cast> [--detach <key>] [--capture-input]
+```
+Attach to a pod and write an asciicast recording.
 
 ```sh
 hexe pod send <text> [--uuid <u>] [--name <n>] [--enter] [--ctrl]
