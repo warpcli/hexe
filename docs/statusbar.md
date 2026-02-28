@@ -35,6 +35,9 @@ You can also provide arrays with `left`, `center`, `right` using your preferred 
   priority = 50,
   command  = "echo hello",      -- optional shell command output
   lua      = "return 'hello'",  -- optional Lua output (in-process)
+  on_click = "hexe pod record --name mypod --out /tmp/mypod.cast",
+  on_right_click = "hexe mux notify \"clicked\"",
+  on_middle_click = "hexe pod gc --dry-run",
   when     = { ... },
   outputs  = {
     { style = "bg:1 fg:0", format = " $output " },
@@ -60,6 +63,8 @@ You can also provide arrays with `left`, `center`, `right` using your preferred 
   },
 }
 ```
+
+`on_click`, `on_right_click`, and `on_middle_click` run shell commands on statusbar clicks.
 
 ## Built-in Status Segments
 

@@ -92,6 +92,10 @@ pub const Segment = struct {
     outputs: []const OutputDef = &[_]OutputDef{},
     // Optional for custom modules
     command: ?[]const u8 = null,
+    // Optional statusbar click actions (shell commands)
+    on_click: ?[]const u8 = null,
+    on_right_click: ?[]const u8 = null,
+    on_middle_click: ?[]const u8 = null,
     when: ?WhenDef = null,
 
     // Optional spinner configuration
@@ -352,6 +356,9 @@ pub const LayoutFloatDef = struct {
                     allocator.free(module.outputs);
                 }
                 if (module.command) |cmd| allocator.free(@constCast(cmd));
+                if (module.on_click) |cmd| allocator.free(@constCast(cmd));
+                if (module.on_right_click) |cmd| allocator.free(@constCast(cmd));
+                if (module.on_middle_click) |cmd| allocator.free(@constCast(cmd));
                 if (module.when) |*w| {
                     var when = @constCast(w);
                     when.deinit(allocator);
@@ -1353,6 +1360,9 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         .priority = lua_runtime.parseConstrainedInt(runtime, u8, -1, "priority", 1, 255, 50),
         .outputs = parseOutputs(runtime, allocator),
         .command = runtime.getStringAlloc(-1, "command"),
+        .on_click = runtime.getStringAlloc(-1, "on_click"),
+        .on_right_click = runtime.getStringAlloc(-1, "on_right_click"),
+        .on_middle_click = runtime.getStringAlloc(-1, "on_middle_click"),
         .when = parseWhenTable(runtime, allocator, true),
         .spinner = parseSpinner(runtime, allocator),
         .active_style = runtime.getStringAlloc(-1, "active_style") orelse "bg:1 fg:0",

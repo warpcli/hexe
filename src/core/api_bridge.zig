@@ -1288,6 +1288,28 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     }
     lua.pop(1);
 
+    // Parse optional click actions.
+    _ = lua.getField(idx, "on_click");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        if (s.len > 0) segment.on_click = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+
+    _ = lua.getField(idx, "on_right_click");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        if (s.len > 0) segment.on_right_click = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+
+    _ = lua.getField(idx, "on_middle_click");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        if (s.len > 0) segment.on_middle_click = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+
     // Parse lua output expression/script (optional).
     // Sugar so statusbar and prompt can both use `lua = "return ..."`.
     if (segment.command == null) {

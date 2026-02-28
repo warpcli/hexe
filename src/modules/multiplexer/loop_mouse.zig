@@ -15,6 +15,29 @@ const State = @import("state.zig").State;
 
 const FocusTarget = focus_nav.FocusTarget;
 
+fn runStatusbarAction(state: *State, command: []const u8) void {
+    if (command.len == 0) return;
+
+    const wrapped = std.fmt.allocPrint(state.allocator, "({s}) >/dev/null 2>&1 &", .{command}) catch {
+        state.notifications.showFor("status action alloc failed", 1400);
+        state.needs_render = true;
+        return;
+    };
+    defer state.allocator.free(wrapped);
+
+    var child = std.process.Child.init(&.{ "/bin/bash", "-lc", wrapped }, state.allocator);
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+
+    child.spawn() catch {
+        state.notifications.showFor("status action spawn failed", 1400);
+        state.needs_render = true;
+        return;
+    };
+    _ = child.wait() catch {};
+}
+
 fn mouseModsMask(btn: u16) u8 {
     // SGR mouse modifier bits:
     // - shift: 4
@@ -631,6 +654,23 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
             if (ti != state.active_tab) {
                 @import("tab_switch.zig").switchToTab(state, ti);
             }
+            return true;
+        }
+
+        if (statusbar.hitTestAction(
+            state,
+            state.allocator,
+            &state.config,
+            state.term_width,
+            state.term_height,
+            state.tabs,
+            state.active_tab,
+            state.session_name,
+            ev.x,
+            ev.y,
+            @intCast(ev.btn & 3),
+        )) |cmd| {
+            runStatusbarAction(state, cmd);
             return true;
         }
     }
