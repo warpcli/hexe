@@ -274,6 +274,8 @@ pub fn main() !void {
     try pod_attach.addArg(Arg.singleValueOption("name", 'n', null));
     try pod_attach.addArg(Arg.singleValueOption("socket", 's', null));
     try pod_attach.addArg(Arg.singleValueOption("detach", null, null));
+    try pod_attach.addArg(Arg.singleValueOption("record", null, null));
+    try pod_attach.addArg(Arg.booleanOption("capture-input", null, null));
 
     var pod_kill = app.createCommand("kill", "Kill a pod by uuid/name");
     try pod_kill.addArg(Arg.singleValueOption("uuid", 'u', null));
@@ -596,6 +598,8 @@ pub fn main() !void {
                 m.getSingleValue("name") orelse "",
                 m.getSingleValue("socket") orelse "",
                 m.getSingleValue("detach") orelse "",
+                m.getSingleValue("record") orelse "",
+                m.containsArg("capture-input"),
             );
             return;
         }

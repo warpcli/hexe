@@ -20,6 +20,7 @@ pub const constants = @import("constants.zig");
 pub const resource_limits = @import("resource_limits.zig");
 pub const isolation_voidbox = @import("isolation_voidbox.zig");
 pub const session_config = @import("session_config.zig");
+pub const recording = @import("recording/mod.zig");
 
 pub const LuaRuntime = lua_runtime.LuaRuntime;
 pub const SessionConfig = session_config.SessionConfig;
