@@ -1395,7 +1395,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                                 if (count >= styled.len) break;
                                 const tn = @min(seg.text.len, text_buf[count].len);
                                 @memcpy(text_buf[count][0..tn], seg.text[0..tn]);
-                                styled[count] = .{ .text = text_buf[count][0..tn], .style = mergeStyle(bdesc.style, seg.style) };
+                                styled[count] = .{ .text = text_buf[count][0..tn], .style = mergeStyle(seg.style, bdesc.style) };
                                 count += 1;
                             }
                             if (bdesc.suffix.len > 0 and count < styled.len) {
@@ -1566,7 +1566,7 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
                                 if (count >= styled.len) break;
                                 const tn = @min(seg.text.len, text_buf[count].len);
                                 @memcpy(text_buf[count][0..tn], seg.text[0..tn]);
-                                styled[count] = .{ .text = text_buf[count][0..tn], .style = mergeStyle(bdesc.style, seg.style) };
+                                styled[count] = .{ .text = text_buf[count][0..tn], .style = mergeStyle(seg.style, bdesc.style) };
                                 count += 1;
                             }
                             if (bdesc.suffix.len > 0 and count < styled.len) {
