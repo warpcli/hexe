@@ -94,8 +94,9 @@ if section == nil or section == "mux" then
 
   -- Tab status segments - Left
   hx.mux.tabs.add_segment("left", {
-    name = "time",
+    name = "time_lua",
     priority = 10,
+    lua = "return os.date('%H:%M:%S')",
     outputs = {
       { style = "bg:237 fg:250", format = " " },
       { style = "bold bg:237 fg:250", format = "$output" },
@@ -162,6 +163,30 @@ if section == nil or section == "mux" then
 
   -- Tab status segments - Right
   hx.mux.tabs.add_segment("right", {
+    name = "virt",
+    priority = 12,
+    lua = [[
+      local p = io.popen("systemd-detect-virt 2>/dev/null")
+      if not p then
+        return nil
+      end
+      local out = p:read("*a") or ""
+      p:close()
+      local virt = out:match("^%s*(.-)%s*$")
+      if virt == "" or virt == "none" then
+        return nil
+      end
+      if virt == "lxc" then
+        return " >> "
+      end
+      return " :: "
+    ]],
+    outputs = {
+      { style = "bg:5 fg:0", format = "$output" },
+    },
+  })
+
+  hx.mux.tabs.add_segment("right", {
     name = "cpu",
     priority = 15,
     outputs = {
@@ -187,8 +212,15 @@ if section == nil or section == "mux" then
   })
 
   hx.mux.tabs.add_segment("right", {
-    name = "jobs",
+    name = "jobs_lua",
     priority = 200,
+    lua = [[
+      local j = tonumber(ctx.jobs or 0) or 0
+      if j <= 0 then
+        return nil
+      end
+      return tostring(j)
+    ]],
     outputs = {
       { style = "fg:7", format = " $output" },
     },
@@ -291,8 +323,7 @@ if section == nil or section == "shp" then
     {
       name = "ssh",
       priority = 60,
-      command = "echo //",
-      when = { bash = "[[ -n $SSH_CONNECTION ]]" },
+      lua = "return ctx.env.SSH_CONNECTION and '//' or nil",
       outputs = {
         { style = "bg:237 italic fg:15", format = " $output" },
       },
@@ -308,7 +339,6 @@ if section == nil or section == "shp" then
       name = "distro",
       priority = 10,
       command = "/env/dot/.func/shell/distrologo",
-      when = { bash = "true" },
       outputs = {
         { style = "bg:1 fg:0", format = " $output" },
       },
@@ -323,8 +353,7 @@ if section == nil or section == "shp" then
     {
       name = "direnv",
       priority = 25,
-      command = "echo ▓",
-      when = { bash = "[[ -n $DIRENV_DIR ]]" },
+      lua = "return ctx.env.DIRENV_DIR and '▓' or nil",
       outputs = {
         { style = "bg:1 fg:0", format = "$output" },
       },
@@ -339,8 +368,13 @@ if section == nil or section == "shp" then
     {
       name = "tab",
       priority = 30,
-      command = "echo $TAB | tr -d '/'",
-      when = { bash = "[[ -n $TAB && $TAB != '.reset-prompt' && $TAB != 'reset-prompt' ]]" },
+      lua = [[
+        local tab = ctx.env.TAB
+        if not tab or tab == "" or tab == ".reset-prompt" or tab == "reset-prompt" then
+          return nil
+        end
+        return (tab:gsub("/", ""))
+      ]],
       outputs = {
         { style = "fg:7", format = "|" },
         { style = "bg:6 italic fg:0", format = " t: $output " },
@@ -366,8 +400,23 @@ if section == nil or section == "shp" then
     {
       name = "container",
       priority = 50,
-      command = "/env/dot/.func/shell/incontainer",
-      when = { bash = "[[ $(systemd-detect-virt) != 'none' ]]" },
+      lua = [[
+        local p = io.popen("systemd-detect-virt 2>/dev/null")
+        if not p then
+          return nil
+        end
+        local out = p:read("*a") or ""
+        p:close()
+
+        local virt = out:match("^%s*(.-)%s*$")
+        if virt == "" or virt == "none" then
+          return nil
+        end
+        if virt == "lxc" then
+          return " >> "
+        end
+        return " :: "
+      ]],
       outputs = {
         { style = "bg:0 fg:0", format = " " },
         { style = "bg:5 fg:0", format = "$output" },
@@ -386,7 +435,7 @@ if section == nil or section == "shp" then
     {
       name = "pod_name",
       priority = 1,
-      when = { bash = "[[ -n $HEXE_POD_NAME ]]" },
+      when = { env = "HEXE_POD_NAME" },
       outputs = {
         { style = "fg:7", format = "|" },
         { style = "bg:5 fg:0", format = " $output " },
@@ -396,7 +445,7 @@ if section == nil or section == "shp" then
     {
       name = "separator",
       priority = 2,
-      when = { bash = "[[ -n $HEXE_POD_NAME ]]" },
+      when = { env = "HEXE_POD_NAME" },
       outputs = {
         { style = "fg:7", format = "|" },
       },
