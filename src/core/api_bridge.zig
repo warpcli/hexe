@@ -1358,8 +1358,14 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     lua.pop(1);
 
     // Parse builtin source
+    var builtin_command: ?[]const u8 = null;
     _ = lua.getField(idx, "builtin");
-    if (lua.typeOf(-1) == .string) {
+    if (lua.typeOf(-1) == .function) {
+        if (parseLuaChunkValue(lua, allocator, false)) |code| {
+            defer allocator.free(code);
+            builtin_command = allocator.dupe(u8, code) catch null;
+        }
+    } else if (lua.typeOf(-1) == .string) {
         const s = lua.toString(-1) catch "";
         if (s.len > 0) segment.builtin = allocator.dupe(u8, s) catch null;
     } else if (lua.typeOf(-1) == .table) {
@@ -1373,6 +1379,24 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
         if (segment.builtin == null and lua.typeOf(-1) == .string) {
             const s = lua.toString(-1) catch "";
             if (s.len > 0) segment.builtin = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "lua");
+        if (builtin_command == null) {
+            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+                defer allocator.free(code);
+                builtin_command = allocator.dupe(u8, code) catch null;
+            }
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "fn");
+        if (builtin_command == null) {
+            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+                defer allocator.free(code);
+                builtin_command = allocator.dupe(u8, code) catch null;
+            }
         }
         lua.pop(1);
     }
@@ -1757,7 +1781,7 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
 
     segment.command = switch (segment.kind) {
         .value => value_command,
-        .builtin => null,
+        .builtin => builtin_command,
         .button, .progress => value_command,
     };
 
@@ -2431,6 +2455,7 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     var priority: i64 = 50; // default priority
     var outputs = std.ArrayList(config_builder.ShpConfigBuilder.OutputDef){};
     var command: ?[]const u8 = null;
+    var builtin_command: ?[]const u8 = null;
     var builtin: ?[]const u8 = null;
     var progress_every_ms: u64 = 1000;
     var progress_show_when: ?[]const u8 = null;
@@ -2486,7 +2511,12 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     lua.pop(1);
 
     _ = lua.getField(idx, "builtin");
-    if (lua.typeOf(-1) == .string) {
+    if (lua.typeOf(-1) == .function) {
+        if (parseLuaChunkValue(lua, allocator, false)) |code| {
+            defer allocator.free(code);
+            builtin_command = allocator.dupe(u8, code) catch null;
+        }
+    } else if (lua.typeOf(-1) == .string) {
         const b = lua.toString(-1) catch "";
         if (b.len > 0) builtin = allocator.dupe(u8, b) catch null;
     } else if (lua.typeOf(-1) == .table) {
@@ -2500,6 +2530,24 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
         if (builtin == null and lua.typeOf(-1) == .string) {
             const b = lua.toString(-1) catch "";
             if (b.len > 0) builtin = allocator.dupe(u8, b) catch null;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "lua");
+        if (builtin_command == null) {
+            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+                defer allocator.free(code);
+                builtin_command = allocator.dupe(u8, code) catch null;
+            }
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "fn");
+        if (builtin_command == null) {
+            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+                defer allocator.free(code);
+                builtin_command = allocator.dupe(u8, code) catch null;
+            }
         }
         lua.pop(1);
     }
@@ -2572,6 +2620,10 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
         lua.pop(1);
     }
     lua.pop(1);
+
+    if (kind == .builtin and command == null) {
+        command = builtin_command;
+    }
 
     var inverse_on_hover: bool = true;
     _ = lua.getField(idx, "inverse_on_hover");

@@ -214,6 +214,41 @@ fn evalLuaGate(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bo
     };
 }
 
+fn evalLuaBuiltinName(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) ?[]const u8 {
+    populateLuaContext(runtime, ctx);
+
+    const code_z = runtime.allocator.dupeZ(u8, code) catch return null;
+    defer runtime.allocator.free(code_z);
+
+    runtime.lua.loadString(code_z) catch return null;
+    runtime.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
+        runtime.lua.pop(1);
+        return null;
+    };
+    defer runtime.lua.pop(1);
+
+    switch (runtime.lua.typeOf(-1)) {
+        .string => {
+            const s = runtime.lua.toString(-1) catch return null;
+            const t = std.mem.trim(u8, s, " \t\r\n");
+            if (t.len == 0) return null;
+            return t;
+        },
+        .table => {
+            _ = runtime.lua.getField(-1, "name");
+            defer runtime.lua.pop(1);
+            if (runtime.lua.typeOf(-1) == .string) {
+                const s = runtime.lua.toString(-1) catch return null;
+                const t = std.mem.trim(u8, s, " \t\r\n");
+                if (t.len == 0) return null;
+                return t;
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
 pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, modules: []const core.Segment, stdout: std.fs.File, is_zsh: bool) !void {
     const alloc = std.heap.page_allocator;
     _ = allocator;
@@ -252,7 +287,29 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
                 results[i].when_passed = false;
                 continue;
             }
-            results[i].output = evalLuaCommand(&lua_rt.?, ctx, cmd);
+            if (mod.kind == .builtin) {
+                if (evalLuaBuiltinName(&lua_rt.?, ctx, cmd)) |builtin_name| {
+                    var bi = LuaValue{};
+                    if (ctx.renderSegment(builtin_name)) |segs| {
+                        if (segs.len > 0) {
+                            for (segs) |seg_out| {
+                                if (bi.block_count >= bi.blocks.len) break;
+                                if (seg_out.text.len == 0) continue;
+                                var blk = LuaBlock{};
+                                const tn = @min(seg_out.text.len, blk.text.len);
+                                @memcpy(blk.text[0..tn], seg_out.text[0..tn]);
+                                blk.len = tn;
+                                blk.style = seg_out.style;
+                                bi.blocks[bi.block_count] = blk;
+                                bi.block_count += 1;
+                            }
+                        }
+                    }
+                    results[i].output = bi;
+                }
+            } else {
+                results[i].output = evalLuaCommand(&lua_rt.?, ctx, cmd);
+            }
         } else if (mod.builtin) |builtin_name| {
             var bi = LuaValue{};
             if (ctx.renderSegment(builtin_name)) |segs| {

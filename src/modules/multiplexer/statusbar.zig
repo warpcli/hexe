@@ -495,6 +495,46 @@ fn evalLuaCommand(code: []const u8, ctx: *shp.Context) LuaEval {
     }
 }
 
+fn evalLuaBuiltinName(code: []const u8, ctx: *shp.Context) ?[]const u8 {
+    if (when_lua_rt == null) {
+        when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch null;
+        if (when_lua_rt == null) return null;
+    }
+    const rt = &when_lua_rt.?;
+    populateLuaContext(rt, ctx);
+
+    const code_z = rt.allocator.dupeZ(u8, code) catch return null;
+    defer rt.allocator.free(code_z);
+
+    rt.lua.loadString(code_z) catch return null;
+    rt.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
+        rt.lua.pop(1);
+        return null;
+    };
+    defer rt.lua.pop(1);
+
+    switch (rt.lua.typeOf(-1)) {
+        .string => {
+            const s = rt.lua.toString(-1) catch return null;
+            const t = std.mem.trim(u8, s, " \t\r\n");
+            if (t.len == 0) return null;
+            return t;
+        },
+        .table => {
+            _ = rt.lua.getField(-1, "name");
+            defer rt.lua.pop(1);
+            if (rt.lua.typeOf(-1) == .string) {
+                const s = rt.lua.toString(-1) catch return null;
+                const t = std.mem.trim(u8, s, " \t\r\n");
+                if (t.len == 0) return null;
+                return t;
+            }
+            return null;
+        },
+        else => return null,
+    }
+}
+
 fn passesWhen(ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment) bool {
     if (mod.when == null) return true;
     return passesWhenClause(ctx, query, mod.when.?);
@@ -1297,7 +1337,11 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
             }
         } else if (mod.command) |cmd| {
             if (!command_output_ready) {
-                if (mod.kind == .progress and !progressVisible(mod, ctx)) {
+                if (mod.kind == .builtin) {
+                    if (evalLuaBuiltinName(cmd, ctx)) |builtin_name| {
+                        output_segs = ctx.renderSegment(builtin_name);
+                    }
+                } else if (mod.kind == .progress and !progressVisible(mod, ctx)) {
                     command_output = "";
                 } else {
                     if (mod.kind == .progress and mod.progress_every_ms > 0) {
@@ -1330,7 +1374,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                 }
                 command_output_ready = true;
             }
-            output_segs = command_eval.segSlice();
+            if (output_segs == null) output_segs = command_eval.segSlice();
             output_text = command_output;
             if (output_segs == null) {
                 if (builtinNameFromMarker(output_text)) |builtin_name| {
@@ -1439,7 +1483,11 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
             }
         } else if (mod.command) |cmd| {
             if (!command_output_ready) {
-                if (mod.kind == .progress and !progressVisible(mod, ctx)) {
+                if (mod.kind == .builtin) {
+                    if (evalLuaBuiltinName(cmd, ctx)) |builtin_name| {
+                        output_segs = ctx.renderSegment(builtin_name);
+                    }
+                } else if (mod.kind == .progress and !progressVisible(mod, ctx)) {
                     command_output = "";
                 } else {
                     if (mod.kind == .progress and mod.progress_every_ms > 0) {
@@ -1472,7 +1520,7 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
                 }
                 command_output_ready = true;
             }
-            output_segs = command_eval.segSlice();
+            if (output_segs == null) output_segs = command_eval.segSlice();
             output_text = command_output;
             if (output_segs == null) {
                 if (builtinNameFromMarker(output_text)) |builtin_name| {
