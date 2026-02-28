@@ -119,3 +119,78 @@ fn writeFloat3(file: *std.fs.File, value: f64) !void {
     const s = try std.fmt.bufPrint(&buf, "{d:.3}", .{value});
     try file.writeAll(s);
 }
+
+fn tempCastPath(allocator: std.mem.Allocator, suffix: []const u8) ![]u8 {
+    return std.fmt.allocPrint(allocator, "/tmp/hexe-asciicast-test-{d}-{s}.cast", .{ std.time.nanoTimestamp(), suffix });
+}
+
+test "asciicast writes header and both event kinds" {
+    const allocator = std.testing.allocator;
+    const path = try tempCastPath(allocator, "events");
+    defer allocator.free(path);
+    defer std.fs.cwd().deleteFile(path) catch {};
+
+    var writer = try AsciicastWriter.init(path, .{
+        .width = 120,
+        .height = 33,
+        .title = "record test",
+        .command = "echo hi",
+    });
+    defer writer.deinit();
+
+    try writer.writeOutput("hello\n");
+    try writer.writeInput("ls\t-a\r\n");
+    try writer.flush();
+
+    const content = try std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024);
+    defer allocator.free(content);
+
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"version\":2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"width\":120") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"height\":33") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"title\":\"record test\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, "\"command\":\"echo hi\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, ",\"o\",\"hello\\n\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, content, ",\"i\",\"ls\\t-a\\r\\n\"") != null);
+}
+
+test "asciicast escapes quotes backslashes and control chars" {
+    const allocator = std.testing.allocator;
+    const path = try tempCastPath(allocator, "escape");
+    defer allocator.free(path);
+    defer std.fs.cwd().deleteFile(path) catch {};
+
+    var writer = try AsciicastWriter.init(path, .{ .width = 80, .height = 24 });
+    defer writer.deinit();
+
+    const payload = "\"\\\x01\n";
+    try writer.writeOutput(payload);
+    try writer.flush();
+
+    const content = try std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024);
+    defer allocator.free(content);
+
+    try std.testing.expect(std.mem.indexOf(u8, content, "\\\"\\\\\\u0001\\n") != null);
+}
+
+test "asciicast skips empty input and output events" {
+    const allocator = std.testing.allocator;
+    const path = try tempCastPath(allocator, "empty");
+    defer allocator.free(path);
+    defer std.fs.cwd().deleteFile(path) catch {};
+
+    var writer = try AsciicastWriter.init(path, .{ .width = 80, .height = 24 });
+    defer writer.deinit();
+
+    try writer.writeOutput("");
+    try writer.writeInput("");
+    try writer.flush();
+
+    const content = try std.fs.cwd().readFileAlloc(allocator, path, 64 * 1024);
+    defer allocator.free(content);
+
+    var lines = std.mem.tokenizeScalar(u8, content, '\n');
+    var count: usize = 0;
+    while (lines.next()) |_| count += 1;
+    try std.testing.expectEqual(@as(usize, 1), count);
+}
