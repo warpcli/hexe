@@ -154,6 +154,14 @@ pub fn main() !void {
     const pod_attach_record = try pod_attach.string("", "record", null);
     const pod_attach_capture_input = try pod_attach.flag("", "capture-input", null);
 
+    const pod_record = try pod_cmd.newCommand("record", "Attach to a pod and record asciicast");
+    const pod_record_uuid = try pod_record.string("u", "uuid", null);
+    const pod_record_name = try pod_record.string("n", "name", null);
+    const pod_record_socket = try pod_record.string("s", "socket", null);
+    const pod_record_detach = try pod_record.string("", "detach", null);
+    const pod_record_out = try pod_record.string("o", "out", null);
+    const pod_record_capture_input = try pod_record.flag("", "capture-input", null);
+
     const pod_kill = try pod_cmd.newCommand("kill", "Kill a pod by uuid/name");
     const pod_kill_uuid = try pod_kill.string("u", "uuid", null);
     const pod_kill_name = try pod_kill.string("n", "name", null);
@@ -310,6 +318,7 @@ pub fn main() !void {
     var found_validate = false;
     var found_export = false;
     var found_stats = false;
+    var found_record = false;
 
     for (args) |arg| {
         if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) has_help = true;
@@ -345,6 +354,7 @@ pub fn main() !void {
         if (std.mem.eql(u8, arg, "validate")) found_validate = true;
         if (std.mem.eql(u8, arg, "export")) found_export = true;
         if (std.mem.eql(u8, arg, "stats")) found_stats = true;
+        if (std.mem.eql(u8, arg, "record")) found_record = true;
     }
 
     if (has_help) {
@@ -395,6 +405,8 @@ pub fn main() !void {
             print("Usage: hexe pod send [OPTIONS] [text]\n\nSend input to a pod without ses/mux.\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID (32 hex chars)\n  -n, --name <NAME>        Target pod by name (via pod-*.meta scan)\n  -s, --socket <PATH>      Target pod by explicit socket path\n  -e, --enter              Append Enter key\n  -C, --ctrl <char>        Send Ctrl+<char> (e.g., -C c for Ctrl+C)\n", .{});
         } else if (found_pod and found_attach) {
             print("Usage: hexe pod attach [OPTIONS]\n\nInteractive attach to a pod socket (raw tty).\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID (32 hex chars)\n  -n, --name <NAME>        Target pod by name (via pod-*.meta scan)\n  -s, --socket <PATH>      Target pod by explicit socket path\n      --detach <key>       Detach prefix Ctrl+<key> (default: b), then press 'd'\n      --record <PATH>      Write asciicast recording (.cast)\n      --capture-input      Include typed input events in recording\n", .{});
+        } else if (found_pod and found_record) {
+            print("Usage: hexe pod record [OPTIONS]\n\nAttach to a pod and write an asciicast recording.\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID (32 hex chars)\n  -n, --name <NAME>        Target pod by name (via pod-*.meta scan)\n  -s, --socket <PATH>      Target pod by explicit socket path\n      --detach <key>       Detach prefix Ctrl+<key> (default: b), then press 'd'\n  -o, --out <PATH>         Output cast file path (required)\n      --capture-input      Include typed input events in recording\n", .{});
         } else if (found_pod and found_kill) {
             print("Usage: hexe pod kill [OPTIONS]\n\nKill a pod process (reads pid from pod-*.meta).\n\nOptions:\n  -u, --uuid <UUID>        Target pod by UUID\n  -n, --name <NAME>        Target pod by name (newest created_at wins)\n  -s, --signal <SIG>       Signal name or number (default: TERM)\n                           Names: TERM, KILL, INT, HUP, QUIT, STOP, CONT, TSTP, USR1, USR2\n  -f, --force              Follow with SIGKILL\n", .{});
         } else if (found_pod and found_gc) {
@@ -425,7 +437,7 @@ pub fn main() !void {
         } else if (found_ses) {
             print("Usage: hexe ses <command>\n\nSession daemon management\n\nCommands:\n  daemon  Start the session daemon\n  status  Show daemon info\n  list    List sessions and panes\n  kill    Kill a detached session\n  clear   Kill all detached sessions\n  export  Export detached session to JSON\n  stats   Show resource usage statistics\n", .{});
         } else if (found_pod) {
-            print("Usage: hexe pod <command>\n\nPer-pane PTY daemon\n\nCommands:\n  daemon  Start a per-pane pod daemon\n  new     Create a standalone pod\n  list    List discoverable pods\n  send    Send input to a pod\n  attach  Attach to a pod\n  kill    Kill a pod\n  gc      Clean stale pod metadata\n", .{});
+            print("Usage: hexe pod <command>\n\nPer-pane PTY daemon\n\nCommands:\n  daemon  Start a per-pane pod daemon\n  new     Create a standalone pod\n  list    List discoverable pods\n  send    Send input to a pod\n  attach  Attach to a pod\n  record  Attach and record asciicast\n  kill    Kill a pod\n  gc      Clean stale pod metadata\n", .{});
         } else if (found_mux) {
             print("Usage: hexe mux <command>\n\nTerminal multiplexer\n\nCommands:\n  new      Create new multiplexer session\n  attach   Attach to existing session\n  float    Spawn a transient float pane\n  notify   Send notification\n  send     Send keystrokes to pane\n  info     Show pane info\n  layout   Save and restore layouts\n", .{});
         } else if (found_shp) {
@@ -569,6 +581,20 @@ pub fn main() !void {
                 pod_attach_detach.*,
                 pod_attach_record.*,
                 pod_attach_capture_input.*,
+            );
+        } else if (pod_record.happened) {
+            if (pod_record_out.*.len == 0) {
+                print("Error: --out is required for pod record\n", .{});
+                return;
+            }
+            try cli_cmds.runPodAttach(
+                allocator,
+                pod_record_uuid.*,
+                pod_record_name.*,
+                pod_record_socket.*,
+                pod_record_detach.*,
+                pod_record_out.*,
+                pod_record_capture_input.*,
             );
         } else if (pod_kill.happened) {
             try cli_cmds.runPodKill(

@@ -277,6 +277,14 @@ pub fn main() !void {
     try pod_attach.addArg(Arg.singleValueOption("record", null, null));
     try pod_attach.addArg(Arg.booleanOption("capture-input", null, null));
 
+    var pod_record = app.createCommand("record", "Attach to a pod and record asciicast");
+    try pod_record.addArg(Arg.singleValueOption("uuid", 'u', null));
+    try pod_record.addArg(Arg.singleValueOption("name", 'n', null));
+    try pod_record.addArg(Arg.singleValueOption("socket", 's', null));
+    try pod_record.addArg(Arg.singleValueOption("detach", null, null));
+    try pod_record.addArg(Arg.singleValueOption("out", 'o', null));
+    try pod_record.addArg(Arg.booleanOption("capture-input", null, null));
+
     var pod_kill = app.createCommand("kill", "Kill a pod by uuid/name");
     try pod_kill.addArg(Arg.singleValueOption("uuid", 'u', null));
     try pod_kill.addArg(Arg.singleValueOption("name", 'n', null));
@@ -286,7 +294,7 @@ pub fn main() !void {
     var pod_gc = app.createCommand("gc", "Garbage-collect stale pod metadata");
     try pod_gc.addArg(Arg.booleanOption("dry-run", 'n', null));
 
-    try pod_cmd.addSubcommands(&[_]yazap.Command{ pod_daemon, pod_list, pod_new, pod_send, pod_attach, pod_kill, pod_gc });
+    try pod_cmd.addSubcommands(&[_]yazap.Command{ pod_daemon, pod_list, pod_new, pod_send, pod_attach, pod_record, pod_kill, pod_gc });
 
     // MUX subcommands
     var mux_new = app.createCommand("new", "Create new multiplexer session");
@@ -599,6 +607,23 @@ pub fn main() !void {
                 m.getSingleValue("socket") orelse "",
                 m.getSingleValue("detach") orelse "",
                 m.getSingleValue("record") orelse "",
+                m.containsArg("capture-input"),
+            );
+            return;
+        }
+        if (pod_matches.subcommandMatches("record")) |m| {
+            const out = m.getSingleValue("out") orelse "";
+            if (out.len == 0) {
+                print("Error: --out is required for pod record\n", .{});
+                return;
+            }
+            try cli_cmds.runPodAttach(
+                allocator,
+                m.getSingleValue("uuid") orelse "",
+                m.getSingleValue("name") orelse "",
+                m.getSingleValue("socket") orelse "",
+                m.getSingleValue("detach") orelse "",
+                out,
                 m.containsArg("capture-input"),
             );
             return;
