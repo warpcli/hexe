@@ -90,5 +90,5 @@ See [isolation.md](isolation.md) for profiles and limits.
 When the float is shown, it imports environment variables from the currently focused parent pane.
 
 - Useful with `direnv` and manual exports like `export ONE=TWO`
-- Applies on first creation and when reopening an existing float
+- Applies when creating a float process (first creation or after a destroy/recreate cycle)
 - Internal runtime variables (`HEXE_*`, `PWD`, `SHLVL`, `TERM`, etc.) are not overwritten

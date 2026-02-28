@@ -249,6 +249,19 @@ fn syncEnvIntoExistingFloat(state: *State, pane: *Pane, parent_uuid: [32]u8) voi
     pane.write(cmd.items) catch {};
 }
 
+fn paneExistsInSes(state: *State, uuid: [32]u8) bool {
+    if (!state.ses_client.isConnected()) return true;
+    if (state.ses_client.getPaneInfoSnapshot(uuid)) |info| {
+        defer {
+            if (info.name) |s| state.allocator.free(s);
+            if (info.cwd) |s| state.allocator.free(s);
+            if (info.fg_name) |s| state.allocator.free(s);
+        }
+        return true;
+    }
+    return false;
+}
+
 fn isValidEnvKey(key: []const u8) bool {
     if (key.len == 0) return false;
     const first = key[0];
@@ -534,13 +547,18 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
     // the cwd of the currently focused split pane.
 
     // Find existing float by key (and directory if per_cwd).
-    for (state.floats.items, 0..) |pane, i| {
+    var existing_idx: usize = 0;
+    while (existing_idx < state.floats.items.len) {
+        const pane = state.floats.items[existing_idx];
         if (pane.float_key == float_def.key) {
             // Only tab-bound floats use parent_tab filtering.
             // per_cwd/global floats are shared across tabs.
             if (!float_def.attributes.per_cwd and !float_def.attributes.global) {
                 if (pane.parent_tab) |parent| {
-                    if (parent != state.active_tab) continue;
+                    if (parent != state.active_tab) {
+                        existing_idx += 1;
+                        continue;
+                    }
                 }
             }
 
@@ -554,7 +572,34 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                     break :blk false;
                 } else current_dir == null;
 
-                if (!dirs_match) continue;
+                if (!dirs_match) {
+                    existing_idx += 1;
+                    continue;
+                }
+            }
+
+            const missing_in_ses = switch (pane.backend) {
+                .pod => !paneExistsInSes(state, pane.uuid),
+                else => false,
+            };
+            if (!pane.isAlive() or missing_in_ses) {
+                const stale = state.floats.orderedRemove(existing_idx);
+                stale.deinit();
+                state.allocator.destroy(stale);
+
+                if (state.active_floating) |af| {
+                    if (af == existing_idx) {
+                        state.active_floating = null;
+                    } else if (af > existing_idx) {
+                        state.active_floating = af - 1;
+                    }
+                }
+
+                state.syncStateToSes();
+                state.needs_render = true;
+                state.force_full_render = true;
+                state.renderer.invalidate();
+                continue;
             }
 
             // Toggle visibility (per-tab for global/per_cwd floats).
@@ -569,15 +614,8 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 } else if (state.currentLayout().getFocusedPane()) |tiled| {
                     state.syncPaneUnfocus(tiled);
                 }
-                state.active_floating = i;
+                state.active_floating = existing_idx;
                 state.syncPaneFocus(pane, old_uuid);
-                if (float_def.attributes.inherit_env) {
-                    if (old_uuid) |parent_uuid| {
-                        if (!std.mem.eql(u8, &parent_uuid, &pane.uuid)) {
-                            syncEnvIntoExistingFloat(state, pane, parent_uuid);
-                        }
-                    }
-                }
                 // If alone mode, hide all other floats on this tab.
                 if (float_def.attributes.exclusive) {
                     var to_hide: std.ArrayList([32]u8) = .empty;
@@ -600,7 +638,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 }
             } else {
                 // Float was hidden. If it had focus, return focus to tiled pane.
-                if (state.active_floating == i) {
+                if (state.active_floating == existing_idx) {
                     state.syncPaneUnfocus(pane);
                     state.active_floating = null;
                     if (state.currentLayout().getFocusedPane()) |tiled| {
@@ -614,6 +652,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
             state.needs_render = true;
             return;
         }
+        existing_idx += 1;
     }
 
     // No existing float - create new.
