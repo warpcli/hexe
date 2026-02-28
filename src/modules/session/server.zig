@@ -2037,8 +2037,21 @@ pub const Server = struct {
 
         if (self.ses_state.panes.getPtr(ex.uuid)) |pane| {
             pane.last_status = ex.status;
-            self.ses_state.markDirty();
+            // Notify owning mux immediately so it can tear down dead pane UI.
+            if (pane.attached_to) |client_id| {
+                if (self.ses_state.getClient(client_id)) |client| {
+                    if (client.mux_ctl_fd) |ctl_fd| {
+                        var msg = wire.PaneUuid{ .uuid = ex.uuid };
+                        wire.writeControl(ctl_fd, .pane_exited, std.mem.asBytes(&msg)) catch {};
+                    }
+                }
+            }
         }
+
+        // Fully remove dead pane from SES routing/state so sticky/adopt lookup
+        // cannot return a process that already exited.
+        self.ses_state.killPane(ex.uuid) catch {};
+        self.ses_state.markDirty();
     }
 
     /// Handle a CLI tool request (handshake byte 0x04).

@@ -493,6 +493,7 @@ pub const SesClient = struct {
     pub const PaneType = enum { split, float };
     pub const PaneAuxInfo = struct { created_from: ?[32]u8, focused_from: ?[32]u8 };
     pub const PaneInfoSnapshot = struct {
+        pid: ?i32,
         name: ?[]u8,
         cwd: ?[]u8,
         fg_name: ?[]u8,
@@ -702,6 +703,7 @@ pub const SesClient = struct {
         if (remaining > 0) self.skipPayload(fd, @intCast(remaining));
 
         return .{
+            .pid = if (resp.pid != 0) resp.pid else null,
             .name = name,
             .cwd = cwd,
             .fg_name = fg_name,

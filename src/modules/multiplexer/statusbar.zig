@@ -892,15 +892,8 @@ pub fn hitTestAction(
     ctx.now_ms = @intCast(std.time.milliTimestamp());
 
     // Keep context parity with draw() for consistent width/when decisions.
+    // Important: do not mutate runtime shell state during hit-testing.
     if (state.getCurrentFocusedUuid()) |uuid| {
-        if (state.active_floating != null) {
-            const info_opt = state.getPaneShell(uuid);
-            const needs_start = if (info_opt) |info| info.started_at_ms == null else true;
-            if (needs_start) {
-                state.setPaneShellRunning(uuid, false, ctx.now_ms, null, null, null);
-            }
-        }
-
         if (state.getPaneShell(uuid)) |info| {
             if (info.cmd) |c| ctx.last_command = c;
             if (info.cwd) |c| ctx.cwd = c;

@@ -1439,6 +1439,7 @@ pub const SesState = struct {
             // Sticky candidates can be idle (.sticky) or currently active
             // (.attached). Active ones may be taken over by another mux.
             if (pane.state == .sticky or pane.state == .attached) {
+                if (!isPidAlive(pane.child_pid)) continue;
                 if (pane.sticky_pwd) |spwd| {
                     if (pane.sticky_key) |skey| {
                         if (skey == key and std.mem.eql(u8, spwd, pwd)) {
@@ -1469,6 +1470,15 @@ pub const SesState = struct {
             }
         }
         return fallback_pane;
+    }
+
+    fn isPidAlive(pid: posix.pid_t) bool {
+        if (pid <= 0) return false;
+        var path_buf: [64]u8 = undefined;
+        const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch return false;
+        const file = std.fs.openFileAbsolute(path, .{}) catch return false;
+        file.close();
+        return true;
     }
 
     /// Transfer a pane from its current owner to another client.

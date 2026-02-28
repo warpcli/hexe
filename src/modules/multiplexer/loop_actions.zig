@@ -257,9 +257,21 @@ fn paneExistsInSes(state: *State, uuid: [32]u8) bool {
             if (info.cwd) |s| state.allocator.free(s);
             if (info.fg_name) |s| state.allocator.free(s);
         }
+        if (info.pid) |pid| {
+            if (!isProcessAlive(pid)) return false;
+        }
         return true;
     }
     return false;
+}
+
+fn isProcessAlive(pid: i32) bool {
+    if (pid <= 0) return false;
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch return false;
+    const file = std.fs.openFileAbsolute(path, .{}) catch return false;
+    file.close();
+    return true;
 }
 
 fn isValidEnvKey(key: []const u8) bool {
