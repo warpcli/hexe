@@ -17,6 +17,7 @@ pub const BindKeyKind = core.Config.BindKeyKind;
 pub const BindAction = core.Config.BindAction;
 const PaneQuery = core.PaneQuery;
 const FocusContext = @import("state.zig").FocusContext;
+const LuaRuntime = core.LuaRuntime;
 
 fn handleBlockedPopup(popups: anytype, parsed_event: ?vaxis.Event) bool {
     if (parsed_event) |ev| {
@@ -198,9 +199,113 @@ fn buildPaneQuery(state: *State) PaneQuery {
 /// Evaluate a bind's when condition against the current state.
 fn matchesWhen(when: ?core.config.WhenDef, query: *const PaneQuery) bool {
     if (when) |w| {
-        return core.query.evalWhen(query, w);
+        if (!core.query.evalWhen(query, w)) return false;
+        if (!matchesEnvWhen(w)) return false;
+        if (!matchesLuaWhen(query, w)) return false;
+        if (!matchesBashWhen(w)) return false;
+        return true;
     }
     return true; // No condition = always matches.
+}
+
+fn matchesEnvWhen(w: core.config.WhenDef) bool {
+    if (w.env) |name| {
+        const v = std.posix.getenv(name);
+        if (v == null or v.?.len == 0) return false;
+    }
+    if (w.env_not) |name| {
+        const v = std.posix.getenv(name);
+        if (v != null and v.?.len > 0) return false;
+    }
+    return true;
+}
+
+fn populateWhenLuaContext(rt: *LuaRuntime, query: *const PaneQuery) void {
+    rt.lua.createTable(0, 20);
+
+    rt.lua.pushBoolean(query.is_float);
+    rt.lua.setField(-2, "is_float");
+    rt.lua.pushBoolean(query.is_split);
+    rt.lua.setField(-2, "is_split");
+    rt.lua.pushBoolean(query.alt_screen);
+    rt.lua.setField(-2, "alt_screen");
+    rt.lua.pushBoolean(query.shell_running);
+    rt.lua.setField(-2, "shell_running");
+    rt.lua.pushBoolean(query.is_float and query.float_key == 0);
+    rt.lua.setField(-2, "adhoc_float");
+
+    rt.lua.pushInteger(query.float_key);
+    rt.lua.setField(-2, "float_key");
+    rt.lua.pushInteger(query.tab_count);
+    rt.lua.setField(-2, "tab_count");
+    rt.lua.pushInteger(query.active_tab);
+    rt.lua.setField(-2, "active_tab");
+    rt.lua.pushInteger(query.jobs);
+    rt.lua.setField(-2, "jobs");
+    rt.lua.pushInteger(@intCast(query.now_ms));
+    rt.lua.setField(-2, "now_ms");
+
+    if (query.fg_process) |p| {
+        _ = rt.lua.pushString(p);
+        rt.lua.setField(-2, "fg_process");
+    }
+    if (query.fg_pid) |pid| {
+        rt.lua.pushInteger(pid);
+        rt.lua.setField(-2, "fg_pid");
+    }
+
+    var env_map = std.process.getEnvMap(rt.allocator) catch {
+        rt.lua.createTable(0, 0);
+        rt.lua.setField(-2, "env");
+        rt.lua.setGlobal("ctx");
+        return;
+    };
+    defer env_map.deinit();
+
+    rt.lua.createTable(0, @intCast(env_map.count()));
+    var it = env_map.iterator();
+    while (it.next()) |entry| {
+        _ = rt.lua.pushString(entry.key_ptr.*);
+        _ = rt.lua.pushString(entry.value_ptr.*);
+        rt.lua.setTable(-3);
+    }
+    rt.lua.setField(-2, "env");
+
+    rt.lua.setGlobal("ctx");
+}
+
+fn matchesLuaWhen(query: *const PaneQuery, w: core.config.WhenDef) bool {
+    const code = w.lua orelse return true;
+    var rt = LuaRuntime.init(std.heap.page_allocator) catch return false;
+    defer rt.deinit();
+
+    populateWhenLuaContext(&rt, query);
+
+    const code_z = rt.allocator.dupeZ(u8, code) catch return false;
+    defer rt.allocator.free(code_z);
+
+    rt.lua.loadString(code_z) catch return false;
+    rt.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
+        rt.lua.pop(1);
+        return false;
+    };
+    defer rt.lua.pop(1);
+    if (rt.lua.typeOf(-1) != .boolean) return false;
+    return rt.lua.toBoolean(-1);
+}
+
+fn matchesBashWhen(w: core.config.WhenDef) bool {
+    const script = w.bash orelse return true;
+    const res = std.process.Child.run(.{
+        .allocator = std.heap.page_allocator,
+        .argv = &.{ "/bin/bash", "-c", script },
+    }) catch return false;
+    defer std.heap.page_allocator.free(res.stdout);
+    defer std.heap.page_allocator.free(res.stderr);
+    return switch (res.term) {
+        .Exited => |code| code == 0,
+        else => false,
+    };
 }
 
 fn keyEq(a: BindKey, b: BindKey) bool {

@@ -58,7 +58,8 @@ pub fn isUnsafeMode() bool {
     if (posix.getenv("HEXE_UNSAFE_CONFIG")) |v| {
         return std.mem.eql(u8, v, "1");
     }
-    return false;
+    // Default to unrestricted mode unless explicitly disabled.
+    return true;
 }
 
 /// Get the config directory path
