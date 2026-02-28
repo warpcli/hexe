@@ -1525,23 +1525,6 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     else
         .value;
 
-    segment.command = switch (segment.kind) {
-        .value => value_command,
-        .builtin => null,
-        .button, .progress => value_command,
-    };
-
-    if (segment.command == null and segment.builtin == null) {
-        const msg = switch (segment.kind) {
-            .value => "value segment requires a non-empty 'value'",
-            .builtin => "builtin segment requires non-empty 'builtin'",
-            .button => "button segment requires 'value' or 'builtin'",
-            .progress => "progress segment requires 'value' or 'builtin'",
-        };
-        _ = lua.pushString(msg);
-        lua.raiseError();
-    }
-
     // Parse optional click actions.
     _ = lua.getField(idx, "on_click");
     if (lua.typeOf(-1) == .string) {
@@ -1771,6 +1754,23 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
         segment.spinner = spinner;
     }
     lua.pop(1);
+
+    segment.command = switch (segment.kind) {
+        .value => value_command,
+        .builtin => null,
+        .button, .progress => value_command,
+    };
+
+    if (segment.command == null and segment.builtin == null) {
+        const msg = switch (segment.kind) {
+            .value => "value segment requires a non-empty 'value'",
+            .builtin => "builtin segment requires non-empty 'builtin'",
+            .button => "button segment requires 'value' or 'builtin'",
+            .progress => "progress segment requires 'value' or 'builtin'",
+        };
+        _ = lua.pushString(msg);
+        lua.raiseError();
+    }
 
     return segment;
 }
