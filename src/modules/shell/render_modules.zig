@@ -5,6 +5,44 @@ const LuaRuntime = core.LuaRuntime;
 const segment = core.segments;
 const Style = core.style.Style;
 const segment_render = core.segment_render;
+const CALLBACK_REF_PREFIX = "__hexe_cb_ref:";
+
+fn callbackIdFromCode(code: []const u8) ?i32 {
+    if (!std.mem.startsWith(u8, code, CALLBACK_REF_PREFIX)) return null;
+    return std.fmt.parseInt(i32, code[CALLBACK_REF_PREFIX.len..], 10) catch null;
+}
+
+const LuaEvalMode = enum { chunk, callback };
+
+fn beginLuaEval(rt: *LuaRuntime, code: []const u8) ?LuaEvalMode {
+    if (callbackIdFromCode(code)) |cid| {
+        if (!core.lua_runtime.pushRegisteredCallback(rt, cid)) return null;
+        _ = rt.lua.getGlobal("ctx") catch {
+            rt.lua.pop(2);
+            return null;
+        };
+        rt.lua.protectedCall(.{ .args = 1, .results = 1 }) catch {
+            rt.lua.pop(2);
+            return null;
+        };
+        return .callback;
+    }
+
+    const code_z = rt.allocator.dupeZ(u8, code) catch return null;
+    defer rt.allocator.free(code_z);
+
+    rt.lua.loadString(code_z) catch return null;
+    rt.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
+        rt.lua.pop(1);
+        return null;
+    };
+    return .chunk;
+}
+
+fn endLuaEval(rt: *LuaRuntime, mode: LuaEvalMode) void {
+    rt.lua.pop(1);
+    if (mode == .callback) rt.lua.pop(1);
+}
 
 fn isPromptBuiltinAllowed(name: []const u8) bool {
     const allowed = [_][]const u8{
@@ -96,16 +134,8 @@ fn evalLuaCommand(runtime: *LuaRuntime, callback_runtime: ?*LuaRuntime, ctx: *se
     var out: LuaValue = .{};
     const rt = callback_runtime orelse runtime;
     populateLuaContext(rt, ctx);
-
-    const code_z = rt.allocator.dupeZ(u8, code) catch return out;
-    defer rt.allocator.free(code_z);
-
-    rt.lua.loadString(code_z) catch return out;
-    rt.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
-        rt.lua.pop(1);
-        return out;
-    };
-    defer rt.lua.pop(1);
+    const mode = beginLuaEval(rt, code) orelse return out;
+    defer endLuaEval(rt, mode);
 
     switch (rt.lua.typeOf(-1)) {
         .string => {
@@ -210,16 +240,8 @@ fn evalLuaCommand(runtime: *LuaRuntime, callback_runtime: ?*LuaRuntime, ctx: *se
 
 fn evalLuaGate(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bool {
     populateLuaContext(runtime, ctx);
-
-    const code_z = runtime.allocator.dupeZ(u8, code) catch return false;
-    defer runtime.allocator.free(code_z);
-
-    runtime.lua.loadString(code_z) catch return false;
-    runtime.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
-        runtime.lua.pop(1);
-        return false;
-    };
-    defer runtime.lua.pop(1);
+    const mode = beginLuaEval(runtime, code) orelse return false;
+    defer endLuaEval(runtime, mode);
     return switch (runtime.lua.typeOf(-1)) {
         .boolean => runtime.lua.toBoolean(-1),
         .number => (runtime.lua.toNumber(-1) catch 0) != 0,
@@ -255,16 +277,8 @@ fn evalLuaBuiltinDesc(runtime: *LuaRuntime, callback_runtime: ?*LuaRuntime, ctx:
     var desc: BuiltinDesc = .{};
     const rt = callback_runtime orelse runtime;
     populateLuaContext(rt, ctx);
-
-    const code_z = rt.allocator.dupeZ(u8, code) catch return desc;
-    defer rt.allocator.free(code_z);
-
-    rt.lua.loadString(code_z) catch return desc;
-    rt.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
-        rt.lua.pop(1);
-        return desc;
-    };
-    defer rt.lua.pop(1);
+    const mode = beginLuaEval(rt, code) orelse return desc;
+    defer endLuaEval(rt, mode);
 
     switch (rt.lua.typeOf(-1)) {
         .string => {

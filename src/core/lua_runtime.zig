@@ -35,6 +35,7 @@ const hexe_record_start = api_bridge.hexe_record_start;
 const hexe_record_stop = api_bridge.hexe_record_stop;
 const hexe_record_toggle = api_bridge.hexe_record_toggle;
 const hexe_record_status = api_bridge.hexe_record_status;
+const CALLBACK_TABLE_KEY = "__hexe_cb_table";
 
 /// Configuration loading status
 pub const ConfigStatus = enum {
@@ -76,6 +77,23 @@ pub fn getConfigPath(allocator: std.mem.Allocator, filename: []const u8) ![]cons
     const dir = try getConfigDir(allocator);
     defer allocator.free(dir);
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, filename });
+}
+
+/// Push callback table and function by registered callback id.
+/// On success, stack has: [..., callback_table, callback_function].
+pub fn pushRegisteredCallback(runtime: *LuaRuntime, callback_id: i32) bool {
+    _ = runtime.lua.getField(zlua.registry_index, CALLBACK_TABLE_KEY);
+    if (runtime.lua.typeOf(-1) != .table) {
+        runtime.lua.pop(1);
+        return false;
+    }
+
+    _ = runtime.lua.rawGetIndex(-1, callback_id);
+    if (runtime.lua.typeOf(-1) != .function) {
+        runtime.lua.pop(2);
+        return false;
+    }
+    return true;
 }
 
 /// Lua runtime for config loading

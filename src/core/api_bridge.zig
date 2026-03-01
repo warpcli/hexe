@@ -14,6 +14,8 @@ const c = @cImport({
 /// Registry key for storing ConfigBuilder pointer
 const BUILDER_REGISTRY_KEY = "_hexe_config_builder";
 const CALLBACK_TABLE_KEY = "__hexe_cb_table";
+const CALLBACK_NEXT_ID_KEY = "__hexe_cb_next_id";
+const CALLBACK_REF_PREFIX = "__hexe_cb_ref:";
 
 /// Store ConfigBuilder pointer in Lua registry
 pub fn storeConfigBuilder(lua: *Lua, builder: *ConfigBuilder) !void {
@@ -195,28 +197,28 @@ fn registerPromptValueCallback(lua: *Lua) ?i64 {
         return null;
     }
 
-    const next_id: i64 = @intCast(lua.rawLen(-1) + 1);
+    _ = lua.getField(zlua.registry_index, CALLBACK_NEXT_ID_KEY);
+    var next_id: i64 = 1;
+    if (lua.typeOf(-1) == .number) {
+        next_id = lua.toInteger(-1) catch 1;
+        if (next_id < 1) next_id = 1;
+    }
+    lua.pop(1);
+
     // Stack: ..., function, callback_table
     lua.pushValue(-2);
     lua.rawSetIndex(-2, @intCast(next_id));
     lua.pop(1);
+
+    lua.pushInteger(next_id + 1);
+    lua.setField(zlua.registry_index, CALLBACK_NEXT_ID_KEY);
+
     return next_id;
 }
 
 fn parsePromptValueChunkValue(lua: *Lua, allocator: std.mem.Allocator, require_boolean: bool) ?[]const u8 {
     if (registerPromptValueCallback(lua)) |callback_id| {
-        if (require_boolean) {
-            return std.fmt.allocPrint(
-                allocator,
-                "local __t={s}; if not __t then return false end; local __f=__t[{d}]; if not __f then return false end; return not not __f(ctx)",
-                .{ CALLBACK_TABLE_KEY, callback_id },
-            ) catch null;
-        }
-        return std.fmt.allocPrint(
-            allocator,
-            "local __t={s}; if not __t then return nil end; local __f=__t[{d}]; if not __f then return nil end; return __f(ctx)",
-            .{ CALLBACK_TABLE_KEY, callback_id },
-        ) catch null;
+        return std.fmt.allocPrint(allocator, "{s}{d}", .{ CALLBACK_REF_PREFIX, callback_id }) catch null;
     }
     return parseLuaChunkValue(lua, allocator, require_boolean);
 }

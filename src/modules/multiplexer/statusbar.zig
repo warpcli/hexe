@@ -13,6 +13,44 @@ const Color = core.style.Color;
 const Pane = @import("pane.zig").Pane;
 const segment_render = core.segment_render;
 const DEFAULT_OUTPUTS = [_]core.config.OutputDef{.{ .style = "", .format = "$output" }};
+const CALLBACK_REF_PREFIX = "__hexe_cb_ref:";
+
+fn callbackIdFromCode(code: []const u8) ?i32 {
+    if (!std.mem.startsWith(u8, code, CALLBACK_REF_PREFIX)) return null;
+    return std.fmt.parseInt(i32, code[CALLBACK_REF_PREFIX.len..], 10) catch null;
+}
+
+const LuaEvalMode = enum { chunk, callback };
+
+fn beginLuaEval(rt: *LuaRuntime, code: []const u8) ?LuaEvalMode {
+    if (callbackIdFromCode(code)) |cid| {
+        if (!core.lua_runtime.pushRegisteredCallback(rt, cid)) return null;
+        _ = rt.lua.getGlobal("ctx") catch {
+            rt.lua.pop(2);
+            return null;
+        };
+        rt.lua.protectedCall(.{ .args = 1, .results = 1 }) catch {
+            rt.lua.pop(2);
+            return null;
+        };
+        return .callback;
+    }
+
+    const code_z = rt.allocator.dupeZ(u8, code) catch return null;
+    defer rt.allocator.free(code_z);
+
+    rt.lua.loadString(code_z) catch return null;
+    rt.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
+        rt.lua.pop(1);
+        return null;
+    };
+    return .chunk;
+}
+
+fn endLuaEval(rt: *LuaRuntime, mode: LuaEvalMode) void {
+    rt.lua.pop(1);
+    if (mode == .callback) rt.lua.pop(1);
+}
 
 const WhenCacheEntry = struct {
     last_eval_ms: u64,
@@ -402,23 +440,18 @@ fn evalLuaWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
 
     populateLuaContext(rt, ctx);
 
-    const code_z = rt.allocator.dupeZ(u8, code) catch {
+    const mode = beginLuaEval(rt, code) orelse {
         map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
         return false;
     };
-    defer rt.allocator.free(code_z);
+    defer endLuaEval(rt, mode);
 
-    rt.lua.loadString(code_z) catch {
-        map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
-        return false;
+    const ok = switch (rt.lua.typeOf(-1)) {
+        .boolean => rt.lua.toBoolean(-1),
+        .number => (rt.lua.toNumber(-1) catch 0) != 0,
+        .string => (rt.lua.toString(-1) catch "").len > 0,
+        else => false,
     };
-    rt.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
-        rt.lua.pop(1);
-        map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
-        return false;
-    };
-    const ok = if (rt.lua.typeOf(-1) == .boolean) rt.lua.toBoolean(-1) else false;
-    rt.lua.pop(1);
     map.put(key, .{ .last_eval_ms = now, .last_result = ok }) catch {};
     return ok;
 }
@@ -433,17 +466,26 @@ fn progressVisible(mod: *const core.config.Segment, ctx: *shp.Context) bool {
 const LuaEval = struct {
     text: [256]u8 = [_]u8{0} ** 256,
     text_len: usize = 0,
-    segs: [16]shp.Segment = undefined,
-    seg_text: [16][64]u8 = undefined,
+    seg_text: [16][64]u8 = [_][64]u8{[_]u8{0} ** 64} ** 16,
+    seg_style: [16]shp.Style = [_]shp.Style{.{}} ** 16,
+    seg_text_len: [16]usize = [_]usize{0} ** 16,
     seg_count: usize = 0,
 
     fn textSlice(self: *const LuaEval) []const u8 {
         return self.text[0..self.text_len];
     }
 
-    fn segSlice(self: *const LuaEval) ?[]const shp.Segment {
+    fn segSlice(self: *const LuaEval, into: *[16]shp.Segment) ?[]const shp.Segment {
         if (self.seg_count == 0) return null;
-        return self.segs[0..self.seg_count];
+        var i: usize = 0;
+        while (i < self.seg_count and i < into.len) : (i += 1) {
+            const n = self.seg_text_len[i];
+            into[i] = .{
+                .text = self.seg_text[i][0..n],
+                .style = self.seg_style[i],
+            };
+        }
+        return into[0..@min(self.seg_count, into.len)];
     }
 };
 
@@ -460,16 +502,8 @@ fn evalLuaCommand(code: []const u8, ctx: *shp.Context) LuaEval {
         rt = &when_lua_rt.?;
     }
     populateLuaContext(rt, ctx);
-
-    const code_z = rt.allocator.dupeZ(u8, code) catch return out;
-    defer rt.allocator.free(code_z);
-
-    rt.lua.loadString(code_z) catch return out;
-    rt.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
-        rt.lua.pop(1);
-        return out;
-    };
-    defer rt.lua.pop(1);
+    const mode = beginLuaEval(rt, code) orelse return out;
+    defer endLuaEval(rt, mode);
 
     switch (rt.lua.typeOf(-1)) {
         .string => {
@@ -493,7 +527,7 @@ fn evalLuaCommand(code: []const u8, ctx: *shp.Context) LuaEval {
             return out;
         },
         .table => {
-            const len: i32 = @intCast(@min(rt.lua.rawLen(-1), out.segs.len));
+            const len: i32 = @intCast(@min(rt.lua.rawLen(-1), out.seg_text.len));
             var i: i32 = 1;
             while (i <= len) : (i += 1) {
                 _ = rt.lua.rawGetIndex(-1, i);
@@ -511,10 +545,11 @@ fn evalLuaCommand(code: []const u8, ctx: *shp.Context) LuaEval {
                 };
                 rt.lua.pop(1);
 
-                if (txt.len == 0 or out.seg_count >= out.segs.len) continue;
+                if (txt.len == 0 or out.seg_count >= out.seg_text.len) continue;
                 const bi = out.seg_count;
                 const tn = @min(txt.len, out.seg_text[bi].len);
                 @memcpy(out.seg_text[bi][0..tn], txt[0..tn]);
+                out.seg_text_len[bi] = tn;
 
                 var style = shp.Style{};
                 _ = rt.lua.getField(-1, "style");
@@ -546,7 +581,7 @@ fn evalLuaCommand(code: []const u8, ctx: *shp.Context) LuaEval {
                 if (rt.lua.typeOf(-1) == .boolean) style.italic = rt.lua.toBoolean(-1);
                 rt.lua.pop(1);
 
-                out.segs[bi] = .{ .text = out.seg_text[bi][0..tn], .style = style };
+                out.seg_style[bi] = style;
                 out.seg_count += 1;
             }
             return out;
@@ -609,16 +644,8 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
         rt = &when_lua_rt.?;
     }
     populateLuaContext(rt, ctx);
-
-    const code_z = rt.allocator.dupeZ(u8, code) catch return desc;
-    defer rt.allocator.free(code_z);
-
-    rt.lua.loadString(code_z) catch return desc;
-    rt.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
-        rt.lua.pop(1);
-        return desc;
-    };
-    defer rt.lua.pop(1);
+    const mode = beginLuaEval(rt, code) orelse return desc;
+    defer endLuaEval(rt, mode);
 
     switch (rt.lua.typeOf(-1)) {
         .string => {
@@ -1551,6 +1578,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
     var command_output: []const u8 = "";
     var command_output_ready = false;
     var command_eval: LuaEval = .{};
+    var command_eval_segs: [16]shp.Segment = undefined;
 
     const outputs = if (mod.outputs.len == 0) DEFAULT_OUTPUTS[0..] else mod.outputs;
     for (outputs) |out| {
@@ -1682,7 +1710,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                 command_output_ready = true;
             }
             if (output_segs == null and output_text.len == 0) {
-                output_segs = command_eval.segSlice();
+                output_segs = command_eval.segSlice(&command_eval_segs);
                 output_text = command_output;
             }
             if (output_segs == null) {
@@ -1791,6 +1819,7 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: *co
     var command_output: []const u8 = "";
     var command_output_ready = false;
     var command_eval: LuaEval = .{};
+    var command_eval_segs: [16]shp.Segment = undefined;
 
     const outputs = if (mod.outputs.len == 0) DEFAULT_OUTPUTS[0..] else mod.outputs;
     for (outputs) |out| {
@@ -1912,7 +1941,7 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: *co
                 command_output_ready = true;
             }
             if (output_segs == null and output_text.len == 0) {
-                output_segs = command_eval.segSlice();
+                output_segs = command_eval.segSlice(&command_eval_segs);
                 output_text = command_output;
             }
             if (output_segs == null) {
