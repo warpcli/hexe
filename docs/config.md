@@ -197,6 +197,12 @@ Prompt and statusbar now use a Lua-first segment model. Segment kind is inferred
 - `button` (click actions)
 - `progress` (cadence + visibility)
 
+Scope rules:
+
+- Prompt supports `value` and an allowlisted subset of `builtin` segments.
+- Prompt does not accept `button` or `progress` segments.
+- Statusbar accepts full segment kinds (`value`, `builtin`, `button`, `progress`) and full statusbar builtins.
+
 See `docs/prompt.md` and `docs/statusbar.md` for the full schema and examples.
 
 ---

@@ -2449,6 +2449,26 @@ fn parseOutputDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bui
     };
 }
 
+fn isPromptBuiltinAllowed(name: []const u8) bool {
+    const allowed = [_][]const u8{
+        "directory",
+        "git_branch",
+        "git_status",
+        "status",
+        "sudo",
+        "jobs",
+        "duration",
+        "pod_name",
+        "hostname",
+        "username",
+        "character",
+    };
+    for (allowed) |n| {
+        if (std.mem.eql(u8, name, n)) return true;
+    }
+    return false;
+}
+
 /// Helper: Parse segment definition from a table
 fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_builder.ShpConfigBuilder.SegmentDef {
     if (lua.typeOf(idx) != .table) return null;
@@ -2622,6 +2642,30 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
         lua.pop(1);
     }
     lua.pop(1);
+
+    if (kind == .button) {
+        const msg = std.fmt.allocPrint(allocator, "prompt segment '{s}': button segments are not allowed in prompt", .{name.?}) catch null;
+        defer if (msg) |m| allocator.free(m);
+        _ = lua.pushString(msg orelse "button segments are not allowed in prompt");
+        lua.raiseError();
+    }
+
+    if (kind == .progress) {
+        const msg = std.fmt.allocPrint(allocator, "prompt segment '{s}': progress segments are not allowed in prompt", .{name.?}) catch null;
+        defer if (msg) |m| allocator.free(m);
+        _ = lua.pushString(msg orelse "progress segments are not allowed in prompt");
+        lua.raiseError();
+    }
+
+    if (kind == .builtin and builtin != null) {
+        const b = builtin.?;
+        if (!isPromptBuiltinAllowed(b)) {
+            const msg = std.fmt.allocPrint(allocator, "prompt segment '{s}': builtin '{s}' is not allowed in prompt", .{ name.?, b }) catch null;
+            defer if (msg) |m| allocator.free(m);
+            _ = lua.pushString(msg orelse "builtin is not allowed in prompt");
+            lua.raiseError();
+        }
+    }
 
     if (kind == .builtin and command == null) command = builtin_command;
 

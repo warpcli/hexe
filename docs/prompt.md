@@ -74,21 +74,6 @@ Each prompt side is an array of segment definitions.
   builtin = function(ctx)
     return { name = "directory", style = "bg:237 fg:15", suffix = " " }
   end,
-
-  -- optional click behavior
-  button = {
-    on_left_click = "hexe record toggle --scope pod --out /tmp/pod.cast",
-    on_right_click = "hexe record stop --scope pod --out /tmp/pod.cast",
-    active_when = "test \"$(hexe record status --scope pod 2>/dev/null)\" = 1",
-    inverse_on_hover = true,
-  },
-
-  -- optional progress behavior
-  progress = {
-    every_ms = 1000,
-    show_when = function(ctx) return (ctx.jobs or 0) > 0 end,
-    value = function(ctx) return tostring(ctx.jobs or 0) end,
-  },
 }
 ```
 
@@ -96,6 +81,29 @@ Notes:
 
 - Kind is inferred from fields (`value`, `builtin`, `button`, `progress`); no `kind` field is required.
 - `outputs` is not used in the Lua-first prompt model.
+
+## Prompt Restrictions
+
+Prompt intentionally supports a limited segment subset:
+
+- Allowed kinds: `value`, `builtin`
+- Not allowed in prompt: `button`, `progress`
+
+Builtin allowlist for prompt:
+
+- `directory`
+- `git_branch`
+- `git_status`
+- `status`
+- `sudo`
+- `jobs`
+- `duration`
+- `pod_name`
+- `hostname`
+- `username`
+- `character`
+
+Examples of builtins not allowed in prompt: `spinner`, `randomdo`, `running_anim`.
 
 ## Output Execution Paths
 
@@ -199,7 +207,7 @@ If segments exceed budget, higher priority numbers are hidden first. Lower numbe
 
 ## Built-in Prompt Segments
 
-Common built-ins used in prompt:
+Prompt builtin allowlist:
 
 - `directory`
 - `git_branch`

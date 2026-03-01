@@ -6,6 +6,26 @@ const segment = core.segments;
 const Style = core.style.Style;
 const segment_render = core.segment_render;
 
+fn isPromptBuiltinAllowed(name: []const u8) bool {
+    const allowed = [_][]const u8{
+        "directory",
+        "git_branch",
+        "git_status",
+        "status",
+        "sudo",
+        "jobs",
+        "duration",
+        "pod_name",
+        "hostname",
+        "username",
+        "character",
+    };
+    for (allowed) |n| {
+        if (std.mem.eql(u8, name, n)) return true;
+    }
+    return false;
+}
+
 fn populateLuaContext(runtime: *LuaRuntime, ctx: *segment.Context) void {
     runtime.lua.createTable(0, 8);
     _ = runtime.lua.pushString(ctx.cwd);
@@ -355,39 +375,41 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
                 const desc = evalLuaBuiltinDesc(&lua_rt.?, ctx, cmd);
                 if (desc.name()) |builtin_name| {
                     var bi = LuaValue{};
-                    if (ctx.renderSegment(builtin_name)) |segs| {
-                        const pref = desc.prefix();
-                        if (pref.len > 0 and bi.block_count < bi.blocks.len) {
-                            var pblk = LuaBlock{};
-                            const pn = @min(pref.len, pblk.text.len);
-                            @memcpy(pblk.text[0..pn], pref[0..pn]);
-                            pblk.len = pn;
-                            pblk.style = desc.style;
-                            bi.blocks[bi.block_count] = pblk;
-                            bi.block_count += 1;
-                        }
-                        if (segs.len > 0) {
-                            for (segs) |seg_out| {
-                                if (bi.block_count >= bi.blocks.len) break;
-                                if (seg_out.text.len == 0) continue;
-                                var blk = LuaBlock{};
-                                const tn = @min(seg_out.text.len, blk.text.len);
-                                @memcpy(blk.text[0..tn], seg_out.text[0..tn]);
-                                blk.len = tn;
-                                blk.style = if (desc.style.isEmpty()) seg_out.style else desc.style;
-                                bi.blocks[bi.block_count] = blk;
+                    if (isPromptBuiltinAllowed(builtin_name)) {
+                        if (ctx.renderSegment(builtin_name)) |segs| {
+                            const pref = desc.prefix();
+                            if (pref.len > 0 and bi.block_count < bi.blocks.len) {
+                                var pblk = LuaBlock{};
+                                const pn = @min(pref.len, pblk.text.len);
+                                @memcpy(pblk.text[0..pn], pref[0..pn]);
+                                pblk.len = pn;
+                                pblk.style = desc.style;
+                                bi.blocks[bi.block_count] = pblk;
                                 bi.block_count += 1;
                             }
-                        }
-                        const suff = desc.suffix();
-                        if (suff.len > 0 and bi.block_count < bi.blocks.len) {
-                            var sblk = LuaBlock{};
-                            const sn = @min(suff.len, sblk.text.len);
-                            @memcpy(sblk.text[0..sn], suff[0..sn]);
-                            sblk.len = sn;
-                            sblk.style = desc.style;
-                            bi.blocks[bi.block_count] = sblk;
-                            bi.block_count += 1;
+                            if (segs.len > 0) {
+                                for (segs) |seg_out| {
+                                    if (bi.block_count >= bi.blocks.len) break;
+                                    if (seg_out.text.len == 0) continue;
+                                    var blk = LuaBlock{};
+                                    const tn = @min(seg_out.text.len, blk.text.len);
+                                    @memcpy(blk.text[0..tn], seg_out.text[0..tn]);
+                                    blk.len = tn;
+                                    blk.style = if (desc.style.isEmpty()) seg_out.style else desc.style;
+                                    bi.blocks[bi.block_count] = blk;
+                                    bi.block_count += 1;
+                                }
+                            }
+                            const suff = desc.suffix();
+                            if (suff.len > 0 and bi.block_count < bi.blocks.len) {
+                                var sblk = LuaBlock{};
+                                const sn = @min(suff.len, sblk.text.len);
+                                @memcpy(sblk.text[0..sn], suff[0..sn]);
+                                sblk.len = sn;
+                                sblk.style = desc.style;
+                                bi.blocks[bi.block_count] = sblk;
+                                bi.block_count += 1;
+                            }
                         }
                     }
                     results[i].output = bi;
@@ -397,18 +419,20 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
             }
         } else if (mod.builtin) |builtin_name| {
             var bi = LuaValue{};
-            if (ctx.renderSegment(builtin_name)) |segs| {
-                if (segs.len > 0) {
-                    for (segs) |seg_out| {
-                        if (bi.block_count >= bi.blocks.len) break;
-                        if (seg_out.text.len == 0) continue;
-                        var blk = LuaBlock{};
-                        const tn = @min(seg_out.text.len, blk.text.len);
-                        @memcpy(blk.text[0..tn], seg_out.text[0..tn]);
-                        blk.len = tn;
-                        blk.style = seg_out.style;
-                        bi.blocks[bi.block_count] = blk;
-                        bi.block_count += 1;
+            if (isPromptBuiltinAllowed(builtin_name)) {
+                if (ctx.renderSegment(builtin_name)) |segs| {
+                    if (segs.len > 0) {
+                        for (segs) |seg_out| {
+                            if (bi.block_count >= bi.blocks.len) break;
+                            if (seg_out.text.len == 0) continue;
+                            var blk = LuaBlock{};
+                            const tn = @min(seg_out.text.len, blk.text.len);
+                            @memcpy(blk.text[0..tn], seg_out.text[0..tn]);
+                            blk.len = tn;
+                            blk.style = seg_out.style;
+                            bi.blocks[bi.block_count] = blk;
+                            bi.block_count += 1;
+                        }
                     }
                 }
             }
@@ -440,21 +464,26 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
 
         var output_text = results[i].output.textSlice();
         if (segment_render.builtinNameFromMarker(output_text)) |builtin_name| {
-            if (ctx.renderSegment(builtin_name)) |segs| {
-                if (segs.len > 0) {
-                    var bi = LuaValue{};
-                    for (segs) |seg_out| {
-                        if (bi.block_count >= bi.blocks.len) break;
-                        if (seg_out.text.len == 0) continue;
-                        var blk = LuaBlock{};
-                        const tn = @min(seg_out.text.len, blk.text.len);
-                        @memcpy(blk.text[0..tn], seg_out.text[0..tn]);
-                        blk.len = tn;
-                        blk.style = seg_out.style;
-                        bi.blocks[bi.block_count] = blk;
-                        bi.block_count += 1;
+            if (isPromptBuiltinAllowed(builtin_name)) {
+                if (ctx.renderSegment(builtin_name)) |segs| {
+                    if (segs.len > 0) {
+                        var bi = LuaValue{};
+                        for (segs) |seg_out| {
+                            if (bi.block_count >= bi.blocks.len) break;
+                            if (seg_out.text.len == 0) continue;
+                            var blk = LuaBlock{};
+                            const tn = @min(seg_out.text.len, blk.text.len);
+                            @memcpy(blk.text[0..tn], seg_out.text[0..tn]);
+                            blk.len = tn;
+                            blk.style = seg_out.style;
+                            bi.blocks[bi.block_count] = blk;
+                            bi.block_count += 1;
+                        }
+                        results[i].output = bi;
+                    } else {
+                        results[i].should_render = false;
+                        continue;
                     }
-                    results[i].output = bi;
                 } else {
                     results[i].should_render = false;
                     continue;
@@ -469,12 +498,14 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
             for (results[i].output.blocks[0..results[i].output.block_count]) |blk| {
                 const bt = blk.text[0..blk.len];
                 if (segment_render.builtinNameFromMarker(bt)) |builtin_name| {
-                    if (ctx.renderSegment(builtin_name)) |segs| {
-                        var seg_width: u16 = 0;
-                        for (segs) |s| seg_width += @intCast(s.text.len);
-                        if (seg_width > 0) {
-                            results[i].width += seg_width;
-                            results[i].width += @intCast(blk.prefix_len + blk.suffix_len);
+                    if (isPromptBuiltinAllowed(builtin_name)) {
+                        if (ctx.renderSegment(builtin_name)) |segs| {
+                            var seg_width: u16 = 0;
+                            for (segs) |s| seg_width += @intCast(s.text.len);
+                            if (seg_width > 0) {
+                                results[i].width += seg_width;
+                                results[i].width += @intCast(blk.prefix_len + blk.suffix_len);
+                            }
                         }
                     }
                 } else {
@@ -532,26 +563,28 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
                 const bt = blk.text[0..blk.len];
                 const style = blk.style;
                 if (segment_render.builtinNameFromMarker(bt)) |builtin_name| {
-                    if (ctx.renderSegment(builtin_name)) |segs| {
-                        if (segs.len == 0) continue;
-                        var wrote_any = false;
-                        for (segs) |s| {
-                            if (s.text.len > 0) {
-                                wrote_any = true;
-                                break;
+                    if (isPromptBuiltinAllowed(builtin_name)) {
+                        if (ctx.renderSegment(builtin_name)) |segs| {
+                            if (segs.len == 0) continue;
+                            var wrote_any = false;
+                            for (segs) |s| {
+                                if (s.text.len > 0) {
+                                    wrote_any = true;
+                                    break;
+                                }
                             }
-                        }
-                        if (!wrote_any) continue;
-                        try writeStyleDirect(stdout, style, is_zsh);
-                        if (blk.prefix_len > 0) try stdout.writeAll(blk.prefix[0..blk.prefix_len]);
-                        for (segs) |s| {
-                            try stdout.writeAll(s.text);
-                            if (s.text.len > 0) wrote_module = true;
-                        }
-                        if (blk.suffix_len > 0) try stdout.writeAll(blk.suffix[0..blk.suffix_len]);
-                        if (blk.prefix_len > 0 or blk.suffix_len > 0) wrote_module = true;
-                        if (!style.isEmpty()) {
-                            try writeResetDirect(stdout, is_zsh);
+                            if (!wrote_any) continue;
+                            try writeStyleDirect(stdout, style, is_zsh);
+                            if (blk.prefix_len > 0) try stdout.writeAll(blk.prefix[0..blk.prefix_len]);
+                            for (segs) |s| {
+                                try stdout.writeAll(s.text);
+                                if (s.text.len > 0) wrote_module = true;
+                            }
+                            if (blk.suffix_len > 0) try stdout.writeAll(blk.suffix[0..blk.suffix_len]);
+                            if (blk.prefix_len > 0 or blk.suffix_len > 0) wrote_module = true;
+                            if (!style.isEmpty()) {
+                                try writeResetDirect(stdout, is_zsh);
+                            }
                         }
                     }
                 } else {

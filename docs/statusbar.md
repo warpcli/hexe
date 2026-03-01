@@ -85,6 +85,8 @@ You can also provide arrays with `left`, `center`, `right` using your preferred 
 
 Kind is inferred from fields (`value`, `builtin`, `button`, `progress`); you do not need to set a `kind` field.
 
+Unlike prompt, statusbar is not builtin-allowlisted: statusbar can use `value`, `builtin`, `button`, and `progress` segment kinds and full statusbar builtins (including `spinner`).
+
 `on_click`, `on_right_click`, and `on_middle_click` run shell commands on statusbar clicks.
 
 Clickable segments are treated as buttons and automatically render with reverse colors while hovered.
