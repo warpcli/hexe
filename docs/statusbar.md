@@ -162,6 +162,8 @@ when = { lua  = function(ctx) return ctx.shell_running and not ctx.alt_screen en
 
 `when.lua` must be a callback (`lua = function(ctx) ... end`). String-chunk form is no longer supported.
 
+`ctx.pane(0)` returns the current focused pane state (same table as `ctx`).
+
 Available fields in `ctx`:
 
 - `ctx.shell_running`
@@ -176,6 +178,8 @@ Available fields in `ctx`:
 - `ctx.terminal_width`
 - `ctx.now_ms`
 - `ctx.env`
+
+Common pane fields include `focus_split`, `focus_float`, `process_name`, and `process_running`.
 
 Condition evaluation is cached internally:
 

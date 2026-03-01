@@ -270,20 +270,22 @@ fn populateWhenLuaContext(rt: *LuaRuntime, query: *const PaneQuery) void {
     }
     rt.lua.setField(-2, "env");
 
+    // Expose pragmatic pane API: ctx.pane(0)
+    rt.lua.pushValue(-1);
+    rt.lua.setGlobal("__hexe_when_pane0");
     rt.lua.pushValue(-1);
     rt.lua.setGlobal("ctx");
 
-    // Expose pragmatic pane API: hexe.status.pane(0)
-    rt.lua.pushValue(-1);
-    rt.lua.setGlobal("__hexe_when_pane0");
-    rt.lua.pop(1);
-
     const status_api =
+        "if type(ctx)=='table' then " ++
+        "ctx.pane=function(id) " ++
+        "if id==nil or id==0 then return __hexe_when_pane0 end " ++
+        "return nil end end; " ++
+        "end; " ++
         "if type(hexe)=='table' then " ++
         "hexe.status=hexe.status or {}; " ++
-        "hexe.status.pane=function(id) " ++
-        "if id==nil or id==0 then return __hexe_when_pane0 end " ++
-        "return nil end end";
+        "hexe.status.pane=ctx.pane; " ++
+        "end";
     const status_api_z = rt.allocator.dupeZ(u8, status_api) catch return;
     defer rt.allocator.free(status_api_z);
     rt.lua.loadString(status_api_z) catch return;
@@ -291,6 +293,8 @@ fn populateWhenLuaContext(rt: *LuaRuntime, query: *const PaneQuery) void {
         rt.lua.pop(1);
         return;
     };
+
+    rt.lua.setGlobal("ctx");
 }
 
 fn matchesLuaWhen(state: *State, query: *const PaneQuery, w: core.config.WhenDef) bool {

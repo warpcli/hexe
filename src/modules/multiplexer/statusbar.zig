@@ -362,6 +362,10 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
     rt.lua.setField(-2, "not_alt_screen");
     rt.lua.pushBoolean(ctx.focus_is_float);
     rt.lua.setField(-2, "focus_is_float");
+    rt.lua.pushBoolean(ctx.focus_is_float);
+    rt.lua.setField(-2, "focus_float");
+    rt.lua.pushBoolean(ctx.focus_is_split);
+    rt.lua.setField(-2, "focus_split");
     rt.lua.pushInteger(ctx.float_key);
     rt.lua.setField(-2, "float_key");
     rt.lua.pushBoolean(ctx.focus_is_float and ctx.float_key == 0);
@@ -383,6 +387,12 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
     if (ctx.last_command) |c| {
         _ = rt.lua.pushString(c);
         rt.lua.setField(-2, "last_command");
+    }
+    if (ctx.shell_running_cmd) |c| {
+        _ = rt.lua.pushString(c);
+        rt.lua.setField(-2, "process_name");
+        _ = rt.lua.pushString(c);
+        rt.lua.setField(-2, "fg_process");
     }
     if (ctx.cmd_duration_ms) |d| {
         rt.lua.pushInteger(@intCast(d));
@@ -412,6 +422,37 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
         rt.lua.setTable(-3);
     }
     rt.lua.setField(-2, "env");
+
+    // Expose pragmatic pane API: ctx.pane(0)
+    rt.lua.pushValue(-1);
+    rt.lua.setGlobal("__hexe_when_pane0");
+    rt.lua.pushValue(-1);
+    rt.lua.setGlobal("ctx");
+
+    const pane_api =
+        "if type(ctx)=='table' then " ++
+        "ctx.pane=function(id) " ++
+        "if id==nil or id==0 then return __hexe_when_pane0 end " ++
+        "return nil end end; " ++
+        "end; " ++
+        "if type(hexe)=='table' then " ++
+        "hexe.status=hexe.status or {}; " ++
+        "hexe.status.pane=ctx.pane; " ++
+        "end";
+    const pane_api_z = rt.allocator.dupeZ(u8, pane_api) catch {
+        rt.lua.setGlobal("ctx");
+        return;
+    };
+    defer rt.allocator.free(pane_api_z);
+    rt.lua.loadString(pane_api_z) catch {
+        rt.lua.setGlobal("ctx");
+        return;
+    };
+    rt.lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
+        rt.lua.pop(1);
+        rt.lua.setGlobal("ctx");
+        return;
+    };
 
     rt.lua.setGlobal("ctx");
 }

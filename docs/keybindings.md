@@ -99,7 +99,7 @@ Controls what happens to the key after the bind fires:
 -- passthrough: forward to pane, no action
 { key = { hx.key.ctrl, hx.key.alt, hx.key.up }, mode = hx.mode.passthrough_only,
   when = function(ctx)
-    local p = hexe.status.pane(0)
+    local p = ctx.pane(0)
     return p and (p.process_name == "nvim" or p.process_name == "vim")
   end }
 
@@ -123,15 +123,17 @@ when = function(ctx)
 end
 ```
 
-`ctx` and `hexe.status.pane(0)` expose the current focused pane state.
+`ctx` exposes the current focused pane state and `ctx.pane(0)` returns it explicitly.
 
 ```lua
-local p = hexe.status.pane(0)
+local p = ctx.pane(0)
 if p and p.focus_float then
   return true
 end
 return false
 ```
+
+`hexe.status.pane(0)` is kept as an alias to `ctx.pane(0)`.
 
 Common pane fields:
 

@@ -30,8 +30,8 @@ if section == nil or section == "mux" then
     { key = { hx.key.ctrl, hx.key.alt, hx.key.k }, action = { type = hx.action.keycast_toggle } },
     { key = { hx.key.ctrl, hx.key.alt, hx.key.o }, action = { type = hx.action.pane_select_mode } },
 
-    { key = { hx.key.ctrl, hx.key.alt, hx.key.h }, when = function(ctx) return ctx.focus_split end, action = { type = hx.action.split_h } },
-    { key = { hx.key.ctrl, hx.key.alt, hx.key.v }, when = function(ctx) return ctx.focus_split end, action = { type = hx.action.split_v } },
+    { key = { hx.key.ctrl, hx.key.alt, hx.key.h }, when = function(ctx) local p = ctx.pane(0); return p and p.focus_split end, action = { type = hx.action.split_h } },
+    { key = { hx.key.ctrl, hx.key.alt, hx.key.v }, when = function(ctx) local p = ctx.pane(0); return p and p.focus_split end, action = { type = hx.action.split_v } },
 
     { key = { hx.key.ctrl, hx.key.alt, hx.key.t }, action = { type = hx.action.tab_new } },
     { key = { hx.key.ctrl, hx.key.alt, hx.key.x }, action = { type = hx.action.tab_close } },
@@ -39,10 +39,10 @@ if section == nil or section == "mux" then
     { key = { hx.key.ctrl, hx.key.alt, hx.key.comma }, action = { type = hx.action.tab_prev } },
 
     -- Focus movement: passthrough to nvim/vim, otherwise do focus_move
-    { key = { hx.key.ctrl, hx.key.alt, hx.key.up }, when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hx.mode.passthrough_only },
-    { key = { hx.key.ctrl, hx.key.alt, hx.key.down }, when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hx.mode.passthrough_only },
-    { key = { hx.key.ctrl, hx.key.alt, hx.key.left }, when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hx.mode.passthrough_only },
-    { key = { hx.key.ctrl, hx.key.alt, hx.key.right }, when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hx.mode.passthrough_only },
+    { key = { hx.key.ctrl, hx.key.alt, hx.key.up }, when = function(ctx) local p = ctx.pane(0); return p and (p.process_name == "nvim" or p.process_name == "vim") end, mode = hx.mode.passthrough_only },
+    { key = { hx.key.ctrl, hx.key.alt, hx.key.down }, when = function(ctx) local p = ctx.pane(0); return p and (p.process_name == "nvim" or p.process_name == "vim") end, mode = hx.mode.passthrough_only },
+    { key = { hx.key.ctrl, hx.key.alt, hx.key.left }, when = function(ctx) local p = ctx.pane(0); return p and (p.process_name == "nvim" or p.process_name == "vim") end, mode = hx.mode.passthrough_only },
+    { key = { hx.key.ctrl, hx.key.alt, hx.key.right }, when = function(ctx) local p = ctx.pane(0); return p and (p.process_name == "nvim" or p.process_name == "vim") end, mode = hx.mode.passthrough_only },
     { key = { hx.key.ctrl, hx.key.alt, hx.key.up }, action = { type = hx.action.focus_move, dir = "up" } },
     { key = { hx.key.ctrl, hx.key.alt, hx.key.down }, action = { type = hx.action.focus_move, dir = "down" } },
     { key = { hx.key.ctrl, hx.key.alt, hx.key.left }, action = { type = hx.action.focus_move, dir = "left" } },
