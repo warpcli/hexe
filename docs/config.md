@@ -6,7 +6,7 @@ Hexe is configured in Lua.
 
 ## File locations
 
-Hexa reads config from (in order):
+Hexe reads config from (in order):
 
 1. `$XDG_CONFIG_HOME/hexe/init.lua`
 2. `~/.config/hexe/init.lua` (default if XDG not set)
@@ -190,12 +190,44 @@ hx.shp.prompt.left({ ... })
 hx.shp.prompt.right({ ... })
 ```
 
-Prompt and statusbar now use a Lua-first segment model. Segment kind is inferred from fields:
+Prompt and statusbar use a Lua-first callback model. Segment kind is inferred from fields:
 
-- `value` (function/string source)
-- `builtin` (function/string descriptor)
+- `value` (callback)
+- `builtin` (callback descriptor)
 - `button` (click actions)
 - `progress` (cadence + visibility)
+
+`when` is callback-only everywhere:
+
+- `when = function(ctx) ... end`
+
+Legacy forms (for example string chunks, token tables, `when = { lua = ... }`, `bash`, `env`) are not supported.
+
+Quick examples:
+
+```lua
+value = function(ctx)
+  local p = ctx.pane(0)
+  if p and p.process_running then
+    return "RUN"
+  end
+  return nil
+end
+
+builtin = function(_)
+  return {
+    name = "directory",
+    style = "bg:237 fg:15",
+    prefix = { output = " ", style = "bg:0 fg:8" },
+    suffix = { output = " ", style = "bg:0 fg:8" },
+  }
+end
+
+when = function(ctx)
+  local p = ctx.pane("focused")
+  return p and p.focus_split
+end
+```
 
 Scope rules:
 
@@ -213,14 +245,16 @@ See `docs/prompt.md` and `docs/statusbar.md` for the full schema and examples.
 |---|---|
 | `HEXE_INSTANCE` | Named instance (see [instances](instances.md)) |
 | `HEXE_TEST_ONLY` | Set by `--test-only`; signals test isolation |
-| `HEXE_CONDITION_TIMEOUT` | Bash condition eval timeout (ms, default 100, range 10–5000) |
+| `HEXE_LUA_TRACE` | Lua callback trace mode: `1`/`all` or `slow` |
+| `HEXE_LUA_TRACE_SLOW_MS` | Slow-trace threshold (ms, default `8`) |
+| `HEXE_STATUSBAR_REDRAW_EVENT_MS` | Throttle interval for `statusbar_redraw` event (ms, default `120`) |
 
 ---
 
 ## Validate config
 
 ```sh
-hexe config validate
+hexe cfg validate
 ```
 
 Parses and validates your config without starting any daemon.

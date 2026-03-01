@@ -129,6 +129,9 @@ Pane lookup:
 - `ctx.pane(0)` (or `ctx.pane(nil)`) → current focused pane
 - `ctx.pane(<number>)` → pane by runtime index in `ctx.panes` (1-based)
 - `ctx.pane(<uuid_string>)` → pane by UUID
+- `ctx.pane("focused")` / `ctx.pane("current")` → current focused pane
+- `ctx.pane("tab:<n>/focus")` → focused split pane for tab `n` (1-based)
+- `ctx.cache.get(key)` / `ctx.cache.set(key, value, ttl_ms)` / `ctx.cache.del(key)` for callback caching
 
 ```lua
 local p = ctx.pane(0)
@@ -152,6 +155,62 @@ Common pane fields:
 | `tab_count` | Number of open tabs |
 | `active_tab` | Active tab index |
 | `float_key` | Float key for focused float pane |
+
+### Lua Trace
+
+- Set `HEXE_LUA_TRACE=1` to trace all callback evaluations.
+- Set `HEXE_LUA_TRACE=slow` to trace only slow evaluations.
+- Optional threshold: `HEXE_LUA_TRACE_SLOW_MS` (default `8`).
+
+## Lua Events (autocmd)
+
+You can register runtime event callbacks through `hexe.autocmd`.
+
+Supported events:
+- `pane_focus_changed`
+- `tab_changed`
+- `command_finished`
+- `pane_shell_running_changed`
+- `statusbar_redraw` (throttled, default 120ms)
+
+Registration forms:
+
+```lua
+hexe.autocmd.pane_focus_changed = function(ev)
+  -- ev.pane_uuid, ev.previous_pane_uuid, ev.pane_type, ev.active_tab, ev.now_ms
+end
+
+hexe.autocmd.tab_changed = {
+  function(ev) end,
+  function(ev) end,
+}
+```
+
+Built-in helper `hexe.autocmd.on(event, fn)`:
+
+```lua
+hexe.autocmd.on("command_finished", function(ev)
+  -- ev.command, ev.cwd, ev.status, ev.duration_ms, ev.jobs, ev.pane_uuid
+end)
+
+hexe.autocmd.on("pane_shell_running_changed", function(ev)
+  -- ev.pane_uuid, ev.previous_running, ev.running, ev.phase, ev.command, ev.now_ms
+end)
+
+hexe.autocmd.on("statusbar_redraw", function(ev)
+  -- ev.now_ms, ev.term_width, ev.term_height, ev.active_tab, ev.tab_count, ev.interval_ms
+end)
+
+-- debounce helper (returns wrapped handler)
+hexe.autocmd.on("statusbar_redraw", hexe.autocmd.debounce(250, function(ev)
+  -- runs at most every 250ms
+end))
+
+-- convenience helper
+hexe.autocmd.debounced_on("statusbar_redraw", 250, function(ev)
+  -- same as on(..., debounce(...))
+end)
+```
 
 ---
 

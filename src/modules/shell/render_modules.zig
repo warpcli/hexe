@@ -7,6 +7,29 @@ const Style = core.style.Style;
 const segment_render = core.segment_render;
 const CALLBACK_REF_PREFIX = "__hexe_cb_ref:";
 
+const LuaTraceMode = enum { off, all, slow };
+
+fn parseLuaTraceMode() LuaTraceMode {
+    const v = std.posix.getenv("HEXE_LUA_TRACE") orelse return .off;
+    if (std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "all")) return .all;
+    if (std.mem.eql(u8, v, "slow")) return .slow;
+    return .off;
+}
+
+fn luaTraceSlowMs() i64 {
+    const raw = std.posix.getenv("HEXE_LUA_TRACE_SLOW_MS") orelse return 8;
+    return std.fmt.parseInt(i64, raw, 10) catch 8;
+}
+
+fn traceLuaEval(scope: []const u8, code: []const u8, ok: bool, start_ms: i64) void {
+    const mode = parseLuaTraceMode();
+    if (mode == .off) return;
+    const elapsed = std.time.milliTimestamp() - start_ms;
+    if (mode == .slow and elapsed < luaTraceSlowMs()) return;
+    const code_hint = if (callbackIdFromCode(code) != null) code else "<chunk>";
+    std.debug.print("[hexe-lua:{s}] ok={s} elapsed_ms={d} code={s}\n", .{ scope, if (ok) "true" else "false", elapsed, code_hint });
+}
+
 fn callbackIdFromCode(code: []const u8) ?i32 {
     if (!std.mem.startsWith(u8, code, CALLBACK_REF_PREFIX)) return null;
     return std.fmt.parseInt(i32, code[CALLBACK_REF_PREFIX.len..], 10) catch null;
@@ -112,7 +135,23 @@ fn populateLuaContext(runtime: *LuaRuntime, ctx: *segment.Context) void {
 
     const pane_api =
         "if type(ctx)=='table' then " ++
-        "ctx.pane=function(id) if id==nil or id==0 then return __hexe_when_pane0 end return nil end; " ++
+        "ctx.panes={ [1]=__hexe_when_pane0 }; " ++
+        "ctx.pane=function(id) " ++
+        "if id==nil or id==0 then return __hexe_when_pane0 end; " ++
+        "if id==1 then return __hexe_when_pane0 end; " ++
+        "if type(id)=='string' and (id=='focused' or id=='current') then return __hexe_when_pane0 end; " ++
+        "return nil end; " ++
+        "__hexe_ctx_cache=__hexe_ctx_cache or {}; " ++
+        "ctx.cache = ctx.cache or {}; " ++
+        "ctx.cache.get=function(key) " ++
+        "local k=tostring(key); local e=__hexe_ctx_cache[k]; if not e then return nil end; " ++
+        "local now=(ctx.now_ms or 0); if e.exp and e.exp < now then __hexe_ctx_cache[k]=nil; return nil end; " ++
+        "return e.val end; " ++
+        "ctx.cache.set=function(key,val,ttl_ms) " ++
+        "local k=tostring(key); local exp=nil; " ++
+        "if ttl_ms and type(ttl_ms)=='number' and ttl_ms>0 then exp=(ctx.now_ms or 0)+ttl_ms end; " ++
+        "__hexe_ctx_cache[k]={ val=val, exp=exp }; return val end; " ++
+        "ctx.cache.del=function(key) __hexe_ctx_cache[tostring(key)]=nil end; " ++
         "ctx.status = ctx.pane(0); " ++
         "end; " ++
         "if type(hexe)=='table' then hexe.status=hexe.status or {}; hexe.status.pane=ctx.pane; end";
@@ -158,9 +197,14 @@ const LuaValue = struct {
 fn evalLuaCommand(runtime: *LuaRuntime, callback_runtime: ?*LuaRuntime, ctx: *segment.Context, code: []const u8) LuaValue {
     var out: LuaValue = .{};
     const rt = callback_runtime orelse runtime;
+    const start_ms = std.time.milliTimestamp();
     populateLuaContext(rt, ctx);
-    const mode = beginLuaEval(rt, code) orelse return out;
+    const mode = beginLuaEval(rt, code) orelse {
+        traceLuaEval("prompt.value", code, false, start_ms);
+        return out;
+    };
     defer endLuaEval(rt, mode);
+    defer traceLuaEval("prompt.value", code, true, start_ms);
 
     switch (rt.lua.typeOf(-1)) {
         .string => {
@@ -264,15 +308,21 @@ fn evalLuaCommand(runtime: *LuaRuntime, callback_runtime: ?*LuaRuntime, ctx: *se
 }
 
 fn evalLuaGate(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bool {
+    const start_ms = std.time.milliTimestamp();
     populateLuaContext(runtime, ctx);
-    const mode = beginLuaEval(runtime, code) orelse return false;
+    const mode = beginLuaEval(runtime, code) orelse {
+        traceLuaEval("prompt.when", code, false, start_ms);
+        return false;
+    };
     defer endLuaEval(runtime, mode);
-    return switch (runtime.lua.typeOf(-1)) {
+    const ok = switch (runtime.lua.typeOf(-1)) {
         .boolean => runtime.lua.toBoolean(-1),
         .number => (runtime.lua.toNumber(-1) catch 0) != 0,
         .string => (runtime.lua.toString(-1) catch "").len > 0,
         else => false,
     };
+    traceLuaEval("prompt.when", code, true, start_ms);
+    return ok;
 }
 
 const BuiltinDesc = struct {
@@ -311,9 +361,14 @@ const BuiltinDesc = struct {
 fn evalLuaBuiltinDesc(runtime: *LuaRuntime, callback_runtime: ?*LuaRuntime, ctx: *segment.Context, code: []const u8) BuiltinDesc {
     var desc: BuiltinDesc = .{};
     const rt = callback_runtime orelse runtime;
+    const start_ms = std.time.milliTimestamp();
     populateLuaContext(rt, ctx);
-    const mode = beginLuaEval(rt, code) orelse return desc;
+    const mode = beginLuaEval(rt, code) orelse {
+        traceLuaEval("prompt.builtin", code, false, start_ms);
+        return desc;
+    };
     defer endLuaEval(rt, mode);
+    defer traceLuaEval("prompt.builtin", code, true, start_ms);
 
     switch (rt.lua.typeOf(-1)) {
         .string => {
@@ -373,6 +428,9 @@ fn evalLuaBuiltinDesc(runtime: *LuaRuntime, callback_runtime: ?*LuaRuntime, ctx:
                     const n = @min(s.len, desc.prefix_buf.len);
                     @memcpy(desc.prefix_buf[0..n], s[0..n]);
                     desc.prefix_len = n;
+                } else if (rt.lua.typeOf(-1) != .nil) {
+                    _ = rt.lua.pushString("builtin.prefix.output must be string");
+                    rt.lua.raiseError();
                 }
                 rt.lua.pop(1);
 
@@ -380,6 +438,9 @@ fn evalLuaBuiltinDesc(runtime: *LuaRuntime, callback_runtime: ?*LuaRuntime, ctx:
                 if (rt.lua.typeOf(-1) == .string) {
                     const s = rt.lua.toString(-1) catch "";
                     desc.prefix_style = Style.parse(s);
+                } else if (rt.lua.typeOf(-1) != .nil) {
+                    _ = rt.lua.pushString("builtin.prefix.style must be string");
+                    rt.lua.raiseError();
                 }
                 rt.lua.pop(1);
             }
@@ -398,6 +459,9 @@ fn evalLuaBuiltinDesc(runtime: *LuaRuntime, callback_runtime: ?*LuaRuntime, ctx:
                     const n = @min(s.len, desc.suffix_buf.len);
                     @memcpy(desc.suffix_buf[0..n], s[0..n]);
                     desc.suffix_len = n;
+                } else if (rt.lua.typeOf(-1) != .nil) {
+                    _ = rt.lua.pushString("builtin.suffix.output must be string");
+                    rt.lua.raiseError();
                 }
                 rt.lua.pop(1);
 
@@ -405,6 +469,9 @@ fn evalLuaBuiltinDesc(runtime: *LuaRuntime, callback_runtime: ?*LuaRuntime, ctx:
                 if (rt.lua.typeOf(-1) == .string) {
                     const s = rt.lua.toString(-1) catch "";
                     desc.suffix_style = Style.parse(s);
+                } else if (rt.lua.typeOf(-1) != .nil) {
+                    _ = rt.lua.pushString("builtin.suffix.style must be string");
+                    rt.lua.raiseError();
                 }
                 rt.lua.pop(1);
             }
@@ -419,6 +486,9 @@ fn evalLuaBuiltinDesc(runtime: *LuaRuntime, callback_runtime: ?*LuaRuntime, ctx:
                         const n = @min(s.len, desc.suffix_buf.len);
                         @memcpy(desc.suffix_buf[0..n], s[0..n]);
                         desc.suffix_len = n;
+                    } else if (rt.lua.typeOf(-1) != .nil) {
+                        _ = rt.lua.pushString("builtin.sufix.output must be string");
+                        rt.lua.raiseError();
                     }
                     rt.lua.pop(1);
 
@@ -426,6 +496,9 @@ fn evalLuaBuiltinDesc(runtime: *LuaRuntime, callback_runtime: ?*LuaRuntime, ctx:
                     if (rt.lua.typeOf(-1) == .string) {
                         const s = rt.lua.toString(-1) catch "";
                         desc.suffix_style = Style.parse(s);
+                    } else if (rt.lua.typeOf(-1) != .nil) {
+                        _ = rt.lua.pushString("builtin.sufix.style must be string");
+                        rt.lua.raiseError();
                     }
                     rt.lua.pop(1);
                 }

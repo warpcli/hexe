@@ -9,11 +9,35 @@ const LuaRuntime = core.LuaRuntime;
 
 const State = @import("state.zig").State;
 const Renderer = @import("render_core.zig").Renderer;
+const lua_events = @import("lua_events.zig");
 const Color = core.style.Color;
 const Pane = @import("pane.zig").Pane;
 const segment_render = core.segment_render;
 const DEFAULT_OUTPUTS = [_]core.config.OutputDef{.{ .style = "", .format = "$output" }};
 const CALLBACK_REF_PREFIX = "__hexe_cb_ref:";
+
+const LuaTraceMode = enum { off, all, slow };
+
+fn parseLuaTraceMode() LuaTraceMode {
+    const v = std.posix.getenv("HEXE_LUA_TRACE") orelse return .off;
+    if (std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "all")) return .all;
+    if (std.mem.eql(u8, v, "slow")) return .slow;
+    return .off;
+}
+
+fn luaTraceSlowMs() i64 {
+    const raw = std.posix.getenv("HEXE_LUA_TRACE_SLOW_MS") orelse return 8;
+    return std.fmt.parseInt(i64, raw, 10) catch 8;
+}
+
+fn traceLuaEval(scope: []const u8, code: []const u8, ok: bool, start_ms: i64) void {
+    const mode = parseLuaTraceMode();
+    if (mode == .off) return;
+    const elapsed = std.time.milliTimestamp() - start_ms;
+    if (mode == .slow and elapsed < luaTraceSlowMs()) return;
+    const code_hint = if (callbackIdFromCode(code) != null) code else "<chunk>";
+    std.debug.print("[hexe-lua:{s}] ok={s} elapsed_ms={d} code={s}\n", .{ scope, if (ok) "true" else "false", elapsed, code_hint });
+}
 
 fn callbackIdFromCode(code: []const u8) ?i32 {
     if (!std.mem.startsWith(u8, code, CALLBACK_REF_PREFIX)) return null;
@@ -78,6 +102,45 @@ const ProgressCacheEntry = struct {
 threadlocal var progress_text_cache: ?std.AutoHashMap(usize, ProgressCacheEntry) = null;
 threadlocal var hover_x: ?u16 = null;
 threadlocal var hover_y: ?u16 = null;
+threadlocal var statusbar_redraw_last_emit_ms: ?u64 = null;
+
+fn statusbarRedrawEventIntervalMs() u64 {
+    const raw = std.posix.getenv("HEXE_STATUSBAR_REDRAW_EVENT_MS") orelse return 120;
+    return std.fmt.parseInt(u64, raw, 10) catch 120;
+}
+
+fn emitStatusbarRedrawEventIfDue(state: *State, ctx: *const shp.Context, term_width: u16, term_height: u16, active_tab: usize) void {
+    const rt = state.config._lua_runtime orelse return;
+    const interval_ms = statusbarRedrawEventIntervalMs();
+    if (statusbar_redraw_last_emit_ms) |last| {
+        if (ctx.now_ms >= last and (ctx.now_ms - last) < interval_ms) return;
+    }
+    statusbar_redraw_last_emit_ms = ctx.now_ms;
+
+    rt.lua.createTable(0, 12);
+    _ = rt.lua.pushString("statusbar_redraw");
+    rt.lua.setField(-2, "event");
+    rt.lua.pushInteger(@intCast(ctx.now_ms));
+    rt.lua.setField(-2, "now_ms");
+    rt.lua.pushInteger(term_width);
+    rt.lua.setField(-2, "term_width");
+    rt.lua.pushInteger(term_height);
+    rt.lua.setField(-2, "term_height");
+    rt.lua.pushInteger(@intCast(active_tab + 1));
+    rt.lua.setField(-2, "active_tab");
+    rt.lua.pushInteger(ctx.tab_count);
+    rt.lua.setField(-2, "tab_count");
+    rt.lua.pushBoolean(ctx.focus_is_float);
+    rt.lua.setField(-2, "focus_float");
+    rt.lua.pushBoolean(ctx.focus_is_split);
+    rt.lua.setField(-2, "focus_split");
+    rt.lua.pushBoolean(ctx.shell_running);
+    rt.lua.setField(-2, "shell_running");
+    rt.lua.pushInteger(@intCast(interval_ms));
+    rt.lua.setField(-2, "interval_ms");
+
+    lua_events.emitAutocmdWithPayloadOnStack(rt, "statusbar_redraw");
+}
 
 fn builtinNameFromMarker(s: []const u8) ?[]const u8 {
     return segment_render.builtinNameFromMarker(s);
@@ -441,15 +504,20 @@ fn pushPaneLuaTable(rt: *LuaRuntime, state: *State, pane: *Pane, is_focused: boo
     }
 }
 
-fn appendPaneApiEntry(rt: *LuaRuntime, state: *State, pane: *Pane, is_focused: bool, tab_index: usize, pane_index: usize) void {
+fn appendPaneApiEntry(rt: *LuaRuntime, state: *State, pane: *Pane, is_focused: bool, tab_index: usize, pane_index: usize, tab_focus_slot: ?usize) void {
     pushPaneLuaTable(rt, state, pane, is_focused, tab_index, pane_index);
 
     rt.lua.pushValue(-1);
-    rt.lua.rawSetIndex(-4, @intCast(pane_index));
+    rt.lua.rawSetIndex(-5, @intCast(pane_index));
 
     _ = rt.lua.pushString(pane.uuid[0..]);
     rt.lua.pushValue(-2);
-    rt.lua.setTable(-4);
+    rt.lua.setTable(-5);
+
+    if (tab_focus_slot) |slot| {
+        rt.lua.pushValue(-1);
+        rt.lua.rawSetIndex(-3, @intCast(slot));
+    }
 
     if (is_focused) {
         rt.lua.pushValue(-1);
@@ -532,9 +600,10 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
         rt.lua.setField(-2, "env");
     }
 
-    // Build pane lookup maps: numeric index and uuid.
+    // Build pane lookup maps: numeric index, uuid, and tab focus.
     rt.lua.createTable(0, 64); // index map (1-based)
     rt.lua.createTable(0, 64); // uuid map
+    rt.lua.createTable(0, 32); // tab:N/focus map (1-based tabs)
 
     rt.lua.pushValue(-3);
     rt.lua.setGlobal("__hexe_when_pane0");
@@ -544,13 +613,18 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
         var pane_index: usize = 1;
 
         for (state.tabs.items, 0..) |*tab, tab_idx| {
+            const tab_focused_uuid = if (tab.layout.getFocusedPane()) |fp| fp.uuid else null;
             var pane_it = tab.layout.splitIterator();
             while (pane_it.next()) |pane| {
                 const is_focused = if (focused_uuid) |fu|
                     std.mem.eql(u8, &pane.*.uuid, &fu)
                 else
                     false;
-                appendPaneApiEntry(rt, state, pane.*, is_focused, tab_idx, pane_index);
+                const tab_focus_slot: ?usize = if (tab_focused_uuid) |tfu|
+                    if (std.mem.eql(u8, &pane.*.uuid, &tfu)) (tab_idx + 1) else null
+                else
+                    null;
+                appendPaneApiEntry(rt, state, pane.*, is_focused, tab_idx, pane_index, tab_focus_slot);
                 pane_index += 1;
             }
         }
@@ -561,20 +635,22 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
             else
                 false;
             const tab_idx = pane.parent_tab orelse state.active_tab;
-            appendPaneApiEntry(rt, state, pane, is_focused, tab_idx, pane_index);
+            appendPaneApiEntry(rt, state, pane, is_focused, tab_idx, pane_index, null);
             pane_index += 1;
         }
     }
 
-    rt.lua.pushValue(-2);
-    rt.lua.setField(-4, "panes");
+    rt.lua.pushValue(-3);
+    rt.lua.setField(-5, "panes");
 
-    rt.lua.pushValue(-1);
+    rt.lua.pushValue(-2);
     rt.lua.setGlobal("__hexe_panes_by_uuid");
-    rt.lua.pushValue(-2);
+    rt.lua.pushValue(-3);
     rt.lua.setGlobal("__hexe_panes_by_index");
+    rt.lua.pushValue(-1);
+    rt.lua.setGlobal("__hexe_panes_by_tab_focus");
 
-    rt.lua.pop(2);
+    rt.lua.pop(3);
 
     // Expose pragmatic pane API: ctx.pane(0)
     rt.lua.pushValue(-1);
@@ -588,8 +664,23 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
         "if id==nil or id==0 then return __hexe_when_pane0 end " ++
         "local t=type(id); " ++
         "if t=='number' then return __hexe_panes_by_index[id] end; " ++
-        "if t=='string' then return __hexe_panes_by_uuid[id] end; " ++
+        "if t=='string' then " ++
+        "if id=='focused' or id=='current' then return __hexe_when_pane0 end; " ++
+        "local n=string.match(id,'^tab:(%d+)/focus$'); " ++
+        "if n then return __hexe_panes_by_tab_focus[tonumber(n)] end; " ++
+        "return __hexe_panes_by_uuid[id] end; " ++
         "return nil end; " ++
+        "__hexe_ctx_cache=__hexe_ctx_cache or {}; " ++
+        "ctx.cache = ctx.cache or {}; " ++
+        "ctx.cache.get=function(key) " ++
+        "local k=tostring(key); local e=__hexe_ctx_cache[k]; if not e then return nil end; " ++
+        "local now=(ctx.now_ms or 0); if e.exp and e.exp < now then __hexe_ctx_cache[k]=nil; return nil end; " ++
+        "return e.val end; " ++
+        "ctx.cache.set=function(key,val,ttl_ms) " ++
+        "local k=tostring(key); local exp=nil; " ++
+        "if ttl_ms and type(ttl_ms)=='number' and ttl_ms>0 then exp=(ctx.now_ms or 0)+ttl_ms end; " ++
+        "__hexe_ctx_cache[k]={ val=val, exp=exp }; return val end; " ++
+        "ctx.cache.del=function(key) __hexe_ctx_cache[tostring(key)]=nil end; " ++
         "ctx.status = ctx.pane(0); " ++
         "end; " ++
         "if type(hexe)=='table' then " ++
@@ -615,6 +706,7 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
 }
 
 fn evalLuaWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
+    const trace_start_ms = std.time.milliTimestamp();
     const now = ctx.now_ms;
     const key = whenKey(code);
     const map = getWhenCache(&when_lua_cache);
@@ -639,6 +731,7 @@ fn evalLuaWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     populateLuaContext(rt, ctx);
 
     const mode = beginLuaEval(rt, code) orelse {
+        traceLuaEval("statusbar.when", code, false, trace_start_ms);
         map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
         return false;
     };
@@ -650,6 +743,7 @@ fn evalLuaWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
         .string => (rt.lua.toString(-1) catch "").len > 0,
         else => false,
     };
+    traceLuaEval("statusbar.when", code, true, trace_start_ms);
     map.put(key, .{ .last_eval_ms = now, .last_result = ok }) catch {};
     return ok;
 }
@@ -689,6 +783,7 @@ const LuaEval = struct {
 
 fn evalLuaCommand(code: []const u8, ctx: *shp.Context) LuaEval {
     var out: LuaEval = .{};
+    const trace_start_ms = std.time.milliTimestamp();
     var rt: *LuaRuntime = undefined;
     if (callback_lua_rt) |cb| {
         rt = cb;
@@ -700,8 +795,12 @@ fn evalLuaCommand(code: []const u8, ctx: *shp.Context) LuaEval {
         rt = &when_lua_rt.?;
     }
     populateLuaContext(rt, ctx);
-    const mode = beginLuaEval(rt, code) orelse return out;
+    const mode = beginLuaEval(rt, code) orelse {
+        traceLuaEval("statusbar.value", code, false, trace_start_ms);
+        return out;
+    };
     defer endLuaEval(rt, mode);
+    defer traceLuaEval("statusbar.value", code, true, trace_start_ms);
 
     switch (rt.lua.typeOf(-1)) {
         .string => {
@@ -841,6 +940,7 @@ const BuiltinDesc = struct {
 
 fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
     var desc: BuiltinDesc = .{};
+    const trace_start_ms = std.time.milliTimestamp();
     var rt: *LuaRuntime = undefined;
     if (callback_lua_rt) |cb| {
         rt = cb;
@@ -852,8 +952,12 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
         rt = &when_lua_rt.?;
     }
     populateLuaContext(rt, ctx);
-    const mode = beginLuaEval(rt, code) orelse return desc;
+    const mode = beginLuaEval(rt, code) orelse {
+        traceLuaEval("statusbar.builtin", code, false, trace_start_ms);
+        return desc;
+    };
     defer endLuaEval(rt, mode);
+    defer traceLuaEval("statusbar.builtin", code, true, trace_start_ms);
 
     switch (rt.lua.typeOf(-1)) {
         .string => {
@@ -913,6 +1017,9 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                     const n = @min(s.len, desc.prefix_buf.len);
                     @memcpy(desc.prefix_buf[0..n], s[0..n]);
                     desc.prefix_len = n;
+                } else if (rt.lua.typeOf(-1) != .nil) {
+                    _ = rt.lua.pushString("builtin.prefix.output must be string");
+                    rt.lua.raiseError();
                 }
                 rt.lua.pop(1);
 
@@ -920,6 +1027,9 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                 if (rt.lua.typeOf(-1) == .string) {
                     const s = rt.lua.toString(-1) catch "";
                     desc.prefix_style = shp.Style.parse(s);
+                } else if (rt.lua.typeOf(-1) != .nil) {
+                    _ = rt.lua.pushString("builtin.prefix.style must be string");
+                    rt.lua.raiseError();
                 }
                 rt.lua.pop(1);
             }
@@ -938,6 +1048,9 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                     const n = @min(s.len, desc.suffix_buf.len);
                     @memcpy(desc.suffix_buf[0..n], s[0..n]);
                     desc.suffix_len = n;
+                } else if (rt.lua.typeOf(-1) != .nil) {
+                    _ = rt.lua.pushString("builtin.suffix.output must be string");
+                    rt.lua.raiseError();
                 }
                 rt.lua.pop(1);
 
@@ -945,6 +1058,9 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                 if (rt.lua.typeOf(-1) == .string) {
                     const s = rt.lua.toString(-1) catch "";
                     desc.suffix_style = shp.Style.parse(s);
+                } else if (rt.lua.typeOf(-1) != .nil) {
+                    _ = rt.lua.pushString("builtin.suffix.style must be string");
+                    rt.lua.raiseError();
                 }
                 rt.lua.pop(1);
             }
@@ -959,6 +1075,9 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                         const n = @min(s.len, desc.suffix_buf.len);
                         @memcpy(desc.suffix_buf[0..n], s[0..n]);
                         desc.suffix_len = n;
+                    } else if (rt.lua.typeOf(-1) != .nil) {
+                        _ = rt.lua.pushString("builtin.sufix.output must be string");
+                        rt.lua.raiseError();
                     }
                     rt.lua.pop(1);
 
@@ -966,6 +1085,9 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                     if (rt.lua.typeOf(-1) == .string) {
                         const s = rt.lua.toString(-1) catch "";
                         desc.suffix_style = shp.Style.parse(s);
+                    } else if (rt.lua.typeOf(-1) != .nil) {
+                        _ = rt.lua.pushString("builtin.sufix.style must be string");
+                        rt.lua.raiseError();
                     }
                     rt.lua.pop(1);
                 }
@@ -1296,6 +1418,8 @@ pub fn draw(
     } else if (state.currentLayout().getFocusedPane()) |pane| {
         ctx.alt_screen = pane.vt.inAltScreen();
     }
+
+    emitStatusbarRedrawEventIfDue(state, &ctx, term_width, term_height, active_tab);
 
     // Find the tabs module to check tab_title setting
     var use_basename = true;

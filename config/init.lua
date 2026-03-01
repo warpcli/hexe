@@ -1,6 +1,58 @@
 hx = require("hexe")
 local section = HEXE_SECTION
 
+hx.autocmd = hx.autocmd or {}
+if hx.autocmd.on == nil then
+  hx.autocmd.on = function(event, fn)
+    if type(event) ~= "string" then
+      error("autocmd event must be string")
+    end
+    if type(fn) ~= "function" then
+      error("autocmd handler must be function")
+    end
+    local cur = hx.autocmd[event]
+    if cur == nil then
+      hx.autocmd[event] = fn
+    elseif type(cur) == "function" then
+      hx.autocmd[event] = { cur, fn }
+    elseif type(cur) == "table" then
+      cur[#cur + 1] = fn
+    else
+      error("autocmd slot already used by non-function value: " .. event)
+    end
+    return fn
+  end
+end
+
+if hx.autocmd.debounce == nil then
+  hx.autocmd.debounce = function(interval_ms, fn)
+    if type(interval_ms) ~= "number" or interval_ms < 0 then
+      error("debounce interval_ms must be non-negative number")
+    end
+    if type(fn) ~= "function" then
+      error("debounce fn must be function")
+    end
+    local last_now_ms = nil
+    return function(ev)
+      local now_ms = 0
+      if type(ev) == "table" and type(ev.now_ms) == "number" then
+        now_ms = ev.now_ms
+      end
+      if last_now_ms ~= nil and now_ms >= last_now_ms and (now_ms - last_now_ms) < interval_ms then
+        return nil
+      end
+      last_now_ms = now_ms
+      return fn(ev)
+    end
+  end
+end
+
+if hx.autocmd.debounced_on == nil then
+  hx.autocmd.debounced_on = function(event, interval_ms, fn)
+    return hx.autocmd.on(event, hx.autocmd.debounce(interval_ms, fn))
+  end
+end
+
 -- ============================================================================
 -- MUX Configuration (Terminal UI)
 -- ============================================================================
@@ -114,8 +166,8 @@ if section == nil or section == "mux" then
     builtin = function(_)
       return hx.segment.builtin.session({
         style = "bg:1 fg:0",
-        prefix = { output = " ", style = "bg:0 fg:8" },
-        suffix = { output = " ", style = "bg:0 fg:8" },
+        prefix = { output = "| " },
+        suffix = { output = " |" },
       })
     end,
   })

@@ -86,6 +86,7 @@ Notes:
 
 - Kind is inferred from fields (`value`, `builtin`, `button`, `progress`); no `kind` field is required.
 - `outputs` is not used in the Lua-first prompt model.
+- Affix object form is supported: `prefix = { output = "...", style = "..." }`, `suffix = { output = "...", style = "..." }`.
 
 ## Prompt Restrictions
 
@@ -130,6 +131,10 @@ Return behavior:
 - `name` (required): builtin segment name (for example `git_branch`, `git_status`, `directory`)
 - `style`: descriptor style override
 - `prefix` / `suffix`: wrapper text around builtin output
+  - string form: `prefix = " "`
+  - object form: `prefix = { output = " ", style = "bg:0 fg:8" }`
+  - same schema for `suffix`
+- `sufix = { output = ..., style = ... }` is accepted as alias for `suffix`
 
 You can build descriptors with helpers:
 
@@ -149,22 +154,17 @@ Style behavior:
 
 ## Conditions (`when`)
 
-The Lua-first prompt model usually encodes visibility directly in `value`/`builtin` functions (return `nil` to hide). `when` is still available and uses callback form for `lua` conditions.
+The Lua-first prompt model usually encodes visibility directly in `value`/`builtin` callbacks (return `nil` to hide). `when` is callback-only.
 
-Prompt supports these condition forms:
+Prompt condition form:
 
 ```lua
-when = { env = "SSH_CONNECTION" }
-when = { env_not = "INSIDE_CONTAINER" }
-when = { bash = "[[ -n $SSH_CONNECTION ]]" }
-when = { lua = function(ctx) return (ctx.exit_status or 0) ~= 0 end }
-when = { all = { "token_a", "token_b" } }
-when = { any = { "token_a", { lua = function(_) return true end } } }
+when = function(ctx)
+  return (ctx.exit_status or 0) ~= 0
+end
 ```
 
-`when.lua` must return boolean.
-
-`when.lua` must use callback form (`lua = function(ctx) ... end`). String-chunk form is no longer supported.
+Legacy forms like `when = { lua = ... }`, token tables, and bash/env conditions are no longer supported in prompt.
 
 ## Lua Context (`ctx`)
 
@@ -178,7 +178,10 @@ Prompt Lua callbacks (`value`, `builtin`, and `when.lua`) receive `ctx`:
 - `ctx.terminal_width`
 - `ctx.now_ms`
 - `ctx.env` (environment map: `ctx.env.NAME`)
-- `ctx.pane(0)` / `ctx.pane(nil)` (returns current prompt context table); prompt mode has no cross-pane lookup
+- `ctx.pane(0)` / `ctx.pane(nil)` (returns current prompt context table)
+- `ctx.pane(1)` and `ctx.pane("focused")` / `ctx.pane("current")` also return current prompt context table
+- prompt mode has no cross-pane lookup (`ctx.pane(<other>)` returns `nil`)
+- `ctx.cache.get(key)` / `ctx.cache.set(key, value, ttl_ms)` / `ctx.cache.del(key)` for callback-local caching
 
 Example:
 
@@ -214,6 +217,12 @@ Unsafe mode package search paths:
 If `XDG_CONFIG_HOME` is unset, `~/.config/hexe` is used.
 
 Native C modules are disabled (`package.cpath = ""`).
+
+### Lua Trace
+
+- Set `HEXE_LUA_TRACE=1` to trace all callback evaluations.
+- Set `HEXE_LUA_TRACE=slow` to trace only slow evaluations.
+- Optional threshold: `HEXE_LUA_TRACE_SLOW_MS` (default `8`).
 
 ## Width and Priority Behavior
 

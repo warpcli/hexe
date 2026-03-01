@@ -20,6 +20,29 @@ const FocusContext = @import("state.zig").FocusContext;
 const LuaRuntime = core.LuaRuntime;
 const CALLBACK_REF_PREFIX = "__hexe_cb_ref:";
 
+const LuaTraceMode = enum { off, all, slow };
+
+fn parseLuaTraceMode() LuaTraceMode {
+    const v = std.posix.getenv("HEXE_LUA_TRACE") orelse return .off;
+    if (std.mem.eql(u8, v, "1") or std.mem.eql(u8, v, "true") or std.mem.eql(u8, v, "all")) return .all;
+    if (std.mem.eql(u8, v, "slow")) return .slow;
+    return .off;
+}
+
+fn luaTraceSlowMs() i64 {
+    const raw = std.posix.getenv("HEXE_LUA_TRACE_SLOW_MS") orelse return 8;
+    return std.fmt.parseInt(i64, raw, 10) catch 8;
+}
+
+fn traceLuaEval(scope: []const u8, code: []const u8, ok: bool, start_ms: i64) void {
+    const mode = parseLuaTraceMode();
+    if (mode == .off) return;
+    const elapsed = std.time.milliTimestamp() - start_ms;
+    if (mode == .slow and elapsed < luaTraceSlowMs()) return;
+    const code_hint = if (callbackIdFromCode(code) != null) code else "<chunk>";
+    std.debug.print("[hexe-lua:{s}] ok={s} elapsed_ms={d} code={s}\n", .{ scope, if (ok) "true" else "false", elapsed, code_hint });
+}
+
 fn handleBlockedPopup(popups: anytype, parsed_event: ?vaxis.Event) bool {
     if (parsed_event) |ev| {
         return input.handlePopupEvent(popups, ev);
@@ -301,15 +324,20 @@ fn pushPaneLuaTable(rt: *LuaRuntime, state: *State, pane: *Pane, is_focused: boo
     }
 }
 
-fn appendPaneApiEntry(rt: *LuaRuntime, state: *State, pane: *Pane, is_focused: bool, tab_index: usize, pane_index: usize) void {
+fn appendPaneApiEntry(rt: *LuaRuntime, state: *State, pane: *Pane, is_focused: bool, tab_index: usize, pane_index: usize, tab_focus_slot: ?usize) void {
     pushPaneLuaTable(rt, state, pane, is_focused, tab_index, pane_index);
 
     rt.lua.pushValue(-1);
-    rt.lua.rawSetIndex(-4, @intCast(pane_index));
+    rt.lua.rawSetIndex(-5, @intCast(pane_index));
 
     _ = rt.lua.pushString(pane.uuid[0..]);
     rt.lua.pushValue(-2);
-    rt.lua.setTable(-4);
+    rt.lua.setTable(-5);
+
+    if (tab_focus_slot) |slot| {
+        rt.lua.pushValue(-1);
+        rt.lua.rawSetIndex(-3, @intCast(slot));
+    }
 
     if (is_focused) {
         rt.lua.pushValue(-1);
@@ -378,9 +406,10 @@ fn populateWhenLuaContext(state: *State, rt: *LuaRuntime, query: *const PaneQuer
         rt.lua.setField(-2, "env");
     }
 
-    // Build pane lookup maps: numeric index and uuid.
+    // Build pane lookup maps: numeric index, uuid, and tab focus.
     rt.lua.createTable(0, 64); // index map (1-based)
     rt.lua.createTable(0, 64); // uuid map
+    rt.lua.createTable(0, 32); // tab:N/focus map (1-based tabs)
 
     rt.lua.pushValue(-3);
     rt.lua.setGlobal("__hexe_when_pane0");
@@ -389,13 +418,18 @@ fn populateWhenLuaContext(state: *State, rt: *LuaRuntime, query: *const PaneQuer
     var pane_index: usize = 1;
 
     for (state.tabs.items, 0..) |*tab, tab_idx| {
+        const tab_focused_uuid = if (tab.layout.getFocusedPane()) |fp| fp.uuid else null;
         var pane_it = tab.layout.splitIterator();
         while (pane_it.next()) |pane| {
             const is_focused = if (focused_uuid) |fu|
                 std.mem.eql(u8, &pane.*.uuid, &fu)
             else
                 false;
-            appendPaneApiEntry(rt, state, pane.*, is_focused, tab_idx, pane_index);
+            const tab_focus_slot: ?usize = if (tab_focused_uuid) |tfu|
+                if (std.mem.eql(u8, &pane.*.uuid, &tfu)) (tab_idx + 1) else null
+            else
+                null;
+            appendPaneApiEntry(rt, state, pane.*, is_focused, tab_idx, pane_index, tab_focus_slot);
             pane_index += 1;
         }
     }
@@ -406,19 +440,21 @@ fn populateWhenLuaContext(state: *State, rt: *LuaRuntime, query: *const PaneQuer
         else
             false;
         const tab_idx = pane.parent_tab orelse state.active_tab;
-        appendPaneApiEntry(rt, state, pane, is_focused, tab_idx, pane_index);
+        appendPaneApiEntry(rt, state, pane, is_focused, tab_idx, pane_index, null);
         pane_index += 1;
     }
 
-    rt.lua.pushValue(-2);
-    rt.lua.setField(-4, "panes");
+    rt.lua.pushValue(-3);
+    rt.lua.setField(-5, "panes");
 
-    rt.lua.pushValue(-1);
+    rt.lua.pushValue(-2);
     rt.lua.setGlobal("__hexe_panes_by_uuid");
-    rt.lua.pushValue(-2);
+    rt.lua.pushValue(-3);
     rt.lua.setGlobal("__hexe_panes_by_index");
+    rt.lua.pushValue(-1);
+    rt.lua.setGlobal("__hexe_panes_by_tab_focus");
 
-    rt.lua.pop(2);
+    rt.lua.pop(3);
 
     // Expose pragmatic pane API: ctx.pane(0)
     rt.lua.pushValue(-1);
@@ -430,8 +466,23 @@ fn populateWhenLuaContext(state: *State, rt: *LuaRuntime, query: *const PaneQuer
         "if id==nil or id==0 then return __hexe_when_pane0 end " ++
         "local t=type(id); " ++
         "if t=='number' then return __hexe_panes_by_index[id] end; " ++
-        "if t=='string' then return __hexe_panes_by_uuid[id] end; " ++
+        "if t=='string' then " ++
+        "if id=='focused' or id=='current' then return __hexe_when_pane0 end; " ++
+        "local n=string.match(id,'^tab:(%d+)/focus$'); " ++
+        "if n then return __hexe_panes_by_tab_focus[tonumber(n)] end; " ++
+        "return __hexe_panes_by_uuid[id] end; " ++
         "return nil end; " ++
+        "__hexe_ctx_cache=__hexe_ctx_cache or {}; " ++
+        "ctx.cache = ctx.cache or {}; " ++
+        "ctx.cache.get=function(key) " ++
+        "local k=tostring(key); local e=__hexe_ctx_cache[k]; if not e then return nil end; " ++
+        "local now=(ctx.now_ms or 0); if e.exp and e.exp < now then __hexe_ctx_cache[k]=nil; return nil end; " ++
+        "return e.val end; " ++
+        "ctx.cache.set=function(key,val,ttl_ms) " ++
+        "local k=tostring(key); local exp=nil; " ++
+        "if ttl_ms and type(ttl_ms)=='number' and ttl_ms>0 then exp=(ctx.now_ms or 0)+ttl_ms end; " ++
+        "__hexe_ctx_cache[k]={ val=val, exp=exp }; return val end; " ++
+        "ctx.cache.del=function(key) __hexe_ctx_cache[tostring(key)]=nil end; " ++
         "ctx.status = ctx.pane(0); " ++
         "end; " ++
         "if type(hexe)=='table' then " ++
@@ -451,19 +502,31 @@ fn populateWhenLuaContext(state: *State, rt: *LuaRuntime, query: *const PaneQuer
 
 fn matchesLuaWhen(state: *State, query: *const PaneQuery, w: core.config.WhenDef) bool {
     const code = w.lua orelse return true;
-    const callback_id = callbackIdFromCode(code) orelse return false;
-    const rt = state.config._lua_runtime orelse return false;
+    const trace_start_ms = std.time.milliTimestamp();
+    const callback_id = callbackIdFromCode(code) orelse {
+        traceLuaEval("keybind.when", code, false, trace_start_ms);
+        return false;
+    };
+    const rt = state.config._lua_runtime orelse {
+        traceLuaEval("keybind.when", code, false, trace_start_ms);
+        return false;
+    };
 
     populateWhenLuaContext(state, rt, query);
 
-    if (!core.lua_runtime.pushRegisteredCallback(rt, callback_id)) return false;
+    if (!core.lua_runtime.pushRegisteredCallback(rt, callback_id)) {
+        traceLuaEval("keybind.when", code, false, trace_start_ms);
+        return false;
+    }
     _ = rt.lua.getGlobal("ctx") catch {
         rt.lua.pop(2);
+        traceLuaEval("keybind.when", code, false, trace_start_ms);
         return false;
     };
 
     rt.lua.protectedCall(.{ .args = 1, .results = 1 }) catch {
         rt.lua.pop(2);
+        traceLuaEval("keybind.when", code, false, trace_start_ms);
         return false;
     };
     defer {
@@ -471,8 +534,13 @@ fn matchesLuaWhen(state: *State, query: *const PaneQuery, w: core.config.WhenDef
         rt.lua.pop(1); // callback table
     }
 
-    if (rt.lua.typeOf(-1) != .boolean) return false;
-    return rt.lua.toBoolean(-1);
+    if (rt.lua.typeOf(-1) != .boolean) {
+        traceLuaEval("keybind.when", code, false, trace_start_ms);
+        return false;
+    }
+    const ok = rt.lua.toBoolean(-1);
+    traceLuaEval("keybind.when", code, true, trace_start_ms);
+    return ok;
 }
 
 fn keyEq(a: BindKey, b: BindKey) bool {

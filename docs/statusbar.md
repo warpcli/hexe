@@ -52,6 +52,8 @@ You can also provide arrays with `left`, `center`, `right` using your preferred 
     }
   end,
 
+  -- affix object schema: { output = string, style = string }
+
   -- optional click behavior
   button = {
     on_left_click = "hexe record toggle --scope pod --out /tmp/pod.cast",
@@ -140,37 +142,26 @@ Common built-ins used by the status bar:
 
 ## Conditions (`when`) in Status Bar
 
-Status bar supports token and script conditions.
+Statusbar `when` is callback-only.
 
-### Token conditions
-
-```lua
-when = { all = { "process_running", "not_alt_screen" } }
-when = { any = { "focus_float", "tabs_gt1" } }
-```
-
-Common tokens:
-
-- shell state: `process_running`, `not_process_running`, `alt_screen`, `not_alt_screen`, `jobs_nonzero`, `has_last_cmd`, `last_status_nonzero`
-- focus state: `focus_float`, `focus_split`
-- float attributes: `float_destroyable`, `float_exclusive`, `float_sticky`, `float_per_cwd`, `float_global`, `float_isolated`, `adhoc_float`, `named_float`
-- tabs: `tabs_gt1`, `tabs_eq1`
-
-### Script conditions
+Use:
 
 ```lua
-when = { bash = "[[ $HEXE_STATUS_ALT_SCREEN -eq 0 ]]" }
-when = { lua  = function(ctx) return ctx.shell_running and not ctx.alt_screen end }
+when = function(ctx)
+  local p = ctx.pane(0)
+  return p and p.process_running and not p.alt_screen
+end
 ```
 
-`when.lua` is evaluated with a statusbar `ctx` table.
-
-`when.lua` must be a callback (`lua = function(ctx) ... end`). String-chunk form is no longer supported.
+Legacy forms like token tables, `when = { lua = ... }`, and bash/env conditions are no longer supported in statusbar.
 
 Pane lookup in statusbar callbacks:
 - `ctx.pane(0)` (or `ctx.pane(nil)`) returns the current focused pane state (same table as `ctx`)
 - `ctx.pane(<number>)` returns pane by runtime index in `ctx.panes` (1-based)
 - `ctx.pane(<uuid_string>)` returns pane by UUID
+- `ctx.pane("focused")` / `ctx.pane("current")` returns the current focused pane
+- `ctx.pane("tab:<n>/focus")` returns focused split pane for tab `n` (1-based)
+- `ctx.cache.get(key)` / `ctx.cache.set(key, value, ttl_ms)` / `ctx.cache.del(key)` for callback caching
 
 Available fields in `ctx`:
 
@@ -189,12 +180,15 @@ Available fields in `ctx`:
 
 Common pane fields include `focus_split`, `focus_float`, `process_name`, and `process_running`.
 
+### Lua Trace
+
+- Set `HEXE_LUA_TRACE=1` to trace all callback evaluations.
+- Set `HEXE_LUA_TRACE=slow` to trace only slow evaluations.
+- Optional threshold: `HEXE_LUA_TRACE_SLOW_MS` (default `8`).
+
 Condition evaluation is cached internally:
 
-- Lua conditions: short TTL (fast re-use)
-- Bash conditions: longer TTL and timeout guard
-
-You can adjust bash condition timeout via `HEXE_CONDITION_TIMEOUT` (ms, clamped to safe range).
+- Callback conditions: short TTL (fast re-use)
 
 ## Value/Builtin Output Model
 
@@ -227,8 +221,12 @@ Example:
 Builtin descriptor behavior:
 
 - `name` selects a builtin segment renderer.
-- `style` applies to descriptor-added prefix/suffix.
-- `prefix`/`suffix` wrap the builtin output.
+- `style` applies to builtin output text.
+- `prefix`/`suffix` wrap builtin output and support two forms:
+  - string: `prefix = " "`
+  - object: `prefix = { output = " ", style = "bg:0 fg:8" }`
+  - same schema for `suffix`
+- `sufix = { output = ..., style = ... }` is accepted as alias for `suffix`.
 - For spinner builtin descriptors, optional fields `kind`, `width`, `step`/`step_ms`, `hold`/`hold_frames`, `colors`, `bg`, and `placeholder` are supported.
 - Descriptor style is authoritative when provided (it does not merge with builtin segment style).
 
