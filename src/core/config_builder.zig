@@ -390,9 +390,14 @@ pub const ShpConfigBuilder = struct {
     // Temporary struct for prompt segments (similar to config.Segment but for SHP)
     pub const SegmentDef = struct {
         name: []const u8,
+        kind: config.SegmentKind = .value,
         priority: i64,
         outputs: []const OutputDef,
         command: ?[]const u8,
+        builtin: ?[]const u8 = null,
+        progress_every_ms: u64 = 1000,
+        progress_show_when: ?[]const u8 = null,
+        inverse_on_hover: bool = true,
         when: ?config.WhenDef,
     };
 
@@ -416,6 +421,8 @@ pub const ShpConfigBuilder = struct {
         for (self.left_segments.items) |seg| {
             self.allocator.free(seg.name);
             if (seg.command) |cmd| self.allocator.free(cmd);
+            if (seg.builtin) |b| self.allocator.free(b);
+            if (seg.progress_show_when) |s| self.allocator.free(s);
             for (seg.outputs) |out| {
                 self.allocator.free(out.style);
                 self.allocator.free(out.format);
@@ -425,6 +432,8 @@ pub const ShpConfigBuilder = struct {
         for (self.right_segments.items) |seg| {
             self.allocator.free(seg.name);
             if (seg.command) |cmd| self.allocator.free(cmd);
+            if (seg.builtin) |b| self.allocator.free(b);
+            if (seg.progress_show_when) |s| self.allocator.free(s);
             for (seg.outputs) |out| {
                 self.allocator.free(out.style);
                 self.allocator.free(out.format);

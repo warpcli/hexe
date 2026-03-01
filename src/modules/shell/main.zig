@@ -269,6 +269,18 @@ fn convertSegments(segments: []const config_builder.ShpConfigBuilder.SegmentDef,
             null;
         errdefer if (command_copy) |cmd| allocator.free(cmd);
 
+        const builtin_copy = if (seg.builtin) |b|
+            allocator.dupe(u8, b) catch return &[_]core.Segment{}
+        else
+            null;
+        errdefer if (builtin_copy) |b| allocator.free(b);
+
+        const show_when_copy = if (seg.progress_show_when) |s|
+            allocator.dupe(u8, s) catch return &[_]core.Segment{}
+        else
+            null;
+        errdefer if (show_when_copy) |s| allocator.free(s);
+
         const outputs = if (seg.outputs.len == 0)
             &[_]core.OutputDef{}
         else blk: {
@@ -300,9 +312,14 @@ fn convertSegments(segments: []const config_builder.ShpConfigBuilder.SegmentDef,
 
         modules[i] = .{
             .name = name_copy,
+            .kind = seg.kind,
             .priority = @intCast(@max(@as(i64, 0), @min(seg.priority, 255))),
             .outputs = outputs,
             .command = command_copy,
+            .builtin = builtin_copy,
+            .progress_every_ms = seg.progress_every_ms,
+            .progress_show_when = show_when_copy,
+            .inverse_on_hover = seg.inverse_on_hover,
             .when = seg.when,
         };
         built_count += 1;
@@ -314,6 +331,8 @@ fn convertSegments(segments: []const config_builder.ShpConfigBuilder.SegmentDef,
 fn deinitModuleDefOwned(m: core.Segment, allocator: std.mem.Allocator) void {
     allocator.free(m.name);
     if (m.command) |c| allocator.free(c);
+    if (m.builtin) |b| allocator.free(b);
+    if (m.progress_show_when) |s| allocator.free(s);
     for (m.outputs) |o| {
         allocator.free(o.style);
         allocator.free(o.format);
@@ -447,7 +466,7 @@ fn parseModule(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?core.Segment
     var command = runtime.getStringAlloc(-1, "command");
     if (command == null) {
         if (runtime.getString(-1, "lua")) |code| {
-            command = std.fmt.allocPrint(allocator, "lua:{s}", .{code}) catch null;
+            command = allocator.dupe(u8, code) catch null;
         }
     }
 

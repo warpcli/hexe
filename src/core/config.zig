@@ -84,20 +84,35 @@ pub const WhenDef = struct {
 
 /// Segment definition for statusbar and prompt.
 /// Both statusbar modules and shell prompt segments use this unified type.
+pub const SegmentKind = enum {
+    value,
+    builtin,
+    button,
+    progress,
+};
+
 pub const Segment = struct {
     name: []const u8,
+    kind: SegmentKind = .value,
     // Priority for width-based hiding (lower = higher priority, stays longer)
     priority: u8 = 50,
     // Array of outputs (each with style + format)
     outputs: []const OutputDef = &[_]OutputDef{},
     // Optional for custom modules
     command: ?[]const u8 = null,
+    // Optional explicit builtin source name
+    builtin: ?[]const u8 = null,
+    // Progress behavior tuning
+    progress_every_ms: u64 = 1000,
+    progress_show_when: ?[]const u8 = null,
     // Optional statusbar click actions (shell commands)
     on_click: ?[]const u8 = null,
     on_right_click: ?[]const u8 = null,
     on_middle_click: ?[]const u8 = null,
     // Optional statusbar button active-state condition (bash, exit 0 = active)
     button_active_bash: ?[]const u8 = null,
+    // If true, invert button style when hovered.
+    inverse_on_hover: bool = true,
     when: ?WhenDef = null,
 
     // Optional spinner configuration
@@ -358,6 +373,8 @@ pub const LayoutFloatDef = struct {
                     allocator.free(module.outputs);
                 }
                 if (module.command) |cmd| allocator.free(@constCast(cmd));
+                if (module.builtin) |b| allocator.free(@constCast(b));
+                if (module.progress_show_when) |s| allocator.free(@constCast(s));
                 if (module.on_click) |cmd| allocator.free(@constCast(cmd));
                 if (module.on_right_click) |cmd| allocator.free(@constCast(cmd));
                 if (module.on_middle_click) |cmd| allocator.free(@constCast(cmd));
@@ -1358,16 +1375,192 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         return null;
     };
 
+    var value_code: ?[]const u8 = blk: {
+        if (runtime.getString(-1, "value")) |v| {
+            const trimmed = std.mem.trim(u8, v, " \t\r\n");
+            if (trimmed.len == 0) break :blk null;
+            break :blk allocator.dupe(u8, trimmed) catch null;
+        }
+        if (runtime.pushTable(-1, "value")) {
+            defer runtime.pop();
+            if (runtime.getString(-1, "lua")) |v| {
+                const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                if (trimmed.len > 0) break :blk allocator.dupe(u8, trimmed) catch null;
+            }
+            if (runtime.getString(-1, "fn")) |v| {
+                const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                if (trimmed.len > 0) break :blk allocator.dupe(u8, trimmed) catch null;
+            }
+        }
+        break :blk null;
+    };
+
+    var source_builtin: ?[]const u8 = null;
+    var source_value: ?[]const u8 = null;
+    if (runtime.pushTable(-1, "source")) {
+        defer runtime.pop();
+        source_builtin = runtime.getStringAlloc(-1, "builtin") orelse runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
+        if (runtime.getString(-1, "value")) |v| {
+            const trimmed = std.mem.trim(u8, v, " \t\r\n");
+            if (trimmed.len > 0) source_value = allocator.dupe(u8, trimmed) catch null;
+        }
+    }
+
+    var builtin_name: ?[]const u8 = runtime.getStringAlloc(-1, "builtin");
+    if (builtin_name == null and runtime.pushTable(-1, "builtin")) {
+        defer runtime.pop();
+        builtin_name = runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
+    }
+    if (builtin_name == null) {
+        builtin_name = source_builtin;
+    } else if (source_builtin) |b| {
+        allocator.free(b);
+    }
+    if (value_code == null) {
+        value_code = source_value;
+    } else if (source_value) |v| {
+        allocator.free(v);
+    }
+    var show_when_code: ?[]const u8 = blk: {
+        if (runtime.getString(-1, "show_when")) |v| {
+            const trimmed = std.mem.trim(u8, v, " \t\r\n");
+            if (trimmed.len == 0) break :blk null;
+            break :blk allocator.dupe(u8, trimmed) catch null;
+        }
+        break :blk null;
+    };
+
+    if (runtime.pushTable(-1, "progress")) {
+        defer runtime.pop();
+        if (runtime.getInt(u64, -1, "every_ms")) |v| {
+            _ = v;
+        }
+        if (show_when_code == null) {
+            if (runtime.getString(-1, "show_when")) |v| {
+                const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                if (trimmed.len > 0) show_when_code = allocator.dupe(u8, trimmed) catch null;
+            }
+        }
+        if (builtin_name == null) {
+            builtin_name = runtime.getStringAlloc(-1, "builtin");
+        }
+        if (builtin_name == null and runtime.pushTable(-1, "source")) {
+            defer runtime.pop();
+            builtin_name = runtime.getStringAlloc(-1, "builtin") orelse runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
+        }
+        if (value_code == null) {
+            if (runtime.getString(-1, "value")) |v| {
+                const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+            }
+            if (value_code == null and runtime.pushTable(-1, "source")) {
+                defer runtime.pop();
+                if (runtime.getString(-1, "value")) |v| {
+                    const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                    if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+                }
+            }
+        }
+    }
+
+    const has_button = runtime.fieldType(-1, "button") == .table or
+        runtime.fieldType(-1, "on_click") == .string or
+        runtime.fieldType(-1, "on_left_click") == .string or
+        runtime.fieldType(-1, "on_right_click") == .string or
+        runtime.fieldType(-1, "on_middle_click") == .string;
+    const has_progress = runtime.fieldType(-1, "progress") == .table or show_when_code != null or runtime.fieldType(-1, "every_ms") != .nil;
+    const progress_every_ms: u64 = blk: {
+        if (runtime.getInt(u64, -1, "every_ms")) |v| break :blk v;
+        if (runtime.pushTable(-1, "progress")) {
+            defer runtime.pop();
+            if (runtime.getInt(u64, -1, "every_ms")) |v| break :blk v;
+        }
+        break :blk 1000;
+    };
+
+    var on_click = runtime.getStringAlloc(-1, "on_click") orelse runtime.getStringAlloc(-1, "on_left_click");
+    var on_right_click = runtime.getStringAlloc(-1, "on_right_click") orelse runtime.getStringAlloc(-1, "right_click");
+    var on_middle_click = runtime.getStringAlloc(-1, "on_middle_click") orelse runtime.getStringAlloc(-1, "middle_click");
+    var button_active_bash = runtime.getStringAlloc(-1, "button_active_bash");
+    var inverse_on_hover = runtime.getBool(-1, "inverse_on_hover") orelse true;
+    if (runtime.pushTable(-1, "button")) {
+        defer runtime.pop();
+        if (on_click == null) on_click = runtime.getStringAlloc(-1, "on_click") orelse runtime.getStringAlloc(-1, "on_left_click");
+        if (on_right_click == null) on_right_click = runtime.getStringAlloc(-1, "on_right_click") orelse runtime.getStringAlloc(-1, "right_click");
+        if (on_middle_click == null) on_middle_click = runtime.getStringAlloc(-1, "on_middle_click") orelse runtime.getStringAlloc(-1, "middle_click");
+        if (button_active_bash == null) button_active_bash = runtime.getStringAlloc(-1, "active_when");
+        if (runtime.getBool(-1, "inverse_on_hover")) |v| inverse_on_hover = v;
+        if (builtin_name == null) builtin_name = runtime.getStringAlloc(-1, "builtin");
+        if (builtin_name == null and runtime.pushTable(-1, "source")) {
+            defer runtime.pop();
+            builtin_name = runtime.getStringAlloc(-1, "builtin") orelse runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
+        }
+        if (value_code == null) {
+            if (runtime.getString(-1, "value")) |v| {
+                const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+            }
+            if (value_code == null and runtime.pushTable(-1, "source")) {
+                defer runtime.pop();
+                if (runtime.getString(-1, "value")) |v| {
+                    const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                    if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+                }
+            }
+        }
+    }
+    const kind: SegmentKind = if (has_progress)
+        .progress
+    else if (has_button)
+        .button
+    else if (builtin_name != null and value_code == null)
+        .builtin
+    else
+        .value;
+
+    const command: ?[]const u8 = switch (kind) {
+        .value => value_code,
+        .builtin => null,
+        .button, .progress => value_code,
+    };
+
+    if (runtime.fieldType(-1, "outputs") != .nil) {
+        setParseError(allocator, "config: segment field 'outputs' is removed; return styled blocks from 'value'");
+        allocator.free(name);
+        if (value_code) |vc| allocator.free(vc);
+        return null;
+    }
+
+    const has_source = command != null or builtin_name != null;
+    if (!has_source) {
+        const err_msg = switch (kind) {
+            .builtin => "config: builtin segment requires non-empty 'builtin'",
+            .value => "config: value segment requires a non-empty 'value'",
+            .button => "config: button segment requires 'value' or 'builtin'",
+            .progress => "config: progress segment requires 'value' or 'builtin'",
+        };
+        setParseError(allocator, err_msg);
+        allocator.free(name);
+        if (builtin_name) |b| allocator.free(@constCast(b));
+        if (show_when_code) |s| allocator.free(@constCast(s));
+        return null;
+    }
+
     return Segment{
         .name = name,
+        .kind = kind,
         .priority = lua_runtime.parseConstrainedInt(runtime, u8, -1, "priority", 1, 255, 50),
         .outputs = parseOutputs(runtime, allocator),
-        .command = runtime.getStringAlloc(-1, "command"),
-        .on_click = runtime.getStringAlloc(-1, "on_click"),
-        .on_right_click = runtime.getStringAlloc(-1, "on_right_click"),
-        .on_middle_click = runtime.getStringAlloc(-1, "on_middle_click"),
-        .button_active_bash = runtime.getStringAlloc(-1, "button_active_bash"),
-        .when = parseWhenTable(runtime, allocator, true),
+        .command = command,
+        .builtin = builtin_name,
+        .progress_every_ms = progress_every_ms,
+        .progress_show_when = show_when_code,
+        .on_click = on_click,
+        .on_right_click = on_right_click,
+        .on_middle_click = on_middle_click,
+        .button_active_bash = button_active_bash,
+        .inverse_on_hover = inverse_on_hover,
+        .when = null,
         .spinner = parseSpinner(runtime, allocator),
         .active_style = runtime.getStringAlloc(-1, "active_style") orelse "bg:1 fg:0",
         .inactive_style = runtime.getStringAlloc(-1, "inactive_style") orelse "bg:237 fg:250",

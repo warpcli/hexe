@@ -4,6 +4,25 @@ const core = @import("core");
 const LuaRuntime = core.LuaRuntime;
 const segment = core.segments;
 const Style = core.style.Style;
+const BUILTIN_MARKER_PREFIX = "__hexe_builtin:";
+
+fn builtinNameFromMarker(s: []const u8) ?[]const u8 {
+    if (!std.mem.startsWith(u8, s, BUILTIN_MARKER_PREFIX)) return null;
+    const name = std.mem.trim(u8, s[BUILTIN_MARKER_PREFIX.len..], " \t\r\n");
+    if (name.len == 0) return null;
+    return name;
+}
+
+fn mergeStyle(base: Style, override: Style) Style {
+    var out = base;
+    if (override.fg != .none) out.fg = override.fg;
+    if (override.bg != .none) out.bg = override.bg;
+    if (override.bold) out.bold = true;
+    if (override.italic) out.italic = true;
+    if (override.underline) out.underline = true;
+    if (override.dim) out.dim = true;
+    return out;
+}
 
 fn populateLuaContext(runtime: *LuaRuntime, ctx: *segment.Context) void {
     runtime.lua.createTable(0, 8);
@@ -50,7 +69,143 @@ fn populateLuaContext(runtime: *LuaRuntime, ctx: *segment.Context) void {
     runtime.lua.setGlobal("ctx");
 }
 
-fn evalLuaWhen(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bool {
+const LuaBlock = struct {
+    text: [128]u8 = [_]u8{0} ** 128,
+    len: usize = 0,
+    prefix: [32]u8 = [_]u8{0} ** 32,
+    prefix_len: usize = 0,
+    suffix: [32]u8 = [_]u8{0} ** 32,
+    suffix_len: usize = 0,
+    style: Style = .{},
+};
+
+const LuaValue = struct {
+    text: [512]u8 = [_]u8{0} ** 512,
+    text_len: usize = 0,
+    blocks: [16]LuaBlock = [_]LuaBlock{.{}} ** 16,
+    block_count: usize = 0,
+
+    fn textSlice(self: *const LuaValue) []const u8 {
+        return self.text[0..self.text_len];
+    }
+};
+
+fn evalLuaCommand(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) LuaValue {
+    var out: LuaValue = .{};
+    populateLuaContext(runtime, ctx);
+
+    const code_z = runtime.allocator.dupeZ(u8, code) catch return out;
+    defer runtime.allocator.free(code_z);
+
+    runtime.lua.loadString(code_z) catch return out;
+    runtime.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
+        runtime.lua.pop(1);
+        return out;
+    };
+    defer runtime.lua.pop(1);
+
+    switch (runtime.lua.typeOf(-1)) {
+        .string => {
+            const s = runtime.lua.toString(-1) catch return out;
+            const n = @min(s.len, out.text.len);
+            @memcpy(out.text[0..n], s[0..n]);
+            out.text_len = n;
+            return out;
+        },
+        .number => {
+            const n = runtime.lua.toNumber(-1) catch return out;
+            const s = std.fmt.bufPrint(out.text[0..], "{d}", .{n}) catch "";
+            out.text_len = s.len;
+            return out;
+        },
+        .boolean => {
+            if (!runtime.lua.toBoolean(-1)) return out;
+            @memcpy(out.text[0..4], "true");
+            out.text_len = 4;
+            return out;
+        },
+        .table => {
+            const len: i32 = @intCast(@min(runtime.lua.rawLen(-1), out.blocks.len));
+            var i: i32 = 1;
+            while (i <= len) : (i += 1) {
+                _ = runtime.lua.rawGetIndex(-1, i);
+                defer runtime.lua.pop(1);
+                if (runtime.lua.typeOf(-1) != .table) continue;
+
+                _ = runtime.lua.getField(-1, "text");
+                if (runtime.lua.typeOf(-1) != .string) {
+                    runtime.lua.pop(1);
+                    continue;
+                }
+                const txt = runtime.lua.toString(-1) catch {
+                    runtime.lua.pop(1);
+                    continue;
+                };
+                runtime.lua.pop(1);
+
+                if (txt.len == 0) continue;
+                var blk = LuaBlock{};
+                const tn = @min(txt.len, blk.text.len);
+                @memcpy(blk.text[0..tn], txt[0..tn]);
+                blk.len = tn;
+
+                _ = runtime.lua.getField(-1, "prefix");
+                if (runtime.lua.typeOf(-1) == .string) {
+                    const ps = runtime.lua.toString(-1) catch "";
+                    const pn = @min(ps.len, blk.prefix.len);
+                    @memcpy(blk.prefix[0..pn], ps[0..pn]);
+                    blk.prefix_len = pn;
+                }
+                runtime.lua.pop(1);
+
+                _ = runtime.lua.getField(-1, "suffix");
+                if (runtime.lua.typeOf(-1) == .string) {
+                    const ss = runtime.lua.toString(-1) catch "";
+                    const sn = @min(ss.len, blk.suffix.len);
+                    @memcpy(blk.suffix[0..sn], ss[0..sn]);
+                    blk.suffix_len = sn;
+                }
+                runtime.lua.pop(1);
+
+                _ = runtime.lua.getField(-1, "style");
+                if (runtime.lua.typeOf(-1) == .string) {
+                    const ss = runtime.lua.toString(-1) catch "";
+                    blk.style = Style.parse(ss);
+                }
+                runtime.lua.pop(1);
+
+                _ = runtime.lua.getField(-1, "fg");
+                if (runtime.lua.typeOf(-1) == .number) {
+                    const fg = runtime.lua.toInteger(-1) catch -1;
+                    if (fg >= 0 and fg <= 255) blk.style.fg = .{ .palette = @intCast(fg) };
+                }
+                runtime.lua.pop(1);
+
+                _ = runtime.lua.getField(-1, "bg");
+                if (runtime.lua.typeOf(-1) == .number) {
+                    const bg = runtime.lua.toInteger(-1) catch -1;
+                    if (bg >= 0 and bg <= 255) blk.style.bg = .{ .palette = @intCast(bg) };
+                }
+                runtime.lua.pop(1);
+
+                _ = runtime.lua.getField(-1, "bold");
+                if (runtime.lua.typeOf(-1) == .boolean) blk.style.bold = runtime.lua.toBoolean(-1);
+                runtime.lua.pop(1);
+
+                _ = runtime.lua.getField(-1, "italic");
+                if (runtime.lua.typeOf(-1) == .boolean) blk.style.italic = runtime.lua.toBoolean(-1);
+                runtime.lua.pop(1);
+
+                out.blocks[out.block_count] = blk;
+                out.block_count += 1;
+            }
+            return out;
+        },
+        else => return out,
+    }
+}
+
+fn evalLuaGate(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bool {
     populateLuaContext(runtime, ctx);
 
     const code_z = runtime.allocator.dupeZ(u8, code) catch return false;
@@ -62,61 +217,127 @@ fn evalLuaWhen(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bo
         return false;
     };
     defer runtime.lua.pop(1);
-
-    if (runtime.lua.typeOf(-1) == .boolean) {
-        return runtime.lua.toBoolean(-1);
-    }
-    return false;
+    return switch (runtime.lua.typeOf(-1)) {
+        .boolean => runtime.lua.toBoolean(-1),
+        .number => (runtime.lua.toNumber(-1) catch 0) != 0,
+        .string => (runtime.lua.toString(-1) catch "").len > 0,
+        else => false,
+    };
 }
 
-fn evalLuaCommand(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) ?[]const u8 {
+const BuiltinDesc = struct {
+    name_buf: [64]u8 = [_]u8{0} ** 64,
+    name_len: usize = 0,
+    style: Style = .{},
+    prefix_buf: [32]u8 = [_]u8{0} ** 32,
+    prefix_len: usize = 0,
+    suffix_buf: [32]u8 = [_]u8{0} ** 32,
+    suffix_len: usize = 0,
+
+    fn name(self: *const BuiltinDesc) ?[]const u8 {
+        if (self.name_len == 0) return null;
+        return self.name_buf[0..self.name_len];
+    }
+
+    fn prefix(self: *const BuiltinDesc) []const u8 {
+        return self.prefix_buf[0..self.prefix_len];
+    }
+
+    fn suffix(self: *const BuiltinDesc) []const u8 {
+        return self.suffix_buf[0..self.suffix_len];
+    }
+};
+
+fn evalLuaBuiltinDesc(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) BuiltinDesc {
+    var desc: BuiltinDesc = .{};
     populateLuaContext(runtime, ctx);
 
-    const code_z = runtime.allocator.dupeZ(u8, code) catch return null;
+    const code_z = runtime.allocator.dupeZ(u8, code) catch return desc;
     defer runtime.allocator.free(code_z);
 
-    runtime.lua.loadString(code_z) catch return null;
+    runtime.lua.loadString(code_z) catch return desc;
     runtime.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
         runtime.lua.pop(1);
-        return null;
+        return desc;
     };
     defer runtime.lua.pop(1);
 
     switch (runtime.lua.typeOf(-1)) {
         .string => {
-            const s = runtime.lua.toString(-1) catch return null;
-            if (s.len == 0) return null;
-            return runtime.allocator.dupe(u8, s) catch null;
+            const s = runtime.lua.toString(-1) catch return desc;
+            const t = std.mem.trim(u8, s, " \t\r\n");
+            if (t.len > 0) {
+                const n = @min(t.len, desc.name_buf.len);
+                @memcpy(desc.name_buf[0..n], t[0..n]);
+                desc.name_len = n;
+            }
+            return desc;
         },
-        .number => {
-            const n = runtime.lua.toNumber(-1) catch return null;
-            return std.fmt.allocPrint(runtime.allocator, "{d}", .{n}) catch null;
-        },
-        .boolean => {
-            if (!runtime.lua.toBoolean(-1)) return null;
-            return runtime.allocator.dupe(u8, "true") catch null;
-        },
-        else => return null,
-    }
-}
+        .table => {
+            _ = runtime.lua.getField(-1, "name");
+            if (runtime.lua.typeOf(-1) == .string) {
+                const s = runtime.lua.toString(-1) catch "";
+                const t = std.mem.trim(u8, s, " \t\r\n");
+                if (t.len > 0) {
+                    const n = @min(t.len, desc.name_buf.len);
+                    @memcpy(desc.name_buf[0..n], t[0..n]);
+                    desc.name_len = n;
+                }
+            }
+            runtime.lua.pop(1);
 
-fn luaCommandCode(command: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, command, "lua:")) return null;
-    const body = std.mem.trim(u8, command[4..], " \t\r\n");
-    if (body.len == 0) return null;
-    return body;
+            _ = runtime.lua.getField(-1, "style");
+            if (runtime.lua.typeOf(-1) == .string) {
+                const s = runtime.lua.toString(-1) catch "";
+                desc.style = Style.parse(s);
+            }
+            runtime.lua.pop(1);
+
+            _ = runtime.lua.getField(-1, "fg");
+            if (runtime.lua.typeOf(-1) == .number) {
+                const fg = runtime.lua.toInteger(-1) catch -1;
+                if (fg >= 0 and fg <= 255) desc.style.fg = .{ .palette = @intCast(fg) };
+            }
+            runtime.lua.pop(1);
+
+            _ = runtime.lua.getField(-1, "bg");
+            if (runtime.lua.typeOf(-1) == .number) {
+                const bg = runtime.lua.toInteger(-1) catch -1;
+                if (bg >= 0 and bg <= 255) desc.style.bg = .{ .palette = @intCast(bg) };
+            }
+            runtime.lua.pop(1);
+
+            _ = runtime.lua.getField(-1, "prefix");
+            if (runtime.lua.typeOf(-1) == .string) {
+                const s = runtime.lua.toString(-1) catch "";
+                const n = @min(s.len, desc.prefix_buf.len);
+                @memcpy(desc.prefix_buf[0..n], s[0..n]);
+                desc.prefix_len = n;
+            }
+            runtime.lua.pop(1);
+
+            _ = runtime.lua.getField(-1, "suffix");
+            if (runtime.lua.typeOf(-1) == .string) {
+                const s = runtime.lua.toString(-1) catch "";
+                const n = @min(s.len, desc.suffix_buf.len);
+                @memcpy(desc.suffix_buf[0..n], s[0..n]);
+                desc.suffix_len = n;
+            }
+            runtime.lua.pop(1);
+
+            return desc;
+        },
+        else => return desc,
+    }
 }
 
 pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, modules: []const core.Segment, stdout: std.fs.File, is_zsh: bool) !void {
     const alloc = std.heap.page_allocator;
     _ = allocator;
 
-    const conditional_segments = [_][]const u8{ "status", "sudo", "git_branch", "git_status", "jobs", "duration", "pod_name" };
-
     const ModuleResult = struct {
         when_passed: bool = true,
-        needs_bash_check: bool = false,
-        output: ?[]const u8 = null,
+        output: LuaValue = .{},
         width: u16 = 0,
         should_render: bool = true,
         visible: bool = true,
@@ -129,156 +350,162 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
     defer if (lua_rt) |*rt| rt.deinit();
 
     for (modules[0..mod_count], 0..) |mod, i| {
-        if (mod.when) |w| {
-            if (w.env) |env_name| {
-                const val = std.posix.getenv(env_name);
-                if (val == null or val.?.len == 0) {
-                    results[i].when_passed = false;
-                    continue;
-                }
-            }
-            if (w.env_not) |env_name| {
-                const val = std.posix.getenv(env_name);
-                if (val != null and val.?.len > 0) {
-                    results[i].when_passed = false;
-                    continue;
-                }
-            }
-
-            if (w.lua) |lua_code| {
-                if (lua_rt == null) lua_rt = LuaRuntime.init(alloc) catch null;
-                if (lua_rt == null or !evalLuaWhen(&lua_rt.?, ctx, lua_code)) {
-                    results[i].when_passed = false;
-                    continue;
-                }
-            }
-
-            if (w.bash != null) results[i].needs_bash_check = true;
-        }
-
         if (mod.command) |cmd| {
-            if (luaCommandCode(cmd)) |lua_code| {
-                if (lua_rt == null) lua_rt = LuaRuntime.init(alloc) catch null;
-                if (lua_rt == null) {
-                    results[i].when_passed = false;
-                    continue;
-                }
-                results[i].output = evalLuaCommand(&lua_rt.?, ctx, lua_code);
-            }
-        }
-    }
-
-    const ThreadContext = struct {
-        mod: *const core.Segment,
-        result: *ModuleResult,
-        alloc: std.mem.Allocator,
-    };
-
-    const thread_fn = struct {
-        fn run(tctx: ThreadContext) void {
-            if (tctx.result.needs_bash_check) {
-                if (tctx.mod.when) |w| {
-                    if (w.bash) |bash_code| {
-                        const res = std.process.Child.run(.{
-                            .allocator = tctx.alloc,
-                            .argv = &.{ "/bin/bash", "-c", bash_code },
-                        }) catch {
-                            tctx.result.when_passed = false;
-                            return;
-                        };
-                        tctx.alloc.free(res.stdout);
-                        tctx.alloc.free(res.stderr);
-                        const ok = switch (res.term) {
-                            .Exited => |code| code == 0,
-                            else => false,
-                        };
-                        if (!ok) {
-                            tctx.result.when_passed = false;
-                            return;
-                        }
+            if (mod.kind == .progress) {
+                if (mod.progress_show_when) |gate| {
+                    if (lua_rt == null) lua_rt = LuaRuntime.init(alloc) catch null;
+                    if (lua_rt == null) {
+                        results[i].when_passed = false;
+                        continue;
+                    }
+                    if (!evalLuaGate(&lua_rt.?, ctx, gate)) {
+                        results[i].when_passed = false;
+                        continue;
                     }
                 }
             }
-
-            if (!tctx.result.when_passed) return;
-
-            if (tctx.mod.command) |cmd| {
-                const cmd_result = std.process.Child.run(.{
-                    .allocator = tctx.alloc,
-                    .argv = &.{ "/bin/bash", "-c", cmd },
-                }) catch return;
-                tctx.alloc.free(cmd_result.stderr);
-
-                const exit_ok = switch (cmd_result.term) {
-                    .Exited => |code| code == 0,
-                    else => false,
-                };
-                if (!exit_ok) {
-                    tctx.alloc.free(cmd_result.stdout);
-                    return;
+            if (lua_rt == null) lua_rt = LuaRuntime.init(alloc) catch null;
+            if (lua_rt == null) {
+                results[i].when_passed = false;
+                continue;
+            }
+            if (mod.kind == .builtin) {
+                const desc = evalLuaBuiltinDesc(&lua_rt.?, ctx, cmd);
+                if (desc.name()) |builtin_name| {
+                    var bi = LuaValue{};
+                    if (ctx.renderSegment(builtin_name)) |segs| {
+                        const pref = desc.prefix();
+                        if (pref.len > 0 and bi.block_count < bi.blocks.len) {
+                            var pblk = LuaBlock{};
+                            const pn = @min(pref.len, pblk.text.len);
+                            @memcpy(pblk.text[0..pn], pref[0..pn]);
+                            pblk.len = pn;
+                            pblk.style = desc.style;
+                            bi.blocks[bi.block_count] = pblk;
+                            bi.block_count += 1;
+                        }
+                        if (segs.len > 0) {
+                            for (segs) |seg_out| {
+                                if (bi.block_count >= bi.blocks.len) break;
+                                if (seg_out.text.len == 0) continue;
+                                var blk = LuaBlock{};
+                                const tn = @min(seg_out.text.len, blk.text.len);
+                                @memcpy(blk.text[0..tn], seg_out.text[0..tn]);
+                                blk.len = tn;
+                                blk.style = if (desc.style.isEmpty()) seg_out.style else desc.style;
+                                bi.blocks[bi.block_count] = blk;
+                                bi.block_count += 1;
+                            }
+                        }
+                        const suff = desc.suffix();
+                        if (suff.len > 0 and bi.block_count < bi.blocks.len) {
+                            var sblk = LuaBlock{};
+                            const sn = @min(suff.len, sblk.text.len);
+                            @memcpy(sblk.text[0..sn], suff[0..sn]);
+                            sblk.len = sn;
+                            sblk.style = desc.style;
+                            bi.blocks[bi.block_count] = sblk;
+                            bi.block_count += 1;
+                        }
+                    }
+                    results[i].output = bi;
                 }
-
-                const trimmed = std.mem.trimRight(u8, cmd_result.stdout, "\n\r");
-                if (trimmed.len > 0) {
-                    tctx.result.output = trimmed;
-                } else {
-                    tctx.alloc.free(cmd_result.stdout);
+            } else {
+                results[i].output = evalLuaCommand(&lua_rt.?, ctx, cmd);
+            }
+        } else if (mod.builtin) |builtin_name| {
+            var bi = LuaValue{};
+            if (ctx.renderSegment(builtin_name)) |segs| {
+                if (segs.len > 0) {
+                    for (segs) |seg_out| {
+                        if (bi.block_count >= bi.blocks.len) break;
+                        if (seg_out.text.len == 0) continue;
+                        var blk = LuaBlock{};
+                        const tn = @min(seg_out.text.len, blk.text.len);
+                        @memcpy(blk.text[0..tn], seg_out.text[0..tn]);
+                        blk.len = tn;
+                        blk.style = seg_out.style;
+                        bi.blocks[bi.block_count] = blk;
+                        bi.block_count += 1;
+                    }
                 }
             }
-        }
-    }.run;
-
-    var threads: [32]?std.Thread = [_]?std.Thread{null} ** 32;
-    for (modules[0..mod_count], 0..) |*mod, i| {
-        const has_bash_command = if (mod.command) |cmd| luaCommandCode(cmd) == null else false;
-        if (results[i].needs_bash_check or (has_bash_command and results[i].when_passed)) {
-            threads[i] = std.Thread.spawn(.{}, thread_fn, .{ThreadContext{
-                .mod = mod,
-                .result = &results[i],
-                .alloc = alloc,
-            }}) catch null;
+            results[i].output = bi;
+        } else if (ctx.renderSegment(mod.name)) |segs| {
+            if (segs.len > 0) {
+                var bi = results[i].output;
+                for (segs) |seg_out| {
+                    if (bi.block_count >= bi.blocks.len) break;
+                    if (seg_out.text.len == 0) continue;
+                    var blk = LuaBlock{};
+                    const tn = @min(seg_out.text.len, blk.text.len);
+                    @memcpy(blk.text[0..tn], seg_out.text[0..tn]);
+                    blk.len = tn;
+                    blk.style = seg_out.style;
+                    bi.blocks[bi.block_count] = blk;
+                    bi.block_count += 1;
+                }
+                results[i].output = bi;
+            }
         }
     }
 
-    for (threads[0..mod_count]) |maybe_thread| {
-        if (maybe_thread) |thread| thread.join();
-    }
-
-    for (modules[0..mod_count], 0..) |mod, i| {
+    for (modules[0..mod_count], 0..) |_, i| {
         if (!results[i].when_passed) {
             results[i].should_render = false;
             continue;
         }
 
-        var output_text: []const u8 = "";
-
-        if (mod.command != null) {
-            if (results[i].output) |out| {
-                output_text = std.mem.trimRight(u8, out, "\n\r");
-            } else {
-                results[i].should_render = false;
-                continue;
-            }
-        } else {
-            var is_conditional = false;
-            for (conditional_segments) |cs| {
-                if (std.mem.eql(u8, mod.name, cs)) {
-                    is_conditional = true;
-                    break;
+        var output_text = results[i].output.textSlice();
+        if (builtinNameFromMarker(output_text)) |builtin_name| {
+            if (ctx.renderSegment(builtin_name)) |segs| {
+                if (segs.len > 0) {
+                    var bi = LuaValue{};
+                    for (segs) |seg_out| {
+                        if (bi.block_count >= bi.blocks.len) break;
+                        if (seg_out.text.len == 0) continue;
+                        var blk = LuaBlock{};
+                        const tn = @min(seg_out.text.len, blk.text.len);
+                        @memcpy(blk.text[0..tn], seg_out.text[0..tn]);
+                        blk.len = tn;
+                        blk.style = seg_out.style;
+                        bi.blocks[bi.block_count] = blk;
+                        bi.block_count += 1;
+                    }
+                    results[i].output = bi;
+                } else {
+                    results[i].should_render = false;
+                    continue;
                 }
-            }
-
-            if (ctx.renderSegment(mod.name)) |segs| {
-                if (segs.len > 0) output_text = segs[0].text;
-            } else if (is_conditional) {
+            } else {
                 results[i].should_render = false;
                 continue;
             }
         }
 
-        results[i].output = output_text;
-        for (mod.outputs) |out| {
-            results[i].width += calcFormatWidth(out.format, output_text);
+        if (results[i].output.block_count > 0) {
+            for (results[i].output.blocks[0..results[i].output.block_count]) |blk| {
+                const bt = blk.text[0..blk.len];
+                if (builtinNameFromMarker(bt)) |builtin_name| {
+                    if (ctx.renderSegment(builtin_name)) |segs| {
+                        var seg_width: u16 = 0;
+                        for (segs) |s| seg_width += @intCast(s.text.len);
+                        if (seg_width > 0) {
+                            results[i].width += seg_width;
+                            results[i].width += @intCast(blk.prefix_len + blk.suffix_len);
+                        }
+                    }
+                } else {
+                    results[i].width += @intCast(blk.len);
+                }
+            }
+        } else {
+            output_text = results[i].output.textSlice();
+            if (output_text.len == 0) {
+                results[i].should_render = false;
+                continue;
+            }
+            results[i].width = @intCast(output_text.len);
         }
     }
 
@@ -312,13 +539,52 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
     }
 
     for (modules[0..mod_count], 0..) |mod, i| {
+        _ = mod;
         if (!results[i].should_render or !results[i].visible) continue;
 
-        const output_text = results[i].output orelse "";
-        for (mod.outputs) |out| {
-            const style = Style.parse(out.style);
+        if (results[i].output.block_count > 0) {
+            for (results[i].output.blocks[0..results[i].output.block_count]) |blk| {
+                if (blk.len == 0) continue;
+                const bt = blk.text[0..blk.len];
+                const style = blk.style;
+                if (builtinNameFromMarker(bt)) |builtin_name| {
+                    if (ctx.renderSegment(builtin_name)) |segs| {
+                        if (segs.len == 0) continue;
+                        var wrote_any = false;
+                        for (segs) |s| {
+                            if (s.text.len > 0) {
+                                wrote_any = true;
+                                break;
+                            }
+                        }
+                        if (!wrote_any) continue;
+                        try writeStyleDirect(stdout, style, is_zsh);
+                        if (blk.prefix_len > 0) try stdout.writeAll(blk.prefix[0..blk.prefix_len]);
+                        for (segs) |s| {
+                            try stdout.writeAll(s.text);
+                        }
+                        if (blk.suffix_len > 0) try stdout.writeAll(blk.suffix[0..blk.suffix_len]);
+                        if (!style.isEmpty()) {
+                            if (is_zsh) try stdout.writeAll("%{");
+                            try stdout.writeAll("\x1b[0m");
+                            if (is_zsh) try stdout.writeAll("%}");
+                        }
+                    }
+                } else {
+                    try writeStyleDirect(stdout, style, is_zsh);
+                    try stdout.writeAll(bt);
+                    if (!style.isEmpty()) {
+                        if (is_zsh) try stdout.writeAll("%{");
+                        try stdout.writeAll("\x1b[0m");
+                        if (is_zsh) try stdout.writeAll("%}");
+                    }
+                }
+            }
+        } else {
+            const output_text = results[i].output.textSlice();
+            const style = Style{};
             try writeStyleDirect(stdout, style, is_zsh);
-            try writeFormat(stdout, out.format, output_text);
+            try stdout.writeAll(output_text);
             if (!style.isEmpty()) {
                 if (is_zsh) try stdout.writeAll("%{");
                 try stdout.writeAll("\x1b[0m");
@@ -326,21 +592,6 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
             }
         }
     }
-}
-
-fn calcFormatWidth(format: []const u8, output: []const u8) u16 {
-    var width: u16 = 0;
-    var i: usize = 0;
-    while (i < format.len) {
-        if (i + 6 < format.len and std.mem.eql(u8, format[i .. i + 7], "$output")) {
-            width += @intCast(output.len);
-            i += 7;
-        } else {
-            width += 1;
-            i += 1;
-        }
-    }
-    return width;
 }
 
 fn writeStyleDirect(stdout: std.fs.File, style: Style, is_zsh: bool) !void {
@@ -447,19 +698,4 @@ fn writeStyleDirect(stdout: std.fs.File, style: Style, is_zsh: bool) !void {
 
     try stdout.writeAll(buf[0..len]);
     if (is_zsh) try stdout.writeAll("%}");
-}
-
-fn writeFormat(stdout: std.fs.File, format: []const u8, output: []const u8) !void {
-    var i: usize = 0;
-    while (i < format.len) {
-        if (i + 7 <= format.len and std.mem.eql(u8, format[i..][0..7], "$output")) {
-            try stdout.writeAll(output);
-            i += 7;
-        } else {
-            const char_len = std.unicode.utf8ByteSequenceLength(format[i]) catch 1;
-            const end = @min(i + char_len, format.len);
-            try stdout.writeAll(format[i..end]);
-            i = end;
-        }
-    }
 }
