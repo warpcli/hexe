@@ -22,6 +22,7 @@ const WhenCacheEntry = struct {
 threadlocal var when_bash_cache: ?std.AutoHashMap(usize, WhenCacheEntry) = null;
 threadlocal var when_lua_cache: ?std.AutoHashMap(usize, WhenCacheEntry) = null;
 threadlocal var when_lua_rt: ?LuaRuntime = null;
+threadlocal var callback_lua_rt: ?*LuaRuntime = null;
 
 const RandomdoState = struct {
     active: bool,
@@ -385,14 +386,19 @@ fn evalLuaWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
         if (now - e.last_eval_ms < ttl_ms) return e.last_result;
     }
 
-    if (when_lua_rt == null) {
-        when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch null;
+    var rt: *LuaRuntime = undefined;
+    if (callback_lua_rt) |cb| {
+        rt = cb;
+    } else {
         if (when_lua_rt == null) {
-            map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
-            return false;
+            when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch null;
+            if (when_lua_rt == null) {
+                map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
+                return false;
+            }
         }
+        rt = &when_lua_rt.?;
     }
-    const rt = &when_lua_rt.?;
 
     populateLuaContext(rt, ctx);
 
@@ -443,11 +449,16 @@ const LuaEval = struct {
 
 fn evalLuaCommand(code: []const u8, ctx: *shp.Context) LuaEval {
     var out: LuaEval = .{};
-    if (when_lua_rt == null) {
-        when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch null;
-        if (when_lua_rt == null) return out;
+    var rt: *LuaRuntime = undefined;
+    if (callback_lua_rt) |cb| {
+        rt = cb;
+    } else {
+        if (when_lua_rt == null) {
+            when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch null;
+            if (when_lua_rt == null) return out;
+        }
+        rt = &when_lua_rt.?;
     }
-    const rt = &when_lua_rt.?;
     populateLuaContext(rt, ctx);
 
     const code_z = rt.allocator.dupeZ(u8, code) catch return out;
@@ -587,11 +598,16 @@ const BuiltinDesc = struct {
 
 fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
     var desc: BuiltinDesc = .{};
-    if (when_lua_rt == null) {
-        when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch null;
-        if (when_lua_rt == null) return desc;
+    var rt: *LuaRuntime = undefined;
+    if (callback_lua_rt) |cb| {
+        rt = cb;
+    } else {
+        if (when_lua_rt == null) {
+            when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch null;
+            if (when_lua_rt == null) return desc;
+        }
+        rt = &when_lua_rt.?;
     }
-    const rt = &when_lua_rt.?;
     populateLuaContext(rt, ctx);
 
     const code_z = rt.allocator.dupeZ(u8, code) catch return desc;
@@ -892,6 +908,9 @@ pub fn draw(
     const y = term_height - 1;
     const width = term_width;
     const cfg = &config.tabs.status;
+
+    callback_lua_rt = config._lua_runtime;
+    defer callback_lua_rt = null;
 
     // Clear status bar
     for (0..width) |xi| {

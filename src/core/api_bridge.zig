@@ -203,15 +203,22 @@ fn registerPromptValueCallback(lua: *Lua) ?i64 {
     return next_id;
 }
 
-fn parsePromptValueChunkValue(lua: *Lua, allocator: std.mem.Allocator) ?[]const u8 {
+fn parsePromptValueChunkValue(lua: *Lua, allocator: std.mem.Allocator, require_boolean: bool) ?[]const u8 {
     if (registerPromptValueCallback(lua)) |callback_id| {
+        if (require_boolean) {
+            return std.fmt.allocPrint(
+                allocator,
+                "local __t={s}; if not __t then return false end; local __f=__t[{d}]; if not __f then return false end; return not not __f(ctx)",
+                .{ CALLBACK_TABLE_KEY, callback_id },
+            ) catch null;
+        }
         return std.fmt.allocPrint(
             allocator,
             "local __t={s}; if not __t then return nil end; local __f=__t[{d}]; if not __f then return nil end; return __f(ctx)",
             .{ CALLBACK_TABLE_KEY, callback_id },
         ) catch null;
     }
-    return parseLuaChunkValue(lua, allocator, false);
+    return parseLuaChunkValue(lua, allocator, require_boolean);
 }
 
 /// Result of parsing a key array
@@ -1374,20 +1381,20 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     _ = lua.getField(idx, "value");
     if (lua.typeOf(-1) == .table) {
         _ = lua.getField(-1, "lua");
-        if (parseLuaChunkValue(lua, allocator, false)) |code| {
+        if (parsePromptValueChunkValue(lua, allocator, false)) |code| {
             defer allocator.free(code);
             value_command = allocator.dupe(u8, code) catch null;
         }
         lua.pop(1);
         _ = lua.getField(-1, "fn");
         if (value_command == null) {
-            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+            if (parsePromptValueChunkValue(lua, allocator, false)) |code| {
                 defer allocator.free(code);
                 value_command = allocator.dupe(u8, code) catch null;
             }
         }
         lua.pop(1);
-    } else if (parseLuaChunkValue(lua, allocator, false)) |code| {
+    } else if (parsePromptValueChunkValue(lua, allocator, false)) |code| {
         defer allocator.free(code);
         value_command = allocator.dupe(u8, code) catch null;
     }
@@ -1397,7 +1404,7 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     var builtin_command: ?[]const u8 = null;
     _ = lua.getField(idx, "builtin");
     if (lua.typeOf(-1) == .function) {
-        if (parseLuaChunkValue(lua, allocator, false)) |code| {
+        if (parsePromptValueChunkValue(lua, allocator, false)) |code| {
             defer allocator.free(code);
             builtin_command = allocator.dupe(u8, code) catch null;
         }
@@ -1420,7 +1427,7 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
 
         _ = lua.getField(-1, "lua");
         if (builtin_command == null) {
-            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+            if (parsePromptValueChunkValue(lua, allocator, false)) |code| {
                 defer allocator.free(code);
                 builtin_command = allocator.dupe(u8, code) catch null;
             }
@@ -1429,7 +1436,7 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
 
         _ = lua.getField(-1, "fn");
         if (builtin_command == null) {
-            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+            if (parsePromptValueChunkValue(lua, allocator, false)) |code| {
                 defer allocator.free(code);
                 builtin_command = allocator.dupe(u8, code) catch null;
             }
@@ -1463,7 +1470,7 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
 
         _ = lua.getField(-1, "value");
         if (value_command == null) {
-            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+            if (parsePromptValueChunkValue(lua, allocator, false)) |code| {
                 defer allocator.free(code);
                 value_command = allocator.dupe(u8, code) catch null;
             }
@@ -1481,7 +1488,7 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     lua.pop(1);
 
     _ = lua.getField(idx, "show_when");
-    if (parseLuaChunkValue(lua, allocator, true)) |code| {
+    if (parsePromptValueChunkValue(lua, allocator, true)) |code| {
         defer allocator.free(code);
         segment.progress_show_when = allocator.dupe(u8, code) catch null;
     }
@@ -1497,7 +1504,7 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
         lua.pop(1);
 
         _ = lua.getField(-1, "show_when");
-        if (parseLuaChunkValue(lua, allocator, true)) |code| {
+        if (parsePromptValueChunkValue(lua, allocator, true)) |code| {
             defer allocator.free(code);
             if (segment.progress_show_when) |old| allocator.free(old);
             segment.progress_show_when = allocator.dupe(u8, code) catch segment.progress_show_when;
@@ -1513,7 +1520,7 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
 
         _ = lua.getField(-1, "value");
         if (value_command == null) {
-            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+            if (parsePromptValueChunkValue(lua, allocator, false)) |code| {
                 defer allocator.free(code);
                 value_command = allocator.dupe(u8, code) catch null;
             }
@@ -1531,7 +1538,7 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     }
     lua.pop(1);
     _ = lua.getField(idx, "show_when");
-    if (parseLuaChunkValue(lua, allocator, true)) |code| {
+    if (parsePromptValueChunkValue(lua, allocator, true)) |code| {
         defer allocator.free(code);
         progress_show_when = allocator.dupe(u8, code) catch null;
     }
@@ -1545,7 +1552,7 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     lua.pop(1);
 
     _ = lua.getField(idx, "show_when");
-    if (parseLuaChunkValue(lua, allocator, true)) |code| {
+    if (parsePromptValueChunkValue(lua, allocator, true)) |code| {
         defer allocator.free(code);
         progress_show_when = allocator.dupe(u8, code) catch null;
     }
@@ -2663,20 +2670,20 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     _ = lua.getField(idx, "value");
     if (lua.typeOf(-1) == .table) {
         _ = lua.getField(-1, "lua");
-        if (parsePromptValueChunkValue(lua, allocator)) |code| {
+        if (parsePromptValueChunkValue(lua, allocator, false)) |code| {
             defer allocator.free(code);
             command = allocator.dupe(u8, code) catch null;
         }
         lua.pop(1);
         _ = lua.getField(-1, "fn");
         if (command == null) {
-            if (parsePromptValueChunkValue(lua, allocator)) |code| {
+            if (parsePromptValueChunkValue(lua, allocator, false)) |code| {
                 defer allocator.free(code);
                 command = allocator.dupe(u8, code) catch null;
             }
         }
         lua.pop(1);
-    } else if (parsePromptValueChunkValue(lua, allocator)) |code| {
+    } else if (parsePromptValueChunkValue(lua, allocator, false)) |code| {
         defer allocator.free(code);
         command = allocator.dupe(u8, code) catch null;
     }
@@ -2684,7 +2691,7 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
 
     _ = lua.getField(idx, "builtin");
     if (lua.typeOf(-1) == .function) {
-        if (parsePromptValueChunkValue(lua, allocator)) |code| {
+        if (parsePromptValueChunkValue(lua, allocator, false)) |code| {
             defer allocator.free(code);
             builtin_command = allocator.dupe(u8, code) catch null;
         }
@@ -2707,7 +2714,7 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
 
         _ = lua.getField(-1, "lua");
         if (builtin_command == null) {
-            if (parsePromptValueChunkValue(lua, allocator)) |code| {
+            if (parsePromptValueChunkValue(lua, allocator, false)) |code| {
                 defer allocator.free(code);
                 builtin_command = allocator.dupe(u8, code) catch null;
             }
@@ -2716,7 +2723,7 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
 
         _ = lua.getField(-1, "fn");
         if (builtin_command == null) {
-            if (parsePromptValueChunkValue(lua, allocator)) |code| {
+            if (parsePromptValueChunkValue(lua, allocator, false)) |code| {
                 defer allocator.free(code);
                 builtin_command = allocator.dupe(u8, code) catch null;
             }
@@ -2784,7 +2791,7 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
         lua.pop(1);
         _ = lua.getField(-1, "value");
         if (command == null) {
-            if (parsePromptValueChunkValue(lua, allocator)) |code| {
+            if (parsePromptValueChunkValue(lua, allocator, false)) |code| {
                 defer allocator.free(code);
                 command = allocator.dupe(u8, code) catch null;
             }
