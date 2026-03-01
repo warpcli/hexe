@@ -392,7 +392,7 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
                                 const tn = @min(seg_out.text.len, blk.text.len);
                                 @memcpy(blk.text[0..tn], seg_out.text[0..tn]);
                                 blk.len = tn;
-                                blk.style = mergeStyle(seg_out.style, desc.style);
+                                blk.style = if (desc.style.isEmpty()) seg_out.style else desc.style;
                                 bi.blocks[bi.block_count] = blk;
                                 bi.block_count += 1;
                             }
