@@ -1,6 +1,6 @@
 # Configuration
 
-Hexa is configured in Lua.
+Hexe is configured in Lua.
 
 ---
 
@@ -27,10 +27,11 @@ local hx = require("hexe")
 hx.ses.layout.define({ ... })
 
 -- mux config (tabs, status bar, floats, keybinds, etc.)
-hx.mux.set({ ... })
+hx.mux.config.setup({ ... })
 
--- shell prompt config
-hx.shp.set({ ... })
+-- prompt segments
+hx.shp.prompt.left({ ... })
+hx.shp.prompt.right({ ... })
 ```
 
 ---
@@ -38,7 +39,7 @@ hx.shp.set({ ... })
 ## Mux config reference
 
 ```lua
-hx.mux.set({
+hx.mux.config.setup({
   -- Confirmation dialogs
   confirm_on_exit   = false,
   confirm_on_detach = false,
@@ -185,13 +186,18 @@ hx.ses.layout.define({
 ## Shell prompt reference
 
 ```lua
-hx.shp.set({
-  prompt = {
-    left  = { ... },   -- segment arrays, see statusbar.md
-    right = { ... },
-  },
-})
+hx.shp.prompt.left({ ... })
+hx.shp.prompt.right({ ... })
 ```
+
+Prompt and statusbar now use a Lua-first segment model. Segment kind is inferred from fields:
+
+- `value` (function/string source)
+- `builtin` (function/string descriptor)
+- `button` (click actions)
+- `progress` (cadence + visibility)
+
+See `docs/prompt.md` and `docs/statusbar.md` for the full schema and examples.
 
 ---
 

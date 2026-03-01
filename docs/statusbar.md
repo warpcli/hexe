@@ -27,27 +27,39 @@ hx.mux.tabs.add_segment("left", {
 
 You can also provide arrays with `left`, `center`, `right` using your preferred config style.
 
-## Segment Schema
+## Segment Schema (Lua-first)
 
 ```lua
 {
   name     = "tabs",
   priority = 50,
-  command  = "echo hello",      -- optional shell command output
-  lua      = "return 'hello'",  -- optional Lua output (in-process)
-  on_click = "hexe pod record --name mypod --out /tmp/mypod.cast",
-  on_right_click = "hexe mux notify \"clicked\"",
-  on_middle_click = "hexe pod gc --dry-run",
+  -- value segment (text or styled blocks)
+  value = function(ctx)
+    return {
+      { text = " ", style = "bg:237 fg:250" },
+      { text = os.date("%H:%M:%S"), style = "bold bg:237 fg:250" },
+      { text = " ", style = "bg:237 fg:250" },
+    }
+  end,
 
-  -- optional sugar section
+  -- builtin segment (descriptor)
+  builtin = function(ctx)
+    return { name = "session", style = "bg:1 fg:0", prefix = " ", suffix = " " }
+  end,
+
+  -- optional click behavior
   button = {
-    on_click = "hexe pod record --name mypod --out /tmp/mypod.cast",
-    on_right_click = "pkill -f 'hexe pod record --name mypod'",
-    active_when = "pgrep -f -- 'hexe pod record --name mypod' >/dev/null",
+    on_left_click = "hexe record toggle --scope pod --out /tmp/pod.cast",
+    on_right_click = "hexe record stop --scope pod --out /tmp/pod.cast",
+    active_when = "test \"$(hexe record status --scope pod 2>/dev/null)\" = 1",
+    inverse_on_hover = true,
   },
-  when     = { ... },
-  outputs  = {
-    { style = "bg:1 fg:0", format = " $output " },
+
+  -- optional structured progress behavior
+  progress = {
+    every_ms = 1000,
+    show_when = function(ctx) return ctx.jobs > 0 end,
+    value = function(ctx) return tostring(ctx.jobs) end,
   },
 
   -- tabs-only styling fields:
@@ -70,6 +82,8 @@ You can also provide arrays with `left`, `center`, `right` using your preferred 
   },
 }
 ```
+
+Kind is inferred from fields (`value`, `builtin`, `button`, `progress`); you do not need to set a `kind` field.
 
 `on_click`, `on_right_click`, and `on_middle_click` run shell commands on statusbar clicks.
 
@@ -153,14 +167,9 @@ Condition evaluation is cached internally:
 
 You can adjust bash condition timeout via `HEXE_CONDITION_TIMEOUT` (ms, clamped to safe range).
 
-## Lua Output in Statusbar Segments
+## Value/Builtin Output Model
 
-Statusbar now supports the same output model as prompt segments:
-
-- `lua = "return ..."` (in-process Lua)
-- `command = "..."` (shell subprocess)
-
-`lua` output return behavior:
+`value` return behavior:
 
 - `string` -> rendered text
 - `number` -> rendered text
@@ -172,19 +181,27 @@ Example:
 ```lua
 {
   name = "virt",
-  lua = [[
+  value = function(_)
     local p = io.popen("systemd-detect-virt 2>/dev/null")
     if not p then return nil end
     local v = (p:read("*a") or ""):match("^%s*(.-)%s*$")
     p:close()
     if v == "" or v == "none" then return nil end
-    return v == "lxc" and " >> " or " :: "
-  ]],
-  outputs = {
-    { style = "bg:5 fg:0", format = "$output" },
-  },
+    if v == "lxc" then
+      return { { text = " >> ", style = "bg:5 fg:0" } }
+    end
+    return { { text = " :: ", style = "bg:5 fg:0" } }
+  end,
 }
 ```
+
+Builtin descriptor behavior:
+
+- `name` selects a builtin segment renderer.
+- `style` applies to descriptor-added prefix/suffix.
+- `prefix`/`suffix` wrap the builtin output.
+- For spinner builtin descriptors, optional fields `kind`, `width`, `step`/`step_ms`, `hold`/`hold_frames`, `colors`, `bg`, and `placeholder` are supported.
+- Descriptor style is authoritative when provided (it does not merge with builtin segment style).
 
 ## Width and Priority
 

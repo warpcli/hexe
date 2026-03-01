@@ -26,10 +26,12 @@ hx.shp.prompt.left({
   {
     name = "ssh",
     priority = 50,
-    lua = "return ctx.env.SSH_CONNECTION and '//' or nil",
-    outputs = {
-      { style = "bg:237 fg:15", format = " $output " },
-    },
+    value = function(ctx)
+      if not ctx.env.SSH_CONNECTION then
+        return nil
+      end
+      return { { text = " //", style = "bg:237 fg:15" } }
+    end,
   },
 })
 ```
@@ -54,7 +56,7 @@ return {
 }
 ```
 
-## Segment Model
+## Segment Model (Lua-first)
 
 Each prompt side is an array of segment definitions.
 
@@ -62,26 +64,44 @@ Each prompt side is an array of segment definitions.
 {
   name     = "directory",       -- built-in segment name
   priority = 50,                 -- lower = kept longer when width is tight
-  command  = "echo hello",      -- optional shell command output
-  lua      = "return 'hello'",  -- optional Lua output (preferred)
-  when     = { ... },            -- optional condition
-  outputs  = {
-    { style = "bg:1 fg:0", format = " $output " },
+
+  -- value segment
+  value = function(ctx)
+    return { { text = " hello ", style = "bg:1 fg:0" } }
+  end,
+
+  -- or builtin segment descriptor
+  builtin = function(ctx)
+    return { name = "directory", style = "bg:237 fg:15", suffix = " " }
+  end,
+
+  -- optional click behavior
+  button = {
+    on_left_click = "hexe record toggle --scope pod --out /tmp/pod.cast",
+    on_right_click = "hexe record stop --scope pod --out /tmp/pod.cast",
+    active_when = "test \"$(hexe record status --scope pod 2>/dev/null)\" = 1",
+    inverse_on_hover = true,
+  },
+
+  -- optional progress behavior
+  progress = {
+    every_ms = 1000,
+    show_when = function(ctx) return (ctx.jobs or 0) > 0 end,
+    value = function(ctx) return tostring(ctx.jobs or 0) end,
   },
 }
 ```
 
 Notes:
 
-- `lua` and `command` are mutually practical choices; use one output source.
-- `outputs` is required for visible rendering.
-- `$output` is replaced with the segment output.
+- Kind is inferred from fields (`value`, `builtin`, `button`, `progress`); no `kind` field is required.
+- `outputs` is not used in the Lua-first prompt model.
 
 ## Output Execution Paths
 
-### `lua = "..."` (in-process)
+### `value = ...` (in-process)
 
-Lua output runs inside Hexe (no shell subprocess). The chunk must `return` a value.
+`value` runs inside Hexe and must return a value.
 
 Return behavior:
 
@@ -90,11 +110,22 @@ Return behavior:
 - `boolean true` -> rendered as `"true"`
 - `nil` / `false` / other types -> treated as empty (segment hidden)
 
-### `command = "..."` (shell subprocess)
+### `builtin = ...` (descriptor)
 
-Runs via `/bin/bash -c` in parallel with other command segments. Stdout is trimmed and used as output on exit code `0`.
+`builtin` returns a descriptor table:
 
-## Conditions (`when`)
+- `name` (required): builtin segment name (for example `git_branch`, `git_status`, `directory`)
+- `style`: descriptor style override
+- `prefix` / `suffix`: wrapper text around builtin output
+
+Style behavior:
+
+- If descriptor `style` is provided, it is authoritative for rendered builtin text.
+- This is useful when you want fixed colors (for example black-on-red git segments).
+
+## Conditions (`when`) [legacy parser path]
+
+The current Lua-first prompt model typically encodes visibility directly in `value`/`builtin` functions (return `nil` to hide). Older table-style parser paths still support `when` fields.
 
 Prompt supports these condition forms:
 
@@ -190,31 +221,29 @@ Pure Lua segment:
 {
   name = "virt",
   priority = 40,
-  lua = [[
+  value = function(_)
     local p = io.popen("systemd-detect-virt 2>/dev/null")
     if not p then return nil end
     local v = (p:read("*a") or ""):match("^%s*(.-)%s*$")
     p:close()
     if v == "" or v == "none" then return nil end
-    return v == "lxc" and " >> " or " :: "
-  ]],
-  outputs = {
-    { style = "bg:5 fg:0", format = "$output" },
-  },
+    if v == "lxc" then
+      return { { text = " >> ", style = "bg:5 fg:0" } }
+    end
+    return { { text = " :: ", style = "bg:5 fg:0" } }
+  end,
 }
 ```
 
-Fast env-gated segment:
+Builtin descriptor segment:
 
 ```lua
 {
-  name = "ssh",
-  priority = 30,
-  when = { env = "SSH_CONNECTION" },
-  command = "echo //",
-  outputs = {
-    { style = "bg:237 fg:15", format = " $output" },
-  },
+  name = "git_status",
+  priority = 5,
+  builtin = function(_)
+    return { name = "git_status", style = "bg:1 fg:0", suffix = " " }
+  end,
 }
 ```
 

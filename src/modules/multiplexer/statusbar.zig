@@ -1453,6 +1453,9 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
     var x = start_x;
     _ = query;
 
+    const prev_module_style = ctx.module_default_style;
+    defer ctx.module_default_style = prev_module_style;
+
     var spinner_allowed = true;
     if (mod.spinner != null) {
         if (mod.kind == .progress and !progressVisible(mod, ctx)) {
@@ -1653,7 +1656,7 @@ pub fn drawFormatted(renderer: *Renderer, ctx: *shp.Context, start_x: u16, y: u1
                             }
                         }
                     } else {
-                        x = drawSegment(renderer, x, y, seg, style);
+                        x = drawSegment(renderer, x, y, seg, seg_base_style);
                     }
                 }
             } else {
@@ -1672,6 +1675,10 @@ pub fn drawFormatted(renderer: *Renderer, ctx: *shp.Context, start_x: u16, y: u1
 
 pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment) u16 {
     _ = query;
+
+    const prev_module_style = ctx.module_default_style;
+    defer ctx.module_default_style = prev_module_style;
+
     var spinner_allowed = true;
     if (mod.spinner != null) {
         if (mod.kind == .progress and !progressVisible(mod, ctx)) {

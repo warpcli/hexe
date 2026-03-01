@@ -542,6 +542,8 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
         _ = mod;
         if (!results[i].should_render or !results[i].visible) continue;
 
+        var wrote_module = false;
+
         if (results[i].output.block_count > 0) {
             for (results[i].output.blocks[0..results[i].output.block_count]) |blk| {
                 if (blk.len == 0) continue;
@@ -562,21 +564,20 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
                         if (blk.prefix_len > 0) try stdout.writeAll(blk.prefix[0..blk.prefix_len]);
                         for (segs) |s| {
                             try stdout.writeAll(s.text);
+                            if (s.text.len > 0) wrote_module = true;
                         }
                         if (blk.suffix_len > 0) try stdout.writeAll(blk.suffix[0..blk.suffix_len]);
+                        if (blk.prefix_len > 0 or blk.suffix_len > 0) wrote_module = true;
                         if (!style.isEmpty()) {
-                            if (is_zsh) try stdout.writeAll("%{");
-                            try stdout.writeAll("\x1b[0m");
-                            if (is_zsh) try stdout.writeAll("%}");
+                            try writeResetDirect(stdout, is_zsh);
                         }
                     }
                 } else {
                     try writeStyleDirect(stdout, style, is_zsh);
                     try stdout.writeAll(bt);
+                    wrote_module = true;
                     if (!style.isEmpty()) {
-                        if (is_zsh) try stdout.writeAll("%{");
-                        try stdout.writeAll("\x1b[0m");
-                        if (is_zsh) try stdout.writeAll("%}");
+                        try writeResetDirect(stdout, is_zsh);
                     }
                 }
             }
@@ -585,11 +586,14 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
             const style = Style{};
             try writeStyleDirect(stdout, style, is_zsh);
             try stdout.writeAll(output_text);
+            wrote_module = output_text.len > 0;
             if (!style.isEmpty()) {
-                if (is_zsh) try stdout.writeAll("%{");
-                try stdout.writeAll("\x1b[0m");
-                if (is_zsh) try stdout.writeAll("%}");
+                try writeResetDirect(stdout, is_zsh);
             }
+        }
+
+        if (wrote_module) {
+            try writeResetDirect(stdout, is_zsh);
         }
     }
 }
@@ -697,5 +701,11 @@ fn writeStyleDirect(stdout: std.fs.File, style: Style, is_zsh: bool) !void {
     len += 1;
 
     try stdout.writeAll(buf[0..len]);
+    if (is_zsh) try stdout.writeAll("%}");
+}
+
+fn writeResetDirect(stdout: std.fs.File, is_zsh: bool) !void {
+    if (is_zsh) try stdout.writeAll("%{");
+    try stdout.writeAll("\x1b[0m");
     if (is_zsh) try stdout.writeAll("%}");
 }
