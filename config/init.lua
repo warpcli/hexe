@@ -472,21 +472,21 @@ if section == nil or section == "shp" then
       name = "pod_name",
       priority = 1,
       builtin = function(_)
-        return hexe.segment.builtin.pod_name({ style = "bg:5 fg:0", prefix = "| ", suffix = " ||" })
+        return hexe.segment.builtin.pod_name({ style = "bg:5 fg:0", prefix = "| ", suffix = " |" })
       end,
     },
     {
       name = "git_branch",
       priority = 4,
       builtin = function(_)
-        return hexe.segment.builtin.git_branch({ style = "bg:1 fg:0", prefix = "  ", suffix = " " })
+        return hexe.segment.builtin.git_branch({ style = "bg:1 fg:0", prefix = " ", suffix = " " })
       end,
     },
     {
       name = "git_status",
       priority = 5,
       builtin = function(_)
-        return hexe.segment.builtin.git_status({ style = "bg:1 fg:0", suffix = " " })
+        return hexe.segment.builtin.git_status({ style = "bg:1 fg:0", prefix = " ", suffix = " " })
       end,
     },
     {
