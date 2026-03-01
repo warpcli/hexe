@@ -112,7 +112,11 @@ if section == nil or section == "mux" then
     name = "session",
     priority = 30,
     builtin = function(_)
-      return hx.segment.builtin.session({ style = "bg:1 fg:0", prefix = " ", suffix = " " })
+      return hx.segment.builtin.session({
+        style = "bg:1 fg:0",
+        prefix = { output = " ", style = "bg:0 fg:8" },
+        suffix = { output = " ", style = "bg:0 fg:8" },
+      })
     end,
   })
 

@@ -794,8 +794,10 @@ const BuiltinDesc = struct {
     style: shp.Style = .{},
     prefix_buf: [32]u8 = [_]u8{0} ** 32,
     prefix_len: usize = 0,
+    prefix_style: shp.Style = .{},
     suffix_buf: [32]u8 = [_]u8{0} ** 32,
     suffix_len: usize = 0,
+    suffix_style: shp.Style = .{},
     spinner_kind_buf: [32]u8 = [_]u8{0} ** 32,
     spinner_kind_len: usize = 0,
     spinner_width: ?u8 = null,
@@ -817,6 +819,14 @@ const BuiltinDesc = struct {
 
     fn suffix(self: *const BuiltinDesc) []const u8 {
         return self.suffix_buf[0..self.suffix_len];
+    }
+
+    fn prefixStyle(self: *const BuiltinDesc) shp.Style {
+        return if (self.prefix_style.isEmpty()) self.style else self.prefix_style;
+    }
+
+    fn suffixStyle(self: *const BuiltinDesc) shp.Style {
+        return if (self.suffix_style.isEmpty()) self.style else self.suffix_style;
     }
 
     fn spinnerKind(self: *const BuiltinDesc) ?[]const u8 {
@@ -896,6 +906,22 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                 const n = @min(s.len, desc.prefix_buf.len);
                 @memcpy(desc.prefix_buf[0..n], s[0..n]);
                 desc.prefix_len = n;
+            } else if (rt.lua.typeOf(-1) == .table) {
+                _ = rt.lua.getField(-1, "output");
+                if (rt.lua.typeOf(-1) == .string) {
+                    const s = rt.lua.toString(-1) catch "";
+                    const n = @min(s.len, desc.prefix_buf.len);
+                    @memcpy(desc.prefix_buf[0..n], s[0..n]);
+                    desc.prefix_len = n;
+                }
+                rt.lua.pop(1);
+
+                _ = rt.lua.getField(-1, "style");
+                if (rt.lua.typeOf(-1) == .string) {
+                    const s = rt.lua.toString(-1) catch "";
+                    desc.prefix_style = shp.Style.parse(s);
+                }
+                rt.lua.pop(1);
             }
             rt.lua.pop(1);
 
@@ -905,6 +931,58 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
                 const n = @min(s.len, desc.suffix_buf.len);
                 @memcpy(desc.suffix_buf[0..n], s[0..n]);
                 desc.suffix_len = n;
+            } else if (rt.lua.typeOf(-1) == .table) {
+                _ = rt.lua.getField(-1, "output");
+                if (rt.lua.typeOf(-1) == .string) {
+                    const s = rt.lua.toString(-1) catch "";
+                    const n = @min(s.len, desc.suffix_buf.len);
+                    @memcpy(desc.suffix_buf[0..n], s[0..n]);
+                    desc.suffix_len = n;
+                }
+                rt.lua.pop(1);
+
+                _ = rt.lua.getField(-1, "style");
+                if (rt.lua.typeOf(-1) == .string) {
+                    const s = rt.lua.toString(-1) catch "";
+                    desc.suffix_style = shp.Style.parse(s);
+                }
+                rt.lua.pop(1);
+            }
+            rt.lua.pop(1);
+
+            if (desc.suffix_len == 0 and desc.suffix_style.isEmpty()) {
+                _ = rt.lua.getField(-1, "sufix");
+                if (rt.lua.typeOf(-1) == .table) {
+                    _ = rt.lua.getField(-1, "output");
+                    if (rt.lua.typeOf(-1) == .string) {
+                        const s = rt.lua.toString(-1) catch "";
+                        const n = @min(s.len, desc.suffix_buf.len);
+                        @memcpy(desc.suffix_buf[0..n], s[0..n]);
+                        desc.suffix_len = n;
+                    }
+                    rt.lua.pop(1);
+
+                    _ = rt.lua.getField(-1, "style");
+                    if (rt.lua.typeOf(-1) == .string) {
+                        const s = rt.lua.toString(-1) catch "";
+                        desc.suffix_style = shp.Style.parse(s);
+                    }
+                    rt.lua.pop(1);
+                }
+                rt.lua.pop(1);
+            }
+
+            _ = rt.lua.getField(-1, "prefix_style");
+            if (rt.lua.typeOf(-1) == .string) {
+                const s = rt.lua.toString(-1) catch "";
+                desc.prefix_style = shp.Style.parse(s);
+            }
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "suffix_style");
+            if (rt.lua.typeOf(-1) == .string) {
+                const s = rt.lua.toString(-1) catch "";
+                desc.suffix_style = shp.Style.parse(s);
             }
             rt.lua.pop(1);
 
@@ -1861,7 +1939,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                             if (pref.len > 0 and count < styled.len) {
                                 const pn = @min(pref.len, text_buf[count].len);
                                 @memcpy(text_buf[count][0..pn], pref[0..pn]);
-                                styled[count] = .{ .text = text_buf[count][0..pn], .style = bdesc.style };
+                                styled[count] = .{ .text = text_buf[count][0..pn], .style = bdesc.prefixStyle() };
                                 count += 1;
                             }
                             for (segs) |seg| {
@@ -1875,7 +1953,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                             if (suff.len > 0 and count < styled.len) {
                                 const sn = @min(suff.len, text_buf[count].len);
                                 @memcpy(text_buf[count][0..sn], suff[0..sn]);
-                                styled[count] = .{ .text = text_buf[count][0..sn], .style = bdesc.style };
+                                styled[count] = .{ .text = text_buf[count][0..sn], .style = bdesc.suffixStyle() };
                                 count += 1;
                             }
                             output_segs = styled[0..count];
@@ -2092,7 +2170,7 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: *co
                             if (pref.len > 0 and count < styled.len) {
                                 const pn = @min(pref.len, text_buf[count].len);
                                 @memcpy(text_buf[count][0..pn], pref[0..pn]);
-                                styled[count] = .{ .text = text_buf[count][0..pn], .style = bdesc.style };
+                                styled[count] = .{ .text = text_buf[count][0..pn], .style = bdesc.prefixStyle() };
                                 count += 1;
                             }
                             for (segs) |seg| {
@@ -2106,7 +2184,7 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: *co
                             if (suff.len > 0 and count < styled.len) {
                                 const sn = @min(suff.len, text_buf[count].len);
                                 @memcpy(text_buf[count][0..sn], suff[0..sn]);
-                                styled[count] = .{ .text = text_buf[count][0..sn], .style = bdesc.style };
+                                styled[count] = .{ .text = text_buf[count][0..sn], .style = bdesc.suffixStyle() };
                                 count += 1;
                             }
                             output_segs = styled[0..count];

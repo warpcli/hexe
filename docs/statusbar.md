@@ -44,7 +44,12 @@ You can also provide arrays with `left`, `center`, `right` using your preferred 
 
   -- builtin segment (descriptor)
   builtin = function(ctx)
-    return { name = "session", style = "bg:1 fg:0", prefix = " ", suffix = " " }
+    return {
+      name = "session",
+      style = "bg:1 fg:0",
+      prefix = { output = " ", style = "bg:0 fg:8" },
+      suffix = { output = " ", style = "bg:0 fg:8" },
+    }
   end,
 
   -- optional click behavior

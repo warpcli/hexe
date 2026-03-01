@@ -281,8 +281,10 @@ const BuiltinDesc = struct {
     style: Style = .{},
     prefix_buf: [32]u8 = [_]u8{0} ** 32,
     prefix_len: usize = 0,
+    prefix_style: Style = .{},
     suffix_buf: [32]u8 = [_]u8{0} ** 32,
     suffix_len: usize = 0,
+    suffix_style: Style = .{},
 
     fn name(self: *const BuiltinDesc) ?[]const u8 {
         if (self.name_len == 0) return null;
@@ -295,6 +297,14 @@ const BuiltinDesc = struct {
 
     fn suffix(self: *const BuiltinDesc) []const u8 {
         return self.suffix_buf[0..self.suffix_len];
+    }
+
+    fn prefixStyle(self: *const BuiltinDesc) Style {
+        return if (self.prefix_style.isEmpty()) self.style else self.prefix_style;
+    }
+
+    fn suffixStyle(self: *const BuiltinDesc) Style {
+        return if (self.suffix_style.isEmpty()) self.style else self.suffix_style;
     }
 };
 
@@ -356,6 +366,22 @@ fn evalLuaBuiltinDesc(runtime: *LuaRuntime, callback_runtime: ?*LuaRuntime, ctx:
                 const n = @min(s.len, desc.prefix_buf.len);
                 @memcpy(desc.prefix_buf[0..n], s[0..n]);
                 desc.prefix_len = n;
+            } else if (rt.lua.typeOf(-1) == .table) {
+                _ = rt.lua.getField(-1, "output");
+                if (rt.lua.typeOf(-1) == .string) {
+                    const s = rt.lua.toString(-1) catch "";
+                    const n = @min(s.len, desc.prefix_buf.len);
+                    @memcpy(desc.prefix_buf[0..n], s[0..n]);
+                    desc.prefix_len = n;
+                }
+                rt.lua.pop(1);
+
+                _ = rt.lua.getField(-1, "style");
+                if (rt.lua.typeOf(-1) == .string) {
+                    const s = rt.lua.toString(-1) catch "";
+                    desc.prefix_style = Style.parse(s);
+                }
+                rt.lua.pop(1);
             }
             rt.lua.pop(1);
 
@@ -365,6 +391,58 @@ fn evalLuaBuiltinDesc(runtime: *LuaRuntime, callback_runtime: ?*LuaRuntime, ctx:
                 const n = @min(s.len, desc.suffix_buf.len);
                 @memcpy(desc.suffix_buf[0..n], s[0..n]);
                 desc.suffix_len = n;
+            } else if (rt.lua.typeOf(-1) == .table) {
+                _ = rt.lua.getField(-1, "output");
+                if (rt.lua.typeOf(-1) == .string) {
+                    const s = rt.lua.toString(-1) catch "";
+                    const n = @min(s.len, desc.suffix_buf.len);
+                    @memcpy(desc.suffix_buf[0..n], s[0..n]);
+                    desc.suffix_len = n;
+                }
+                rt.lua.pop(1);
+
+                _ = rt.lua.getField(-1, "style");
+                if (rt.lua.typeOf(-1) == .string) {
+                    const s = rt.lua.toString(-1) catch "";
+                    desc.suffix_style = Style.parse(s);
+                }
+                rt.lua.pop(1);
+            }
+            rt.lua.pop(1);
+
+            if (desc.suffix_len == 0 and desc.suffix_style.isEmpty()) {
+                _ = rt.lua.getField(-1, "sufix");
+                if (rt.lua.typeOf(-1) == .table) {
+                    _ = rt.lua.getField(-1, "output");
+                    if (rt.lua.typeOf(-1) == .string) {
+                        const s = rt.lua.toString(-1) catch "";
+                        const n = @min(s.len, desc.suffix_buf.len);
+                        @memcpy(desc.suffix_buf[0..n], s[0..n]);
+                        desc.suffix_len = n;
+                    }
+                    rt.lua.pop(1);
+
+                    _ = rt.lua.getField(-1, "style");
+                    if (rt.lua.typeOf(-1) == .string) {
+                        const s = rt.lua.toString(-1) catch "";
+                        desc.suffix_style = Style.parse(s);
+                    }
+                    rt.lua.pop(1);
+                }
+                rt.lua.pop(1);
+            }
+
+            _ = rt.lua.getField(-1, "prefix_style");
+            if (rt.lua.typeOf(-1) == .string) {
+                const s = rt.lua.toString(-1) catch "";
+                desc.prefix_style = Style.parse(s);
+            }
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "suffix_style");
+            if (rt.lua.typeOf(-1) == .string) {
+                const s = rt.lua.toString(-1) catch "";
+                desc.suffix_style = Style.parse(s);
             }
             rt.lua.pop(1);
 
@@ -424,7 +502,7 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, callback_runtime: ?*Lua
                                 const pn = @min(pref.len, pblk.text.len);
                                 @memcpy(pblk.text[0..pn], pref[0..pn]);
                                 pblk.len = pn;
-                                pblk.style = desc.style;
+                                pblk.style = desc.prefixStyle();
                                 bi.blocks[bi.block_count] = pblk;
                                 bi.block_count += 1;
                             }
@@ -447,7 +525,7 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, callback_runtime: ?*Lua
                                 const sn = @min(suff.len, sblk.text.len);
                                 @memcpy(sblk.text[0..sn], suff[0..sn]);
                                 sblk.len = sn;
-                                sblk.style = desc.style;
+                                sblk.style = desc.suffixStyle();
                                 bi.blocks[bi.block_count] = sblk;
                                 bi.block_count += 1;
                             }

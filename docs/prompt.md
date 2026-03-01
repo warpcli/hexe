@@ -72,7 +72,12 @@ Each prompt side is an array of segment definitions.
 
   -- or builtin segment descriptor
   builtin = function(ctx)
-    return { name = "directory", style = "bg:237 fg:15", suffix = " " }
+    return {
+      name = "directory",
+      style = "bg:237 fg:15",
+      prefix = { output = " ", style = "bg:0 fg:8" },
+      suffix = { output = " ", style = "bg:0 fg:8" },
+    }
   end,
 }
 ```
