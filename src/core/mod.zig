@@ -7,6 +7,7 @@ pub const ipc = @import("ipc.zig");
 pub const wire = @import("wire.zig");
 pub const query = @import("query.zig");
 pub const style = @import("style.zig");
+pub const segment_render = @import("segment_render.zig");
 pub const segments = @import("segments/mod.zig");
 pub const pod_protocol = @import("pod_protocol.zig");
 pub const pod_meta = @import("pod_meta.zig");

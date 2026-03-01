@@ -11,6 +11,7 @@ const State = @import("state.zig").State;
 const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
 const Pane = @import("pane.zig").Pane;
+const segment_render = core.segment_render;
 const DEFAULT_OUTPUTS = [_]core.config.OutputDef{.{ .style = "", .format = "$output" }};
 
 const WhenCacheEntry = struct {
@@ -37,13 +38,8 @@ threadlocal var progress_text_cache: ?std.AutoHashMap(usize, ProgressCacheEntry)
 threadlocal var hover_x: ?u16 = null;
 threadlocal var hover_y: ?u16 = null;
 
-const BUILTIN_MARKER_PREFIX = "__hexe_builtin:";
-
 fn builtinNameFromMarker(s: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, s, BUILTIN_MARKER_PREFIX)) return null;
-    const name = std.mem.trim(u8, s[BUILTIN_MARKER_PREFIX.len..], " \t\r\n");
-    if (name.len == 0) return null;
-    return name;
+    return segment_render.builtinNameFromMarker(s);
 }
 
 pub fn updateHover(term_height: u16, x: u16, y: u16) bool {
@@ -1641,36 +1637,25 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
 }
 
 pub fn drawFormatted(renderer: *Renderer, ctx: *shp.Context, start_x: u16, y: u16, format: []const u8, output: []const u8, output_segs: ?[]const shp.Segment, style: shp.Style) u16 {
-    var x = start_x;
-    var i: usize = 0;
+    const DrawState = struct {
+        renderer: *Renderer,
+        ctx: *shp.Context,
+        x: u16,
+        y: u16,
 
-    while (i < format.len) {
-        if (i + 7 <= format.len and std.mem.eql(u8, format[i..][0..7], "$output")) {
-            if (output_segs) |segs| {
-                for (segs) |seg| {
-                    const seg_base_style = mergeStyle(style, seg.style);
-                    if (builtinNameFromMarker(seg.text)) |builtin_name| {
-                        if (ctx.renderSegment(builtin_name)) |built_segs| {
-                            for (built_segs) |bs| {
-                                x = drawSegment(renderer, x, y, bs, seg_base_style);
-                            }
-                        }
-                    } else {
-                        x = drawSegment(renderer, x, y, seg, seg_base_style);
-                    }
-                }
-            } else {
-                x = drawStyledText(renderer, x, y, output, style);
-            }
-            i += 7;
-        } else {
-            const len = std.unicode.utf8ByteSequenceLength(format[i]) catch 1;
-            const end = @min(i + len, format.len);
-            x = drawStyledText(renderer, x, y, format[i..end], style);
-            i = end;
+        fn resolve(self: *@This(), builtin_name: []const u8) ?[]const shp.Segment {
+            return self.ctx.renderSegment(builtin_name);
         }
-    }
-    return x;
+
+        fn emit(self: *@This(), text: []const u8, run_style: shp.Style) !void {
+            if (text.len == 0) return;
+            self.x = drawStyledText(self.renderer, self.x, self.y, text, run_style);
+        }
+    };
+
+    var state: DrawState = .{ .renderer = renderer, .ctx = ctx, .x = start_x, .y = y };
+    segment_render.forEachFormattedRun(DrawState, &state, format, output, output_segs, style, DrawState.resolve, DrawState.emit) catch {};
+    return state.x;
 }
 
 pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment) u16 {
@@ -1883,44 +1868,27 @@ pub fn measureText(text: []const u8) u16 {
 }
 
 pub fn calcFormattedWidth(ctx: *shp.Context, format: []const u8, output: []const u8, output_segs: ?[]const shp.Segment) u16 {
-    var width: u16 = 0;
-    var i: usize = 0;
+    const WidthState = struct {
+        ctx: *shp.Context,
+        width: u16 = 0,
 
-    while (i < format.len) {
-        if (i + 7 <= format.len and std.mem.eql(u8, format[i..][0..7], "$output")) {
-            if (output_segs) |segs| {
-                for (segs) |seg| {
-                    if (builtinNameFromMarker(seg.text)) |builtin_name| {
-                        if (ctx.renderSegment(builtin_name)) |built_segs| {
-                            for (built_segs) |bs| width += measureText(bs.text);
-                        }
-                    } else {
-                        width += measureText(seg.text);
-                    }
-                }
-            } else {
-                width += measureText(output);
-            }
-            i += 7;
-        } else {
-            const len = std.unicode.utf8ByteSequenceLength(format[i]) catch 1;
-            const end = @min(i + len, format.len);
-            width += vaxis.gwidth.gwidth(format[i..end], .unicode);
-            i = end;
+        fn resolve(self: *@This(), builtin_name: []const u8) ?[]const shp.Segment {
+            return self.ctx.renderSegment(builtin_name);
         }
-    }
-    return width;
+
+        fn emit(self: *@This(), text: []const u8, _: shp.Style) !void {
+            if (text.len == 0) return;
+            self.width += measureText(text);
+        }
+    };
+
+    var state: WidthState = .{ .ctx = ctx };
+    segment_render.forEachFormattedRun(WidthState, &state, format, output, output_segs, .{}, WidthState.resolve, WidthState.emit) catch {};
+    return state.width;
 }
 
 fn mergeStyle(base: shp.Style, override: shp.Style) shp.Style {
-    var out = base;
-    if (override.fg != .none) out.fg = override.fg;
-    if (override.bg != .none) out.bg = override.bg;
-    if (override.bold) out.bold = true;
-    if (override.italic) out.italic = true;
-    if (override.underline) out.underline = true;
-    if (override.dim) out.dim = true;
-    return out;
+    return segment_render.mergeStyle(base, override);
 }
 
 fn shpStyleToVaxis(style: shp.Style) vaxis.Style {
@@ -1935,7 +1903,7 @@ fn shpStyleToVaxis(style: shp.Style) vaxis.Style {
 }
 
 pub fn drawSegment(renderer: *Renderer, x: u16, y: u16, seg: shp.Segment, default_style: shp.Style) u16 {
-    const style = if (seg.style.isEmpty()) default_style else mergeStyle(default_style, seg.style);
+    const style = segment_render.resolveSegmentStyle(default_style, seg.style);
     return drawStyledText(renderer, x, y, seg.text, style);
 }
 

@@ -4,25 +4,7 @@ const core = @import("core");
 const LuaRuntime = core.LuaRuntime;
 const segment = core.segments;
 const Style = core.style.Style;
-const BUILTIN_MARKER_PREFIX = "__hexe_builtin:";
-
-fn builtinNameFromMarker(s: []const u8) ?[]const u8 {
-    if (!std.mem.startsWith(u8, s, BUILTIN_MARKER_PREFIX)) return null;
-    const name = std.mem.trim(u8, s[BUILTIN_MARKER_PREFIX.len..], " \t\r\n");
-    if (name.len == 0) return null;
-    return name;
-}
-
-fn mergeStyle(base: Style, override: Style) Style {
-    var out = base;
-    if (override.fg != .none) out.fg = override.fg;
-    if (override.bg != .none) out.bg = override.bg;
-    if (override.bold) out.bold = true;
-    if (override.italic) out.italic = true;
-    if (override.underline) out.underline = true;
-    if (override.dim) out.dim = true;
-    return out;
-}
+const segment_render = core.segment_render;
 
 fn populateLuaContext(runtime: *LuaRuntime, ctx: *segment.Context) void {
     runtime.lua.createTable(0, 8);
@@ -457,7 +439,7 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
         }
 
         var output_text = results[i].output.textSlice();
-        if (builtinNameFromMarker(output_text)) |builtin_name| {
+        if (segment_render.builtinNameFromMarker(output_text)) |builtin_name| {
             if (ctx.renderSegment(builtin_name)) |segs| {
                 if (segs.len > 0) {
                     var bi = LuaValue{};
@@ -486,7 +468,7 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
         if (results[i].output.block_count > 0) {
             for (results[i].output.blocks[0..results[i].output.block_count]) |blk| {
                 const bt = blk.text[0..blk.len];
-                if (builtinNameFromMarker(bt)) |builtin_name| {
+                if (segment_render.builtinNameFromMarker(bt)) |builtin_name| {
                     if (ctx.renderSegment(builtin_name)) |segs| {
                         var seg_width: u16 = 0;
                         for (segs) |s| seg_width += @intCast(s.text.len);
@@ -549,7 +531,7 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
                 if (blk.len == 0) continue;
                 const bt = blk.text[0..blk.len];
                 const style = blk.style;
-                if (builtinNameFromMarker(bt)) |builtin_name| {
+                if (segment_render.builtinNameFromMarker(bt)) |builtin_name| {
                     if (ctx.renderSegment(builtin_name)) |segs| {
                         if (segs.len == 0) continue;
                         var wrote_any = false;
