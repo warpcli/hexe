@@ -18,6 +18,7 @@ pub const BindAction = core.Config.BindAction;
 const PaneQuery = core.PaneQuery;
 const FocusContext = @import("state.zig").FocusContext;
 const LuaRuntime = core.LuaRuntime;
+const CALLBACK_REF_PREFIX = "__hexe_cb_ref:";
 
 fn handleBlockedPopup(popups: anytype, parsed_event: ?vaxis.Event) bool {
     if (parsed_event) |ev| {
@@ -197,31 +198,25 @@ fn buildPaneQuery(state: *State) PaneQuery {
 }
 
 /// Evaluate a bind's when condition against the current state.
-fn matchesWhen(when: ?core.config.WhenDef, query: *const PaneQuery) bool {
+fn matchesWhen(state: *State, when: ?core.config.WhenDef, query: *const PaneQuery) bool {
     if (when) |w| {
-        if (!core.query.evalWhen(query, w)) return false;
-        if (!matchesEnvWhen(w)) return false;
-        if (!matchesLuaWhen(query, w)) return false;
-        if (!matchesBashWhen(w)) return false;
-        return true;
+        return matchesLuaWhen(state, query, w);
     }
     return true; // No condition = always matches.
 }
 
-fn matchesEnvWhen(w: core.config.WhenDef) bool {
-    if (w.env) |name| {
-        const v = std.posix.getenv(name);
-        if (v == null or v.?.len == 0) return false;
-    }
-    if (w.env_not) |name| {
-        const v = std.posix.getenv(name);
-        if (v != null and v.?.len > 0) return false;
-    }
-    return true;
+fn callbackIdFromCode(code: []const u8) ?i32 {
+    if (!std.mem.startsWith(u8, code, CALLBACK_REF_PREFIX)) return null;
+    return std.fmt.parseInt(i32, code[CALLBACK_REF_PREFIX.len..], 10) catch null;
 }
 
 fn populateWhenLuaContext(rt: *LuaRuntime, query: *const PaneQuery) void {
     rt.lua.createTable(0, 20);
+
+    rt.lua.pushBoolean(query.is_split);
+    rt.lua.setField(-2, "focus_split");
+    rt.lua.pushBoolean(query.is_float);
+    rt.lua.setField(-2, "focus_float");
 
     rt.lua.pushBoolean(query.is_float);
     rt.lua.setField(-2, "is_float");
@@ -231,6 +226,8 @@ fn populateWhenLuaContext(rt: *LuaRuntime, query: *const PaneQuery) void {
     rt.lua.setField(-2, "alt_screen");
     rt.lua.pushBoolean(query.shell_running);
     rt.lua.setField(-2, "shell_running");
+    rt.lua.pushBoolean(query.fg_process != null);
+    rt.lua.setField(-2, "process_running");
     rt.lua.pushBoolean(query.is_float and query.float_key == 0);
     rt.lua.setField(-2, "adhoc_float");
 
@@ -248,6 +245,8 @@ fn populateWhenLuaContext(rt: *LuaRuntime, query: *const PaneQuery) void {
     if (query.fg_process) |p| {
         _ = rt.lua.pushString(p);
         rt.lua.setField(-2, "fg_process");
+        _ = rt.lua.pushString(p);
+        rt.lua.setField(-2, "process_name");
     }
     if (query.fg_pid) |pid| {
         rt.lua.pushInteger(pid);
@@ -271,41 +270,53 @@ fn populateWhenLuaContext(rt: *LuaRuntime, query: *const PaneQuery) void {
     }
     rt.lua.setField(-2, "env");
 
+    rt.lua.pushValue(-1);
     rt.lua.setGlobal("ctx");
+
+    // Expose pragmatic pane API: hexe.status.pane(0)
+    rt.lua.pushValue(-1);
+    rt.lua.setGlobal("__hexe_when_pane0");
+    rt.lua.pop(1);
+
+    const status_api =
+        "if type(hexe)=='table' then " ++
+        "hexe.status=hexe.status or {}; " ++
+        "hexe.status.pane=function(id) " ++
+        "if id==nil or id==0 then return __hexe_when_pane0 end " ++
+        "return nil end end";
+    const status_api_z = rt.allocator.dupeZ(u8, status_api) catch return;
+    defer rt.allocator.free(status_api_z);
+    rt.lua.loadString(status_api_z) catch return;
+    rt.lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
+        rt.lua.pop(1);
+        return;
+    };
 }
 
-fn matchesLuaWhen(query: *const PaneQuery, w: core.config.WhenDef) bool {
+fn matchesLuaWhen(state: *State, query: *const PaneQuery, w: core.config.WhenDef) bool {
     const code = w.lua orelse return true;
-    var rt = LuaRuntime.init(std.heap.page_allocator) catch return false;
-    defer rt.deinit();
+    const callback_id = callbackIdFromCode(code) orelse return false;
+    const rt = state.config._lua_runtime orelse return false;
 
-    populateWhenLuaContext(&rt, query);
+    populateWhenLuaContext(rt, query);
 
-    const code_z = rt.allocator.dupeZ(u8, code) catch return false;
-    defer rt.allocator.free(code_z);
-
-    rt.lua.loadString(code_z) catch return false;
-    rt.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
-        rt.lua.pop(1);
+    if (!core.lua_runtime.pushRegisteredCallback(rt, callback_id)) return false;
+    _ = rt.lua.getGlobal("ctx") catch {
+        rt.lua.pop(2);
         return false;
     };
-    defer rt.lua.pop(1);
+
+    rt.lua.protectedCall(.{ .args = 1, .results = 1 }) catch {
+        rt.lua.pop(2);
+        return false;
+    };
+    defer {
+        rt.lua.pop(1); // result
+        rt.lua.pop(1); // callback table
+    }
+
     if (rt.lua.typeOf(-1) != .boolean) return false;
     return rt.lua.toBoolean(-1);
-}
-
-fn matchesBashWhen(w: core.config.WhenDef) bool {
-    const script = w.bash orelse return true;
-    const res = std.process.Child.run(.{
-        .allocator = std.heap.page_allocator,
-        .argv = &.{ "/bin/bash", "-c", script },
-    }) catch return false;
-    defer std.heap.page_allocator.free(res.stdout);
-    defer std.heap.page_allocator.free(res.stderr);
-    return switch (res.term) {
-        .Exited => |code| code == 0,
-        else => false,
-    };
 }
 
 fn keyEq(a: BindKey, b: BindKey) bool {
@@ -326,7 +337,7 @@ fn findBestBind(state: *State, mods: u8, key: BindKey, on: BindWhen, allow_only_
         if (b.on != on) continue;
         if (b.mods != mods) continue;
         if (!keyEq(b.key, key)) continue;
-        const when_match = matchesWhen(b.when, query);
+        const when_match = matchesWhen(state, b.when, query);
         if (!when_match) continue;
 
         if (allow_only_tabs) {
