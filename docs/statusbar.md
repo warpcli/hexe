@@ -155,10 +155,15 @@ Common tokens:
 
 ```lua
 when = { bash = "[[ $HEXE_STATUS_ALT_SCREEN -eq 0 ]]" }
-when = { lua  = "return ctx.shell_running and not ctx.alt_screen" }
+when = { lua  = function(ctx) return ctx.shell_running and not ctx.alt_screen end }
 ```
 
-`when.lua` is evaluated with a statusbar `ctx` table:
+`when.lua` is evaluated with a statusbar `ctx` table.
+
+Function form is the canonical API (`lua = function(ctx) ... end`).
+String-chunk form (`lua = "return ..."`) is still accepted for migration but is deprecated.
+
+Available fields in `ctx`:
 
 - `ctx.shell_running`
 - `ctx.alt_screen`
@@ -227,7 +232,7 @@ builtin = function(_)
 end
 ```
 
-`hexe.segment.buildin` is available as an alias for compatibility with existing configs.
+Use `hexe.segment.builtin` (or `hx.segment.builtin`). The typo alias `hexe.segment.buildin` is deprecated and will be removed.
 
 ## Width and Priority
 

@@ -142,9 +142,9 @@ Style behavior:
 - If descriptor `style` is provided, it is authoritative for rendered builtin text.
 - This is useful when you want fixed colors (for example black-on-red git segments).
 
-## Conditions (`when`) [legacy parser path]
+## Conditions (`when`) [deprecated forms]
 
-The current Lua-first prompt model typically encodes visibility directly in `value`/`builtin` functions (return `nil` to hide). Older table-style parser paths still support `when` fields.
+The Lua-first prompt model usually encodes visibility directly in `value`/`builtin` functions (return `nil` to hide). `when` remains available for migration, but function forms are preferred.
 
 Prompt supports these condition forms:
 
@@ -152,16 +152,18 @@ Prompt supports these condition forms:
 when = { env = "SSH_CONNECTION" }
 when = { env_not = "INSIDE_CONTAINER" }
 when = { bash = "[[ -n $SSH_CONNECTION ]]" }
-when = { lua = "return (ctx.exit_status or 0) ~= 0" }
+when = { lua = function(ctx) return (ctx.exit_status or 0) ~= 0 end }
 when = { all = { "token_a", "token_b" } }
-when = { any = { "token_a", { lua = "return true" } } }
+when = { any = { "token_a", { lua = function(_) return true end } } }
 ```
 
 `when.lua` must return boolean.
 
+Canonical style is `lua = function(ctx) ... end`. String-chunk form (`lua = "return ..."`) is deprecated and will be removed.
+
 ## Lua Context (`ctx`)
 
-Prompt Lua (`lua` field and `when.lua`) gets a global `ctx` table:
+Prompt Lua callbacks (`value`, `builtin`, and `when.lua`) receive `ctx`:
 
 - `ctx.cwd`
 - `ctx.home`
@@ -175,12 +177,12 @@ Prompt Lua (`lua` field and `when.lua`) gets a global `ctx` table:
 Example:
 
 ```lua
-lua = [[
+value = function(ctx)
   if (ctx.exit_status or 0) ~= 0 then
     return "ERR"
   end
   return nil
-]]
+end
 ```
 
 ## Lua Safety Modes
