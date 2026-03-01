@@ -121,7 +121,7 @@ if section == nil or section == "mux" then
     priority = 20,
     builtin = function(ctx)
       if (ctx.shell_running and not ctx.alt_screen) or ctx.adhoc_float then
-        return hexe.segment.builtin.spinner({
+        return hx.segment.builtin.spinner({
           kind = "knight_rider",
           width = 10,
           step = 40,
@@ -141,7 +141,7 @@ if section == nil or section == "mux" then
     priority = 200000,
     builtin = function(ctx)
       if (ctx.shell_running and not ctx.alt_screen) or ctx.adhoc_float then
-        return hexe.segment.builtin.randomdo({ style = "bg:0 fg:1", suffix = " " })
+        return hx.segment.builtin.randomdo({ style = "bg:0 fg:1", suffix = " " })
       end
       return nil
     end,
