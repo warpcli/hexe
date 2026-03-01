@@ -226,10 +226,26 @@ fn evalLuaGate(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) bo
 }
 
 const BuiltinDesc = struct {
-    name: ?[]const u8 = null,
+    name_buf: [64]u8 = [_]u8{0} ** 64,
+    name_len: usize = 0,
     style: Style = .{},
-    prefix: []const u8 = "",
-    suffix: []const u8 = "",
+    prefix_buf: [32]u8 = [_]u8{0} ** 32,
+    prefix_len: usize = 0,
+    suffix_buf: [32]u8 = [_]u8{0} ** 32,
+    suffix_len: usize = 0,
+
+    fn name(self: *const BuiltinDesc) ?[]const u8 {
+        if (self.name_len == 0) return null;
+        return self.name_buf[0..self.name_len];
+    }
+
+    fn prefix(self: *const BuiltinDesc) []const u8 {
+        return self.prefix_buf[0..self.prefix_len];
+    }
+
+    fn suffix(self: *const BuiltinDesc) []const u8 {
+        return self.suffix_buf[0..self.suffix_len];
+    }
 };
 
 fn evalLuaBuiltinDesc(runtime: *LuaRuntime, ctx: *segment.Context, code: []const u8) BuiltinDesc {
@@ -250,7 +266,11 @@ fn evalLuaBuiltinDesc(runtime: *LuaRuntime, ctx: *segment.Context, code: []const
         .string => {
             const s = runtime.lua.toString(-1) catch return desc;
             const t = std.mem.trim(u8, s, " \t\r\n");
-            if (t.len > 0) desc.name = t;
+            if (t.len > 0) {
+                const n = @min(t.len, desc.name_buf.len);
+                @memcpy(desc.name_buf[0..n], t[0..n]);
+                desc.name_len = n;
+            }
             return desc;
         },
         .table => {
@@ -258,7 +278,11 @@ fn evalLuaBuiltinDesc(runtime: *LuaRuntime, ctx: *segment.Context, code: []const
             if (runtime.lua.typeOf(-1) == .string) {
                 const s = runtime.lua.toString(-1) catch "";
                 const t = std.mem.trim(u8, s, " \t\r\n");
-                if (t.len > 0) desc.name = t;
+                if (t.len > 0) {
+                    const n = @min(t.len, desc.name_buf.len);
+                    @memcpy(desc.name_buf[0..n], t[0..n]);
+                    desc.name_len = n;
+                }
             }
             runtime.lua.pop(1);
 
@@ -285,13 +309,19 @@ fn evalLuaBuiltinDesc(runtime: *LuaRuntime, ctx: *segment.Context, code: []const
 
             _ = runtime.lua.getField(-1, "prefix");
             if (runtime.lua.typeOf(-1) == .string) {
-                desc.prefix = runtime.lua.toString(-1) catch "";
+                const s = runtime.lua.toString(-1) catch "";
+                const n = @min(s.len, desc.prefix_buf.len);
+                @memcpy(desc.prefix_buf[0..n], s[0..n]);
+                desc.prefix_len = n;
             }
             runtime.lua.pop(1);
 
             _ = runtime.lua.getField(-1, "suffix");
             if (runtime.lua.typeOf(-1) == .string) {
-                desc.suffix = runtime.lua.toString(-1) catch "";
+                const s = runtime.lua.toString(-1) catch "";
+                const n = @min(s.len, desc.suffix_buf.len);
+                @memcpy(desc.suffix_buf[0..n], s[0..n]);
+                desc.suffix_len = n;
             }
             runtime.lua.pop(1);
 
@@ -341,13 +371,14 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
             }
             if (mod.kind == .builtin) {
                 const desc = evalLuaBuiltinDesc(&lua_rt.?, ctx, cmd);
-                if (desc.name) |builtin_name| {
+                if (desc.name()) |builtin_name| {
                     var bi = LuaValue{};
                     if (ctx.renderSegment(builtin_name)) |segs| {
-                        if (desc.prefix.len > 0 and bi.block_count < bi.blocks.len) {
+                        const pref = desc.prefix();
+                        if (pref.len > 0 and bi.block_count < bi.blocks.len) {
                             var pblk = LuaBlock{};
-                            const pn = @min(desc.prefix.len, pblk.text.len);
-                            @memcpy(pblk.text[0..pn], desc.prefix[0..pn]);
+                            const pn = @min(pref.len, pblk.text.len);
+                            @memcpy(pblk.text[0..pn], pref[0..pn]);
                             pblk.len = pn;
                             pblk.style = desc.style;
                             bi.blocks[bi.block_count] = pblk;
@@ -366,10 +397,11 @@ pub fn renderModulesSimple(allocator: std.mem.Allocator, ctx: *segment.Context, 
                                 bi.block_count += 1;
                             }
                         }
-                        if (desc.suffix.len > 0 and bi.block_count < bi.blocks.len) {
+                        const suff = desc.suffix();
+                        if (suff.len > 0 and bi.block_count < bi.blocks.len) {
                             var sblk = LuaBlock{};
-                            const sn = @min(desc.suffix.len, sblk.text.len);
-                            @memcpy(sblk.text[0..sn], desc.suffix[0..sn]);
+                            const sn = @min(suff.len, sblk.text.len);
+                            @memcpy(sblk.text[0..sn], suff[0..sn]);
                             sblk.len = sn;
                             sblk.style = desc.style;
                             bi.blocks[bi.block_count] = sblk;

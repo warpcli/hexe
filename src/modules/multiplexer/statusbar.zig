@@ -507,12 +507,15 @@ const BuiltinDesc = struct {
     prefix_len: usize = 0,
     suffix_buf: [32]u8 = [_]u8{0} ** 32,
     suffix_len: usize = 0,
-    spinner_kind: ?[]const u8 = null,
+    spinner_kind_buf: [32]u8 = [_]u8{0} ** 32,
+    spinner_kind_len: usize = 0,
     spinner_width: ?u8 = null,
     spinner_step_ms: ?u64 = null,
     spinner_hold_frames: ?u8 = null,
     spinner_bg: ?u8 = null,
     spinner_placeholder: ?u8 = null,
+    spinner_colors_buf: [16]u8 = [_]u8{0} ** 16,
+    spinner_colors_len: usize = 0,
 
     fn name(self: *const BuiltinDesc) ?[]const u8 {
         if (self.name_len == 0) return null;
@@ -525,6 +528,15 @@ const BuiltinDesc = struct {
 
     fn suffix(self: *const BuiltinDesc) []const u8 {
         return self.suffix_buf[0..self.suffix_len];
+    }
+
+    fn spinnerKind(self: *const BuiltinDesc) ?[]const u8 {
+        if (self.spinner_kind_len == 0) return null;
+        return self.spinner_kind_buf[0..self.spinner_kind_len];
+    }
+
+    fn spinnerColors(self: *const BuiltinDesc) []const u8 {
+        return self.spinner_colors_buf[0..self.spinner_colors_len];
     }
 };
 
@@ -612,7 +624,10 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
 
             _ = rt.lua.getField(-1, "kind");
             if (rt.lua.typeOf(-1) == .string) {
-                desc.spinner_kind = rt.lua.toString(-1) catch null;
+                const s = rt.lua.toString(-1) catch "";
+                const n = @min(s.len, desc.spinner_kind_buf.len);
+                @memcpy(desc.spinner_kind_buf[0..n], s[0..n]);
+                desc.spinner_kind_len = n;
             }
             rt.lua.pop(1);
 
@@ -662,6 +677,25 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
             if (rt.lua.typeOf(-1) == .number) {
                 const v = rt.lua.toNumber(-1) catch 0;
                 if (std.math.isFinite(v)) desc.spinner_placeholder = @intFromFloat(std.math.clamp(v, 0, 255));
+            }
+            rt.lua.pop(1);
+
+            _ = rt.lua.getField(-1, "colors");
+            if (rt.lua.typeOf(-1) == .table) {
+                const len: i32 = @intCast(@min(rt.lua.rawLen(-1), desc.spinner_colors_buf.len));
+                var i: i32 = 1;
+                while (i <= len) : (i += 1) {
+                    _ = rt.lua.rawGetIndex(-1, i);
+                    if (rt.lua.typeOf(-1) == .number) {
+                        const v = rt.lua.toNumber(-1) catch -1;
+                        if (std.math.isFinite(v)) {
+                            const iv: i32 = @intFromFloat(std.math.clamp(v, 0, 255));
+                            desc.spinner_colors_buf[desc.spinner_colors_len] = @intCast(iv);
+                            desc.spinner_colors_len += 1;
+                        }
+                    }
+                    rt.lua.pop(1);
+                }
             }
             rt.lua.pop(1);
 
@@ -1425,9 +1459,14 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
             spinner_allowed = false;
         }
         if (mod.command) |cmd| {
-            const gate_eval = evalLuaCommand(cmd, ctx);
-            const gate_text = gate_eval.textSlice();
-            spinner_allowed = spinner_allowed and (gate_eval.seg_count > 0 or gate_text.len > 0);
+            if (mod.kind == .builtin) {
+                const bdesc = evalLuaBuiltinDesc(cmd, ctx);
+                spinner_allowed = spinner_allowed and (bdesc.name() != null);
+            } else {
+                const gate_eval = evalLuaCommand(cmd, ctx);
+                const gate_text = gate_eval.textSlice();
+                spinner_allowed = spinner_allowed and (gate_eval.seg_count > 0 or gate_text.len > 0);
+            }
         } else if (mod.builtin) |builtin_name| {
             spinner_allowed = spinner_allowed and (ctx.renderSegment(builtin_name) != null);
         }
@@ -1485,12 +1524,14 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                         if (std.mem.eql(u8, builtin_name, "spinner")) {
                             var cfg = core.config.SpinnerDef{};
                             cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
-                            if (bdesc.spinner_kind) |k| cfg.kind = k;
+                            if (bdesc.spinnerKind()) |k| cfg.kind = k;
                             if (bdesc.spinner_width) |v| cfg.width = v;
                             if (bdesc.spinner_step_ms) |v| cfg.step_ms = v;
                             if (bdesc.spinner_hold_frames) |v| cfg.hold_frames = v;
                             if (bdesc.spinner_bg) |v| cfg.bg_color = v;
                             if (bdesc.spinner_placeholder) |v| cfg.placeholder_color = v;
+                            const cols = bdesc.spinnerColors();
+                            if (cols.len > 0) cfg.colors = cols;
                             output_segs = animations.renderSegments(ctx, cfg);
                             if (output_segs) |segs| {
                                 if (segs.len == 0) output_segs = null;
@@ -1564,8 +1605,10 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                 }
                 command_output_ready = true;
             }
-            if (output_segs == null) output_segs = command_eval.segSlice();
-            output_text = command_output;
+            if (output_segs == null and output_text.len == 0) {
+                output_segs = command_eval.segSlice();
+                output_text = command_output;
+            }
             if (output_segs == null) {
                 if (builtinNameFromMarker(output_text)) |builtin_name| {
                     if (std.mem.eql(u8, builtin_name, "randomdo")) {
@@ -1587,6 +1630,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
         } else {
             output_segs = ctx.renderSegment(mod.name);
         }
+        if ((output_segs == null or output_segs.?.len == 0) and output_text.len == 0) continue;
         x = drawFormatted(renderer, ctx, x, y, format_use, output_text, output_segs, style_final);
     }
 
@@ -1634,9 +1678,14 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
             spinner_allowed = false;
         }
         if (mod.command) |cmd| {
-            const gate_eval = evalLuaCommand(cmd, ctx);
-            const gate_text = gate_eval.textSlice();
-            spinner_allowed = spinner_allowed and (gate_eval.seg_count > 0 or gate_text.len > 0);
+            if (mod.kind == .builtin) {
+                const bdesc = evalLuaBuiltinDesc(cmd, ctx);
+                spinner_allowed = spinner_allowed and (bdesc.name() != null);
+            } else {
+                const gate_eval = evalLuaCommand(cmd, ctx);
+                const gate_text = gate_eval.textSlice();
+                spinner_allowed = spinner_allowed and (gate_eval.seg_count > 0 or gate_text.len > 0);
+            }
         } else if (mod.builtin) |builtin_name| {
             spinner_allowed = spinner_allowed and (ctx.renderSegment(builtin_name) != null);
         }
@@ -1685,12 +1734,14 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
                         if (std.mem.eql(u8, builtin_name, "spinner")) {
                             var cfg = core.config.SpinnerDef{};
                             cfg.started_at_ms = ctx.shell_started_at_ms orelse ctx.now_ms;
-                            if (bdesc.spinner_kind) |k| cfg.kind = k;
+                            if (bdesc.spinnerKind()) |k| cfg.kind = k;
                             if (bdesc.spinner_width) |v| cfg.width = v;
                             if (bdesc.spinner_step_ms) |v| cfg.step_ms = v;
                             if (bdesc.spinner_hold_frames) |v| cfg.hold_frames = v;
                             if (bdesc.spinner_bg) |v| cfg.bg_color = v;
                             if (bdesc.spinner_placeholder) |v| cfg.placeholder_color = v;
+                            const cols = bdesc.spinnerColors();
+                            if (cols.len > 0) cfg.colors = cols;
                             output_segs = animations.renderSegments(ctx, cfg);
                             if (output_segs) |segs| {
                                 if (segs.len == 0) output_segs = null;
@@ -1765,8 +1816,10 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
                 }
                 command_output_ready = true;
             }
-            if (output_segs == null) output_segs = command_eval.segSlice();
-            output_text = command_output;
+            if (output_segs == null and output_text.len == 0) {
+                output_segs = command_eval.segSlice();
+                output_text = command_output;
+            }
             if (output_segs == null) {
                 if (builtinNameFromMarker(output_text)) |builtin_name| {
                     if (std.mem.eql(u8, builtin_name, "randomdo")) {
@@ -1789,6 +1842,7 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: cor
         } else {
             output_segs = ctx.renderSegment(mod.name);
         }
+        if ((output_segs == null or output_segs.?.len == 0) and output_text.len == 0) continue;
         width += calcFormattedWidth(ctx, format_use, output_text, output_segs);
     }
 
