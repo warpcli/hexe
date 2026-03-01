@@ -1,4 +1,4 @@
-local hx = require("hexe")
+hx = require("hexe")
 local section = HEXE_SECTION
 
 -- ============================================================================
@@ -112,7 +112,7 @@ if section == nil or section == "mux" then
     name = "session",
     priority = 30,
     builtin = function(_)
-      return hexe.segment.builtin.session({ style = "bg:1 fg:0", prefix = " ", suffix = " " })
+      return hx.segment.builtin.session({ style = "bg:1 fg:0", prefix = " ", suffix = " " })
     end,
   })
 
@@ -342,7 +342,12 @@ if section == nil or section == "shp" then
     {
       name = "ssh",
       priority = 60,
-      value = "return ctx.env.SSH_CONNECTION and { { text = ' //', style = 'bg:237 italic fg:15' } } or nil",
+      value = function(ctx)
+        if not ctx.env.SSH_CONNECTION then
+          return nil
+        end
+        return { { text = " //", style = "bg:237 italic fg:15" } }
+      end,
     },
     {
       name = "hostname",
@@ -354,15 +359,19 @@ if section == nil or section == "shp" then
     {
       name = "distro",
       priority = 10,
-      value = [[
-        local p = io.popen('/env/dot/.func/shell/distrologo')
-        if not p then return nil end
-        local raw = p:read('*a') or ''
+      value = function(_)
+        local p = io.popen("/env/dot/.func/shell/distrologo")
+        if not p then
+          return nil
+        end
+        local raw = p:read("*a") or ""
         p:close()
-        local t = raw:match('^%s*(.-)%s*$')
-        if not t or t == '' then return nil end
-        return { { text = ' ' .. t, style = 'bg:1 fg:0' } }
-      ]],
+        local t = raw:match("^%s*(.-)%s*$")
+        if not t or t == "" then
+          return nil
+        end
+        return { { text = " " .. t, style = "bg:1 fg:0" } }
+      end,
     },
     {
       name = "username",
@@ -374,7 +383,12 @@ if section == nil or section == "shp" then
     {
       name = "direnv",
       priority = 25,
-      value = "return ctx.env.DIRENV_DIR and { { text = '▓', style = 'bg:1 fg:0' } } or nil",
+      value = function(ctx)
+        if not ctx.env.DIRENV_DIR then
+          return nil
+        end
+        return { { text = "▓", style = "bg:1 fg:0" } }
+      end,
     },
     {
       name = "sudo",
@@ -386,23 +400,28 @@ if section == nil or section == "shp" then
     {
       name = "tab",
       priority = 35,
-      value = [[
-        local tab = ((ctx and ctx.env and ctx.env.TAB) or ''):match('^%s*(.-)%s*$')
-        if tab ~= '' and tab ~= '.reset-prompt' and tab ~= 'reset-prompt' then
+      value = function(ctx)
+        local tab = ((ctx and ctx.env and ctx.env.TAB) or ""):match("^%s*(.-)%s*$")
+        if tab ~= "" and tab ~= ".reset-prompt" and tab ~= "reset-prompt" then
           return nil
         end
-        local p = io.popen('tab -l 2> /dev/null | wc -l')
-        if not p then return nil end
-        local raw = p:read('*a') or ''
+
+        local p = io.popen("tab -l 2> /dev/null | wc -l")
+        if not p then
+          return nil
+        end
+        local raw = p:read("*a") or ""
         p:close()
-        local total = tonumber((raw:match('^%s*(.-)%s*$')) or '0') or 0
+        local total = tonumber((raw:match("^%s*(.-)%s*$")) or "0") or 0
         local n = total - 1
-        if n <= 0 then return nil end
+        if n <= 0 then
+          return nil
+        end
         return {
-          { text = '|', style = 'fg:7' },
-          { text = ' ' .. tostring(n) .. ' ', style = 'bg:237 italic fg:15' },
+          { text = "|", style = "fg:7" },
+          { text = " " .. tostring(n) .. " ", style = "bg:237 italic fg:15" },
         }
-      ]],
+      end,
     },
     {
       name = "status",
@@ -414,29 +433,35 @@ if section == nil or section == "shp" then
     {
       name = "container",
       priority = 50,
-      value = [[
-        local p = io.popen('systemd-detect-virt 2>/dev/null')
-        if not p then return nil end
-        local out = p:read('*a') or ''
+      value = function(_)
+        local p = io.popen("systemd-detect-virt 2>/dev/null")
+        if not p then
+          return nil
+        end
+        local out = p:read("*a") or ""
         p:close()
-        local virt = out:match('^%s*(.-)%s*$')
-        if virt == '' or virt == 'none' then return nil end
-        if virt == 'lxc' then
+        local virt = out:match("^%s*(.-)%s*$")
+        if virt == "" or virt == "none" then
+          return nil
+        end
+        if virt == "lxc" then
           return {
-            { text = ' ', style = 'bg:0 fg:0' },
-            { text = ' >> ', style = 'bg:5 fg:0' },
+            { text = " ", style = "bg:0 fg:0" },
+            { text = " >> ", style = "bg:5 fg:0" },
           }
         end
         return {
-          { text = ' ', style = 'bg:0 fg:0' },
-          { text = ' :: ', style = 'bg:5 fg:0' },
+          { text = " ", style = "bg:0 fg:0" },
+          { text = " :: ", style = "bg:5 fg:0" },
         }
-      ]],
+      end,
     },
     {
       name = "separator",
       priority = 20,
-      value = "return { { text = '|', style = 'fg:7' } }",
+      value = function(_)
+        return { { text = "|", style = "fg:7" } }
+      end,
     },
   })
 
