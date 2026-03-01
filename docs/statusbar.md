@@ -162,7 +162,10 @@ when = { lua  = function(ctx) return ctx.shell_running and not ctx.alt_screen en
 
 `when.lua` must be a callback (`lua = function(ctx) ... end`). String-chunk form is no longer supported.
 
-`ctx.pane(0)` returns the current focused pane state (same table as `ctx`).
+Pane lookup in statusbar callbacks:
+- `ctx.pane(0)` (or `ctx.pane(nil)`) returns the current focused pane state (same table as `ctx`)
+- `ctx.pane(<number>)` returns pane by runtime index in `ctx.panes` (1-based)
+- `ctx.pane(<uuid_string>)` returns pane by UUID
 
 Available fields in `ctx`:
 

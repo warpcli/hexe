@@ -120,7 +120,8 @@ if section == nil or section == "mux" then
     name = "spinner",
     priority = 20,
     builtin = function(ctx)
-      if (ctx.shell_running and not ctx.alt_screen) or ctx.adhoc_float then
+      local p = ctx.pane(0)
+      if p and ((p.shell_running and not p.alt_screen) or p.adhoc_float) then
         return hx.segment.builtin.spinner({
           kind = "knight_rider",
           width = 10,
@@ -140,7 +141,8 @@ if section == nil or section == "mux" then
     name = "randomdo",
     priority = 200000,
     builtin = function(ctx)
-      if (ctx.shell_running and not ctx.alt_screen) or ctx.adhoc_float then
+      local p = ctx.pane(0)
+      if p and ((p.shell_running and not p.alt_screen) or p.adhoc_float) then
         return hx.segment.builtin.randomdo({ style = "bg:0 fg:1", suffix = " " })
       end
       return nil

@@ -173,6 +173,7 @@ Prompt Lua callbacks (`value`, `builtin`, and `when.lua`) receive `ctx`:
 - `ctx.terminal_width`
 - `ctx.now_ms`
 - `ctx.env` (environment map: `ctx.env.NAME`)
+- `ctx.pane(0)` / `ctx.pane(nil)` (returns current prompt context table); prompt mode has no cross-pane lookup
 
 Example:
 

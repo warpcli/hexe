@@ -123,7 +123,12 @@ when = function(ctx)
 end
 ```
 
-`ctx` exposes the current focused pane state and `ctx.pane(0)` returns it explicitly.
+`ctx` exposes the current focused pane state.
+
+Pane lookup:
+- `ctx.pane(0)` (or `ctx.pane(nil)`) → current focused pane
+- `ctx.pane(<number>)` → pane by runtime index in `ctx.panes` (1-based)
+- `ctx.pane(<uuid_string>)` → pane by UUID
 
 ```lua
 local p = ctx.pane(0)

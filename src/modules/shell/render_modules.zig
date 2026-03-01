@@ -89,22 +89,47 @@ fn populateLuaContext(runtime: *LuaRuntime, ctx: *segment.Context) void {
     runtime.lua.pushInteger(@intCast(ctx.now_ms));
     runtime.lua.setField(-2, "now_ms");
 
-    var env_map = std.process.getEnvMap(runtime.allocator) catch {
+    var env_map_opt = std.process.getEnvMap(runtime.allocator) catch null;
+    if (env_map_opt) |*env_map| {
+        defer env_map.deinit();
+        runtime.lua.createTable(0, @intCast(env_map.count()));
+        var it = env_map.iterator();
+        while (it.next()) |entry| {
+            _ = runtime.lua.pushString(entry.key_ptr.*);
+            _ = runtime.lua.pushString(entry.value_ptr.*);
+            runtime.lua.setTable(-3);
+        }
+        runtime.lua.setField(-2, "env");
+    } else {
         runtime.lua.createTable(0, 0);
         runtime.lua.setField(-2, "env");
+    }
+
+    runtime.lua.pushValue(-1);
+    runtime.lua.setGlobal("__hexe_when_pane0");
+    runtime.lua.pushValue(-1);
+    runtime.lua.setGlobal("ctx");
+
+    const pane_api =
+        "if type(ctx)=='table' then " ++
+        "ctx.pane=function(id) if id==nil or id==0 then return __hexe_when_pane0 end return nil end; " ++
+        "ctx.status = ctx.pane(0); " ++
+        "end; " ++
+        "if type(hexe)=='table' then hexe.status=hexe.status or {}; hexe.status.pane=ctx.pane; end";
+    const pane_api_z = runtime.allocator.dupeZ(u8, pane_api) catch {
         runtime.lua.setGlobal("ctx");
         return;
     };
-    defer env_map.deinit();
-
-    runtime.lua.createTable(0, @intCast(env_map.count()));
-    var it = env_map.iterator();
-    while (it.next()) |entry| {
-        _ = runtime.lua.pushString(entry.key_ptr.*);
-        _ = runtime.lua.pushString(entry.value_ptr.*);
-        runtime.lua.setTable(-3);
-    }
-    runtime.lua.setField(-2, "env");
+    defer runtime.allocator.free(pane_api_z);
+    runtime.lua.loadString(pane_api_z) catch {
+        runtime.lua.setGlobal("ctx");
+        return;
+    };
+    runtime.lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
+        runtime.lua.pop(1);
+        runtime.lua.setGlobal("ctx");
+        return;
+    };
 
     runtime.lua.setGlobal("ctx");
 }
