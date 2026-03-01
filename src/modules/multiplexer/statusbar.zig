@@ -29,6 +29,7 @@ const RandomdoState = struct {
 };
 
 threadlocal var randomdo_state: ?std.AutoHashMap(usize, RandomdoState) = null;
+threadlocal var button_click_state: ?std.AutoHashMap(usize, u8) = null;
 const ProgressCacheEntry = struct {
     last_eval_ms: u64,
     text: [256]u8,
@@ -108,6 +109,11 @@ pub fn deinitThreadlocals() void {
         randomdo_state = null;
     }
 
+    if (button_click_state) |*state| {
+        state.deinit();
+        button_click_state = null;
+    }
+
     if (progress_text_cache) |*cache| {
         cache.deinit();
         progress_text_cache = null;
@@ -121,7 +127,7 @@ fn getProgressTextCache() *std.AutoHashMap(usize, ProgressCacheEntry) {
     return &progress_text_cache.?;
 }
 
-fn progressKey(mod: core.config.Segment) usize {
+fn progressKey(mod: *const core.config.Segment) usize {
     return (@intFromPtr(mod.name.ptr) << 1) ^ @as(usize, mod.priority) ^ @as(usize, @intFromEnum(mod.kind));
 }
 
@@ -132,11 +138,54 @@ fn getRandomdoStateMap() *std.AutoHashMap(usize, RandomdoState) {
     return &randomdo_state.?;
 }
 
-fn randomdoKey(mod: core.config.Segment) usize {
+fn getButtonClickStateMap() *std.AutoHashMap(usize, u8) {
+    if (button_click_state == null) {
+        button_click_state = std.AutoHashMap(usize, u8).init(std.heap.page_allocator);
+    }
+    return &button_click_state.?;
+}
+
+fn moduleKey(mod: *const core.Segment) usize {
+    return @intFromPtr(mod);
+}
+
+fn clickedButtonFor(mod: *const core.Segment) ?u8 {
+    if (button_click_state == null) return null;
+    return button_click_state.?.get(moduleKey(mod));
+}
+
+fn toggleClickedButton(mod: *const core.Segment, button: u8) void {
+    if (!isClickable(mod)) return;
+    if (button > 2) return;
+    const key = moduleKey(mod);
+    const map = getButtonClickStateMap();
+    if (map.get(key)) |current| {
+        if (current == button) {
+            _ = map.remove(key);
+        } else {
+            _ = map.remove(key);
+        }
+        return;
+    }
+    map.put(key, button) catch {};
+}
+
+fn clickedButtonStyle(mod: *const core.Segment, clicked_button: u8) ?shp.Style {
+    const style_str = switch (clicked_button) {
+        0 => mod.button_left_style,
+        1 => mod.button_middle_style,
+        2 => mod.button_right_style,
+        else => null,
+    } orelse return null;
+    if (style_str.len == 0) return null;
+    return shp.Style.parse(style_str);
+}
+
+fn randomdoKey(mod: *const core.config.Segment) usize {
     return (@intFromPtr(mod.outputs.ptr) << 1) ^ @as(usize, mod.priority) ^ mod.name.len;
 }
 
-fn randomdoTextFor(ctx: *shp.Context, mod: core.config.Segment, visible: bool) []const u8 {
+fn randomdoTextFor(ctx: *shp.Context, mod: *const core.config.Segment, visible: bool) []const u8 {
     const key = randomdoKey(mod);
     const map = getRandomdoStateMap();
 
@@ -368,7 +417,7 @@ fn evalLuaWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     return ok;
 }
 
-fn progressVisible(mod: core.config.Segment, ctx: *shp.Context) bool {
+fn progressVisible(mod: *const core.config.Segment, ctx: *shp.Context) bool {
     if (mod.progress_show_when) |expr| {
         return evalLuaWhen(expr, ctx, 150);
     }
@@ -994,7 +1043,7 @@ pub fn draw(
         if (left_count < 24) {
             left_modules[left_count] = .{
                 .mod = mod,
-                .width = calcModuleWidth(&ctx, &query, mod.*),
+                .width = calcModuleWidth(&ctx, &query, mod),
                 .visible = false,
             };
             left_count += 1;
@@ -1025,7 +1074,7 @@ pub fn draw(
     for (0..left_count) |i| {
         if (std.mem.eql(u8, left_modules[i].mod.name, "randomdo")) {
             const shown = left_modules[i].visible and left_modules[i].width != 0;
-            _ = randomdoTextFor(&ctx, left_modules[i].mod.*, shown);
+            _ = randomdoTextFor(&ctx, left_modules[i].mod, shown);
         }
     }
 
@@ -1036,7 +1085,7 @@ pub fn draw(
         if (right_count < 24) {
             right_modules[right_count] = .{
                 .mod = mod,
-                .width = calcModuleWidth(&ctx, &query, mod.*),
+                .width = calcModuleWidth(&ctx, &query, mod),
                 .visible = false,
             };
             right_count += 1;
@@ -1065,7 +1114,7 @@ pub fn draw(
     for (0..right_count) |i| {
         if (std.mem.eql(u8, right_modules[i].mod.name, "randomdo")) {
             const shown = right_modules[i].visible and right_modules[i].width != 0;
-            _ = randomdoTextFor(&ctx, right_modules[i].mod.*, shown);
+            _ = randomdoTextFor(&ctx, right_modules[i].mod, shown);
         }
     }
 
@@ -1074,7 +1123,7 @@ pub fn draw(
     for (0..left_count) |i| {
         if (left_modules[i].visible) {
             const hovered = isHoveredRange(left_x, left_modules[i].width, y);
-            left_x = drawModule(renderer, &ctx, &query, left_modules[i].mod.*, left_x, y, hovered);
+            left_x = drawModule(renderer, &ctx, &query, left_modules[i].mod, left_x, y, hovered);
         }
     }
 
@@ -1084,7 +1133,7 @@ pub fn draw(
     for (0..right_count) |i| {
         if (right_modules[i].visible) {
             const hovered = isHoveredRange(rx, right_modules[i].width, y);
-            rx = drawModule(renderer, &ctx, &query, right_modules[i].mod.*, rx, y, hovered);
+            rx = drawModule(renderer, &ctx, &query, right_modules[i].mod, rx, y, hovered);
         }
     }
 
@@ -1352,7 +1401,7 @@ pub fn hitTestAction(
     var left_count: usize = 0;
     for (cfg.left) |*mod| {
         if (left_count < 24) {
-            left_modules[left_count] = .{ .mod = mod, .width = calcModuleWidth(&ctx, &query, mod.*), .visible = false };
+            left_modules[left_count] = .{ .mod = mod, .width = calcModuleWidth(&ctx, &query, mod), .visible = false };
             left_count += 1;
         }
     }
@@ -1379,7 +1428,7 @@ pub fn hitTestAction(
     var right_count: usize = 0;
     for (cfg.right) |*mod| {
         if (right_count < 24) {
-            right_modules[right_count] = .{ .mod = mod, .width = calcModuleWidth(&ctx, &query, mod.*), .visible = false };
+            right_modules[right_count] = .{ .mod = mod, .width = calcModuleWidth(&ctx, &query, mod), .visible = false };
             right_count += 1;
         }
     }
@@ -1408,6 +1457,7 @@ pub fn hitTestAction(
         const start = lx;
         const end = start +| info.width;
         if (x >= start and x < end) {
+            toggleClickedButton(info.mod, button);
             return clickCommandFor(info.mod, button);
         }
         lx = end;
@@ -1420,6 +1470,7 @@ pub fn hitTestAction(
         const start = rx;
         const end = start +| info.width;
         if (x >= start and x < end) {
+            toggleClickedButton(info.mod, button);
             return clickCommandFor(info.mod, button);
         }
         rx = end;
@@ -1445,7 +1496,7 @@ fn measureTabsWidth(tab_names: []const []const u8, separator: []const u8, left_a
     return w;
 }
 
-pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment, start_x: u16, y: u16, hovered: bool) u16 {
+pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.PaneQuery, mod: *const core.config.Segment, start_x: u16, y: u16, hovered: bool) u16 {
     var x = start_x;
     _ = query;
 
@@ -1472,9 +1523,11 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
     }
     if (mod.spinner != null and !spinner_allowed) return x;
 
-    const clickable = isClickable(&mod);
-    const active = if (clickable) isButtonActive(&mod, ctx) else false;
-    const invert_style = clickable and mod.inverse_on_hover and (hovered != active);
+    const clickable = isClickable(mod);
+    const active_when = if (clickable) isButtonActive(mod, ctx) else false;
+    const clicked_button = if (clickable) clickedButtonFor(mod) else null;
+    const clicked_active = clicked_button != null;
+    const invert_style = clickable and mod.inverse_on_hover and if (clicked_active) hovered else (hovered != active_when);
 
     var command_output: []const u8 = "";
     var command_output_ready = false;
@@ -1493,12 +1546,17 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
             }
         }
         var style_final = style;
+        if (clicked_button) |btn| {
+            if (clickedButtonStyle(mod, btn)) |click_style| {
+                style_final = click_style;
+            }
+        }
         if (invert_style) {
             const fg_tmp = style_final.fg;
             style_final.fg = style_final.bg;
             style_final.bg = fg_tmp;
         }
-        ctx.module_default_style = style;
+        ctx.module_default_style = style_final;
 
         var output_segs: ?[]const shp.Segment = null;
         var output_text: []const u8 = "";
@@ -1630,7 +1688,33 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
             output_segs = ctx.renderSegment(mod.name);
         }
         if ((output_segs == null or output_segs.?.len == 0) and output_text.len == 0) continue;
-        x = drawFormatted(renderer, ctx, x, y, format_use, output_text, output_segs, style_final);
+
+        var segs_for_draw = output_segs;
+        var styled_for_button: [16]shp.Segment = undefined;
+        if (clickable) {
+            if (output_segs) |segs| {
+                const click_override = if (clicked_button) |btn| clickedButtonStyle(mod, btn) else null;
+                const n = @min(segs.len, styled_for_button.len);
+                var i: usize = 0;
+                while (i < n) : (i += 1) {
+                    var rs = if (click_override) |cs|
+                        cs
+                    else if (segs[i].style.isEmpty())
+                        style
+                    else
+                        segs[i].style;
+                    if (invert_style) {
+                        const fg_tmp = rs.fg;
+                        rs.fg = rs.bg;
+                        rs.bg = fg_tmp;
+                    }
+                    styled_for_button[i] = .{ .text = segs[i].text, .style = rs };
+                }
+                segs_for_draw = styled_for_button[0..n];
+            }
+        }
+
+        x = drawFormatted(renderer, ctx, x, y, format_use, output_text, segs_for_draw, style_final);
     }
 
     return x;
@@ -1658,7 +1742,7 @@ pub fn drawFormatted(renderer: *Renderer, ctx: *shp.Context, start_x: u16, y: u1
     return state.x;
 }
 
-pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: core.config.Segment) u16 {
+pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: *const core.config.Segment) u16 {
     _ = query;
 
     const prev_module_style = ctx.module_default_style;

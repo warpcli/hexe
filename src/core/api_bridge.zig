@@ -1584,6 +1584,63 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     }
     lua.pop(1);
 
+    _ = lua.getField(idx, "button_left_style");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        if (s.len > 0) segment.button_left_style = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+    _ = lua.getField(idx, "left_click_style");
+    if (segment.button_left_style == null and lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        if (s.len > 0) segment.button_left_style = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+    _ = lua.getField(idx, "on_left_click_style");
+    if (segment.button_left_style == null and lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        if (s.len > 0) segment.button_left_style = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+
+    _ = lua.getField(idx, "button_middle_style");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        if (s.len > 0) segment.button_middle_style = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+    _ = lua.getField(idx, "middle_click_style");
+    if (segment.button_middle_style == null and lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        if (s.len > 0) segment.button_middle_style = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+    _ = lua.getField(idx, "on_middle_click_style");
+    if (segment.button_middle_style == null and lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        if (s.len > 0) segment.button_middle_style = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+
+    _ = lua.getField(idx, "button_right_style");
+    if (lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        if (s.len > 0) segment.button_right_style = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+    _ = lua.getField(idx, "right_click_style");
+    if (segment.button_right_style == null and lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        if (s.len > 0) segment.button_right_style = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+    _ = lua.getField(idx, "on_right_click_style");
+    if (segment.button_right_style == null and lua.typeOf(-1) == .string) {
+        const s = lua.toString(-1) catch "";
+        if (s.len > 0) segment.button_right_style = allocator.dupe(u8, s) catch null;
+    }
+    lua.pop(1);
+
     _ = lua.getField(idx, "inverse_on_hover");
     if (lua.typeOf(-1) == .boolean) {
         segment.inverse_on_hover = lua.toBoolean(-1);
@@ -1653,6 +1710,63 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
         if (segment.button_active_bash == null and lua.typeOf(-1) == .string) {
             const s = lua.toString(-1) catch "";
             if (s.len > 0) segment.button_active_bash = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "left_style");
+        if (segment.button_left_style == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.button_left_style = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "left_click_style");
+        if (segment.button_left_style == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.button_left_style = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "on_left_click_style");
+        if (segment.button_left_style == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.button_left_style = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "middle_style");
+        if (segment.button_middle_style == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.button_middle_style = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "middle_click_style");
+        if (segment.button_middle_style == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.button_middle_style = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "on_middle_click_style");
+        if (segment.button_middle_style == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.button_middle_style = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+
+        _ = lua.getField(-1, "right_style");
+        if (segment.button_right_style == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.button_right_style = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "right_click_style");
+        if (segment.button_right_style == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.button_right_style = allocator.dupe(u8, s) catch null;
+        }
+        lua.pop(1);
+        _ = lua.getField(-1, "on_right_click_style");
+        if (segment.button_right_style == null and lua.typeOf(-1) == .string) {
+            const s = lua.toString(-1) catch "";
+            if (s.len > 0) segment.button_right_style = allocator.dupe(u8, s) catch null;
         }
         lua.pop(1);
 

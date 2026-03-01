@@ -111,6 +111,10 @@ pub const Segment = struct {
     on_middle_click: ?[]const u8 = null,
     // Optional statusbar button active-state condition (bash, exit 0 = active)
     button_active_bash: ?[]const u8 = null,
+    // Optional per-button active style overrides for clicked state.
+    button_left_style: ?[]const u8 = null,
+    button_middle_style: ?[]const u8 = null,
+    button_right_style: ?[]const u8 = null,
     // If true, invert button style when hovered.
     inverse_on_hover: bool = true,
     when: ?WhenDef = null,
@@ -379,6 +383,9 @@ pub const LayoutFloatDef = struct {
                 if (module.on_right_click) |cmd| allocator.free(@constCast(cmd));
                 if (module.on_middle_click) |cmd| allocator.free(@constCast(cmd));
                 if (module.button_active_bash) |cmd| allocator.free(@constCast(cmd));
+                if (module.button_left_style) |s| allocator.free(@constCast(s));
+                if (module.button_middle_style) |s| allocator.free(@constCast(s));
+                if (module.button_right_style) |s| allocator.free(@constCast(s));
                 if (module.when) |*w| {
                     var when = @constCast(w);
                     when.deinit(allocator);
@@ -1482,6 +1489,9 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
     var on_right_click = runtime.getStringAlloc(-1, "on_right_click") orelse runtime.getStringAlloc(-1, "right_click");
     var on_middle_click = runtime.getStringAlloc(-1, "on_middle_click") orelse runtime.getStringAlloc(-1, "middle_click");
     var button_active_bash = runtime.getStringAlloc(-1, "button_active_bash");
+    var button_left_style = runtime.getStringAlloc(-1, "button_left_style") orelse runtime.getStringAlloc(-1, "left_click_style") orelse runtime.getStringAlloc(-1, "on_left_click_style");
+    var button_middle_style = runtime.getStringAlloc(-1, "button_middle_style") orelse runtime.getStringAlloc(-1, "middle_click_style") orelse runtime.getStringAlloc(-1, "on_middle_click_style");
+    var button_right_style = runtime.getStringAlloc(-1, "button_right_style") orelse runtime.getStringAlloc(-1, "right_click_style") orelse runtime.getStringAlloc(-1, "on_right_click_style");
     var inverse_on_hover = runtime.getBool(-1, "inverse_on_hover") orelse true;
     if (runtime.pushTable(-1, "button")) {
         defer runtime.pop();
@@ -1489,6 +1499,9 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         if (on_right_click == null) on_right_click = runtime.getStringAlloc(-1, "on_right_click") orelse runtime.getStringAlloc(-1, "right_click");
         if (on_middle_click == null) on_middle_click = runtime.getStringAlloc(-1, "on_middle_click") orelse runtime.getStringAlloc(-1, "middle_click");
         if (button_active_bash == null) button_active_bash = runtime.getStringAlloc(-1, "active_when");
+        if (button_left_style == null) button_left_style = runtime.getStringAlloc(-1, "left_style") orelse runtime.getStringAlloc(-1, "left_click_style") orelse runtime.getStringAlloc(-1, "on_left_click_style");
+        if (button_middle_style == null) button_middle_style = runtime.getStringAlloc(-1, "middle_style") orelse runtime.getStringAlloc(-1, "middle_click_style") orelse runtime.getStringAlloc(-1, "on_middle_click_style");
+        if (button_right_style == null) button_right_style = runtime.getStringAlloc(-1, "right_style") orelse runtime.getStringAlloc(-1, "right_click_style") orelse runtime.getStringAlloc(-1, "on_right_click_style");
         if (runtime.getBool(-1, "inverse_on_hover")) |v| inverse_on_hover = v;
         if (builtin_name == null) builtin_name = runtime.getStringAlloc(-1, "builtin");
         if (builtin_name == null and runtime.pushTable(-1, "source")) {
@@ -1559,6 +1572,9 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         .on_right_click = on_right_click,
         .on_middle_click = on_middle_click,
         .button_active_bash = button_active_bash,
+        .button_left_style = button_left_style,
+        .button_middle_style = button_middle_style,
+        .button_right_style = button_right_style,
         .inverse_on_hover = inverse_on_hover,
         .when = null,
         .spinner = parseSpinner(runtime, allocator),

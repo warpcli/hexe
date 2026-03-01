@@ -52,6 +52,9 @@ You can also provide arrays with `left`, `center`, `right` using your preferred 
     on_left_click = "hexe record toggle --scope pod --out /tmp/pod.cast",
     on_right_click = "hexe record stop --scope pod --out /tmp/pod.cast",
     active_when = "test \"$(hexe record status --scope pod 2>/dev/null)\" = 1",
+    left_style = "bg:2 fg:0",
+    middle_style = "bg:3 fg:0",
+    right_style = "bg:1 fg:0",
     inverse_on_hover = true,
   },
 
@@ -92,6 +95,14 @@ Unlike prompt, statusbar is not builtin-allowlisted: statusbar can use `value`, 
 Clickable segments are treated as buttons and automatically render with reverse colors while hovered.
 
 If `button.active_when` is set and returns success, the button stays reversed while active; on hover it flips back (opposite visual) to indicate a deactivate click.
+
+Button click-state behavior:
+
+- First click (left/middle/right) sets a clicked state for that button.
+- Clicked state style can be set per button via `left_style`, `middle_style`, and `right_style` (or top-level aliases `button_left_style`, `button_middle_style`, `button_right_style`).
+- When hovered while clicked, style is inverted if `inverse_on_hover = true`.
+- Clicking the same button again unclicks (toggle off).
+- If already clicked with one button, clicking a different button unclicks (does not switch to the other clicked state).
 
 When using Lua config helpers, `hx.record.status({ scope = "pod" })` now returns a table like `{ active = true|false, scope = "pod", pid = ..., out = "...", started_ms = ... }`.
 
