@@ -142,9 +142,9 @@ Style behavior:
 - If descriptor `style` is provided, it is authoritative for rendered builtin text.
 - This is useful when you want fixed colors (for example black-on-red git segments).
 
-## Conditions (`when`) [deprecated forms]
+## Conditions (`when`)
 
-The Lua-first prompt model usually encodes visibility directly in `value`/`builtin` functions (return `nil` to hide). `when` remains available for migration, but function forms are preferred.
+The Lua-first prompt model usually encodes visibility directly in `value`/`builtin` functions (return `nil` to hide). `when` is still available and uses callback form for `lua` conditions.
 
 Prompt supports these condition forms:
 
@@ -159,7 +159,7 @@ when = { any = { "token_a", { lua = function(_) return true end } } }
 
 `when.lua` must return boolean.
 
-Canonical style is `lua = function(ctx) ... end`. String-chunk form (`lua = "return ..."`) is deprecated and will be removed.
+`when.lua` must use callback form (`lua = function(ctx) ... end`). String-chunk form is no longer supported.
 
 ## Lua Context (`ctx`)
 

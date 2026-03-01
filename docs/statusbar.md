@@ -160,8 +160,7 @@ when = { lua  = function(ctx) return ctx.shell_running and not ctx.alt_screen en
 
 `when.lua` is evaluated with a statusbar `ctx` table.
 
-Function form is the canonical API (`lua = function(ctx) ... end`).
-String-chunk form (`lua = "return ..."`) is still accepted for migration but is deprecated.
+`when.lua` must be a callback (`lua = function(ctx) ... end`). String-chunk form is no longer supported.
 
 Available fields in `ctx`:
 
@@ -232,7 +231,7 @@ builtin = function(_)
 end
 ```
 
-Use `hexe.segment.builtin` (or `hx.segment.builtin`). The typo alias `hexe.segment.buildin` is deprecated and will be removed.
+Use `hexe.segment.builtin` (or `hx.segment.builtin`). The typo alias `hexe.segment.buildin` has been removed.
 
 ## Width and Priority
 

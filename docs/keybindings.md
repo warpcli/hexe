@@ -130,7 +130,7 @@ when = { all = { "focus_split", "fg:nvim" } }
 
 ```lua
 when = { bash = "[[ -n $SSH_CONNECTION ]]" }
-when = { lua  = "return ctx.last_status ~= 0" }
+when = { lua  = function(ctx) return ctx.last_status ~= 0 end }
 when = { env  = "MY_VAR" }       -- set and non-empty
 when = { env_not = "MY_VAR" }    -- not set or empty
 ```

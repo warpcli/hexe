@@ -771,10 +771,6 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "title");
     lua.setField(-2, "builtin");
 
-    // Backward-compatible alias for typo-prone usage: hexe.segment.buildin
-    _ = lua.getField(-1, "builtin");
-    lua.setField(-2, "buildin");
-
     lua.setField(-2, "segment");
 
     // hexe.plugin = {}
