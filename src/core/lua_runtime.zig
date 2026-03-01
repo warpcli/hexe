@@ -702,6 +702,61 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "spinner");
     lua.pushFunction(hexe_segment_title);
     lua.setField(-2, "title");
+
+    // hexe.segment.builtin.<name>({ ...settings... }) -> descriptor table
+    lua.createTable(0, 23);
+    lua.pushFunction(hexe_segment_builtin_tabs);
+    lua.setField(-2, "tabs");
+    lua.pushFunction(hexe_segment_builtin_session);
+    lua.setField(-2, "session");
+    lua.pushFunction(hexe_segment_builtin_directory);
+    lua.setField(-2, "directory");
+    lua.pushFunction(hexe_segment_builtin_git_branch);
+    lua.setField(-2, "git_branch");
+    lua.pushFunction(hexe_segment_builtin_git_status);
+    lua.setField(-2, "git_status");
+    lua.pushFunction(hexe_segment_builtin_jobs);
+    lua.setField(-2, "jobs");
+    lua.pushFunction(hexe_segment_builtin_duration);
+    lua.setField(-2, "duration");
+    lua.pushFunction(hexe_segment_builtin_status);
+    lua.setField(-2, "status");
+    lua.pushFunction(hexe_segment_builtin_sudo);
+    lua.setField(-2, "sudo");
+    lua.pushFunction(hexe_segment_builtin_pod_name);
+    lua.setField(-2, "pod_name");
+    lua.pushFunction(hexe_segment_builtin_hostname);
+    lua.setField(-2, "hostname");
+    lua.pushFunction(hexe_segment_builtin_username);
+    lua.setField(-2, "username");
+    lua.pushFunction(hexe_segment_builtin_time);
+    lua.setField(-2, "time");
+    lua.pushFunction(hexe_segment_builtin_cpu);
+    lua.setField(-2, "cpu");
+    lua.pushFunction(hexe_segment_builtin_memory);
+    lua.setField(-2, "memory");
+    lua.pushFunction(hexe_segment_builtin_mem);
+    lua.setField(-2, "mem");
+    lua.pushFunction(hexe_segment_builtin_netspeed);
+    lua.setField(-2, "netspeed");
+    lua.pushFunction(hexe_segment_builtin_battery);
+    lua.setField(-2, "battery");
+    lua.pushFunction(hexe_segment_builtin_uptime);
+    lua.setField(-2, "uptime");
+    lua.pushFunction(hexe_segment_builtin_last_command);
+    lua.setField(-2, "last_command");
+    lua.pushFunction(hexe_segment_builtin_randomdo);
+    lua.setField(-2, "randomdo");
+    lua.pushFunction(hexe_segment_builtin_spinner);
+    lua.setField(-2, "spinner");
+    lua.pushFunction(hexe_segment_builtin_title);
+    lua.setField(-2, "title");
+    lua.setField(-2, "builtin");
+
+    // Backward-compatible alias for typo-prone usage: hexe.segment.buildin
+    _ = lua.getField(-1, "builtin");
+    lua.setField(-2, "buildin");
+
     lua.setField(-2, "segment");
 
     // hexe.plugin = {}
@@ -719,6 +774,8 @@ fn injectHexeModule(lua: *Lua) !void {
     // Also expose as global for callback runtime convenience.
     lua.pushValue(-1); // duplicate
     lua.setGlobal("hexe");
+    lua.pushValue(-1); // duplicate
+    lua.setGlobal("hx");
 }
 
 fn hexeLoader(state: ?*LuaState) callconv(.c) c_int {
@@ -735,6 +792,42 @@ fn pushSegmentMarker(lua: *Lua, name: []const u8) c_int {
     };
     defer std.heap.page_allocator.free(marker);
     _ = lua.pushString(marker);
+    return 1;
+}
+
+fn pushBuiltinDescriptor(lua: *Lua, name: []const u8) c_int {
+    lua.createTable(0, 12);
+    _ = lua.pushString(name);
+    lua.setField(-2, "name");
+
+    if (lua.typeOf(1) != .table) return 1;
+
+    const keys = [_][:0]const u8{
+        "style",
+        "prefix",
+        "suffix",
+        "kind",
+        "width",
+        "step",
+        "step_ms",
+        "hold",
+        "hold_frames",
+        "colors",
+        "bg",
+        "bg_color",
+        "placeholder",
+        "placeholder_color",
+    };
+
+    for (keys) |key| {
+        _ = lua.getField(1, key);
+        if (lua.typeOf(-1) != .nil) {
+            lua.setField(-2, key);
+        } else {
+            lua.pop(1);
+        }
+    }
+
     return 1;
 }
 
@@ -829,6 +922,99 @@ fn hexe_segment_spinner(state: ?*LuaState) callconv(.c) c_int {
 fn hexe_segment_title(state: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(state orelse return 0);
     return pushSegmentMarker(lua, "title");
+}
+
+fn hexe_segment_builtin_tabs(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "tabs");
+}
+fn hexe_segment_builtin_session(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "session");
+}
+fn hexe_segment_builtin_directory(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "directory");
+}
+fn hexe_segment_builtin_git_branch(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "git_branch");
+}
+fn hexe_segment_builtin_git_status(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "git_status");
+}
+fn hexe_segment_builtin_jobs(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "jobs");
+}
+fn hexe_segment_builtin_duration(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "duration");
+}
+fn hexe_segment_builtin_status(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "status");
+}
+fn hexe_segment_builtin_sudo(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "sudo");
+}
+fn hexe_segment_builtin_pod_name(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "pod_name");
+}
+fn hexe_segment_builtin_hostname(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "hostname");
+}
+fn hexe_segment_builtin_username(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "username");
+}
+fn hexe_segment_builtin_time(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "time");
+}
+fn hexe_segment_builtin_cpu(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "cpu");
+}
+fn hexe_segment_builtin_memory(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "memory");
+}
+fn hexe_segment_builtin_mem(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "mem");
+}
+fn hexe_segment_builtin_netspeed(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "netspeed");
+}
+fn hexe_segment_builtin_battery(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "battery");
+}
+fn hexe_segment_builtin_uptime(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "uptime");
+}
+fn hexe_segment_builtin_last_command(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "last_command");
+}
+fn hexe_segment_builtin_randomdo(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "randomdo");
+}
+fn hexe_segment_builtin_spinner(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "spinner");
+}
+fn hexe_segment_builtin_title(state: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(state orelse return 0);
+    return pushBuiltinDescriptor(lua, "title");
 }
 
 fn hexe_color_fg(state: ?*LuaState) callconv(.c) c_int {

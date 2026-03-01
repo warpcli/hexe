@@ -126,6 +126,17 @@ Return behavior:
 - `style`: descriptor style override
 - `prefix` / `suffix`: wrapper text around builtin output
 
+You can build descriptors with helpers:
+
+```lua
+builtin = function(_)
+  return hexe.segment.builtin.directory({
+    style = "bg:237 fg:15",
+    suffix = " ",
+  })
+end
+```
+
 Style behavior:
 
 - If descriptor `style` is provided, it is authoritative for rendered builtin text.

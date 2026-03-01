@@ -216,6 +216,19 @@ Builtin descriptor behavior:
 - For spinner builtin descriptors, optional fields `kind`, `width`, `step`/`step_ms`, `hold`/`hold_frames`, `colors`, `bg`, and `placeholder` are supported.
 - Descriptor style is authoritative when provided (it does not merge with builtin segment style).
 
+Convenience constructor:
+
+```lua
+builtin = function(_)
+  return hexe.segment.builtin.git_status({
+    style = "bg:1 fg:0",
+    suffix = " ",
+  })
+end
+```
+
+`hexe.segment.buildin` is available as an alias for compatibility with existing configs.
+
 ## Width and Priority
 
 Status bar layout is three-zone:
