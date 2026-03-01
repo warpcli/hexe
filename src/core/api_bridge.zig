@@ -13,6 +13,7 @@ const c = @cImport({
 
 /// Registry key for storing ConfigBuilder pointer
 const BUILDER_REGISTRY_KEY = "_hexe_config_builder";
+const CALLBACK_TABLE_KEY = "__hexe_cb_table";
 
 /// Store ConfigBuilder pointer in Lua registry
 pub fn storeConfigBuilder(lua: *Lua, builder: *ConfigBuilder) !void {
@@ -176,6 +177,41 @@ fn parseLuaChunkValue(lua: *Lua, allocator: std.mem.Allocator, require_boolean: 
         },
         else => null,
     };
+}
+
+fn registerPromptValueCallback(lua: *Lua) ?i64 {
+    if (lua.typeOf(-1) != .function) return null;
+
+    _ = lua.getField(zlua.registry_index, CALLBACK_TABLE_KEY);
+    if (lua.typeOf(-1) == .nil) {
+        lua.pop(1);
+        lua.createTable(0, 32);
+        lua.pushValue(-1);
+        lua.setField(zlua.registry_index, CALLBACK_TABLE_KEY);
+        lua.pushValue(-1);
+        lua.setGlobal(CALLBACK_TABLE_KEY);
+    } else if (lua.typeOf(-1) != .table) {
+        lua.pop(1);
+        return null;
+    }
+
+    const next_id: i64 = @intCast(lua.rawLen(-1) + 1);
+    // Stack: ..., function, callback_table
+    lua.pushValue(-2);
+    lua.rawSetIndex(-2, @intCast(next_id));
+    lua.pop(1);
+    return next_id;
+}
+
+fn parsePromptValueChunkValue(lua: *Lua, allocator: std.mem.Allocator) ?[]const u8 {
+    if (registerPromptValueCallback(lua)) |callback_id| {
+        return std.fmt.allocPrint(
+            allocator,
+            "local __t={s}; if not __t then return nil end; local __f=__t[{d}]; if not __f then return nil end; return __f(ctx)",
+            .{ CALLBACK_TABLE_KEY, callback_id },
+        ) catch null;
+    }
+    return parseLuaChunkValue(lua, allocator, false);
 }
 
 /// Result of parsing a key array
@@ -2627,20 +2663,20 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     _ = lua.getField(idx, "value");
     if (lua.typeOf(-1) == .table) {
         _ = lua.getField(-1, "lua");
-        if (parseLuaChunkValue(lua, allocator, false)) |code| {
+        if (parsePromptValueChunkValue(lua, allocator)) |code| {
             defer allocator.free(code);
             command = allocator.dupe(u8, code) catch null;
         }
         lua.pop(1);
         _ = lua.getField(-1, "fn");
         if (command == null) {
-            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+            if (parsePromptValueChunkValue(lua, allocator)) |code| {
                 defer allocator.free(code);
                 command = allocator.dupe(u8, code) catch null;
             }
         }
         lua.pop(1);
-    } else if (parseLuaChunkValue(lua, allocator, false)) |code| {
+    } else if (parsePromptValueChunkValue(lua, allocator)) |code| {
         defer allocator.free(code);
         command = allocator.dupe(u8, code) catch null;
     }
@@ -2748,7 +2784,7 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
         lua.pop(1);
         _ = lua.getField(-1, "value");
         if (command == null) {
-            if (parseLuaChunkValue(lua, allocator, false)) |code| {
+            if (parsePromptValueChunkValue(lua, allocator)) |code| {
                 defer allocator.free(code);
                 command = allocator.dupe(u8, code) catch null;
             }

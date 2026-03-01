@@ -15,6 +15,7 @@ const ShpConfig = struct {
     left: []const core.Segment,
     right: []const core.Segment,
     has_config: bool,
+    lua_runtime: ?*LuaRuntime = null,
 };
 
 /// Arguments for shp commands
@@ -200,7 +201,7 @@ fn renderPrompt(allocator: std.mem.Allocator, args: []const []const u8) !void {
     if (config.has_config) {
         const modules = if (is_right) config.right else config.left;
         if (modules.len > 0) {
-            try render_modules.renderModulesSimple(allocator, &ctx, modules, stdout, is_zsh);
+            try render_modules.renderModulesSimple(allocator, config.lua_runtime, &ctx, modules, stdout, is_zsh);
             return;
         }
     }
@@ -210,12 +211,13 @@ fn renderPrompt(allocator: std.mem.Allocator, args: []const []const u8) !void {
 }
 
 fn deinitShpConfig(config: *ShpConfig, allocator: std.mem.Allocator) void {
-    if (!config.has_config) return;
-    deinitModules(config.left, allocator);
-    deinitModules(config.right, allocator);
-    if (config.left.len > 0) allocator.free(config.left);
-    if (config.right.len > 0) allocator.free(config.right);
-    config.* = .{ .left = &[_]core.Segment{}, .right = &[_]core.Segment{}, .has_config = false };
+    if (config.has_config) {
+        deinitModules(config.left, allocator);
+        deinitModules(config.right, allocator);
+        if (config.left.len > 0) allocator.free(config.left);
+        if (config.right.len > 0) allocator.free(config.right);
+    }
+    config.* = .{ .left = &[_]core.Segment{}, .right = &[_]core.Segment{}, .has_config = false, .lua_runtime = null };
 }
 
 fn deinitModules(mods: []const core.Segment, allocator: std.mem.Allocator) void {
@@ -350,12 +352,19 @@ fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
     const path = lua_runtime.getConfigPath(allocator, "init.lua") catch return config;
     defer allocator.free(path);
 
-    var runtime = LuaRuntime.init(allocator) catch {
+    const runtime_ptr = allocator.create(LuaRuntime) catch {
+        const stderr = std.fs.File.stderr();
+        stderr.writeAll("shp: failed to allocate Lua runtime\n") catch {};
+        return config;
+    };
+    runtime_ptr.* = LuaRuntime.init(allocator) catch {
+        allocator.destroy(runtime_ptr);
         const stderr = std.fs.File.stderr();
         stderr.writeAll("shp: failed to initialize Lua\n") catch {};
         return config;
     };
-    defer runtime.deinit();
+    const runtime = runtime_ptr;
+    config.lua_runtime = runtime_ptr;
 
     runtime.setHexeSection("shp");
 
@@ -418,8 +427,8 @@ fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
             if (config.left.len > 0) allocator.free(config.left);
             if (config.right.len > 0) allocator.free(config.right);
 
-            config.left = parseModules(&runtime, allocator, "left");
-            config.right = parseModules(&runtime, allocator, "right");
+            config.left = parseModules(runtime, allocator, "left");
+            config.right = parseModules(runtime, allocator, "right");
             runtime.pop();
         }
         runtime.pop();
