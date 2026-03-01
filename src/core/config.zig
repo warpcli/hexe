@@ -47,7 +47,7 @@ pub const SpinnerDef = struct {
 ///   when = { any = { "a", "b" } }               -- OR
 ///   when = { any = { { all = { "a", "b" } }, "c" } }  -- OR of ANDs
 ///   when = { bash = "..." }                     -- bash script
-///   when = { lua = "..." }                      -- lua script
+///   when = { lua = function(ctx) return ... end } -- lua callback
 pub const WhenDef = struct {
     /// AND of tokens (flat list, no namespaces needed)
     all: ?[][]const u8 = null,
@@ -1718,7 +1718,7 @@ fn parseSpinner(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?SpinnerDef 
 /// - when = { any = { "a", "b" } }                    -- OR of tokens (each as single-token all)
 /// - when = { any = { { all = {"a","b"} }, "c" } }    -- OR of conditions
 /// - when = { bash = "..." }                          -- bash script
-/// - when = { lua = "..." }                           -- lua function
+/// - when = { lua = function(ctx) return ... end }     -- lua callback
 fn parseWhenTable(runtime: *LuaRuntime, allocator: std.mem.Allocator, allow_hexe: bool) ?WhenDef {
     _ = allow_hexe; // No longer used; tokens are namespace-agnostic
     const ty = runtime.fieldType(-1, "when");
