@@ -1006,7 +1006,10 @@ pub export fn hexe_mux_tabs_add_segment(L: ?*LuaState) callconv(.c) c_int {
     };
 
     // Parse full segment
-    const segment = parseSegment(lua, 2, mux.allocator) orelse {
+    const path = std.fmt.allocPrint(mux.allocator, "mux.tabs.{s}[+1]", .{position}) catch "mux.tabs.segment";
+    defer if (!std.mem.eql(u8, path, "mux.tabs.segment")) mux.allocator.free(path);
+
+    const segment = parseSegmentAtPath(lua, 2, mux.allocator, path) orelse {
         _ = lua.pushString("tabs.add_segment: failed to parse segment");
         lua.raiseError();
     };
@@ -1124,8 +1127,8 @@ pub export fn hexe_mux_splits_setup(L: ?*LuaState) callconv(.c) c_int {
 
 // ===== SES API Functions =====
 
-/// Parse a Segment from a Lua table at idx
-fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segment {
+/// Parse a Segment from a Lua table at idx with path-aware errors.
+fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_path: []const u8) ?config.Segment {
     if (lua.typeOf(idx) != .table) return null;
 
     // Get name (required)
@@ -1157,7 +1160,9 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     // outputs is removed from segment schema.
     _ = lua.getField(idx, "outputs");
     if (lua.typeOf(-1) != .nil) {
-        _ = lua.pushString("segment field 'outputs' is removed; style must be returned from 'value'");
+        const msg = std.fmt.allocPrint(allocator, "{s}.outputs is removed; style must be returned from '{s}.value'", .{ base_path, base_path }) catch "segment outputs field is removed";
+        defer if (!std.mem.eql(u8, msg, "segment outputs field is removed")) allocator.free(msg);
+        _ = lua.pushString(msg);
         lua.raiseError();
     }
     lua.pop(1);
@@ -1165,24 +1170,32 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     // Parse value callback (required for value/progress/button segments).
     var value_command: ?[]const u8 = null;
     _ = lua.getField(idx, "value");
-    if (parsePromptCallbackField(lua, allocator, "segment.value")) |code| {
-        defer allocator.free(code);
-        value_command = allocator.dupe(u8, code) catch null;
+    if (callbackFieldPathAlloc(allocator, base_path, "value")) |field_path| {
+        defer allocator.free(field_path);
+        if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
+            defer allocator.free(code);
+            value_command = allocator.dupe(u8, code) catch null;
+        }
     }
     lua.pop(1);
 
     // Parse builtin callback.
     var builtin_command: ?[]const u8 = null;
     _ = lua.getField(idx, "builtin");
-    if (parsePromptCallbackField(lua, allocator, "segment.builtin")) |code| {
-        defer allocator.free(code);
-        builtin_command = allocator.dupe(u8, code) catch null;
+    if (callbackFieldPathAlloc(allocator, base_path, "builtin")) |field_path| {
+        defer allocator.free(field_path);
+        if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
+            defer allocator.free(code);
+            builtin_command = allocator.dupe(u8, code) catch null;
+        }
     }
     lua.pop(1);
 
     _ = lua.getField(idx, "source");
     if (lua.typeOf(-1) != .nil) {
-        _ = lua.pushString("segment field 'source' was removed; use 'value' and 'builtin' callbacks");
+        const msg = std.fmt.allocPrint(allocator, "{s}.source is removed; use '{s}.value' and '{s}.builtin' callbacks", .{ base_path, base_path, base_path }) catch "segment source field is removed";
+        defer if (!std.mem.eql(u8, msg, "segment source field is removed")) allocator.free(msg);
+        _ = lua.pushString(msg);
         lua.raiseError();
     }
     lua.pop(1);
@@ -1196,9 +1209,12 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     lua.pop(1);
 
     _ = lua.getField(idx, "show_when");
-    if (parsePromptCallbackField(lua, allocator, "segment.show_when")) |code| {
-        defer allocator.free(code);
-        segment.progress_show_when = allocator.dupe(u8, code) catch null;
+    if (callbackFieldPathAlloc(allocator, base_path, "show_when")) |field_path| {
+        defer allocator.free(field_path);
+        if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
+            defer allocator.free(code);
+            segment.progress_show_when = allocator.dupe(u8, code) catch null;
+        }
     }
     lua.pop(1);
 
@@ -1212,27 +1228,36 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
         lua.pop(1);
 
         _ = lua.getField(-1, "show_when");
-        if (parsePromptCallbackField(lua, allocator, "segment.progress.show_when")) |code| {
-            defer allocator.free(code);
-            if (segment.progress_show_when) |old| allocator.free(old);
-            segment.progress_show_when = allocator.dupe(u8, code) catch segment.progress_show_when;
+        if (callbackFieldPathAlloc(allocator, base_path, "progress.show_when")) |field_path| {
+            defer allocator.free(field_path);
+            if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
+                defer allocator.free(code);
+                if (segment.progress_show_when) |old| allocator.free(old);
+                segment.progress_show_when = allocator.dupe(u8, code) catch segment.progress_show_when;
+            }
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "builtin");
         if (builtin_command == null) {
-            if (parsePromptCallbackField(lua, allocator, "segment.progress.builtin")) |code| {
-                defer allocator.free(code);
-                builtin_command = allocator.dupe(u8, code) catch null;
+            if (callbackFieldPathAlloc(allocator, base_path, "progress.builtin")) |field_path| {
+                defer allocator.free(field_path);
+                if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
+                    defer allocator.free(code);
+                    builtin_command = allocator.dupe(u8, code) catch null;
+                }
             }
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "value");
         if (value_command == null) {
-            if (parsePromptCallbackField(lua, allocator, "segment.progress.value")) |code| {
-                defer allocator.free(code);
-                value_command = allocator.dupe(u8, code) catch null;
+            if (callbackFieldPathAlloc(allocator, base_path, "progress.value")) |field_path| {
+                defer allocator.free(field_path);
+                if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
+                    defer allocator.free(code);
+                    value_command = allocator.dupe(u8, code) catch null;
+                }
             }
         }
         lua.pop(1);
@@ -1406,18 +1431,24 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
     if (lua.typeOf(-1) == .table) {
         _ = lua.getField(-1, "builtin");
         if (builtin_command == null) {
-            if (parsePromptCallbackField(lua, allocator, "segment.button.builtin")) |code| {
-                defer allocator.free(code);
-                builtin_command = allocator.dupe(u8, code) catch null;
+            if (callbackFieldPathAlloc(allocator, base_path, "button.builtin")) |field_path| {
+                defer allocator.free(field_path);
+                if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
+                    defer allocator.free(code);
+                    builtin_command = allocator.dupe(u8, code) catch null;
+                }
             }
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "value");
         if (value_command == null) {
-            if (parsePromptCallbackField(lua, allocator, "segment.button.value")) |code| {
-                defer allocator.free(code);
-                value_command = allocator.dupe(u8, code) catch null;
+            if (callbackFieldPathAlloc(allocator, base_path, "button.value")) |field_path| {
+                defer allocator.free(field_path);
+                if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
+                    defer allocator.free(code);
+                    value_command = allocator.dupe(u8, code) catch null;
+                }
             }
         }
         lua.pop(1);
@@ -1661,13 +1692,18 @@ fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segme
             .button => "button segment requires 'value' or 'builtin'",
             .progress => "progress segment requires 'value' or 'builtin'",
         };
-        const owned_msg = std.fmt.allocPrint(allocator, "segment '{s}': {s}", .{ segment.name, msg }) catch null;
+        const owned_msg = std.fmt.allocPrint(allocator, "{s}: {s}", .{ base_path, msg }) catch null;
         defer if (owned_msg) |m| allocator.free(m);
         _ = lua.pushString(owned_msg orelse msg);
         lua.raiseError();
     }
 
     return segment;
+}
+
+/// Backward-compatible parse entry with generic base path.
+fn parseSegment(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.Segment {
+    return parseSegmentAtPath(lua, idx, allocator, "segment");
 }
 
 /// Parse a LayoutFloatDef from a Lua table at idx
