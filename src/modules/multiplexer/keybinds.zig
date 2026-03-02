@@ -19,6 +19,7 @@ const PaneQuery = core.PaneQuery;
 const FocusContext = @import("state.zig").FocusContext;
 const LuaRuntime = core.LuaRuntime;
 const CALLBACK_REF_PREFIX = "__hexe_cb_ref:";
+threadlocal var last_focused_pane_uuid: ?[32]u8 = null;
 
 const LuaTraceMode = enum { off, all, slow };
 
@@ -415,6 +416,12 @@ fn populateWhenLuaContext(state: *State, rt: *LuaRuntime, query: *const PaneQuer
     rt.lua.setGlobal("__hexe_when_pane0");
 
     const focused_uuid = state.getCurrentFocusedUuid();
+    const previous_focused_uuid = last_focused_pane_uuid;
+    if (focused_uuid) |fu| {
+        if (previous_focused_uuid == null or !std.mem.eql(u8, &previous_focused_uuid.?, &fu)) {
+            last_focused_pane_uuid = fu;
+        }
+    }
     var pane_index: usize = 1;
 
     for (state.tabs.items, 0..) |*tab, tab_idx| {
@@ -454,6 +461,14 @@ fn populateWhenLuaContext(state: *State, rt: *LuaRuntime, query: *const PaneQuer
     rt.lua.pushValue(-1);
     rt.lua.setGlobal("__hexe_panes_by_tab_focus");
 
+    if (previous_focused_uuid) |pu| {
+        _ = rt.lua.pushString(pu[0..]);
+        rt.lua.setGlobal("__hexe_last_pane_uuid");
+    } else {
+        rt.lua.pushNil();
+        rt.lua.setGlobal("__hexe_last_pane_uuid");
+    }
+
     rt.lua.pop(3);
 
     // Expose pragmatic pane API: ctx.pane(0)
@@ -468,6 +483,7 @@ fn populateWhenLuaContext(state: *State, rt: *LuaRuntime, query: *const PaneQuer
         "if t=='number' then return __hexe_panes_by_index[id] end; " ++
         "if t=='string' then " ++
         "if id=='focused' or id=='current' then return __hexe_when_pane0 end; " ++
+        "if id=='last' and __hexe_last_pane_uuid then return __hexe_panes_by_uuid[__hexe_last_pane_uuid] end; " ++
         "local n=string.match(id,'^tab:(%d+)/focus$'); " ++
         "if n then return __hexe_panes_by_tab_focus[tonumber(n)] end; " ++
         "return __hexe_panes_by_uuid[id] end; " ++

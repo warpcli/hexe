@@ -160,6 +160,7 @@ Pane lookup in statusbar callbacks:
 - `ctx.pane(<number>)` returns pane by runtime index in `ctx.panes` (1-based)
 - `ctx.pane(<uuid_string>)` returns pane by UUID
 - `ctx.pane("focused")` / `ctx.pane("current")` returns the current focused pane
+- `ctx.pane("last")` returns the previously focused pane (if available)
 - `ctx.pane("tab:<n>/focus")` returns focused split pane for tab `n` (1-based)
 - `ctx.cache.get(key)` / `ctx.cache.set(key, value, ttl_ms)` / `ctx.cache.del(key)` for callback caching
 

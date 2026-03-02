@@ -130,6 +130,7 @@ Pane lookup:
 - `ctx.pane(<number>)` → pane by runtime index in `ctx.panes` (1-based)
 - `ctx.pane(<uuid_string>)` → pane by UUID
 - `ctx.pane("focused")` / `ctx.pane("current")` → current focused pane
+- `ctx.pane("last")` → previously focused pane (if available)
 - `ctx.pane("tab:<n>/focus")` → focused split pane for tab `n` (1-based)
 - `ctx.cache.get(key)` / `ctx.cache.set(key, value, ttl_ms)` / `ctx.cache.del(key)` for callback caching
 
