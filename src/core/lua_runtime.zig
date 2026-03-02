@@ -35,6 +35,7 @@ const hexe_record_start = api_bridge.hexe_record_start;
 const hexe_record_stop = api_bridge.hexe_record_stop;
 const hexe_record_toggle = api_bridge.hexe_record_toggle;
 const hexe_record_status = api_bridge.hexe_record_status;
+const hexe_api_exec = @import("lua_api_exec.zig").hexe_api_exec;
 const CALLBACK_TABLE_KEY = "__hexe_cb_table";
 
 fn hexe_autocmd_on(L: ?*LuaState) callconv(.c) c_int {
@@ -746,8 +747,10 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "on");
     lua.setField(-2, "autocmd");
 
-    // hexe.api = {}
-    lua.createTable(0, 0);
+    // hexe.api = { exec = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(hexe_api_exec);
+    lua.setField(-2, "exec");
     lua.setField(-2, "api");
 
     // hexe.color = { fg = fn, bg = fn }

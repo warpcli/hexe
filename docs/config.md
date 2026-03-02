@@ -227,7 +227,27 @@ when = function(ctx)
   local p = ctx.pane("focused")
   return p and p.focus_split
 end
+
+local r = hx.api.exec("git rev-parse --abbrev-ref HEAD", { timeout = 80, cache = 500 })
+if r.status == 0 and r.output ~= "" then
+  -- r.output, r.cached, r.timeout, r.elapsed_ms
+end
 ```
+
+`hx.api.exec(cmd, opts?)` runs a shell command (`/bin/bash -lc`) and returns:
+
+- `output` (stdout fallback to stderr)
+- `status` (exit code)
+- `cached` (whether value came from cache)
+- `timeout` (`true` if timeout was hit)
+- `elapsed_ms` (execution time)
+
+Options:
+
+- `timeout` / `timeout_ms` (default `80`)
+- `cache` / `cache_ms` (default `500`)
+
+Option values must be numbers (invalid types raise a Lua config/runtime error).
 
 Scope rules:
 
