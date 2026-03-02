@@ -2318,8 +2318,12 @@ fn parseOutputDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bui
     };
 }
 
+fn callbackFieldPathAlloc(allocator: std.mem.Allocator, base_path: []const u8, field_name: []const u8) ?[]u8 {
+    return std.fmt.allocPrint(allocator, "{s}.{s}", .{ base_path, field_name }) catch null;
+}
+
 /// Helper: Parse segment definition from a table
-fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_builder.ShpConfigBuilder.SegmentDef {
+fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_path: []const u8) ?config_builder.ShpConfigBuilder.SegmentDef {
     if (lua.typeOf(idx) != .table) return null;
 
     var name: ?[]const u8 = null;
@@ -2338,7 +2342,12 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     }
     lua.pop(1);
 
-    if (name == null) return null;
+    if (name == null) {
+        const msg = std.fmt.allocPrint(allocator, "{s}.name is required", .{base_path}) catch "segment name is required";
+        defer if (!std.mem.eql(u8, msg, "segment name is required")) allocator.free(msg);
+        _ = lua.pushString(msg);
+        lua.raiseError();
+    }
 
     // Parse priority (optional)
     _ = lua.getField(idx, "priority");
@@ -2350,23 +2359,31 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     // outputs is removed from segment schema.
     _ = lua.getField(idx, "outputs");
     if (lua.typeOf(-1) != .nil) {
-        _ = lua.pushString("segment field 'outputs' is removed; style must be returned from 'value'");
+        const msg = std.fmt.allocPrint(allocator, "{s}.outputs is removed; style must be returned from '{s}.value'", .{ base_path, base_path }) catch "segment outputs field is removed";
+        defer if (!std.mem.eql(u8, msg, "segment outputs field is removed")) allocator.free(msg);
+        _ = lua.pushString(msg);
         lua.raiseError();
     }
     lua.pop(1);
 
     // Parse value callback.
     _ = lua.getField(idx, "value");
-    if (parsePromptCallbackField(lua, allocator, "prompt.segment.value")) |code| {
-        defer allocator.free(code);
-        command = allocator.dupe(u8, code) catch null;
+    if (callbackFieldPathAlloc(allocator, base_path, "value")) |field_path| {
+        defer allocator.free(field_path);
+        if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
+            defer allocator.free(code);
+            command = allocator.dupe(u8, code) catch null;
+        }
     }
     lua.pop(1);
 
     _ = lua.getField(idx, "builtin");
-    if (parsePromptCallbackField(lua, allocator, "prompt.segment.builtin")) |code| {
-        defer allocator.free(code);
-        builtin_command = allocator.dupe(u8, code) catch null;
+    if (callbackFieldPathAlloc(allocator, base_path, "builtin")) |field_path| {
+        defer allocator.free(field_path);
+        if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
+            defer allocator.free(code);
+            builtin_command = allocator.dupe(u8, code) catch null;
+        }
     }
     lua.pop(1);
 
@@ -2407,9 +2424,12 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     if (kind == .progress and lua.typeOf(-1) == .table and command == null) {
         _ = lua.getField(-1, "builtin");
         if (builtin_command == null) {
-            if (parsePromptCallbackField(lua, allocator, "prompt.segment.progress.builtin")) |code| {
-                defer allocator.free(code);
-                builtin_command = allocator.dupe(u8, code) catch null;
+            if (callbackFieldPathAlloc(allocator, base_path, "progress.builtin")) |field_path| {
+                defer allocator.free(field_path);
+                if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
+                    defer allocator.free(code);
+                    builtin_command = allocator.dupe(u8, code) catch null;
+                }
             }
         }
         lua.pop(1);
@@ -2421,17 +2441,23 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
         lua.pop(1);
         _ = lua.getField(-1, "show_when");
         if (progress_show_when == null) {
-            if (parsePromptCallbackField(lua, allocator, "prompt.segment.progress.show_when")) |code| {
-                defer allocator.free(code);
-                progress_show_when = allocator.dupe(u8, code) catch null;
+            if (callbackFieldPathAlloc(allocator, base_path, "progress.show_when")) |field_path| {
+                defer allocator.free(field_path);
+                if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
+                    defer allocator.free(code);
+                    progress_show_when = allocator.dupe(u8, code) catch null;
+                }
             }
         }
         lua.pop(1);
         _ = lua.getField(-1, "value");
         if (command == null) {
-            if (parsePromptCallbackField(lua, allocator, "prompt.segment.progress.value")) |code| {
-                defer allocator.free(code);
-                command = allocator.dupe(u8, code) catch null;
+            if (callbackFieldPathAlloc(allocator, base_path, "progress.value")) |field_path| {
+                defer allocator.free(field_path);
+                if (parsePromptCallbackField(lua, allocator, field_path)) |code| {
+                    defer allocator.free(code);
+                    command = allocator.dupe(u8, code) catch null;
+                }
             }
         }
         lua.pop(1);
@@ -2439,14 +2465,14 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
     lua.pop(1);
 
     if (kind == .button) {
-        const msg = std.fmt.allocPrint(allocator, "prompt segment '{s}': button segments are not allowed in prompt", .{name.?}) catch null;
+        const msg = std.fmt.allocPrint(allocator, "{s}: button segments are not allowed in prompt", .{base_path}) catch null;
         defer if (msg) |m| allocator.free(m);
         _ = lua.pushString(msg orelse "button segments are not allowed in prompt");
         lua.raiseError();
     }
 
     if (kind == .progress) {
-        const msg = std.fmt.allocPrint(allocator, "prompt segment '{s}': progress segments are not allowed in prompt", .{name.?}) catch null;
+        const msg = std.fmt.allocPrint(allocator, "{s}: progress segments are not allowed in prompt", .{base_path}) catch null;
         defer if (msg) |m| allocator.free(m);
         _ = lua.pushString(msg orelse "progress segments are not allowed in prompt");
         lua.raiseError();
@@ -2474,7 +2500,7 @@ fn parseSegmentDef(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config_bu
             .button => "button segment requires 'value' or 'builtin'",
             .progress => "progress segment requires 'value' or 'builtin'",
         };
-        const owned_msg = std.fmt.allocPrint(allocator, "segment '{s}': {s}", .{ name.?, msg }) catch null;
+        const owned_msg = std.fmt.allocPrint(allocator, "{s}: {s}", .{ base_path, msg }) catch null;
         defer if (owned_msg) |m| allocator.free(m);
         _ = lua.pushString(owned_msg orelse msg);
         lua.raiseError();
@@ -2515,7 +2541,9 @@ pub export fn hexe_shp_prompt_left(L: ?*LuaState) callconv(.c) c_int {
     var i: i32 = 1;
     while (i <= n) : (i += 1) {
         _ = lua.rawGetIndex(1, i);
-        if (parseSegmentDef(lua, -1, shp.allocator)) |segment| {
+        const seg_path = std.fmt.allocPrint(shp.allocator, "prompt.left[{d}]", .{i}) catch "prompt.left[?]";
+        defer if (!std.mem.eql(u8, seg_path, "prompt.left[?]")) shp.allocator.free(seg_path);
+        if (parseSegmentDef(lua, -1, shp.allocator, seg_path)) |segment| {
             shp.left_segments.append(shp.allocator, segment) catch {};
         }
         lua.pop(1);
@@ -2545,7 +2573,9 @@ pub export fn hexe_shp_prompt_right(L: ?*LuaState) callconv(.c) c_int {
     var i: i32 = 1;
     while (i <= n) : (i += 1) {
         _ = lua.rawGetIndex(1, i);
-        if (parseSegmentDef(lua, -1, shp.allocator)) |segment| {
+        const seg_path = std.fmt.allocPrint(shp.allocator, "prompt.right[{d}]", .{i}) catch "prompt.right[?]";
+        defer if (!std.mem.eql(u8, seg_path, "prompt.right[?]")) shp.allocator.free(seg_path);
+        if (parseSegmentDef(lua, -1, shp.allocator, seg_path)) |segment| {
             shp.right_segments.append(shp.allocator, segment) catch {};
         }
         lua.pop(1);
@@ -2577,7 +2607,7 @@ pub export fn hexe_shp_prompt_add(L: ?*LuaState) callconv(.c) c_int {
     };
 
     // Parse segment
-    if (parseSegmentDef(lua, 2, shp.allocator)) |segment| {
+    if (parseSegmentDef(lua, 2, shp.allocator, "prompt.add.segment")) |segment| {
         if (std.mem.eql(u8, side, "left")) {
             shp.left_segments.append(shp.allocator, segment) catch {};
         } else if (std.mem.eql(u8, side, "right")) {
