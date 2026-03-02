@@ -21,6 +21,7 @@ hx.ses.layout.define({
         sticky    = false,
         destroy   = false,
         isolated  = false,
+        inherit_env = false,
       },
     },
   },
@@ -83,3 +84,11 @@ The float runs inside a sandboxed pod.
 - Configure the isolation level and resource limits via `isolation = { profile = "...", ... }`
 
 See [isolation.md](isolation.md) for profiles and limits.
+
+## `inherit_env`
+
+When the float is shown, it imports environment variables from the currently focused parent pane.
+
+- Useful with `direnv` and manual exports like `export ONE=TWO`
+- Applies when creating a float process (first creation or after a destroy/recreate cycle)
+- Internal runtime variables (`HEXE_*`, `PWD`, `SHLVL`, `TERM`, etc.) are not overwritten

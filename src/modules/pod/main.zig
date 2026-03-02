@@ -51,13 +51,21 @@ var pod_debug: bool = false;
 
 fn debugLog(comptime fmt: []const u8, args: anytype) void {
     if (!pod_debug) return;
-    std.debug.print("[pod] " ++ fmt ++ "\n", args);
+    const ms = std.time.milliTimestamp();
+    const secs = @divTrunc(ms, 1000);
+    const frac = @mod(ms, 1000);
+    std.debug.print("{d}.{d:0>3} [pod] " ++ fmt ++ "\n", .{ secs, frac } ++ args);
 }
 
 fn setBlocking(fd: posix.fd_t) void {
     const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch return;
     const new_flags: usize = flags & ~@as(usize, @intCast(c.O_NONBLOCK));
     _ = posix.fcntl(fd, posix.F.SETFL, new_flags) catch {};
+}
+
+fn setNonBlocking(fd: posix.fd_t) void {
+    const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch return;
+    _ = posix.fcntl(fd, posix.F.SETFL, flags | @as(usize, @intCast(c.O_NONBLOCK))) catch {};
 }
 
 pub const PodArgs = struct {
@@ -349,17 +357,27 @@ fn redirectStderrToLog(log_path: []const u8) void {
     if (logfd > 2) posix.close(logfd);
 }
 
+/// Write buffer capacity for non-blocking PTY writes.
+/// Large enough to absorb typical clipboard pastes without dropping data.
+const PTY_WRITE_BUF_CAP: usize = 256 * 1024;
+
 const Pod = struct {
     allocator: std.mem.Allocator,
     uuid: [32]u8,
     pty: core.Pty,
     server: core.IpcServer,
     client: ?core.IpcConnection = null,
+    observers: std.array_list.Managed(core.IpcConnection),
     backlog: RingBuffer,
     reader: pod_protocol.Reader,
     pty_paused: bool = false,
 
     uplink: PodUplink,
+
+    // Non-blocking PTY write buffer: absorbs data when master_fd would block.
+    pty_wbuf: []u8,
+    pty_wbuf_len: usize = 0,
+    pty_drain_ctx: ?*PtyDrainContext = null,
 
     // OSC 7 CWD tracking
     osc7_scanner: Osc7Scanner = .{},
@@ -393,13 +411,22 @@ const Pod = struct {
         var reader = try pod_protocol.Reader.init(allocator, pod_protocol.MAX_FRAME_LEN);
         errdefer reader.deinit(allocator);
 
+        const pty_wbuf = try allocator.alloc(u8, PTY_WRITE_BUF_CAP);
+        errdefer allocator.free(pty_wbuf);
+
+        // Make PTY master non-blocking so writes never stall the event loop
+        // (e.g. during large clipboard pastes when the shell is slow to consume).
+        setNonBlocking(pty.master_fd);
+
         return .{
             .allocator = allocator,
             .uuid = uuid,
             .pty = pty,
             .server = server,
+            .observers = std.array_list.Managed(core.IpcConnection).init(allocator),
             .backlog = backlog,
             .reader = reader,
+            .pty_wbuf = pty_wbuf,
             .uplink = PodUplink.init(allocator, uuid),
         };
     }
@@ -408,10 +435,13 @@ const Pod = struct {
         if (self.client) |*client| {
             client.close();
         }
+        for (self.observers.items) |*obs| obs.close();
+        self.observers.deinit();
         self.server.deinit();
         self.pty.close();
         self.backlog.deinit(self.allocator);
         self.reader.deinit(self.allocator);
+        self.allocator.free(self.pty_wbuf);
         self.uplink.deinit();
         if (self.osc7_cwd) |cwd| self.allocator.free(cwd);
     }
@@ -425,9 +455,12 @@ const Pod = struct {
         const pty_watcher = xev.File.initFd(self.pty.master_fd);
         var server_completion: xev.Completion = .{};
         var pty_completion: xev.Completion = .{};
+        var pty_drain_completion: xev.Completion = .{};
         var timer_completion: xev.Completion = .{};
         var ticker = try xev.Timer.init();
         defer ticker.deinit();
+        var drain_ticker = try xev.Timer.init();
+        defer drain_ticker.deinit();
 
         const buf = try self.allocator.alloc(u8, pod_protocol.MAX_FRAME_LEN);
         defer self.allocator.free(buf);
@@ -437,8 +470,11 @@ const Pod = struct {
         var should_stop = false;
         var callback_error: ?anyerror = null;
         var pty_armed = false;
-        var client_completion: xev.Completion = .{};
-        var client_slot: ClientSlot = .{ .parent = undefined, .fd = -1 };
+        var client_completion_0: xev.Completion = .{};
+        var client_completion_1: xev.Completion = .{};
+        var client_slot_0: ClientSlot = .{ .parent = undefined, .fd = -1 };
+        var client_slot_1: ClientSlot = .{ .parent = undefined, .fd = -1 };
+        var client_gen: u1 = 0;
 
         var pty_ctx = PtyContext{
             .pod = self,
@@ -451,13 +487,23 @@ const Pod = struct {
             .armed = &pty_armed,
         };
 
+        var pty_drain_ctx = PtyDrainContext{
+            .pod = self,
+            .loop = &loop,
+            .timer = drain_ticker,
+            .completion = &pty_drain_completion,
+        };
+        self.pty_drain_ctx = &pty_drain_ctx;
+        defer self.pty_drain_ctx = null;
+
         var client_ctx = ClientContext{
             .pod = self,
             .io_buf = buf,
             .loop = &loop,
             .callback_error = &callback_error,
-            .completion = &client_completion,
-            .slot = &client_slot,
+            .completions = .{ &client_completion_0, &client_completion_1 },
+            .slots = .{ &client_slot_0, &client_slot_1 },
+            .gen = &client_gen,
         };
 
         var accept_ctx = AcceptContext{
@@ -472,6 +518,7 @@ const Pod = struct {
         var timer_ctx = TimerContext{
             .pod = self,
             .opts = opts,
+            .ticker = ticker,
         };
         ticker.run(&loop, &timer_completion, 100, TimerContext, &timer_ctx, timerCallback);
 
@@ -507,6 +554,14 @@ const Pod = struct {
         armed: *bool,
     };
 
+    const PtyDrainContext = struct {
+        pod: *Pod,
+        loop: *xev.Loop,
+        timer: xev.Timer,
+        completion: *xev.Completion,
+        armed: bool = false,
+    };
+
     const ClientSlot = struct {
         parent: *ClientContext,
         fd: posix.fd_t,
@@ -517,14 +572,20 @@ const Pod = struct {
         io_buf: []u8,
         loop: *xev.Loop,
         callback_error: *?anyerror,
-        completion: *xev.Completion,
-        slot: *ClientSlot,
+        /// Two completion/slot pairs to alternate between during VT client
+        /// replacement. When a new client replaces an old one, the old
+        /// io_uring POLL_ADD CQE may still reference the previous completion.
+        /// Switching to the alternate pair avoids overwriting a live entry.
+        completions: [2]*xev.Completion,
+        slots: [2]*ClientSlot,
+        gen: *u1,
         watched_fd: ?posix.fd_t = null,
     };
 
     const TimerContext = struct {
         pod: *Pod,
         opts: RunOptions,
+        ticker: xev.Timer,
         last_meta_ms: i64 = 0,
     };
 
@@ -539,11 +600,36 @@ const Pod = struct {
         _ = result catch return .rearm;
 
         while (accept_ctx.pod.server.tryAccept() catch null) |conn| {
+            debugLog("acceptCallback: new conn fd={d}, client_before={?d}, watched_fd={?d}, pty_paused={}, pty_armed={}", .{
+                conn.fd,
+                if (accept_ctx.pod.client) |cl| cl.fd else null,
+                accept_ctx.client_ctx.watched_fd,
+                accept_ctx.pod.pty_paused,
+                accept_ctx.pty_ctx.armed.*,
+            });
             accept_ctx.pod.handleAcceptedConnection(conn, accept_ctx.backlog_tmp);
+            debugLog("acceptCallback: after handle, client={?d}, watched_fd={?d}, pty_paused={}, pty_armed={}", .{
+                if (accept_ctx.pod.client) |cl| cl.fd else null,
+                accept_ctx.client_ctx.watched_fd,
+                accept_ctx.pod.pty_paused,
+                accept_ctx.pty_ctx.armed.*,
+            });
+            // If the client fd changed (old was closed+replaced by acceptVtClient),
+            // clear the stale watched_fd. The old fd was closed so epoll silently
+            // deregistered it — clientCallback will never fire to clear watched_fd.
+            if (accept_ctx.client_ctx.watched_fd) |old_watched| {
+                const cur_fd = if (accept_ctx.pod.client) |cl| cl.fd else null;
+                if (cur_fd == null or cur_fd.? != old_watched) {
+                    debugLog("acceptCallback: clearing stale watched_fd={d} (client now={?d})", .{ old_watched, cur_fd });
+                    accept_ctx.client_ctx.watched_fd = null;
+                }
+            }
             if (accept_ctx.pod.client) |client| {
                 armClientWatcher(accept_ctx.client_ctx, client.fd);
             }
+            debugLog("acceptCallback: after armClient, watched_fd={?d}", .{accept_ctx.client_ctx.watched_fd});
             if (accept_ctx.pod.client != null and accept_ctx.pod.pty_paused) {
+                debugLog("acceptCallback: re-arming pty watcher (was paused)", .{});
                 accept_ctx.pod.pty_paused = false;
                 armPtyWatcher(accept_ctx.pty_ctx);
             }
@@ -553,13 +639,23 @@ const Pod = struct {
     }
 
     fn armClientWatcher(ctx: *ClientContext, client_fd: posix.fd_t) void {
-        if (ctx.watched_fd != null) return;
+        if (ctx.watched_fd != null) {
+            debugLog("armClientWatcher: SKIP fd={d} (watched_fd={?d} still set)", .{ client_fd, ctx.watched_fd });
+            return;
+        }
+        // Alternate between two completion/slot pairs so we never overwrite
+        // a completion that io_uring still references from a previous poll.
+        ctx.gen.* ^= 1;
+        const completion = ctx.completions[ctx.gen.*];
+        const slot = ctx.slots[ctx.gen.*];
+
+        debugLog("armClientWatcher: ARMED fd={d} gen={d}", .{ client_fd, ctx.gen.* });
         ctx.watched_fd = client_fd;
 
-        ctx.slot.* = .{ .parent = ctx, .fd = client_fd };
+        slot.* = .{ .parent = ctx, .fd = client_fd };
         const watcher = xev.File.initFd(client_fd);
-        ctx.completion.* = .{};
-        watcher.poll(ctx.loop, ctx.completion, .read, ClientSlot, ctx.slot, clientCallback);
+        completion.* = .{};
+        watcher.poll(ctx.loop, completion, .read, ClientSlot, slot, clientCallback);
     }
 
     fn clientCallback(
@@ -571,38 +667,67 @@ const Pod = struct {
     ) xev.CallbackAction {
         const slot = ctx orelse return .disarm;
         const client_ctx = slot.parent;
-        _ = result catch return .disarm;
+        _ = result catch {
+            debugLog("clientCallback: ERROR on slot.fd={d}, watched_fd={?d}, client={?d}", .{
+                slot.fd,
+                client_ctx.watched_fd,
+                if (client_ctx.pod.client) |cl| cl.fd else null,
+            });
+            // Poll error (fd closed). Clear tracked fd so a replacement
+            // client can be armed. If the client was already replaced by
+            // acceptVtClient, arm the watcher for the new fd now.
+            if (client_ctx.watched_fd) |w| {
+                if (w == slot.fd) client_ctx.watched_fd = null;
+            }
+            if (client_ctx.pod.client) |cur| {
+                if (cur.fd != slot.fd) {
+                    debugLog("clientCallback: client replaced, re-arming for fd={d}", .{cur.fd});
+                    armClientWatcher(client_ctx, cur.fd);
+                }
+            }
+            return .disarm;
+        };
 
         const current = client_ctx.pod.client orelse {
+            debugLog("clientCallback: no client, disarming slot.fd={d}", .{slot.fd});
             if (client_ctx.watched_fd == slot.fd) client_ctx.watched_fd = null;
             return .disarm;
         };
         if (current.fd != slot.fd) {
+            debugLog("clientCallback: stale fd={d}, current={d}, re-arming", .{ slot.fd, current.fd });
             if (client_ctx.watched_fd == slot.fd) client_ctx.watched_fd = null;
+            armClientWatcher(client_ctx, current.fd);
             return .disarm;
         }
 
         const n = posix.read(slot.fd, client_ctx.io_buf) catch |err| switch (err) {
             error.WouldBlock => 0,
             else => {
+                debugLog("clientCallback: read error on fd={d}: {s}", .{ slot.fd, @errorName(err) });
                 client_ctx.callback_error.* = err;
                 return .disarm;
             },
         };
 
         if (n == 0) {
+            debugLog("clientCallback: EOF on fd={d}, closing client", .{slot.fd});
             if (client_ctx.pod.client) |*conn| conn.close();
             client_ctx.pod.client = null;
             client_ctx.watched_fd = null;
             return .disarm;
         }
 
+        debugLog("clientCallback: read {d} bytes from fd={d}", .{ n, slot.fd });
         client_ctx.pod.reader.feed(client_ctx.io_buf[0..n], @ptrCast(client_ctx.pod), podFrameCallback);
         return .rearm;
     }
 
     fn armPtyWatcher(ctx: *PtyContext) void {
-        if (ctx.armed.* or ctx.pod.pty_paused) return;
+        if (ctx.armed.* or ctx.pod.pty_paused) {
+            debugLog("armPtyWatcher: SKIP (armed={}, pty_paused={})", .{ ctx.armed.*, ctx.pod.pty_paused });
+            return;
+        }
+        debugLog("armPtyWatcher: ARMED", .{});
         ctx.watcher.poll(ctx.loop, ctx.completion, .read, PtyContext, ctx, ptyCallback);
         ctx.armed.* = true;
     }
@@ -616,12 +741,13 @@ const Pod = struct {
     ) xev.CallbackAction {
         const pty_ctx = ctx orelse return .disarm;
         _ = result catch {
+            debugLog("ptyCallback: ERROR, disarming, stopping", .{});
             pty_ctx.armed.* = false;
             pty_ctx.should_stop.* = true;
             return .disarm;
         };
 
-        if (pty_ctx.pod.client == null) {
+        if (pty_ctx.pod.client == null and pty_ctx.pod.observers.items.len == 0) {
             const free = pty_ctx.pod.backlog.available();
             if (free == 0) {
                 pty_ctx.pod.pty_paused = true;
@@ -681,22 +807,121 @@ const Pod = struct {
         pty_ctx.pod.backlog.append(data);
         if (pty_ctx.pod.client) |*client| {
             pod_protocol.writeFrame(client, .output, data) catch {
+                debugLog("ptyCallback: writeFrame FAILED, closing client fd={d}", .{client.fd});
                 client.close();
                 pty_ctx.pod.client = null;
             };
+        } else if (pty_ctx.pod.observers.items.len == 0) {
+            debugLog("ptyCallback: no client, data goes to backlog only ({d} bytes)", .{data.len});
         }
+        pty_ctx.pod.broadcastToObservers(data);
 
         return .rearm;
     }
 
-    fn timerCallback(
-        ctx: ?*TimerContext,
+    /// Queue data for non-blocking write to the PTY master fd.
+    /// Tries to write directly first; any remainder is buffered and
+    /// an xev write-readiness watcher drains it asynchronously.
+    fn queuePtyWrite(self: *Pod, data: []const u8) void {
+        // Try to drain any previously buffered data first.
+        self.drainPtyWriteBuf();
+
+        var remaining = data;
+
+        // If the buffer is empty, attempt a direct write.
+        if (self.pty_wbuf_len == 0 and remaining.len > 0) {
+            const n = self.pty.write(remaining) catch |err| switch (err) {
+                error.WouldBlock => 0,
+                else => {
+                    debugLog("queuePtyWrite: pty write error: {s}", .{@errorName(err)});
+                    return;
+                },
+            };
+            remaining = remaining[n..];
+        }
+
+        // Buffer whatever could not be written.
+        if (remaining.len > 0) {
+            const space = self.pty_wbuf.len - self.pty_wbuf_len;
+            const to_copy = @min(remaining.len, space);
+            if (to_copy > 0) {
+                @memcpy(self.pty_wbuf[self.pty_wbuf_len..][0..to_copy], remaining[0..to_copy]);
+                self.pty_wbuf_len += to_copy;
+            }
+            if (to_copy < remaining.len) {
+                debugLog("queuePtyWrite: write buffer full, dropped {d} bytes", .{remaining.len - to_copy});
+            }
+            self.armPtyDrainTimer();
+        }
+    }
+
+    /// Try to write as much of the PTY write buffer as possible.
+    fn drainPtyWriteBuf(self: *Pod) void {
+        while (self.pty_wbuf_len > 0) {
+            const n = self.pty.write(self.pty_wbuf[0..self.pty_wbuf_len]) catch |err| switch (err) {
+                error.WouldBlock => return,
+                else => {
+                    debugLog("drainPtyWriteBuf: pty write error: {s}, discarding {d} bytes", .{ @errorName(err), self.pty_wbuf_len });
+                    self.pty_wbuf_len = 0;
+                    return;
+                },
+            };
+            if (n == 0) return;
+            const leftover = self.pty_wbuf_len - n;
+            if (leftover > 0) {
+                std.mem.copyForwards(u8, self.pty_wbuf[0..leftover], self.pty_wbuf[n..self.pty_wbuf_len]);
+            }
+            self.pty_wbuf_len = leftover;
+        }
+    }
+
+    fn armPtyDrainTimer(self: *Pod) void {
+        const ctx = self.pty_drain_ctx orelse return;
+        if (ctx.armed) return;
+        debugLog("armPtyDrainTimer: ARMED (buffered={d})", .{self.pty_wbuf_len});
+        ctx.armed = true;
+        // Use fresh timer.run() to avoid xev io_uring absolute-timestamp re-arm bug.
+        ctx.timer.run(ctx.loop, ctx.completion, 1, PtyDrainContext, ctx, ptyDrainCallback);
+    }
+
+    fn ptyDrainCallback(
+        ctx: ?*PtyDrainContext,
         _: *xev.Loop,
         _: *xev.Completion,
         result: xev.Timer.RunError!void,
     ) xev.CallbackAction {
+        const drain_ctx = ctx orelse return .disarm;
+        drain_ctx.armed = false;
+
+        _ = result catch {
+            // Timer error; re-arm if there's still data.
+            if (drain_ctx.pod.pty_wbuf_len > 0) {
+                drain_ctx.pod.armPtyDrainTimer();
+            }
+            return .disarm;
+        };
+
+        drain_ctx.pod.drainPtyWriteBuf();
+
+        if (drain_ctx.pod.pty_wbuf_len > 0) {
+            // Still have data — re-arm with a fresh absolute timestamp.
+            drain_ctx.pod.armPtyDrainTimer();
+        }
+        return .disarm;
+    }
+
+    fn timerCallback(
+        ctx: ?*TimerContext,
+        loop: *xev.Loop,
+        completion: *xev.Completion,
+        result: xev.Timer.RunError!void,
+    ) xev.CallbackAction {
         const timer_ctx = ctx orelse return .disarm;
-        _ = result catch return .rearm;
+        _ = result catch {
+            // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
+            timer_ctx.ticker.run(loop, completion, 100, TimerContext, timer_ctx, timerCallback);
+            return .disarm;
+        };
 
         timer_ctx.pod.uplink.tick(timer_ctx.pod.pty.child_pid);
 
@@ -718,7 +943,9 @@ const Pod = struct {
             }
         }
 
-        return .rearm;
+        // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
+        timer_ctx.ticker.run(loop, completion, 100, TimerContext, timer_ctx, timerCallback);
+        return .disarm;
     }
 
     fn handleAcceptedConnection(self: *Pod, conn: core.IpcConnection, backlog_tmp: []u8) void {
@@ -760,6 +987,9 @@ const Pod = struct {
         } else if (handshake[0] == wire.POD_HANDSHAKE_AUX_INPUT) {
             debugLog("accept: aux input fd={d}", .{conn.fd});
             self.handleAuxInput(conn);
+        } else if (handshake[0] == wire.POD_HANDSHAKE_AUX_OBSERVER) {
+            debugLog("accept: aux observer fd={d}", .{conn.fd});
+            self.acceptObserver(conn, backlog_tmp);
         } else {
             debugLog("accept: unknown handshake 0x{x:0>2} fd={d}", .{ handshake[0], conn.fd });
             var tmp_conn = conn;
@@ -767,10 +997,51 @@ const Pod = struct {
         }
     }
 
+    fn acceptObserver(self: *Pod, conn: core.IpcConnection, backlog_tmp: []u8) void {
+        var obs_conn = conn;
+        setBlocking(conn.fd);
+
+        // Replay current backlog to new observer.
+        const n = self.backlog.copyOut(backlog_tmp);
+        var off: usize = 0;
+        while (off < n) {
+            const chunk = @min(@as(usize, 16 * 1024), n - off);
+            pod_protocol.writeFrame(&obs_conn, .output, backlog_tmp[off .. off + chunk]) catch {
+                var tmp = obs_conn;
+                tmp.close();
+                return;
+            };
+            off += chunk;
+        }
+        pod_protocol.writeFrame(&obs_conn, .backlog_end, &[_]u8{}) catch {
+            var tmp = obs_conn;
+            tmp.close();
+            return;
+        };
+
+        self.observers.append(obs_conn) catch {
+            var tmp = obs_conn;
+            tmp.close();
+        };
+    }
+
+    fn broadcastToObservers(self: *Pod, data: []const u8) void {
+        var i: usize = 0;
+        while (i < self.observers.items.len) {
+            const obs = &self.observers.items[i];
+            pod_protocol.writeFrame(obs, .output, data) catch {
+                obs.close();
+                _ = self.observers.swapRemove(i);
+                continue;
+            };
+            i += 1;
+        }
+    }
+
     fn handleFrame(self: *Pod, frame: pod_protocol.Frame) void {
         switch (frame.frame_type) {
             .input => {
-                _ = self.pty.write(frame.payload) catch {};
+                self.queuePtyWrite(frame.payload);
             },
             .resize => {
                 if (frame.payload.len >= 4) {
@@ -812,8 +1083,13 @@ const Pod = struct {
         }
         pod_protocol.writeFrame(&self.client.?, .backlog_end, &[_]u8{}) catch {};
 
-        self.backlog.clear();
-        self.pty_paused = false;
+        // Keep backlog after replay so repeated detach/reattach cycles can
+        // still restore scrollback for panes that stayed idle between
+        // attaches. Ring capacity naturally bounds history size.
+        // Note: do NOT reset pty_paused here. The acceptCallback caller
+        // checks pty_paused and calls armPtyWatcher. If we clear the flag
+        // here, the caller sees pty_paused=false and skips re-arming,
+        // leaving the PTY watcher permanently disarmed after reconnect.
     }
 
     /// Handle a binary SHP control connection (channel ⑤).
@@ -889,7 +1165,7 @@ const Pod = struct {
                 off += 5;
                 if (payload_len > n - off) break;
                 if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.input)) {
-                    _ = self.pty.write(buf[off .. off + payload_len]) catch {};
+                    self.queuePtyWrite(buf[off .. off + payload_len]);
                 } else if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.resize)) {
                     if (payload_len >= 4) {
                         const cols = std.mem.readInt(u16, buf[off..][0..2], .big);

@@ -7,6 +7,7 @@ pub const ipc = @import("ipc.zig");
 pub const wire = @import("wire.zig");
 pub const query = @import("query.zig");
 pub const style = @import("style.zig");
+pub const segment_render = @import("segment_render.zig");
 pub const segments = @import("segments/mod.zig");
 pub const pod_protocol = @import("pod_protocol.zig");
 pub const pod_meta = @import("pod_meta.zig");
@@ -19,8 +20,11 @@ pub const sprites_embedded = @import("sprites_embedded.zig");
 pub const constants = @import("constants.zig");
 pub const resource_limits = @import("resource_limits.zig");
 pub const isolation_voidbox = @import("isolation_voidbox.zig");
+pub const session_config = @import("session_config.zig");
+pub const recording = @import("recording/mod.zig");
 
 pub const LuaRuntime = lua_runtime.LuaRuntime;
+pub const SessionConfig = session_config.SessionConfig;
 pub const ConfigStatus = lua_runtime.ConfigStatus;
 
 pub const Pty = pty.Pty;

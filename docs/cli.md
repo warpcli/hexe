@@ -88,6 +88,16 @@ hexe ses stats
 ```
 Show resource usage for all sessions and pods.
 
+```sh
+hexe ses open <target>[:<tab>] [--debug] [--logfile <path>]
+```
+Open a session from a `.hexe.lua` config. Target can be a directory, `.lua` file, or session name. See [session_manager](session_manager.md).
+
+```sh
+hexe ses freeze
+```
+Snapshot current session as `.hexe.lua` to stdout.
+
 ---
 
 ## hexe pod
@@ -103,9 +113,14 @@ hexe pod new [--name <name>] [--shell <shell>] [--cwd <path>] [--alias]
 Create a standalone pod not attached to any session.
 
 ```sh
-hexe pod attach <uuid-or-name> [--detach-key <key>]
+hexe pod attach [--uuid <u>] [--name <n>] [--socket <path>] [--detach <key>] [--record <file.cast>] [--capture-input]
 ```
 Raw TTY attach to a pod (like `screen -r` but for a single PTY).
+
+```sh
+hexe pod record [--uuid <u>] [--name <n>] [--socket <path>] --out <file.cast> [--capture-input]
+```
+Observe a pod and write an asciicast recording without replacing the active VT attach client.
 
 ```sh
 hexe pod send <text> [--uuid <u>] [--name <n>] [--enter] [--ctrl]
@@ -139,6 +154,37 @@ eval "$(hexe shp init bash)"
 hexe shp prompt [--status <n>] [--duration <ms>] [--jobs <n>] [--right] [--shell <sh>]
 ```
 Render the prompt for the given context. Called automatically by the shell integration.
+
+---
+
+## hexe record
+
+```sh
+hexe record start --scope pod|mux [--uuid <u>|--name <n>|--socket <path>] [--out <file.cast>] [--capture-input]
+```
+Start background recording for the given scope/target.
+
+For `--scope pod`, if no explicit target is provided, hexe tries to resolve the active pod (`HEXE_PANE_UUID`, then `hexe mux info --last`).
+
+```sh
+hexe record stop --scope pod|mux
+```
+Stop background recording for the given scope.
+
+```sh
+hexe record status --scope pod|mux [--json]
+```
+Print `1` when active and `0` when inactive (or JSON with `--json`).
+
+```sh
+hexe record toggle --scope pod|mux [--uuid <u>|--name <n>|--socket <path>] [--out <file.cast>] [--capture-input]
+```
+Toggle background recording for the given scope/target.
+
+```sh
+hexe multiplexer record --out <file.cast> [--capture-input]
+```
+Record a mux attach stream directly into asciicast output.
 
 ---
 

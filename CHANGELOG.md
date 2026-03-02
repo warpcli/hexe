@@ -1,5 +1,106 @@
 # Changelog
 
+## [0.0.15] - 2026-03-02
+
+### <!-- 0 -->⛰️  Features
+
+- Improve segment parsing error messages
+- Improve configuration error messages for segments
+- Add ctx.pane last selector
+- Add cached Lua command helper and validation
+- Introduce Lua event system and tracing for callbacks
+- Support styling prefix/suffix for segments
+- Enhance Lua context with comprehensive pane API
+- Improve Lua `when` condition context for panes
+- Introduce function-based keybinding `when` conditions
+- Streamline Lua callback evaluation
+- Update segment module references and parsing
+- Improve Lua builtin evaluation in render modules
+- Improve Lua callback handling for prompt segments
+- Add segment builtin descriptor constructors
+- Enhance statusbar buttons with customizable click states
+- Refine prompt segment handling
+- Extract segment rendering logic
+- Refactor prompt and statusbar to use Lua-first segment model
+- Support spinner and randomdo through builtin descriptors
+- Add builtin descriptor styling and runtime resolution
+- Support builtin Lua source functions in segment runtime
+- Infer button segments and require button kind for hover/click
+- Infer segment type from value/builtin/button/progress fields
+- Add progress segment gating and cadence controls
+- Add typed segment kinds and builtin command source
+- Improve Lua segment output and styling capabilities
+- Add built-in segment functionality via Lua API
+- Refactor segment value handling and cleanup 'when' conditions
+- Add tests for AsciicastWriter
+- Extend `hexe record` to support multiplexer
+- Add `mux record` command for recording asciicasts
+- Refactor segment value parsing to use 'value' field
+- Extend keybinding when conditions with more options
+- Implement `hexe record` CLI for recording session control
+- Add active button state for status bar segments
+- Add hx.record command helpers for Lua config
+- Add clickable statusbar segment actions
+- Add non-intrusive pod record observer mode
+- Add dedicated pod record command
+- Add pod attach asciicast recording
+- Inherit environment variables in floats
+- Improve shell prompt and statusbar Lua support
+- Allow reattaching to attached sessions
+- Refactor module rendering into dedicated file
+- Handle environment inheritance for new panes
+- Store cursor state for float completion to restore
+- Add liblink dependency to build system
+- Implement session manager with .hexe.lua configs
+- Refine directional focus navigation
+- Refactor mux and ses VT client handling and logging
+- Improve dead split handling in main loop
+- Improve VT reconnection and backlog replay
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Stabilize Lua callback rendering in status UI
+- Apply block style correctly to status bar segments
+- Improve spinner and module rendering
+- Fallback to text spinner when animation segments are empty
+- Prioritize builtin descriptor colors over builtin defaults
+- Treat builtin Lua callbacks as builtin segment source
+- Parse button/progress sources before segment validation
+- Improve handling of exited processes and panes
+- Handle unresponsive float panes
+- Correctly read pane_info response
+- Trigger backlog replay on pane re-adoption
+- Prevent stale CSI/OSC replies from monopolizing routing
+- Preserve sticky panes on normal exit
+- Enhance sticky float logic for adoption and takeover
+- Forward OSC and CSI responses to terminal
+- Update xev timer re-arming due to io_uring bug
+- Correctly restore cursor position after float
+- Align pane exit handling and VT routing
+- Retain backlog after replay
+- Improve pty/client watcher reliability and logging
+
+### <!-- 2 -->🚜 Refactor
+
+- [**breaking**] Remove legacy Lua callback compatibility
+- Remove prefixed lua/builtin command encoding
+
+### <!-- 3 -->📚 Documentation
+
+- Clarify prompt and statusbar Lua usage
+- Document pod asciicast recording commands
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Refactor Powerline segment prefixes/suffixes
+- Update Lua 'when' definition to reflect callback
+- Refactor shell prompt segment values to functions
+- Refactor config to use Lua functions for segments
+- Refactor shellprompt segments to use Lua
+- Rename module directories for clarity
+- Add Hexel configuration file
+- SEGTERM and improve debug logging timestamp precision
+
 ## [0.0.14] - 2026-02-23
 
 ### <!-- 1 -->🐛 Bug Fixes

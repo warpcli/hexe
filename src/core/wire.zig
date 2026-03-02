@@ -50,6 +50,8 @@ pub const POD_HANDSHAKE_SES_VT: u8 = 0x01;
 pub const POD_HANDSHAKE_SHP_CTL: u8 = 0x02;
 /// Sent by CLI tools (pod send/attach) for auxiliary input (no backlog, no replace).
 pub const POD_HANDSHAKE_AUX_INPUT: u8 = 0x03;
+/// Sent by CLI tools for auxiliary output tap (observe-only, no replace).
+pub const POD_HANDSHAKE_AUX_OBSERVER: u8 = 0x04;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Control message types — carried inside ControlHeader on channels ①④⑤.
@@ -112,6 +114,7 @@ pub const MsgType = enum(u16) {
     get_layout = 0x0134, // CLI → SES: get mux state for layout save
     apply_layout = 0x0135, // CLI → SES → MUX: apply saved layout tree
     get_session_state = 0x0136, // CLI → SES: export detached session to JSON
+    session_stolen = 0x0137, // SES → MUX: this session was attached elsewhere
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -167,13 +170,15 @@ pub const Registered = extern struct {
 };
 
 /// CreatePane: lengths of variable fields.
-/// Followed by: shell bytes, cwd bytes, sticky_pwd bytes.
+/// Followed by: shell bytes, cwd bytes, sticky_pwd bytes, isolation_profile bytes,
+/// and optionally inherit_env_parent_uuid bytes (32 bytes when inherit_env_parent_uuid_len > 0).
 pub const CreatePane = extern struct {
     shell_len: u16 align(1),
     cwd_len: u16 align(1),
     sticky_key: u8 align(1),
     sticky_pwd_len: u16 align(1),
     isolation_profile_len: u8 align(1),
+    inherit_env_parent_uuid_len: u8 align(1) = 0,
 };
 
 /// PaneCreated (response to CreatePane).
@@ -673,6 +678,13 @@ pub fn writeControlMsg(fd: posix.fd_t, msg_type: MsgType, fixed: []const u8, tra
 pub fn readControlHeader(fd: posix.fd_t) !ControlHeader {
     var buf: [@sizeOf(ControlHeader)]u8 = undefined;
     try readExact(fd, &buf);
+    return std.mem.bytesToValue(ControlHeader, &buf);
+}
+
+/// Timeout-bounded ControlHeader read.
+pub fn readControlHeaderTimeout(fd: posix.fd_t, timeout_ms: i32) !ControlHeader {
+    var buf: [@sizeOf(ControlHeader)]u8 = undefined;
+    try readExactTimeout(fd, &buf, timeout_ms);
     return std.mem.bytesToValue(ControlHeader, &buf);
 }
 

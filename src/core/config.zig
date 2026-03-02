@@ -47,7 +47,7 @@ pub const SpinnerDef = struct {
 ///   when = { any = { "a", "b" } }               -- OR
 ///   when = { any = { { all = { "a", "b" } }, "c" } }  -- OR of ANDs
 ///   when = { bash = "..." }                     -- bash script
-///   when = { lua = "..." }                      -- lua script
+///   when = { lua = function(ctx) return ... end } -- lua callback
 pub const WhenDef = struct {
     /// AND of tokens (flat list, no namespaces needed)
     all: ?[][]const u8 = null,
@@ -84,14 +84,39 @@ pub const WhenDef = struct {
 
 /// Segment definition for statusbar and prompt.
 /// Both statusbar modules and shell prompt segments use this unified type.
+pub const SegmentKind = enum {
+    value,
+    builtin,
+    button,
+    progress,
+};
+
 pub const Segment = struct {
     name: []const u8,
+    kind: SegmentKind = .value,
     // Priority for width-based hiding (lower = higher priority, stays longer)
     priority: u8 = 50,
     // Array of outputs (each with style + format)
     outputs: []const OutputDef = &[_]OutputDef{},
     // Optional for custom modules
     command: ?[]const u8 = null,
+    // Optional explicit builtin source name
+    builtin: ?[]const u8 = null,
+    // Progress behavior tuning
+    progress_every_ms: u64 = 1000,
+    progress_show_when: ?[]const u8 = null,
+    // Optional statusbar click actions (shell commands)
+    on_click: ?[]const u8 = null,
+    on_right_click: ?[]const u8 = null,
+    on_middle_click: ?[]const u8 = null,
+    // Optional statusbar button active-state condition (bash, exit 0 = active)
+    button_active_bash: ?[]const u8 = null,
+    // Optional per-button active style overrides for clicked state.
+    button_left_style: ?[]const u8 = null,
+    button_middle_style: ?[]const u8 = null,
+    button_right_style: ?[]const u8 = null,
+    // If true, invert button style when hovered.
+    inverse_on_hover: bool = true,
     when: ?WhenDef = null,
 
     // Optional spinner configuration
@@ -168,6 +193,8 @@ pub const FloatAttributes = struct {
     /// If true, directional navigation (left/right/up/down) works like splits.
     /// If false (default), left/right switches tabs directly.
     navigatable: bool = false,
+    /// Inherit environment variables from the parent pane's shell process.
+    inherit_env: bool = false,
 };
 
 pub const FloatDef = struct {
@@ -350,6 +377,15 @@ pub const LayoutFloatDef = struct {
                     allocator.free(module.outputs);
                 }
                 if (module.command) |cmd| allocator.free(@constCast(cmd));
+                if (module.builtin) |b| allocator.free(@constCast(b));
+                if (module.progress_show_when) |s| allocator.free(@constCast(s));
+                if (module.on_click) |cmd| allocator.free(@constCast(cmd));
+                if (module.on_right_click) |cmd| allocator.free(@constCast(cmd));
+                if (module.on_middle_click) |cmd| allocator.free(@constCast(cmd));
+                if (module.button_active_bash) |cmd| allocator.free(@constCast(cmd));
+                if (module.button_left_style) |s| allocator.free(@constCast(s));
+                if (module.button_middle_style) |s| allocator.free(@constCast(s));
+                if (module.button_right_style) |s| allocator.free(@constCast(s));
                 if (module.when) |*w| {
                     var when = @constCast(w);
                     when.deinit(allocator);
@@ -670,6 +706,7 @@ pub const Config = struct {
 
     // Internal
     _allocator: ?std.mem.Allocator = null,
+    _lua_runtime: ?*LuaRuntime = null,
 
     pub fn load(allocator: std.mem.Allocator) Config {
         var config = Config{};
@@ -682,12 +719,19 @@ pub const Config = struct {
         };
         defer allocator.free(path);
 
-        var runtime = LuaRuntime.init(allocator) catch {
+        const runtime_ptr = allocator.create(LuaRuntime) catch {
+            config.status = .@"error";
+            config.status_message = allocator.dupe(u8, "failed to allocate Lua runtime") catch null;
+            return config;
+        };
+        runtime_ptr.* = LuaRuntime.init(allocator) catch {
+            allocator.destroy(runtime_ptr);
             config.status = .@"error";
             config.status_message = allocator.dupe(u8, "failed to initialize Lua") catch null;
             return config;
         };
-        defer runtime.deinit();
+        var runtime = runtime_ptr;
+        config._lua_runtime = runtime_ptr;
 
         // Let a single config file avoid building other sections.
         runtime.setHexeSection("mux");
@@ -721,7 +765,7 @@ pub const Config = struct {
         std.fs.cwd().access(local_path, .{}) catch {
             // No local config, use global only
             log.debug("no local config found", .{});
-            applyBuilderConfig(&runtime, &config, allocator);
+            applyBuilderConfig(runtime, &config, allocator);
             if (config.status != .@"error") {
                 if (PARSE_ERROR) |msg| {
                     config.status = .@"error";
@@ -738,7 +782,7 @@ pub const Config = struct {
         runtime.loadConfig(local_path) catch |err| {
             // Failed to load local config, but global is already loaded
             log.warn("failed to load local config: {}", .{err});
-            applyBuilderConfig(&runtime, &config, allocator);
+            applyBuilderConfig(runtime, &config, allocator);
             if (config.status != .@"error") {
                 if (PARSE_ERROR) |msg| {
                     config.status = .@"error";
@@ -751,12 +795,12 @@ pub const Config = struct {
 
         // Rebuild from ConfigBuilder after local config load so local builder calls
         // (hexe.mux.* API) are applied consistently with global config loading.
-        applyBuilderConfig(&runtime, &config, allocator);
+        applyBuilderConfig(runtime, &config, allocator);
 
         // Access the "mux" section of the local config table and merge
         if (runtime.pushTable(-1, "mux")) {
             log.info("parsing mux section from local config", .{});
-            parseConfig(&runtime, &config, allocator);
+            parseConfig(runtime, &config, allocator);
             runtime.pop();
         } else {
             log.warn("no mux section in local config", .{});
@@ -780,8 +824,10 @@ pub const Config = struct {
         if (runtime.getBuilder()) |builder| {
             if (builder.mux) |mux_builder| {
                 log.debug("building mux config from ConfigBuilder", .{});
+                const keep_runtime = config._lua_runtime;
                 config.* = mux_builder.build() catch config.*;
                 config._allocator = allocator;
+                config._lua_runtime = keep_runtime;
             }
         }
     }
@@ -842,6 +888,12 @@ pub const Config = struct {
                     }
                 }
                 alloc.free(self.input.binds);
+            }
+
+            if (self._lua_runtime) |rt| {
+                rt.deinit();
+                alloc.destroy(rt);
+                self._lua_runtime = null;
             }
         }
     }
@@ -1270,6 +1322,7 @@ fn parseFloat(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocato
         if (runtime.getBool(-1, "global")) |v| config.float_default_attributes.global = v;
         if (runtime.getBool(-1, "destroy")) |v| config.float_default_attributes.destroy = v;
         if (runtime.getBool(-1, "isolated")) |v| config.float_default_attributes.isolated = v;
+        if (runtime.getBool(-1, "inherit_env")) |v| config.float_default_attributes.inherit_env = v;
         runtime.pop();
     }
 
@@ -1345,12 +1398,201 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         return null;
     };
 
+    var value_code: ?[]const u8 = blk: {
+        if (runtime.getString(-1, "value")) |v| {
+            const trimmed = std.mem.trim(u8, v, " \t\r\n");
+            if (trimmed.len == 0) break :blk null;
+            break :blk allocator.dupe(u8, trimmed) catch null;
+        }
+        if (runtime.pushTable(-1, "value")) {
+            defer runtime.pop();
+            if (runtime.getString(-1, "lua")) |v| {
+                const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                if (trimmed.len > 0) break :blk allocator.dupe(u8, trimmed) catch null;
+            }
+            if (runtime.getString(-1, "fn")) |v| {
+                const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                if (trimmed.len > 0) break :blk allocator.dupe(u8, trimmed) catch null;
+            }
+        }
+        break :blk null;
+    };
+
+    var source_builtin: ?[]const u8 = null;
+    var source_value: ?[]const u8 = null;
+    if (runtime.pushTable(-1, "source")) {
+        defer runtime.pop();
+        source_builtin = runtime.getStringAlloc(-1, "builtin") orelse runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
+        if (runtime.getString(-1, "value")) |v| {
+            const trimmed = std.mem.trim(u8, v, " \t\r\n");
+            if (trimmed.len > 0) source_value = allocator.dupe(u8, trimmed) catch null;
+        }
+    }
+
+    var builtin_name: ?[]const u8 = runtime.getStringAlloc(-1, "builtin");
+    if (builtin_name == null and runtime.pushTable(-1, "builtin")) {
+        defer runtime.pop();
+        builtin_name = runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
+    }
+    if (builtin_name == null) {
+        builtin_name = source_builtin;
+    } else if (source_builtin) |b| {
+        allocator.free(b);
+    }
+    if (value_code == null) {
+        value_code = source_value;
+    } else if (source_value) |v| {
+        allocator.free(v);
+    }
+    var show_when_code: ?[]const u8 = blk: {
+        if (runtime.getString(-1, "show_when")) |v| {
+            const trimmed = std.mem.trim(u8, v, " \t\r\n");
+            if (trimmed.len == 0) break :blk null;
+            break :blk allocator.dupe(u8, trimmed) catch null;
+        }
+        break :blk null;
+    };
+
+    if (runtime.pushTable(-1, "progress")) {
+        defer runtime.pop();
+        if (runtime.getInt(u64, -1, "every_ms")) |v| {
+            _ = v;
+        }
+        if (show_when_code == null) {
+            if (runtime.getString(-1, "show_when")) |v| {
+                const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                if (trimmed.len > 0) show_when_code = allocator.dupe(u8, trimmed) catch null;
+            }
+        }
+        if (builtin_name == null) {
+            builtin_name = runtime.getStringAlloc(-1, "builtin");
+        }
+        if (builtin_name == null and runtime.pushTable(-1, "source")) {
+            defer runtime.pop();
+            builtin_name = runtime.getStringAlloc(-1, "builtin") orelse runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
+        }
+        if (value_code == null) {
+            if (runtime.getString(-1, "value")) |v| {
+                const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+            }
+            if (value_code == null and runtime.pushTable(-1, "source")) {
+                defer runtime.pop();
+                if (runtime.getString(-1, "value")) |v| {
+                    const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                    if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+                }
+            }
+        }
+    }
+
+    const has_button = runtime.fieldType(-1, "button") == .table or
+        runtime.fieldType(-1, "on_click") == .string or
+        runtime.fieldType(-1, "on_left_click") == .string or
+        runtime.fieldType(-1, "on_right_click") == .string or
+        runtime.fieldType(-1, "on_middle_click") == .string;
+    const has_progress = runtime.fieldType(-1, "progress") == .table or show_when_code != null or runtime.fieldType(-1, "every_ms") != .nil;
+    const progress_every_ms: u64 = blk: {
+        if (runtime.getInt(u64, -1, "every_ms")) |v| break :blk v;
+        if (runtime.pushTable(-1, "progress")) {
+            defer runtime.pop();
+            if (runtime.getInt(u64, -1, "every_ms")) |v| break :blk v;
+        }
+        break :blk 1000;
+    };
+
+    var on_click = runtime.getStringAlloc(-1, "on_click") orelse runtime.getStringAlloc(-1, "on_left_click");
+    var on_right_click = runtime.getStringAlloc(-1, "on_right_click") orelse runtime.getStringAlloc(-1, "right_click");
+    var on_middle_click = runtime.getStringAlloc(-1, "on_middle_click") orelse runtime.getStringAlloc(-1, "middle_click");
+    var button_active_bash = runtime.getStringAlloc(-1, "button_active_bash");
+    var button_left_style = runtime.getStringAlloc(-1, "button_left_style") orelse runtime.getStringAlloc(-1, "left_click_style") orelse runtime.getStringAlloc(-1, "on_left_click_style");
+    var button_middle_style = runtime.getStringAlloc(-1, "button_middle_style") orelse runtime.getStringAlloc(-1, "middle_click_style") orelse runtime.getStringAlloc(-1, "on_middle_click_style");
+    var button_right_style = runtime.getStringAlloc(-1, "button_right_style") orelse runtime.getStringAlloc(-1, "right_click_style") orelse runtime.getStringAlloc(-1, "on_right_click_style");
+    var inverse_on_hover = runtime.getBool(-1, "inverse_on_hover") orelse true;
+    if (runtime.pushTable(-1, "button")) {
+        defer runtime.pop();
+        if (on_click == null) on_click = runtime.getStringAlloc(-1, "on_click") orelse runtime.getStringAlloc(-1, "on_left_click");
+        if (on_right_click == null) on_right_click = runtime.getStringAlloc(-1, "on_right_click") orelse runtime.getStringAlloc(-1, "right_click");
+        if (on_middle_click == null) on_middle_click = runtime.getStringAlloc(-1, "on_middle_click") orelse runtime.getStringAlloc(-1, "middle_click");
+        if (button_active_bash == null) button_active_bash = runtime.getStringAlloc(-1, "active_when");
+        if (button_left_style == null) button_left_style = runtime.getStringAlloc(-1, "left_style") orelse runtime.getStringAlloc(-1, "left_click_style") orelse runtime.getStringAlloc(-1, "on_left_click_style");
+        if (button_middle_style == null) button_middle_style = runtime.getStringAlloc(-1, "middle_style") orelse runtime.getStringAlloc(-1, "middle_click_style") orelse runtime.getStringAlloc(-1, "on_middle_click_style");
+        if (button_right_style == null) button_right_style = runtime.getStringAlloc(-1, "right_style") orelse runtime.getStringAlloc(-1, "right_click_style") orelse runtime.getStringAlloc(-1, "on_right_click_style");
+        if (runtime.getBool(-1, "inverse_on_hover")) |v| inverse_on_hover = v;
+        if (builtin_name == null) builtin_name = runtime.getStringAlloc(-1, "builtin");
+        if (builtin_name == null and runtime.pushTable(-1, "source")) {
+            defer runtime.pop();
+            builtin_name = runtime.getStringAlloc(-1, "builtin") orelse runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
+        }
+        if (value_code == null) {
+            if (runtime.getString(-1, "value")) |v| {
+                const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+            }
+            if (value_code == null and runtime.pushTable(-1, "source")) {
+                defer runtime.pop();
+                if (runtime.getString(-1, "value")) |v| {
+                    const trimmed = std.mem.trim(u8, v, " \t\r\n");
+                    if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+                }
+            }
+        }
+    }
+    const kind: SegmentKind = if (has_progress)
+        .progress
+    else if (has_button)
+        .button
+    else if (builtin_name != null and value_code == null)
+        .builtin
+    else
+        .value;
+
+    const command: ?[]const u8 = switch (kind) {
+        .value => value_code,
+        .builtin => null,
+        .button, .progress => value_code,
+    };
+
+    if (runtime.fieldType(-1, "outputs") != .nil) {
+        setParseError(allocator, "config: segment field 'outputs' is removed; return styled blocks from 'value'");
+        allocator.free(name);
+        if (value_code) |vc| allocator.free(vc);
+        return null;
+    }
+
+    const has_source = command != null or builtin_name != null;
+    if (!has_source) {
+        const err_msg = switch (kind) {
+            .builtin => "config: builtin segment requires non-empty 'builtin'",
+            .value => "config: value segment requires a non-empty 'value'",
+            .button => "config: button segment requires 'value' or 'builtin'",
+            .progress => "config: progress segment requires 'value' or 'builtin'",
+        };
+        setParseError(allocator, err_msg);
+        allocator.free(name);
+        if (builtin_name) |b| allocator.free(@constCast(b));
+        if (show_when_code) |s| allocator.free(@constCast(s));
+        return null;
+    }
+
     return Segment{
         .name = name,
+        .kind = kind,
         .priority = lua_runtime.parseConstrainedInt(runtime, u8, -1, "priority", 1, 255, 50),
         .outputs = parseOutputs(runtime, allocator),
-        .command = runtime.getStringAlloc(-1, "command"),
-        .when = parseWhenTable(runtime, allocator, true),
+        .command = command,
+        .builtin = builtin_name,
+        .progress_every_ms = progress_every_ms,
+        .progress_show_when = show_when_code,
+        .on_click = on_click,
+        .on_right_click = on_right_click,
+        .on_middle_click = on_middle_click,
+        .button_active_bash = button_active_bash,
+        .button_left_style = button_left_style,
+        .button_middle_style = button_middle_style,
+        .button_right_style = button_right_style,
+        .inverse_on_hover = inverse_on_hover,
+        .when = null,
         .spinner = parseSpinner(runtime, allocator),
         .active_style = runtime.getStringAlloc(-1, "active_style") orelse "bg:1 fg:0",
         .inactive_style = runtime.getStringAlloc(-1, "inactive_style") orelse "bg:237 fg:250",
@@ -1476,7 +1718,7 @@ fn parseSpinner(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?SpinnerDef 
 /// - when = { any = { "a", "b" } }                    -- OR of tokens (each as single-token all)
 /// - when = { any = { { all = {"a","b"} }, "c" } }    -- OR of conditions
 /// - when = { bash = "..." }                          -- bash script
-/// - when = { lua = "..." }                           -- lua function
+/// - when = { lua = function(ctx) return ... end }     -- lua callback
 fn parseWhenTable(runtime: *LuaRuntime, allocator: std.mem.Allocator, allow_hexe: bool) ?WhenDef {
     _ = allow_hexe; // No longer used; tokens are namespace-agnostic
     const ty = runtime.fieldType(-1, "when");

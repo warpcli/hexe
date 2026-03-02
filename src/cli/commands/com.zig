@@ -3,12 +3,20 @@ const core = @import("core");
 const ipc = core.ipc;
 
 pub const runMuxFloat = @import("mux_float.zig").runMuxFloat;
+pub const runMuxRecord = @import("mux_record.zig").runMuxRecord;
+pub const runSesOpen = @import("ses_open.zig").runSesOpen;
+pub const runSesFreeze = @import("ses_freeze.zig").runSesFreeze;
 pub const runPodList = @import("pod_list.zig").runPodList;
 pub const runPodSend = @import("pod_send.zig").runPodSend;
 pub const runPodNew = @import("pod_new.zig").runPodNew;
 pub const runPodAttach = @import("pod_attach.zig").runPodAttach;
+pub const runPodRecord = @import("pod_record.zig").runPodRecord;
 pub const runPodKill = @import("pod_kill.zig").runPodKill;
 pub const runPodGc = @import("pod_gc.zig").runPodGc;
+pub const runRecordStart = @import("record_ctl.zig").runRecordStart;
+pub const runRecordStop = @import("record_ctl.zig").runRecordStop;
+pub const runRecordStatus = @import("record_ctl.zig").runRecordStatus;
+pub const runRecordToggle = @import("record_ctl.zig").runRecordToggle;
 
 const print = std.debug.print;
 

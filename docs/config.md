@@ -1,16 +1,16 @@
 # Configuration
 
-Hexa is configured in Lua.
+Hexe is configured in Lua.
 
 ---
 
 ## File locations
 
-Hexa reads config from (in order):
+Hexe reads config from (in order):
 
 1. `$XDG_CONFIG_HOME/hexe/init.lua`
 2. `~/.config/hexe/init.lua` (default if XDG not set)
-3. `./.hexe.lua` (optional local override in current directory)
+3. `./.hexe.lua` (optional local override in current directory, or session config — see [session_manager](session_manager.md))
 
 State is stored under:
 
@@ -27,10 +27,11 @@ local hx = require("hexe")
 hx.ses.layout.define({ ... })
 
 -- mux config (tabs, status bar, floats, keybinds, etc.)
-hx.mux.set({ ... })
+hx.mux.config.setup({ ... })
 
--- shell prompt config
-hx.shp.set({ ... })
+-- prompt segments
+hx.shp.prompt.left({ ... })
+hx.shp.prompt.right({ ... })
 ```
 
 ---
@@ -38,7 +39,7 @@ hx.shp.set({ ... })
 ## Mux config reference
 
 ```lua
-hx.mux.set({
+hx.mux.config.setup({
   -- Confirmation dialogs
   confirm_on_exit   = false,
   confirm_on_detach = false,
@@ -185,13 +186,76 @@ hx.ses.layout.define({
 ## Shell prompt reference
 
 ```lua
-hx.shp.set({
-  prompt = {
-    left  = { ... },   -- segment arrays, see statusbar.md
-    right = { ... },
-  },
-})
+hx.shp.prompt.left({ ... })
+hx.shp.prompt.right({ ... })
 ```
+
+Prompt and statusbar use a Lua-first callback model. Segment kind is inferred from fields:
+
+- `value` (callback)
+- `builtin` (callback descriptor)
+- `button` (click actions)
+- `progress` (cadence + visibility)
+
+`when` is callback-only everywhere:
+
+- `when = function(ctx) ... end`
+
+Legacy forms (for example string chunks, token tables, `when = { lua = ... }`, `bash`, `env`) are not supported.
+
+Quick examples:
+
+```lua
+value = function(ctx)
+  local p = ctx.pane(0)
+  if p and p.process_running then
+    return "RUN"
+  end
+  return nil
+end
+
+builtin = function(_)
+  return {
+    name = "directory",
+    style = "bg:237 fg:15",
+    prefix = { output = " ", style = "bg:0 fg:8" },
+    suffix = { output = " ", style = "bg:0 fg:8" },
+  }
+end
+
+when = function(ctx)
+  local p = ctx.pane("focused")
+  return p and p.focus_split
+end
+
+local r = hx.api.exec("git rev-parse --abbrev-ref HEAD", { timeout = 80, cache = 500 })
+if r.status == 0 and r.output ~= "" then
+  -- r.output, r.cached, r.timeout, r.elapsed_ms
+end
+```
+
+`hx.api.exec(cmd, opts?)` runs a shell command (`/bin/bash -lc`) and returns:
+
+- `output` (stdout fallback to stderr)
+- `status` (exit code)
+- `cached` (whether value came from cache)
+- `timeout` (`true` if timeout was hit)
+- `elapsed_ms` (execution time)
+
+Options:
+
+- `timeout` / `timeout_ms` (default `80`)
+- `cache` / `cache_ms` (default `500`)
+
+Option values must be numbers (invalid types raise a Lua config/runtime error).
+
+Scope rules:
+
+- Prompt supports `value` and an allowlisted subset of `builtin` segments.
+- Prompt does not accept `button` or `progress` segments.
+- Statusbar accepts full segment kinds (`value`, `builtin`, `button`, `progress`) and full statusbar builtins.
+
+See `docs/prompt.md` and `docs/statusbar.md` for the full schema and examples.
 
 ---
 
@@ -201,14 +265,16 @@ hx.shp.set({
 |---|---|
 | `HEXE_INSTANCE` | Named instance (see [instances](instances.md)) |
 | `HEXE_TEST_ONLY` | Set by `--test-only`; signals test isolation |
-| `HEXE_CONDITION_TIMEOUT` | Bash condition eval timeout (ms, default 100, range 10–5000) |
+| `HEXE_LUA_TRACE` | Lua callback trace mode: `1`/`all` or `slow` |
+| `HEXE_LUA_TRACE_SLOW_MS` | Slow-trace threshold (ms, default `8`) |
+| `HEXE_STATUSBAR_REDRAW_EVENT_MS` | Throttle interval for `statusbar_redraw` event (ms, default `120`) |
 
 ---
 
 ## Validate config
 
 ```sh
-hexe config validate
+hexe cfg validate
 ```
 
 Parses and validates your config without starting any daemon.

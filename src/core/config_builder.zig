@@ -204,6 +204,27 @@ pub const MuxConfigBuilder = struct {
         if (segment.command) |cmd| {
             result.command = try allocator.dupe(u8, cmd);
         }
+        if (segment.on_click) |cmd| {
+            result.on_click = try allocator.dupe(u8, cmd);
+        }
+        if (segment.on_right_click) |cmd| {
+            result.on_right_click = try allocator.dupe(u8, cmd);
+        }
+        if (segment.on_middle_click) |cmd| {
+            result.on_middle_click = try allocator.dupe(u8, cmd);
+        }
+        if (segment.button_active_bash) |cmd| {
+            result.button_active_bash = try allocator.dupe(u8, cmd);
+        }
+        if (segment.button_left_style) |s| {
+            result.button_left_style = try allocator.dupe(u8, s);
+        }
+        if (segment.button_middle_style) |s| {
+            result.button_middle_style = try allocator.dupe(u8, s);
+        }
+        if (segment.button_right_style) |s| {
+            result.button_right_style = try allocator.dupe(u8, s);
+        }
         result.active_style = try allocator.dupe(u8, segment.active_style);
         result.inactive_style = try allocator.dupe(u8, segment.inactive_style);
         result.separator = try allocator.dupe(u8, segment.separator);
@@ -378,9 +399,14 @@ pub const ShpConfigBuilder = struct {
     // Temporary struct for prompt segments (similar to config.Segment but for SHP)
     pub const SegmentDef = struct {
         name: []const u8,
+        kind: config.SegmentKind = .value,
         priority: i64,
         outputs: []const OutputDef,
         command: ?[]const u8,
+        builtin: ?[]const u8 = null,
+        progress_every_ms: u64 = 1000,
+        progress_show_when: ?[]const u8 = null,
+        inverse_on_hover: bool = true,
         when: ?config.WhenDef,
     };
 
@@ -404,6 +430,8 @@ pub const ShpConfigBuilder = struct {
         for (self.left_segments.items) |seg| {
             self.allocator.free(seg.name);
             if (seg.command) |cmd| self.allocator.free(cmd);
+            if (seg.builtin) |b| self.allocator.free(b);
+            if (seg.progress_show_when) |s| self.allocator.free(s);
             for (seg.outputs) |out| {
                 self.allocator.free(out.style);
                 self.allocator.free(out.format);
@@ -413,6 +441,8 @@ pub const ShpConfigBuilder = struct {
         for (self.right_segments.items) |seg| {
             self.allocator.free(seg.name);
             if (seg.command) |cmd| self.allocator.free(cmd);
+            if (seg.builtin) |b| self.allocator.free(b);
+            if (seg.progress_show_when) |s| self.allocator.free(s);
             for (seg.outputs) |out| {
                 self.allocator.free(out.style);
                 self.allocator.free(out.format);

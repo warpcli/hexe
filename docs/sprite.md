@@ -15,11 +15,11 @@ Added a feature to display Pokemon sprites overlaid in the center of panes when 
 
 ### 2. **Sprite System**
 - Sprite state is managed per pane via `PokemonState`
-- Implementation lives in `src/modules/pop/widgets/pokemon.zig`
+- Implementation lives in `src/modules/popup/widgets/pokemon.zig`
 - Sprites are loaded via embedded sprite assets and rendered as terminal cells
 
 ### 3. **Rendering Pipeline**
-- Added `drawSpriteOverlay()` to `Renderer` (`src/modules/mux/render.zig`)
+- Added `drawSpriteOverlay()` to `Renderer` (`src/modules/multiplexer/render.zig`)
 - Parses ANSI color codes (24-bit RGB)
 - Centers sprite in pane viewport
 - Renders on top of pane content but below overlays
@@ -27,7 +27,7 @@ Added a feature to display Pokemon sprites overlaid in the center of panes when 
 
 ### 4. **Keybinding Action**
 - Added `sprite_toggle` to `BindAction` enum (`src/core/config.zig`)
-- Handler in `src/modules/mux/keybinds.zig`
+- Handler in `src/modules/multiplexer/keybinds.zig`
 - Works for both split panes and floating panes
 - Automatically loads a random Pokemon sprite
 
@@ -122,10 +122,10 @@ rayquaza, kyogre, groudon, dialga, palkia, arceus, and many more!
 ## Files Modified
 
 1. `src/core/config.zig` - Added `sprite_toggle` action
-2. `src/modules/mux/pane.zig` - Added sprite state to panes
-3. `src/modules/pop/widgets/pokemon.zig` - Sprite state and loading
-4. `src/modules/mux/loop_render.zig` - Integrated sprite overlay rendering
-5. `src/modules/mux/keybinds_actions.zig` - Sprite toggle action handler
+2. `src/modules/multiplexer/pane.zig` - Added sprite state to panes
+3. `src/modules/popup/widgets/pokemon.zig` - Sprite state and loading
+4. `src/modules/multiplexer/loop_render.zig` - Integrated sprite overlay rendering
+5. `src/modules/multiplexer/keybinds_actions.zig` - Sprite toggle action handler
 7. `src/sprites/` - Pokemon sprite assets (1,152 × 2)
 
 ## Credits

@@ -98,7 +98,10 @@ Controls what happens to the key after the bind fires:
 
 -- passthrough: forward to pane, no action
 { key = { hx.key.ctrl, hx.key.alt, hx.key.up }, mode = hx.mode.passthrough_only,
-  when = { any = { "fg:nvim", "fg:vim" } } }
+  when = function(ctx)
+    local p = ctx.pane(0)
+    return p and (p.process_name == "nvim" or p.process_name == "vim")
+  end }
 
 -- both: run action and also send key into pane
 { key = { ... }, mode = hx.mode.act_and_passthrough, action = { type = hx.action.sprite_toggle } }
@@ -112,49 +115,103 @@ Keys without any binding always pass through unchanged.
 
 Optional condition that must be true for the bind to fire.
 
-**String shorthand** (single token):
+`when` is callback-only:
 
 ```lua
-when = "focus_split"
-when = "focus_float"
+when = function(ctx)
+  return ctx.focus_split and ctx.process_name == "nvim"
+end
 ```
 
-**Table form** — `any` (OR) or `all` (AND):
+`ctx` exposes the current focused pane state.
+
+Pane lookup:
+- `ctx.pane(0)` (or `ctx.pane(nil)`) → current focused pane
+- `ctx.pane(<number>)` → pane by runtime index in `ctx.panes` (1-based)
+- `ctx.pane(<uuid_string>)` → pane by UUID
+- `ctx.pane("focused")` / `ctx.pane("current")` → current focused pane
+- `ctx.pane("last")` → previously focused pane (if available)
+- `ctx.pane("tab:<n>/focus")` → focused split pane for tab `n` (1-based)
+- `ctx.cache.get(key)` / `ctx.cache.set(key, value, ttl_ms)` / `ctx.cache.del(key)` for callback caching
 
 ```lua
-when = { any = { "fg:nvim", "fg:vim" } }
-when = { all = { "focus_split", "fg:nvim" } }
+local p = ctx.pane(0)
+if p and p.focus_float then
+  return true
+end
+return false
 ```
 
-**Shell/script conditions:**
+`hexe.status.pane(0)` is kept as an alias to `ctx.pane(0)`.
 
-```lua
-when = { bash = "[[ -n $SSH_CONNECTION ]]" }
-when = { lua  = "return ctx.last_status ~= 0" }
-when = { env  = "MY_VAR" }       -- set and non-empty
-when = { env_not = "MY_VAR" }    -- not set or empty
-```
+Common pane fields:
 
-**Available tokens:**
-
-| Token | Meaning |
+| Field | Meaning |
 |---|---|
 | `focus_split` | Focused pane is a split |
 | `focus_float` | Focused pane is a float |
-| `fg:nvim` | Foreground process matches `nvim` |
-| `fg:vim` | Foreground process matches `vim` |
-| `float_sticky` | Current float has sticky attribute |
-| `float_exclusive` | Current float has exclusive attribute |
-| `float_per_cwd` | Current float has per_cwd attribute |
-| `float_global` | Current float has global attribute |
-| `float_isolated` | Current float has isolated attribute |
-| `float_destroyable` | Current float has destroy attribute |
-| `process_running` | A process is running in focused pane |
+| `process_name` | Foreground process name (for example `nvim`) |
+| `process_running` | Whether a foreground process is present |
 | `alt_screen` | Terminal is in alt-screen mode |
-| `has_selection` | Active text selection |
-| `adhoc_float` | An ad-hoc float is open |
-| `named_float` | A named float is open |
-| `tabs_gt1` | More than one tab open |
+| `tab_count` | Number of open tabs |
+| `active_tab` | Active tab index |
+| `float_key` | Float key for focused float pane |
+
+### Lua Trace
+
+- Set `HEXE_LUA_TRACE=1` to trace all callback evaluations.
+- Set `HEXE_LUA_TRACE=slow` to trace only slow evaluations.
+- Optional threshold: `HEXE_LUA_TRACE_SLOW_MS` (default `8`).
+
+## Lua Events (autocmd)
+
+You can register runtime event callbacks through `hexe.autocmd`.
+
+Supported events:
+- `pane_focus_changed`
+- `tab_changed`
+- `command_finished`
+- `pane_shell_running_changed`
+- `statusbar_redraw` (throttled, default 120ms)
+
+Registration forms:
+
+```lua
+hexe.autocmd.pane_focus_changed = function(ev)
+  -- ev.pane_uuid, ev.previous_pane_uuid, ev.pane_type, ev.active_tab, ev.now_ms
+end
+
+hexe.autocmd.tab_changed = {
+  function(ev) end,
+  function(ev) end,
+}
+```
+
+Built-in helper `hexe.autocmd.on(event, fn)`:
+
+```lua
+hexe.autocmd.on("command_finished", function(ev)
+  -- ev.command, ev.cwd, ev.status, ev.duration_ms, ev.jobs, ev.pane_uuid
+end)
+
+hexe.autocmd.on("pane_shell_running_changed", function(ev)
+  -- ev.pane_uuid, ev.previous_running, ev.running, ev.phase, ev.command, ev.now_ms
+end)
+
+hexe.autocmd.on("statusbar_redraw", function(ev)
+  -- ev.now_ms, ev.term_width, ev.term_height, ev.active_tab, ev.tab_count, ev.interval_ms
+end)
+
+-- debounce helper (returns wrapped handler)
+hexe.autocmd.on("statusbar_redraw", hexe.autocmd.debounce(250, function(ev)
+  -- runs at most every 250ms
+end))
+
+-- convenience helper
+hexe.autocmd.debounced_on("statusbar_redraw", 250, function(ev)
+  -- same as on(..., debounce(...))
+end)
+```
 
 ---
 
@@ -166,10 +223,10 @@ Pass `Ctrl+Alt+Arrow` through to nvim/vim, otherwise move focus:
 
 ```lua
 -- passthrough first (evaluated before the fallback)
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.up },    when = { any = {"fg:nvim","fg:vim"} }, mode = hx.mode.passthrough_only },
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.down },  when = { any = {"fg:nvim","fg:vim"} }, mode = hx.mode.passthrough_only },
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.left },  when = { any = {"fg:nvim","fg:vim"} }, mode = hx.mode.passthrough_only },
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.right }, when = { any = {"fg:nvim","fg:vim"} }, mode = hx.mode.passthrough_only },
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.up },    when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hx.mode.passthrough_only },
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.down },  when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hx.mode.passthrough_only },
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.left },  when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hx.mode.passthrough_only },
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.right }, when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hx.mode.passthrough_only },
 
 -- fallback: move mux focus
 { key = { hx.key.ctrl, hx.key.alt, hx.key.up },    action = { type = hx.action.focus_move, dir = "up" } },
@@ -184,8 +241,8 @@ Binds are evaluated in order — first match wins.
 
 ```lua
 -- split only when a split is focused
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.h }, when = "focus_split", action = { type = hx.action.split_h } },
-{ key = { hx.key.ctrl, hx.key.alt, hx.key.v }, when = "focus_split", action = { type = hx.action.split_v } },
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.h }, when = function(ctx) return ctx.focus_split end, action = { type = hx.action.split_h } },
+{ key = { hx.key.ctrl, hx.key.alt, hx.key.v }, when = function(ctx) return ctx.focus_split end, action = { type = hx.action.split_v } },
 ```
 
 ### Float toggles

@@ -1,268 +1,302 @@
-# Status bar & prompt
+# Mux Status Bar (`mux.tabs.status`)
 
-Hexa has a unified segment system used in two places:
+This page documents the mux status bar system.
 
-- **Mux status bar** (`mux.tabs.status`) — shown in the tab bar at the top
-- **Shell prompt** (`shp.prompt`) — rendered by `hexe shp` in your shell
+For shell prompt details, see `docs/prompt.md`.
 
-Both use the same segment format. The only difference is which condition providers are available.
-
----
-
-## Status bar
-
-Configure under `mux.tabs.status` in your mux config:
+## Configure Status Bar
 
 ```lua
-hx.mux.set({
+local hx = require("hexe")
+
+hx.mux.config.setup({
   tabs = {
     status = {
       enabled = true,
-      left   = { ... },
-      center = { ... },
-      right  = { ... },
     },
   },
 })
-```
 
-Each of `left`, `center`, `right` is an array of segment definitions.
-
----
-
-## Shell prompt
-
-Configure under `shp.prompt`:
-
-```lua
-hx.shp.set({
-  prompt = {
-    left  = { ... },
-    right = { ... },
+hx.mux.tabs.add_segment("left", {
+  name = "session",
+  outputs = {
+    { style = "bg:237 fg:15", format = " $output " },
   },
 })
 ```
 
-Initialize in your shell:
+You can also provide arrays with `left`, `center`, `right` using your preferred config style.
 
-```sh
-# bash
-eval "$(hexe shp init bash)"
-
-# zsh
-eval "$(hexe shp init zsh)"
-
-# fish
-hexe shp init fish | source
-```
-
----
-
-## Segment format
+## Segment Schema (Lua-first)
 
 ```lua
 {
-  name     = "git_branch",       -- built-in or custom segment name
-  priority = 50,                 -- 1–255, lower = hidden last when space is tight
-  command  = nil,                -- custom command (overrides built-in)
-  when     = { ... },            -- optional condition (see below)
-  outputs  = {
-    { style = "bg:1 fg:0 bold", format = " $output " },
+  name     = "tabs",
+  priority = 50,
+  -- value segment (text or styled blocks)
+  value = function(ctx)
+    return {
+      { text = " ", style = "bg:237 fg:250" },
+      { text = os.date("%H:%M:%S"), style = "bold bg:237 fg:250" },
+      { text = " ", style = "bg:237 fg:250" },
+    }
+  end,
+
+  -- builtin segment (descriptor)
+  builtin = function(ctx)
+    return {
+      name = "session",
+      style = "bg:1 fg:0",
+      prefix = { output = " ", style = "bg:0 fg:8" },
+      suffix = { output = " ", style = "bg:0 fg:8" },
+    }
+  end,
+
+  -- affix object schema: { output = string, style = string }
+
+  -- optional click behavior
+  button = {
+    on_left_click = "hexe record toggle --scope pod --out /tmp/pod.cast",
+    on_right_click = "hexe record stop --scope pod --out /tmp/pod.cast",
+    active_when = "test \"$(hexe record status --scope pod 2>/dev/null)\" = 1",
+    left_style = "bg:2 fg:0",
+    middle_style = "bg:3 fg:0",
+    right_style = "bg:1 fg:0",
+    inverse_on_hover = true,
+  },
+
+  -- optional structured progress behavior
+  progress = {
+    every_ms = 1000,
+    show_when = function(ctx) return ctx.jobs > 0 end,
+    value = function(ctx) return tostring(ctx.jobs) end,
+  },
+
+  -- tabs-only styling fields:
+  active_style    = "bg:1 fg:0",
+  inactive_style  = "bg:237 fg:250",
+  separator       = " | ",
+  separator_style = "fg:7",
+  tab_title       = "basename", -- or "name"
+  left_arrow      = "",
+  right_arrow     = "",
+
+  -- optional spinner object (module-level animation):
+  spinner = {
+    kind = "knight_rider",
+    width = 8,
+    step_ms = 75,
+    hold_frames = 9,
+    trail_len = 6,
+    colors = { 1, 3, 5 },
   },
 }
 ```
 
-### `outputs`
+Kind is inferred from fields (`value`, `builtin`, `button`, `progress`); you do not need to set a `kind` field.
 
-Each output is a `{ style, format }` pair. `$output` is replaced with the segment's value.
+Unlike prompt, statusbar is not builtin-allowlisted: statusbar can use `value`, `builtin`, `button`, and `progress` segment kinds and full statusbar builtins (including `spinner`).
 
-**Style syntax:** space-separated tokens
-- `bg:<n>` — background palette index or `bg:r,g,b` for RGB
-- `fg:<n>` — foreground palette index or `fg:r,g,b` for RGB
-- `bold`, `italic`, `underline`, `blink`, `reverse`, `strikethrough`
+`on_click`, `on_right_click`, and `on_middle_click` run shell commands on statusbar clicks.
 
-**Format** is a string with `$output` as a placeholder. Can include static text.
+Clickable segments are treated as buttons and automatically render with reverse colors while hovered.
 
-### `priority`
+If `button.active_when` is set and returns success, the button stays reversed while active; on hover it flips back (opposite visual) to indicate a deactivate click.
 
-When the terminal is too narrow to show all segments, lower-priority segments are dropped first. Default is 50.
+Button click-state behavior:
 
----
+- First click (left/middle/right) sets a clicked state for that button.
+- Clicked state style can be set per button via `left_style`, `middle_style`, and `right_style` (or top-level aliases `button_left_style`, `button_middle_style`, `button_right_style`).
+- When hovered while clicked, style is inverted if `inverse_on_hover = true`.
+- Clicking the same button again unclicks (toggle off).
+- If already clicked with one button, clicking a different button unclicks (does not switch to the other clicked state).
 
-## Built-in segments
+When using Lua config helpers, `hx.record.status({ scope = "pod" })` now returns a table like `{ active = true|false, scope = "pod", pid = ..., out = "...", started_ms = ... }`.
 
-### Universal (statusbar + prompt)
+## Built-in Status Segments
 
-| Name | Description |
-|---|---|
-| `directory` | Current working directory |
-| `git_branch` | Git branch name |
-| `git_status` | Git staged/unstaged/untracked counts |
-| `character` | Shell prompt character (e.g., `❯`) |
-| `time` | Current time |
-| `status` | Last exit status code |
-| `sudo` | Shows if sudo credentials are cached |
-| `jobs` | Number of background jobs |
-| `duration` | Duration of last command |
-| `pod_name` | Name of the current pod |
-| `hostname` | Hostname |
-| `username` | Current user |
-| `uptime` | System uptime |
-| `battery` | Battery level |
-| `last_command` | Name of last command |
+Common built-ins used by the status bar:
 
-### Statusbar-only
+- `tabs`
+- `session`
+- `directory`
+- `git_branch`
+- `git_status`
+- `jobs`
+- `duration`
+- `status`
+- `sudo`
+- `pod_name`
+- `hostname`
+- `username`
+- `time`
+- `cpu`
+- `memory`
+- `netspeed`
+- `battery`
+- `uptime`
+- `last_command`
+- `running_anim` (and named variants)
+- `randomdo`
+- `spinner`
 
-| Name | Description |
-|---|---|
-| `tabs` | Tab list with active indicator |
-| `cpu` | CPU usage |
-| `memory` | Memory usage |
-| `netspeed` | Network throughput |
-| `running_anim` | Running indicator (animated) |
-| `running_anim/knight_rider` | Knight Rider animation |
+## Conditions (`when`) in Status Bar
 
-### Animation params (query string syntax)
+Statusbar `when` is callback-only.
 
-```lua
-name = "running_anim/knight_rider?width=10&step=30&hold=20"
-```
-
-| Param | Default | Description |
-|---|---|---|
-| `width` | 8 | Width of animation in cells |
-| `step` | 75 | Frame duration in ms |
-| `hold` | 9 | Frames held at each end |
-| `trail` | 6 | Trail length |
-
-### Spinner (loading indicator)
-
-Shown while a segment's command is running:
+Use:
 
 ```lua
-spinner = {
-  kind        = "knight_rider",
-  width       = 8,
-  step_ms     = 75,
-  hold_frames = 9,
-  trail_len   = 6,
-  colors      = { 1, 3, 5 },
-},
+when = function(ctx)
+  local p = ctx.pane(0)
+  return p and p.process_running and not p.alt_screen
+end
 ```
 
-### Custom commands
+Legacy forms like token tables, `when = { lua = ... }`, and bash/env conditions are no longer supported in statusbar.
 
-Run any shell command as a segment:
+Pane lookup in statusbar callbacks:
+- `ctx.pane(0)` (or `ctx.pane(nil)`) returns the current focused pane state (same table as `ctx`)
+- `ctx.pane(<number>)` returns pane by runtime index in `ctx.panes` (1-based)
+- `ctx.pane(<uuid_string>)` returns pane by UUID
+- `ctx.pane("focused")` / `ctx.pane("current")` returns the current focused pane
+- `ctx.pane("last")` returns the previously focused pane (if available)
+- `ctx.pane("tab:<n>/focus")` returns focused split pane for tab `n` (1-based)
+- `ctx.cache.get(key)` / `ctx.cache.set(key, value, ttl_ms)` / `ctx.cache.del(key)` for callback caching
 
-```lua
-{
-  name    = "my_thing",
-  command = "cat /proc/loadavg | awk '{print $1}'",
-  outputs = {
-    { style = "bg:237 fg:3", format = "  $output " },
-  },
-}
-```
+Available fields in `ctx`:
 
-The command output is used as `$output`.
-
----
-
-## Conditions (`when`)
-
-### In the statusbar
-
-```lua
-when = {
-  hexe = { "process_running", "not_alt_screen" },
-}
-```
-
-Available `hexe` tokens:
-
-**Shell state:**
-- `process_running` / `not_process_running`
-- `alt_screen` / `not_alt_screen`
-- `jobs_nonzero`
-- `has_last_cmd`
-- `last_status_nonzero`
-
-**Mux state:**
-- `focus_float` / `focus_split`
-- `adhoc_float` / `named_float`
-- `float_destroyable`, `float_exclusive`, `float_sticky`, `float_per_cwd`, `float_global`, `float_isolated`
-- `tabs_gt1` / `tabs_eq1`
-
-Bash or Lua conditions also work (rate-limited):
-
-```lua
-when = { bash = "[[ $TERM_PROGRAM == 'ghostty' ]]" }
-when = { lua  = "return ctx.last_status ~= 0" }
-```
-
-Lua `ctx` in statusbar:
-- `ctx.shell_running`, `ctx.alt_screen`, `ctx.jobs`
-- `ctx.last_status`, `ctx.last_command`, `ctx.cwd`
+- `ctx.shell_running`
+- `ctx.alt_screen`
+- `ctx.jobs`
+- `ctx.last_status`
+- `ctx.exit_status`
+- `ctx.last_command`
+- `ctx.cwd`
+- `ctx.home`
+- `ctx.cmd_duration_ms`
+- `ctx.terminal_width`
 - `ctx.now_ms`
+- `ctx.env`
 
-### In the prompt
+Common pane fields include `focus_split`, `focus_float`, `process_name`, and `process_running`.
+
+### Lua Trace
+
+- Set `HEXE_LUA_TRACE=1` to trace all callback evaluations.
+- Set `HEXE_LUA_TRACE=slow` to trace only slow evaluations.
+- Optional threshold: `HEXE_LUA_TRACE_SLOW_MS` (default `8`).
+
+Condition evaluation is cached internally:
+
+- Callback conditions: short TTL (fast re-use)
+
+## Value/Builtin Output Model
+
+`value` return behavior:
+
+- `string` -> rendered text
+- `number` -> rendered text
+- `boolean true` -> `"true"`
+- `nil` / `false` / unsupported types -> empty output
+
+Example:
 
 ```lua
-when = { bash = "[[ -n $SSH_CONNECTION ]]" }
-when = { lua  = "return (ctx.exit_status or 0) ~= 0" }
+{
+  name = "virt",
+  value = function(_)
+    local p = io.popen("systemd-detect-virt 2>/dev/null")
+    if not p then return nil end
+    local v = (p:read("*a") or ""):match("^%s*(.-)%s*$")
+    p:close()
+    if v == "" or v == "none" then return nil end
+    if v == "lxc" then
+      return { { text = " >> ", style = "bg:5 fg:0" } }
+    end
+    return { { text = " :: ", style = "bg:5 fg:0" } }
+  end,
+}
 ```
 
-Lua `ctx` in prompt:
-- `ctx.cwd`, `ctx.exit_status`, `ctx.cmd_duration_ms`, `ctx.jobs`, `ctx.terminal_width`
+Builtin descriptor behavior:
 
----
+- `name` selects a builtin segment renderer.
+- `style` applies to builtin output text.
+- `prefix`/`suffix` wrap builtin output and support two forms:
+  - string: `prefix = " "`
+  - object: `prefix = { output = " ", style = "bg:0 fg:8" }`
+  - same schema for `suffix`
+- `sufix = { output = ..., style = ... }` is accepted as alias for `suffix`.
+- For spinner builtin descriptors, optional fields `kind`, `width`, `step`/`step_ms`, `hold`/`hold_frames`, `colors`, `bg`, and `placeholder` are supported.
+- Descriptor style is authoritative when provided (it does not merge with builtin segment style).
 
-## Tabs segment
+Convenience constructor:
 
-The tab list segment has additional styling:
+```lua
+builtin = function(_)
+  return hexe.segment.builtin.git_status({
+    style = "bg:1 fg:0",
+    suffix = " ",
+  })
+end
+```
+
+Use `hexe.segment.builtin` (or `hx.segment.builtin`). The typo alias `hexe.segment.buildin` has been removed.
+
+## Width and Priority
+
+Status bar layout is three-zone:
+
+- left
+- center (usually `tabs`, truly centered)
+- right
+
+Left and right modules are width-budgeted and priority-sorted.
+
+- lower `priority` value means it survives longer when space is tight
+- center tabs are rendered after side zones and can visually win overlaps
+
+## Tabs Styling Example
 
 ```lua
 {
   name = "tabs",
-  active_style   = "bg:1 fg:0 bold",
+  active_style = "bg:1 fg:0 bold",
   inactive_style = "bg:237 fg:8",
-  separator      = "│",
-  separator_style = "bg:0 fg:237",
-  tab_title      = "basename",   -- "name" or "basename"
-  left_arrow     = "",
-  right_arrow    = "",
-},
+  separator = "│",
+  separator_style = "fg:7",
+  tab_title = "basename",
+  left_arrow = "",
+  right_arrow = "",
+  outputs = {
+    { style = "", format = "$output" },
+  },
+}
 ```
 
----
+## Notification Layer (not a segment)
 
-## Notifications
-
-Transient text notifications appear in the status bar area (not in a segment).
-
-Configure under `mux.notifications`:
+Status-area notifications are configured separately from segment lists:
 
 ```lua
-hx.mux.set({
+hx.mux.config.setup({
   notifications = {
     mux = {
-      fg          = 0,
-      bg          = 3,
-      bold        = true,
-      padding_x   = 1,
-      padding_y   = 0,
-      offset      = 1,
-      alignment   = "center",   -- left | center | right
+      fg = 0,
+      bg = 3,
+      bold = true,
+      padding_x = 1,
+      padding_y = 0,
+      offset = 1,
+      alignment = "center",
       duration_ms = 3000,
-    },
-    pane = {
-      -- same fields, offset is from bottom of pane
     },
   },
 })
 ```
 
-Send a notification from the CLI:
+Send with CLI:
 
 ```sh
 hexe mux notify "Build complete"
