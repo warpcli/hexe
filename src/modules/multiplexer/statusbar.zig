@@ -104,6 +104,7 @@ threadlocal var progress_text_cache: ?std.AutoHashMap(usize, ProgressCacheEntry)
 threadlocal var hover_x: ?u16 = null;
 threadlocal var hover_y: ?u16 = null;
 threadlocal var statusbar_redraw_last_emit_ms: ?u64 = null;
+threadlocal var click_command_buf: [1024]u8 = [_]u8{0} ** 1024;
 
 fn statusbarRedrawEventIntervalMs() u64 {
     const raw = std.posix.getenv("HEXE_STATUSBAR_REDRAW_EVENT_MS") orelse return 120;
@@ -1743,6 +1744,54 @@ fn clickCommandFor(mod: *const core.Segment, button: u8) ?[]const u8 {
     };
 }
 
+fn evalLuaClickCommand(code: []const u8, ctx: *shp.Context) ?[]const u8 {
+    var rt_ptr: *LuaRuntime = undefined;
+    if (callback_lua_rt) |existing| {
+        rt_ptr = existing;
+    } else {
+        if (when_lua_rt == null) {
+            when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch return null;
+        }
+        rt_ptr = &when_lua_rt.?;
+    }
+
+    populateLuaContext(rt_ptr, ctx);
+    const mode = beginLuaEval(rt_ptr, code) orelse return null;
+    defer endLuaEval(rt_ptr, mode);
+
+    if (rt_ptr.lua.typeOf(-1) == .string) {
+        const s = rt_ptr.lua.toString(-1) catch return null;
+        const n = @min(s.len, click_command_buf.len);
+        @memcpy(click_command_buf[0..n], s[0..n]);
+        return click_command_buf[0..n];
+    }
+
+    if (rt_ptr.lua.typeOf(-1) == .table) {
+        _ = rt_ptr.lua.getField(-1, "command");
+        if (rt_ptr.lua.typeOf(-1) == .string) {
+            const s = rt_ptr.lua.toString(-1) catch {
+                rt_ptr.lua.pop(1);
+                return null;
+            };
+            const n = @min(s.len, click_command_buf.len);
+            @memcpy(click_command_buf[0..n], s[0..n]);
+            rt_ptr.lua.pop(1);
+            return click_command_buf[0..n];
+        }
+        rt_ptr.lua.pop(1);
+    }
+
+    return null;
+}
+
+fn resolveClickCommandFor(mod: *const core.Segment, button: u8, ctx: *shp.Context) ?[]const u8 {
+    const cmd = clickCommandFor(mod, button) orelse return null;
+    if (callbackIdFromCode(cmd) != null) {
+        return evalLuaClickCommand(cmd, ctx);
+    }
+    return cmd;
+}
+
 pub fn hitTestAction(
     state: *State,
     allocator: std.mem.Allocator,
@@ -1927,7 +1976,7 @@ pub fn hitTestAction(
         const end = start +| info.width;
         if (x >= start and x < end) {
             toggleClickedButton(info.mod, button);
-            return clickCommandFor(info.mod, button);
+            return resolveClickCommandFor(info.mod, button, &ctx);
         }
         lx = end;
     }
@@ -1940,7 +1989,7 @@ pub fn hitTestAction(
         const end = start +| info.width;
         if (x >= start and x < end) {
             toggleClickedButton(info.mod, button);
-            return clickCommandFor(info.mod, button);
+            return resolveClickCommandFor(info.mod, button, &ctx);
         }
         rx = end;
     }

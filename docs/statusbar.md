@@ -113,6 +113,33 @@ Button click-state behavior:
 
 When using Lua config helpers, `hx.record.status({ scope = "pod" })` now returns a table like `{ active = true|false, scope = "pod", pid = ..., out = "...", started_ms = ... }`.
 
+Recording command helper sugar is available:
+
+```lua
+button = {
+  on_left_click = function(ctx)
+    local ap = hx.status.active_pod(ctx)
+    if not ap then return nil end
+    return hx.record.toggle({
+      scope = "pod",
+      uuid = ap.uuid,
+      out = "/tmp/hexe-active-pod.cast",
+      capture_input = false,
+    })
+  end,
+  on_right_click = function(_)
+    return hx.record.stop({ scope = "pod" })
+  end,
+}
+```
+
+`hx.status.active_pod(ctx?)` returns `{ uuid = "...", pane = <pane_table> }` for the focused pane.
+
+Statusbar button actions export focused pane UUID env vars at click time:
+
+- `HEXE_FOCUSED_PANE_UUID`
+- `HEXE_STATUS_FOCUSED_PANE_UUID`
+
 ## Built-in Status Segments
 
 Common built-ins used by the status bar:

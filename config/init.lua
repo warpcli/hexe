@@ -230,15 +230,36 @@ if section == nil or section == "mux" then
     name = "rec",
     priority = 11,
     value = function(_)
-      local st = hexe.record.status({ scope = "pod" })
+      local st = hexe.record.status({ scope = rec_opts.scope })
       if st and st.active then
         return { { text = " REC ", style = "bg:1 fg:15 bold" } }
       end
       return { { text = " rec ", style = "bg:1 fg:15 bold" } }
     end,
     button = {
-      on_left_click = hx.record.toggle(rec_opts),
-      on_right_click = hx.record.stop(rec_opts),
+      on_left_click = function(ctx)
+        local ap = hx.status.active_pod(ctx)
+        if not ap or not ap.uuid then
+          return nil
+        end
+        local st = hx.record.status({ scope = rec_opts.scope })
+        local start_cmd = hx.record.start({
+          scope = rec_opts.scope,
+          uuid = ap.uuid,
+          out = rec_opts.out,
+          capture_input = rec_opts.capture_input,
+        })
+        if not st or not st.active then
+          return start_cmd
+        end
+        if st.uuid == ap.uuid then
+          return hx.record.stop({ scope = rec_opts.scope })
+        end
+        return hx.record.stop({ scope = rec_opts.scope }) .. "; " .. start_cmd
+      end,
+      on_right_click = function(_)
+        return hx.record.stop({ scope = rec_opts.scope })
+      end,
       active_when = "test \"$(hexe record status --scope pod 2>/dev/null)\" = 1",
       left_style = "bg:2 fg:0 bold",
       middle_style = "bg:3 fg:0 bold",

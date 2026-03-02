@@ -156,6 +156,25 @@ fn parsePromptCallbackField(lua: *Lua, allocator: std.mem.Allocator, field_name:
     };
 }
 
+fn parseCommandOrCallbackField(lua: *Lua, allocator: std.mem.Allocator, field_name: []const u8) ?[]const u8 {
+    return switch (lua.typeOf(-1)) {
+        .nil => null,
+        .string => blk: {
+            const s = lua.toString(-1) catch break :blk null;
+            if (s.len == 0) break :blk null;
+            break :blk allocator.dupe(u8, s) catch null;
+        },
+        .function => parsePromptCallbackField(lua, allocator, field_name),
+        else => blk: {
+            const msg = std.fmt.allocPrint(allocator, "{s} must be string command or function(ctx)", .{field_name}) catch "command field type is invalid";
+            defer if (!std.mem.eql(u8, msg, "command field type is invalid")) allocator.free(msg);
+            _ = lua.pushString(msg);
+            lua.raiseError();
+            break :blk null;
+        },
+    };
+}
+
 /// Result of parsing a key array
 pub const ParsedKey = struct {
     mods: u8, // Bitmask of modifiers
@@ -1298,16 +1317,16 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
         const is_tbl = lua.typeOf(-1) == .table;
         lua.pop(1);
         _ = lua.getField(idx, "on_click");
-        const has_left = lua.typeOf(-1) == .string;
+        const has_left = lua.typeOf(-1) == .string or lua.typeOf(-1) == .function;
         lua.pop(1);
         _ = lua.getField(idx, "on_left_click");
-        const has_left_alias = lua.typeOf(-1) == .string;
+        const has_left_alias = lua.typeOf(-1) == .string or lua.typeOf(-1) == .function;
         lua.pop(1);
         _ = lua.getField(idx, "on_right_click");
-        const has_right = lua.typeOf(-1) == .string;
+        const has_right = lua.typeOf(-1) == .string or lua.typeOf(-1) == .function;
         lua.pop(1);
         _ = lua.getField(idx, "on_middle_click");
-        const has_mid = lua.typeOf(-1) == .string;
+        const has_mid = lua.typeOf(-1) == .string or lua.typeOf(-1) == .function;
         lua.pop(1);
         break :blk is_tbl or has_left or has_left_alias or has_right or has_mid;
     };
@@ -1329,29 +1348,39 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
 
     // Parse optional click actions.
     _ = lua.getField(idx, "on_click");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        if (s.len > 0) segment.on_click = allocator.dupe(u8, s) catch null;
+    if (callbackFieldPathAlloc(allocator, base_path, "on_click")) |field_path| {
+        defer allocator.free(field_path);
+        if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+            segment.on_click = code;
+        }
     }
     lua.pop(1);
     _ = lua.getField(idx, "on_left_click");
-    if (segment.on_click == null and lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        if (s.len > 0) segment.on_click = allocator.dupe(u8, s) catch null;
+    if (segment.on_click == null) {
+        if (callbackFieldPathAlloc(allocator, base_path, "on_left_click")) |field_path| {
+            defer allocator.free(field_path);
+            if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+                segment.on_click = code;
+            }
+        }
     }
     lua.pop(1);
 
     _ = lua.getField(idx, "on_right_click");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        if (s.len > 0) segment.on_right_click = allocator.dupe(u8, s) catch null;
+    if (callbackFieldPathAlloc(allocator, base_path, "on_right_click")) |field_path| {
+        defer allocator.free(field_path);
+        if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+            segment.on_right_click = code;
+        }
     }
     lua.pop(1);
 
     _ = lua.getField(idx, "on_middle_click");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        if (s.len > 0) segment.on_middle_click = allocator.dupe(u8, s) catch null;
+    if (callbackFieldPathAlloc(allocator, base_path, "on_middle_click")) |field_path| {
+        defer allocator.free(field_path);
+        if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+            segment.on_middle_click = code;
+        }
     }
     lua.pop(1);
 
@@ -1454,41 +1483,65 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
         lua.pop(1);
 
         _ = lua.getField(-1, "on_click");
-        if (segment.on_click == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.on_click = allocator.dupe(u8, s) catch null;
+        if (segment.on_click == null) {
+            if (callbackFieldPathAlloc(allocator, base_path, "button.on_click")) |field_path| {
+                defer allocator.free(field_path);
+                if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+                    segment.on_click = code;
+                }
+            }
         }
         lua.pop(1);
         _ = lua.getField(-1, "on_left_click");
-        if (segment.on_click == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.on_click = allocator.dupe(u8, s) catch null;
+        if (segment.on_click == null) {
+            if (callbackFieldPathAlloc(allocator, base_path, "button.on_left_click")) |field_path| {
+                defer allocator.free(field_path);
+                if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+                    segment.on_click = code;
+                }
+            }
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "on_right_click");
-        if (segment.on_right_click == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.on_right_click = allocator.dupe(u8, s) catch null;
+        if (segment.on_right_click == null) {
+            if (callbackFieldPathAlloc(allocator, base_path, "button.on_right_click")) |field_path| {
+                defer allocator.free(field_path);
+                if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+                    segment.on_right_click = code;
+                }
+            }
         }
         lua.pop(1);
         _ = lua.getField(-1, "right_click");
-        if (segment.on_right_click == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.on_right_click = allocator.dupe(u8, s) catch null;
+        if (segment.on_right_click == null) {
+            if (callbackFieldPathAlloc(allocator, base_path, "button.right_click")) |field_path| {
+                defer allocator.free(field_path);
+                if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+                    segment.on_right_click = code;
+                }
+            }
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "on_middle_click");
-        if (segment.on_middle_click == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.on_middle_click = allocator.dupe(u8, s) catch null;
+        if (segment.on_middle_click == null) {
+            if (callbackFieldPathAlloc(allocator, base_path, "button.on_middle_click")) |field_path| {
+                defer allocator.free(field_path);
+                if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+                    segment.on_middle_click = code;
+                }
+            }
         }
         lua.pop(1);
         _ = lua.getField(-1, "middle_click");
-        if (segment.on_middle_click == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.on_middle_click = allocator.dupe(u8, s) catch null;
+        if (segment.on_middle_click == null) {
+            if (callbackFieldPathAlloc(allocator, base_path, "button.middle_click")) |field_path| {
+                defer allocator.free(field_path);
+                if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+                    segment.on_middle_click = code;
+                }
+            }
         }
         lua.pop(1);
 
@@ -3079,12 +3132,17 @@ fn buildRecordCommand(lua: *Lua, action: enum { start, stop, toggle, status }) ?
         cmd.appendSlice(qout) catch return null;
     }
     if (std.mem.eql(u8, scope, "pod") and target_flag.len > 0 and (action == .start or action == .toggle)) {
-        const qtarget = shellQuote(allocator, target_value) catch return null;
-        defer allocator.free(qtarget);
         cmd.appendSlice(" ") catch return null;
         cmd.appendSlice(target_flag) catch return null;
         cmd.appendSlice(" ") catch return null;
-        cmd.appendSlice(qtarget) catch return null;
+        if (std.mem.startsWith(u8, target_value, "$HEXE_") or std.mem.startsWith(u8, target_value, "${HEXE_")) {
+            // Allow runtime env expansion for hexe-provided dynamic targets.
+            cmd.appendSlice(target_value) catch return null;
+        } else {
+            const qtarget = shellQuote(allocator, target_value) catch return null;
+            defer allocator.free(qtarget);
+            cmd.appendSlice(qtarget) catch return null;
+        }
     }
     if ((action == .start or action == .toggle) and capture_input) {
         cmd.appendSlice(" --capture-input") catch return null;
@@ -3095,7 +3153,7 @@ fn buildRecordCommand(lua: *Lua, action: enum { start, stop, toggle, status }) ?
 pub export fn hexe_record_start(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
     const cmd = buildRecordCommand(lua, .start) orelse {
-        _ = lua.pushString("record.start: expected opts table with scope='pod'");
+        _ = lua.pushString("record.start: expected opts table with scope='pod' or 'mux'");
         lua.raiseError();
     };
     defer std.heap.page_allocator.free(cmd);
@@ -3106,7 +3164,7 @@ pub export fn hexe_record_start(L: ?*LuaState) callconv(.c) c_int {
 pub export fn hexe_record_stop(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
     const cmd = buildRecordCommand(lua, .stop) orelse {
-        _ = lua.pushString("record.stop: expected opts table with scope='pod'");
+        _ = lua.pushString("record.stop: expected opts table with scope='pod' or 'mux'");
         lua.raiseError();
     };
     defer std.heap.page_allocator.free(cmd);
@@ -3117,7 +3175,7 @@ pub export fn hexe_record_stop(L: ?*LuaState) callconv(.c) c_int {
 pub export fn hexe_record_toggle(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
     const cmd = buildRecordCommand(lua, .toggle) orelse {
-        _ = lua.pushString("record.toggle: expected opts table with scope='pod'");
+        _ = lua.pushString("record.toggle: expected opts table with scope='pod' or 'mux'");
         lua.raiseError();
     };
     defer std.heap.page_allocator.free(cmd);
@@ -3188,6 +3246,7 @@ pub export fn hexe_record_status(L: ?*LuaState) callconv(.c) c_int {
     var pid: i32 = 0;
     var started_ms: i64 = 0;
     var out: []const u8 = "";
+    var uuid: []const u8 = "";
     var lines = std.mem.tokenizeAny(u8, data, "\n");
     while (lines.next()) |line| {
         var kv = std.mem.splitScalar(u8, line, '=');
@@ -3196,6 +3255,7 @@ pub export fn hexe_record_status(L: ?*LuaState) callconv(.c) c_int {
         if (std.mem.eql(u8, k, "pid")) pid = std.fmt.parseInt(i32, v, 10) catch 0;
         if (std.mem.eql(u8, k, "started_ms")) started_ms = std.fmt.parseInt(i64, v, 10) catch 0;
         if (std.mem.eql(u8, k, "out")) out = v;
+        if (std.mem.eql(u8, k, "uuid")) uuid = v;
     }
 
     const active = pid > 0 and std.c.kill(pid, 0) == 0;
@@ -3203,7 +3263,7 @@ pub export fn hexe_record_status(L: ?*LuaState) callconv(.c) c_int {
         std.fs.cwd().deleteFile(state_path) catch {};
     }
 
-    lua.createTable(0, 5);
+    lua.createTable(0, 6);
     lua.pushBoolean(active);
     lua.setField(-2, "active");
     _ = lua.pushString(scope);
@@ -3214,6 +3274,10 @@ pub export fn hexe_record_status(L: ?*LuaState) callconv(.c) c_int {
         if (out.len > 0) {
             _ = lua.pushString(out);
             lua.setField(-2, "out");
+        }
+        if (uuid.len > 0) {
+            _ = lua.pushString(uuid);
+            lua.setField(-2, "uuid");
         }
         if (started_ms > 0) {
             lua.pushInteger(started_ms);

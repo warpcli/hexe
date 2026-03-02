@@ -122,6 +122,66 @@ fn hexe_autocmd_on(L: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
+fn injectRecordTargetHelper(lua: *Lua) void {
+    const code =
+        "if type(hexe)=='table' and type(hexe.record)=='table' then " ++
+        "local __rec=hexe.record; " ++
+        "local __mt=getmetatable(__rec); if type(__mt)~='table' then __mt={} end; " ++
+        "if __mt.__call==nil then " ++
+        "__mt.__call=function(_, target) " ++
+        "local base={}; " ++
+        "if type(target)=='string' then base.uuid=target " ++
+        "elseif type(target)=='table' then for k,v in pairs(target) do base[k]=v end end; " ++
+        "local out={}; " ++
+        "out.start=__rec.start(base); " ++
+        "out.stop=__rec.stop(base); " ++
+        "out.toggle=__rec.toggle(base); " ++
+        "out.status=function(extra) " ++
+        "local o={}; for k,v in pairs(base) do o[k]=v end; " ++
+        "if type(extra)=='table' then for k,v in pairs(extra) do o[k]=v end end; " ++
+        "return __rec.status(o) end; " ++
+        "out.start_cmd=out.start; out.stop_cmd=out.stop; out.toggle_cmd=out.toggle; " ++
+        "return out end; " ++
+        "setmetatable(__rec,__mt) " ++
+        "end end";
+
+    const z = std.heap.page_allocator.dupeZ(u8, code) catch return;
+    defer std.heap.page_allocator.free(z);
+    lua.loadString(z) catch return;
+    lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
+        lua.pop(1);
+        return;
+    };
+}
+
+fn injectStatusHelpers(lua: *Lua) void {
+    const code =
+        "if type(hexe)=='table' then " ++
+        "hexe.status=hexe.status or {}; " ++
+        "if hexe.status.active_pod==nil then " ++
+        "hexe.status.active_pod=function(c) " ++
+        "local cx=c; if cx==nil then cx=rawget(_G,'ctx') end; " ++
+        "if type(cx)~='table' then return nil end; " ++
+        "local p=nil; if type(cx.pane)=='function' then p=cx.pane(0) else p=cx end; " ++
+        "if type(p)~='table' then return nil end; " ++
+        "local u=p.uuid or p.pane_uuid or os.getenv('HEXE_FOCUSED_PANE_UUID') or os.getenv('HEXE_STATUS_FOCUSED_PANE_UUID'); " ++
+        "if not u or u=='' then return nil end; " ++
+        "return { uuid=u, pane=p } end; " ++
+        "end; " ++
+        "if hexe.status.active_pod_uuid==nil then " ++
+        "hexe.status.active_pod_uuid=function(c) local ap=hexe.status.active_pod(c); return ap and ap.uuid or nil end; " ++
+        "end; " ++
+        "end";
+
+    const z = std.heap.page_allocator.dupeZ(u8, code) catch return;
+    defer std.heap.page_allocator.free(z);
+    lua.loadString(z) catch return;
+    lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
+        lua.pop(1);
+        return;
+    };
+}
+
 /// Configuration loading status
 pub const ConfigStatus = enum {
     loaded,
@@ -879,6 +939,10 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setGlobal("hexe");
     lua.pushValue(-1); // duplicate
     lua.setGlobal("hx");
+
+    // hexe.record(target).start/stop/toggle helper (target = uuid or opts table)
+    injectRecordTargetHelper(lua);
+    injectStatusHelpers(lua);
 }
 
 fn hexeLoader(state: ?*LuaState) callconv(.c) c_int {
