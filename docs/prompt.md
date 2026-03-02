@@ -72,7 +72,12 @@ Each prompt side is an array of segment definitions.
 
   -- or builtin segment descriptor
   builtin = function(ctx)
-    return { name = "directory", style = "bg:237 fg:15", suffix = " " }
+    return {
+      name = "directory",
+      style = "bg:237 fg:15",
+      prefix = { output = " ", style = "bg:0 fg:8" },
+      suffix = { output = " ", style = "bg:0 fg:8" },
+    }
   end,
 }
 ```
@@ -81,6 +86,7 @@ Notes:
 
 - Kind is inferred from fields (`value`, `builtin`, `button`, `progress`); no `kind` field is required.
 - `outputs` is not used in the Lua-first prompt model.
+- Affix object form is supported: `prefix = { output = "...", style = "..." }`, `suffix = { output = "...", style = "..." }`.
 
 ## Prompt Restrictions
 
@@ -125,6 +131,10 @@ Return behavior:
 - `name` (required): builtin segment name (for example `git_branch`, `git_status`, `directory`)
 - `style`: descriptor style override
 - `prefix` / `suffix`: wrapper text around builtin output
+  - string form: `prefix = " "`
+  - object form: `prefix = { output = " ", style = "bg:0 fg:8" }`
+  - same schema for `suffix`
+- `sufix = { output = ..., style = ... }` is accepted as alias for `suffix`
 
 You can build descriptors with helpers:
 
@@ -142,26 +152,23 @@ Style behavior:
 - If descriptor `style` is provided, it is authoritative for rendered builtin text.
 - This is useful when you want fixed colors (for example black-on-red git segments).
 
-## Conditions (`when`) [legacy parser path]
+## Conditions (`when`)
 
-The current Lua-first prompt model typically encodes visibility directly in `value`/`builtin` functions (return `nil` to hide). Older table-style parser paths still support `when` fields.
+The Lua-first prompt model usually encodes visibility directly in `value`/`builtin` callbacks (return `nil` to hide). `when` is callback-only.
 
-Prompt supports these condition forms:
+Prompt condition form:
 
 ```lua
-when = { env = "SSH_CONNECTION" }
-when = { env_not = "INSIDE_CONTAINER" }
-when = { bash = "[[ -n $SSH_CONNECTION ]]" }
-when = { lua = "return (ctx.exit_status or 0) ~= 0" }
-when = { all = { "token_a", "token_b" } }
-when = { any = { "token_a", { lua = "return true" } } }
+when = function(ctx)
+  return (ctx.exit_status or 0) ~= 0
+end
 ```
 
-`when.lua` must return boolean.
+Legacy forms like `when = { lua = ... }`, token tables, and bash/env conditions are no longer supported in prompt.
 
 ## Lua Context (`ctx`)
 
-Prompt Lua (`lua` field and `when.lua`) gets a global `ctx` table:
+Prompt Lua callbacks (`value`, `builtin`, and `when.lua`) receive `ctx`:
 
 - `ctx.cwd`
 - `ctx.home`
@@ -171,16 +178,20 @@ Prompt Lua (`lua` field and `when.lua`) gets a global `ctx` table:
 - `ctx.terminal_width`
 - `ctx.now_ms`
 - `ctx.env` (environment map: `ctx.env.NAME`)
+- `ctx.pane(0)` / `ctx.pane(nil)` (returns current prompt context table)
+- `ctx.pane(1)` and `ctx.pane("focused")` / `ctx.pane("current")` also return current prompt context table
+- prompt mode has no cross-pane lookup (`ctx.pane(<other>)` returns `nil`)
+- `ctx.cache.get(key)` / `ctx.cache.set(key, value, ttl_ms)` / `ctx.cache.del(key)` for callback-local caching
 
 Example:
 
 ```lua
-lua = [[
+value = function(ctx)
   if (ctx.exit_status or 0) ~= 0 then
     return "ERR"
   end
   return nil
-]]
+end
 ```
 
 ## Lua Safety Modes
@@ -206,6 +217,12 @@ Unsafe mode package search paths:
 If `XDG_CONFIG_HOME` is unset, `~/.config/hexe` is used.
 
 Native C modules are disabled (`package.cpath = ""`).
+
+### Lua Trace
+
+- Set `HEXE_LUA_TRACE=1` to trace all callback evaluations.
+- Set `HEXE_LUA_TRACE=slow` to trace only slow evaluations.
+- Optional threshold: `HEXE_LUA_TRACE_SLOW_MS` (default `8`).
 
 ## Width and Priority Behavior
 

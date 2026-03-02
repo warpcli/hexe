@@ -47,7 +47,7 @@ pub const SpinnerDef = struct {
 ///   when = { any = { "a", "b" } }               -- OR
 ///   when = { any = { { all = { "a", "b" } }, "c" } }  -- OR of ANDs
 ///   when = { bash = "..." }                     -- bash script
-///   when = { lua = "..." }                      -- lua script
+///   when = { lua = function(ctx) return ... end } -- lua callback
 pub const WhenDef = struct {
     /// AND of tokens (flat list, no namespaces needed)
     all: ?[][]const u8 = null,
@@ -706,6 +706,7 @@ pub const Config = struct {
 
     // Internal
     _allocator: ?std.mem.Allocator = null,
+    _lua_runtime: ?*LuaRuntime = null,
 
     pub fn load(allocator: std.mem.Allocator) Config {
         var config = Config{};
@@ -718,12 +719,19 @@ pub const Config = struct {
         };
         defer allocator.free(path);
 
-        var runtime = LuaRuntime.init(allocator) catch {
+        const runtime_ptr = allocator.create(LuaRuntime) catch {
+            config.status = .@"error";
+            config.status_message = allocator.dupe(u8, "failed to allocate Lua runtime") catch null;
+            return config;
+        };
+        runtime_ptr.* = LuaRuntime.init(allocator) catch {
+            allocator.destroy(runtime_ptr);
             config.status = .@"error";
             config.status_message = allocator.dupe(u8, "failed to initialize Lua") catch null;
             return config;
         };
-        defer runtime.deinit();
+        var runtime = runtime_ptr;
+        config._lua_runtime = runtime_ptr;
 
         // Let a single config file avoid building other sections.
         runtime.setHexeSection("mux");
@@ -757,7 +765,7 @@ pub const Config = struct {
         std.fs.cwd().access(local_path, .{}) catch {
             // No local config, use global only
             log.debug("no local config found", .{});
-            applyBuilderConfig(&runtime, &config, allocator);
+            applyBuilderConfig(runtime, &config, allocator);
             if (config.status != .@"error") {
                 if (PARSE_ERROR) |msg| {
                     config.status = .@"error";
@@ -774,7 +782,7 @@ pub const Config = struct {
         runtime.loadConfig(local_path) catch |err| {
             // Failed to load local config, but global is already loaded
             log.warn("failed to load local config: {}", .{err});
-            applyBuilderConfig(&runtime, &config, allocator);
+            applyBuilderConfig(runtime, &config, allocator);
             if (config.status != .@"error") {
                 if (PARSE_ERROR) |msg| {
                     config.status = .@"error";
@@ -787,12 +795,12 @@ pub const Config = struct {
 
         // Rebuild from ConfigBuilder after local config load so local builder calls
         // (hexe.mux.* API) are applied consistently with global config loading.
-        applyBuilderConfig(&runtime, &config, allocator);
+        applyBuilderConfig(runtime, &config, allocator);
 
         // Access the "mux" section of the local config table and merge
         if (runtime.pushTable(-1, "mux")) {
             log.info("parsing mux section from local config", .{});
-            parseConfig(&runtime, &config, allocator);
+            parseConfig(runtime, &config, allocator);
             runtime.pop();
         } else {
             log.warn("no mux section in local config", .{});
@@ -816,8 +824,10 @@ pub const Config = struct {
         if (runtime.getBuilder()) |builder| {
             if (builder.mux) |mux_builder| {
                 log.debug("building mux config from ConfigBuilder", .{});
+                const keep_runtime = config._lua_runtime;
                 config.* = mux_builder.build() catch config.*;
                 config._allocator = allocator;
+                config._lua_runtime = keep_runtime;
             }
         }
     }
@@ -878,6 +888,12 @@ pub const Config = struct {
                     }
                 }
                 alloc.free(self.input.binds);
+            }
+
+            if (self._lua_runtime) |rt| {
+                rt.deinit();
+                alloc.destroy(rt);
+                self._lua_runtime = null;
             }
         }
     }
@@ -1702,7 +1718,7 @@ fn parseSpinner(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?SpinnerDef 
 /// - when = { any = { "a", "b" } }                    -- OR of tokens (each as single-token all)
 /// - when = { any = { { all = {"a","b"} }, "c" } }    -- OR of conditions
 /// - when = { bash = "..." }                          -- bash script
-/// - when = { lua = "..." }                           -- lua function
+/// - when = { lua = function(ctx) return ... end }     -- lua callback
 fn parseWhenTable(runtime: *LuaRuntime, allocator: std.mem.Allocator, allow_hexe: bool) ?WhenDef {
     _ = allow_hexe; // No longer used; tokens are namespace-agnostic
     const ty = runtime.fieldType(-1, "when");

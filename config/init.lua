@@ -1,5 +1,57 @@
-local hx = require("hexe")
+hx = require("hexe")
 local section = HEXE_SECTION
+
+hx.autocmd = hx.autocmd or {}
+if hx.autocmd.on == nil then
+  hx.autocmd.on = function(event, fn)
+    if type(event) ~= "string" then
+      error("autocmd event must be string")
+    end
+    if type(fn) ~= "function" then
+      error("autocmd handler must be function")
+    end
+    local cur = hx.autocmd[event]
+    if cur == nil then
+      hx.autocmd[event] = fn
+    elseif type(cur) == "function" then
+      hx.autocmd[event] = { cur, fn }
+    elseif type(cur) == "table" then
+      cur[#cur + 1] = fn
+    else
+      error("autocmd slot already used by non-function value: " .. event)
+    end
+    return fn
+  end
+end
+
+if hx.autocmd.debounce == nil then
+  hx.autocmd.debounce = function(interval_ms, fn)
+    if type(interval_ms) ~= "number" or interval_ms < 0 then
+      error("debounce interval_ms must be non-negative number")
+    end
+    if type(fn) ~= "function" then
+      error("debounce fn must be function")
+    end
+    local last_now_ms = nil
+    return function(ev)
+      local now_ms = 0
+      if type(ev) == "table" and type(ev.now_ms) == "number" then
+        now_ms = ev.now_ms
+      end
+      if last_now_ms ~= nil and now_ms >= last_now_ms and (now_ms - last_now_ms) < interval_ms then
+        return nil
+      end
+      last_now_ms = now_ms
+      return fn(ev)
+    end
+  end
+end
+
+if hx.autocmd.debounced_on == nil then
+  hx.autocmd.debounced_on = function(event, interval_ms, fn)
+    return hx.autocmd.on(event, hx.autocmd.debounce(interval_ms, fn))
+  end
+end
 
 -- ============================================================================
 -- MUX Configuration (Terminal UI)
@@ -30,8 +82,8 @@ if section == nil or section == "mux" then
     { key = { hx.key.ctrl, hx.key.alt, hx.key.k }, action = { type = hx.action.keycast_toggle } },
     { key = { hx.key.ctrl, hx.key.alt, hx.key.o }, action = { type = hx.action.pane_select_mode } },
 
-    { key = { hx.key.ctrl, hx.key.alt, hx.key.h }, when = "focus_split", action = { type = hx.action.split_h } },
-    { key = { hx.key.ctrl, hx.key.alt, hx.key.v }, when = "focus_split", action = { type = hx.action.split_v } },
+    { key = { hx.key.ctrl, hx.key.alt, hx.key.h }, when = function(ctx) local p = ctx.pane(0); return p and p.focus_split end, action = { type = hx.action.split_h } },
+    { key = { hx.key.ctrl, hx.key.alt, hx.key.v }, when = function(ctx) local p = ctx.pane(0); return p and p.focus_split end, action = { type = hx.action.split_v } },
 
     { key = { hx.key.ctrl, hx.key.alt, hx.key.t }, action = { type = hx.action.tab_new } },
     { key = { hx.key.ctrl, hx.key.alt, hx.key.x }, action = { type = hx.action.tab_close } },
@@ -39,10 +91,10 @@ if section == nil or section == "mux" then
     { key = { hx.key.ctrl, hx.key.alt, hx.key.comma }, action = { type = hx.action.tab_prev } },
 
     -- Focus movement: passthrough to nvim/vim, otherwise do focus_move
-    { key = { hx.key.ctrl, hx.key.alt, hx.key.up }, when = { lua = function(ctx) return ctx.fg_process == "nvim" or ctx.fg_process == "vim" end }, mode = hx.mode.passthrough_only },
-    { key = { hx.key.ctrl, hx.key.alt, hx.key.down }, when = { lua = function(ctx) return ctx.fg_process == "nvim" or ctx.fg_process == "vim" end }, mode = hx.mode.passthrough_only },
-    { key = { hx.key.ctrl, hx.key.alt, hx.key.left }, when = { lua = function(ctx) return ctx.fg_process == "nvim" or ctx.fg_process == "vim" end }, mode = hx.mode.passthrough_only },
-    { key = { hx.key.ctrl, hx.key.alt, hx.key.right }, when = { lua = function(ctx) return ctx.fg_process == "nvim" or ctx.fg_process == "vim" end }, mode = hx.mode.passthrough_only },
+    { key = { hx.key.ctrl, hx.key.alt, hx.key.up }, when = function(ctx) local p = ctx.pane(0); return p and (p.process_name == "nvim" or p.process_name == "vim") end, mode = hx.mode.passthrough_only },
+    { key = { hx.key.ctrl, hx.key.alt, hx.key.down }, when = function(ctx) local p = ctx.pane(0); return p and (p.process_name == "nvim" or p.process_name == "vim") end, mode = hx.mode.passthrough_only },
+    { key = { hx.key.ctrl, hx.key.alt, hx.key.left }, when = function(ctx) local p = ctx.pane(0); return p and (p.process_name == "nvim" or p.process_name == "vim") end, mode = hx.mode.passthrough_only },
+    { key = { hx.key.ctrl, hx.key.alt, hx.key.right }, when = function(ctx) local p = ctx.pane(0); return p and (p.process_name == "nvim" or p.process_name == "vim") end, mode = hx.mode.passthrough_only },
     { key = { hx.key.ctrl, hx.key.alt, hx.key.up }, action = { type = hx.action.focus_move, dir = "up" } },
     { key = { hx.key.ctrl, hx.key.alt, hx.key.down }, action = { type = hx.action.focus_move, dir = "down" } },
     { key = { hx.key.ctrl, hx.key.alt, hx.key.left }, action = { type = hx.action.focus_move, dir = "left" } },
@@ -112,7 +164,11 @@ if section == nil or section == "mux" then
     name = "session",
     priority = 30,
     builtin = function(_)
-      return hexe.segment.builtin.session({ style = "bg:1 fg:0", prefix = " ", suffix = " " })
+      return hx.segment.builtin.session({
+        style = "bg:1 fg:0",
+        prefix = { output = "| " },
+        suffix = { output = " |" },
+      })
     end,
   })
 
@@ -120,8 +176,9 @@ if section == nil or section == "mux" then
     name = "spinner",
     priority = 20,
     builtin = function(ctx)
-      if (ctx.shell_running and not ctx.alt_screen) or ctx.adhoc_float then
-        return hexe.segment.builtin.spinner({
+      local p = ctx.pane(0)
+      if p and ((p.shell_running and not p.alt_screen) or p.adhoc_float) then
+        return hx.segment.builtin.spinner({
           kind = "knight_rider",
           width = 10,
           step = 40,
@@ -140,8 +197,9 @@ if section == nil or section == "mux" then
     name = "randomdo",
     priority = 200000,
     builtin = function(ctx)
-      if (ctx.shell_running and not ctx.alt_screen) or ctx.adhoc_float then
-        return hexe.segment.builtin.randomdo({ style = "bg:0 fg:1", suffix = " " })
+      local p = ctx.pane(0)
+      if p and ((p.shell_running and not p.alt_screen) or p.adhoc_float) then
+        return hx.segment.builtin.randomdo({ style = "bg:0 fg:1", suffix = " " })
       end
       return nil
     end,
@@ -342,7 +400,12 @@ if section == nil or section == "shp" then
     {
       name = "ssh",
       priority = 60,
-      value = "return ctx.env.SSH_CONNECTION and { { text = ' //', style = 'bg:237 italic fg:15' } } or nil",
+      value = function(ctx)
+        if not ctx.env.SSH_CONNECTION then
+          return nil
+        end
+        return { { text = " //", style = "bg:237 italic fg:15" } }
+      end,
     },
     {
       name = "hostname",
@@ -354,15 +417,19 @@ if section == nil or section == "shp" then
     {
       name = "distro",
       priority = 10,
-      value = [[
-        local p = io.popen('/env/dot/.func/shell/distrologo')
-        if not p then return nil end
-        local raw = p:read('*a') or ''
+      value = function(_)
+        local p = io.popen("/env/dot/.func/shell/distrologo")
+        if not p then
+          return nil
+        end
+        local raw = p:read("*a") or ""
         p:close()
-        local t = raw:match('^%s*(.-)%s*$')
-        if not t or t == '' then return nil end
-        return { { text = ' ' .. t, style = 'bg:1 fg:0' } }
-      ]],
+        local t = raw:match("^%s*(.-)%s*$")
+        if not t or t == "" then
+          return nil
+        end
+        return { { text = " " .. t, style = "bg:1 fg:0" } }
+      end,
     },
     {
       name = "username",
@@ -374,7 +441,12 @@ if section == nil or section == "shp" then
     {
       name = "direnv",
       priority = 25,
-      value = "return ctx.env.DIRENV_DIR and { { text = '▓', style = 'bg:1 fg:0' } } or nil",
+      value = function(ctx)
+        if not ctx.env.DIRENV_DIR then
+          return nil
+        end
+        return { { text = "▓", style = "bg:1 fg:0" } }
+      end,
     },
     {
       name = "sudo",
@@ -386,23 +458,28 @@ if section == nil or section == "shp" then
     {
       name = "tab",
       priority = 35,
-      value = [[
-        local tab = ((ctx and ctx.env and ctx.env.TAB) or ''):match('^%s*(.-)%s*$')
-        if tab ~= '' and tab ~= '.reset-prompt' and tab ~= 'reset-prompt' then
+      value = function(ctx)
+        local tab = ((ctx and ctx.env and ctx.env.TAB) or ""):match("^%s*(.-)%s*$")
+        if tab ~= "" and tab ~= ".reset-prompt" and tab ~= "reset-prompt" then
           return nil
         end
-        local p = io.popen('tab -l 2> /dev/null | wc -l')
-        if not p then return nil end
-        local raw = p:read('*a') or ''
+
+        local p = io.popen("tab -l 2> /dev/null | wc -l")
+        if not p then
+          return nil
+        end
+        local raw = p:read("*a") or ""
         p:close()
-        local total = tonumber((raw:match('^%s*(.-)%s*$')) or '0') or 0
+        local total = tonumber((raw:match("^%s*(.-)%s*$")) or "0") or 0
         local n = total - 1
-        if n <= 0 then return nil end
+        if n <= 0 then
+          return nil
+        end
         return {
-          { text = '|', style = 'fg:7' },
-          { text = ' ' .. tostring(n) .. ' ', style = 'bg:237 italic fg:15' },
+          { text = "|", style = "fg:7" },
+          { text = " " .. tostring(n) .. " ", style = "bg:237 italic fg:15" },
         }
-      ]],
+      end,
     },
     {
       name = "status",
@@ -414,29 +491,35 @@ if section == nil or section == "shp" then
     {
       name = "container",
       priority = 50,
-      value = [[
-        local p = io.popen('systemd-detect-virt 2>/dev/null')
-        if not p then return nil end
-        local out = p:read('*a') or ''
+      value = function(_)
+        local p = io.popen("systemd-detect-virt 2>/dev/null")
+        if not p then
+          return nil
+        end
+        local out = p:read("*a") or ""
         p:close()
-        local virt = out:match('^%s*(.-)%s*$')
-        if virt == '' or virt == 'none' then return nil end
-        if virt == 'lxc' then
+        local virt = out:match("^%s*(.-)%s*$")
+        if virt == "" or virt == "none" then
+          return nil
+        end
+        if virt == "lxc" then
           return {
-            { text = ' ', style = 'bg:0 fg:0' },
-            { text = ' >> ', style = 'bg:5 fg:0' },
+            { text = " ", style = "bg:0 fg:0" },
+            { text = " >> ", style = "bg:5 fg:0" },
           }
         end
         return {
-          { text = ' ', style = 'bg:0 fg:0' },
-          { text = ' :: ', style = 'bg:5 fg:0' },
+          { text = " ", style = "bg:0 fg:0" },
+          { text = " :: ", style = "bg:5 fg:0" },
         }
-      ]],
+      end,
     },
     {
       name = "separator",
       priority = 20,
-      value = "return { { text = '|', style = 'fg:7' } }",
+      value = function(_)
+        return { { text = "|", style = "fg:7" } }
+      end,
     },
   })
 
@@ -445,21 +528,21 @@ if section == nil or section == "shp" then
       name = "pod_name",
       priority = 1,
       builtin = function(_)
-        return hexe.segment.builtin.pod_name({ style = "bg:5 fg:0", prefix = "| ", suffix = " ||" })
+        return hexe.segment.builtin.pod_name({ style = "bg:5 fg:0", prefix = "| ", suffix = " |" })
       end,
     },
     {
       name = "git_branch",
       priority = 4,
       builtin = function(_)
-        return hexe.segment.builtin.git_branch({ style = "bg:1 fg:0", prefix = "  ", suffix = " " })
+        return hexe.segment.builtin.git_branch({ style = "bg:1 fg:0", prefix = " ", suffix = " " })
       end,
     },
     {
       name = "git_status",
       priority = 5,
       builtin = function(_)
-        return hexe.segment.builtin.git_status({ style = "bg:1 fg:0", suffix = " " })
+        return hexe.segment.builtin.git_status({ style = "bg:1 fg:0", prefix = " ", suffix = " " })
       end,
     },
     {

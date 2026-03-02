@@ -13,6 +13,7 @@ const Pane = @import("pane.zig").Pane;
 const ses_client = @import("ses_client.zig");
 const OrphanedPaneInfo = ses_client.OrphanedPaneInfo;
 const state_reattach = @import("state_reattach.zig");
+const lua_events = @import("lua_events.zig");
 
 /// Get the current tab's layout.
 pub fn currentLayout(self: anytype) *Layout {
@@ -289,18 +290,50 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
 /// Switch to next tab.
 pub fn nextTab(self: anytype) void {
     if (self.tabs.items.len > 1) {
+        const prev_tab = self.active_tab;
         self.active_tab = (self.active_tab + 1) % self.tabs.items.len;
         self.renderer.invalidate();
         self.force_full_render = true;
+
+        if (self.config._lua_runtime) |rt| {
+            rt.lua.createTable(0, 6);
+            _ = rt.lua.pushString("tab_changed");
+            rt.lua.setField(-2, "event");
+            rt.lua.pushInteger(@intCast(prev_tab + 1));
+            rt.lua.setField(-2, "previous_tab");
+            rt.lua.pushInteger(@intCast(self.active_tab + 1));
+            rt.lua.setField(-2, "active_tab");
+            rt.lua.pushInteger(@intCast(self.tabs.items.len));
+            rt.lua.setField(-2, "tab_count");
+            rt.lua.pushInteger(@intCast(std.time.milliTimestamp()));
+            rt.lua.setField(-2, "now_ms");
+            lua_events.emitAutocmdWithPayloadOnStack(rt, "tab_changed");
+        }
     }
 }
 
 /// Switch to previous tab.
 pub fn prevTab(self: anytype) void {
     if (self.tabs.items.len > 1) {
+        const prev_tab = self.active_tab;
         self.active_tab = if (self.active_tab == 0) self.tabs.items.len - 1 else self.active_tab - 1;
         self.renderer.invalidate();
         self.force_full_render = true;
+
+        if (self.config._lua_runtime) |rt| {
+            rt.lua.createTable(0, 6);
+            _ = rt.lua.pushString("tab_changed");
+            rt.lua.setField(-2, "event");
+            rt.lua.pushInteger(@intCast(prev_tab + 1));
+            rt.lua.setField(-2, "previous_tab");
+            rt.lua.pushInteger(@intCast(self.active_tab + 1));
+            rt.lua.setField(-2, "active_tab");
+            rt.lua.pushInteger(@intCast(self.tabs.items.len));
+            rt.lua.setField(-2, "tab_count");
+            rt.lua.pushInteger(@intCast(std.time.milliTimestamp()));
+            rt.lua.setField(-2, "now_ms");
+            lua_events.emitAutocmdWithPayloadOnStack(rt, "tab_changed");
+        }
     }
 }
 

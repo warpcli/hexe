@@ -35,6 +35,92 @@ const hexe_record_start = api_bridge.hexe_record_start;
 const hexe_record_stop = api_bridge.hexe_record_stop;
 const hexe_record_toggle = api_bridge.hexe_record_toggle;
 const hexe_record_status = api_bridge.hexe_record_status;
+const hexe_api_exec = @import("lua_api_exec.zig").hexe_api_exec;
+const CALLBACK_TABLE_KEY = "__hexe_cb_table";
+
+fn hexe_autocmd_on(L: ?*LuaState) callconv(.c) c_int {
+    const lua: *Lua = @ptrCast(L);
+
+    const argc = lua.getTop();
+    var event_idx: i32 = 1;
+    var fn_idx: i32 = 2;
+
+    // Support both dot and colon calls:
+    // - hexe.autocmd.on("event", fn)
+    // - hexe.autocmd:on("event", fn)
+    if (argc >= 3 and lua.typeOf(1) == .table and lua.typeOf(2) == .string and lua.typeOf(3) == .function) {
+        event_idx = 2;
+        fn_idx = 3;
+    } else if (!(argc >= 2 and lua.typeOf(1) == .string and lua.typeOf(2) == .function)) {
+        _ = lua.pushString("usage: hexe.autocmd.on(event_name, fn)");
+        lua.raiseError();
+    }
+
+    const event_name = lua.toString(event_idx) catch {
+        _ = lua.pushString("autocmd event must be string");
+        lua.raiseError();
+    };
+
+    _ = lua.getGlobal("hexe") catch {
+        _ = lua.pushString("hexe module not found");
+        lua.raiseError();
+    };
+    if (lua.typeOf(-1) != .table) {
+        lua.pop(1);
+        _ = lua.pushString("hexe module is invalid");
+        lua.raiseError();
+    }
+
+    _ = lua.getField(-1, "autocmd");
+    if (lua.typeOf(-1) != .table) {
+        lua.pop(2);
+        _ = lua.pushString("hexe.autocmd table is missing");
+        lua.raiseError();
+    }
+
+    _ = lua.pushString(event_name);
+    _ = lua.getTable(-2);
+    const existing_ty = lua.typeOf(-1);
+
+    switch (existing_ty) {
+        .nil => {
+            lua.pop(1); // nil
+            _ = lua.pushString(event_name);
+            lua.pushValue(fn_idx);
+            lua.setTable(-3);
+        },
+        .function => {
+            lua.createTable(2, 0);
+            lua.pushValue(-2); // existing fn
+            lua.rawSetIndex(-2, 1);
+            lua.pushValue(fn_idx); // new fn
+            lua.rawSetIndex(-2, 2);
+            lua.pop(1); // existing fn
+            _ = lua.pushString(event_name);
+            lua.pushValue(-2); // handler table
+            lua.setTable(-4); // set in autocmd
+            lua.pop(1); // handler table
+        },
+        .table => {
+            const len: i32 = @intCast(lua.rawLen(-1));
+            lua.pushValue(fn_idx);
+            lua.rawSetIndex(-2, len + 1);
+            lua.pop(1); // existing table
+        },
+        else => {
+            lua.pop(3); // existing, autocmd, hexe
+            _ = lua.pushString("autocmd slot already used by non-function value");
+            lua.raiseError();
+        },
+    }
+
+    // Pop autocmd + hexe.
+    lua.pop(2);
+
+    // Return the registered function.
+    lua.pushValue(fn_idx);
+    return 1;
+}
 
 /// Configuration loading status
 pub const ConfigStatus = enum {
@@ -76,6 +162,23 @@ pub fn getConfigPath(allocator: std.mem.Allocator, filename: []const u8) ![]cons
     const dir = try getConfigDir(allocator);
     defer allocator.free(dir);
     return std.fmt.allocPrint(allocator, "{s}/{s}", .{ dir, filename });
+}
+
+/// Push callback table and function by registered callback id.
+/// On success, stack has: [..., callback_table, callback_function].
+pub fn pushRegisteredCallback(runtime: *LuaRuntime, callback_id: i32) bool {
+    _ = runtime.lua.getField(zlua.registry_index, CALLBACK_TABLE_KEY);
+    if (runtime.lua.typeOf(-1) != .table) {
+        runtime.lua.pop(1);
+        return false;
+    }
+
+    _ = runtime.lua.rawGetIndex(-1, callback_id);
+    if (runtime.lua.typeOf(-1) != .function) {
+        runtime.lua.pop(2);
+        return false;
+    }
+    return true;
 }
 
 /// Lua runtime for config loading
@@ -638,12 +741,16 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "status");
     lua.setField(-2, "record");
 
-    // hexe.autocmd = {}
-    lua.createTable(0, 0);
+    // hexe.autocmd = { on = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(hexe_autocmd_on);
+    lua.setField(-2, "on");
     lua.setField(-2, "autocmd");
 
-    // hexe.api = {}
-    lua.createTable(0, 0);
+    // hexe.api = { exec = fn }
+    lua.createTable(0, 1);
+    lua.pushFunction(hexe_api_exec);
+    lua.setField(-2, "exec");
     lua.setField(-2, "api");
 
     // hexe.color = { fg = fn, bg = fn }
@@ -752,10 +859,6 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.pushFunction(hexe_segment_builtin_title);
     lua.setField(-2, "title");
     lua.setField(-2, "builtin");
-
-    // Backward-compatible alias for typo-prone usage: hexe.segment.buildin
-    _ = lua.getField(-1, "builtin");
-    lua.setField(-2, "buildin");
 
     lua.setField(-2, "segment");
 

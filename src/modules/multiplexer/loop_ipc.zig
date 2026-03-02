@@ -12,6 +12,7 @@ const CursorSnapshot = @import("state.zig").CursorSnapshot;
 const actions = @import("loop_actions.zig");
 const layout_mod = @import("layout.zig");
 const focus_move = @import("focus_move.zig");
+const lua_events = @import("lua_events.zig");
 
 /// Handle binary control messages from the SES control channel.
 /// Reads all available messages (CTL fd is non-blocking).
@@ -315,6 +316,7 @@ fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
 
     // Job count delta notifications.
     const old_jobs: ?u16 = if (state.pane_shell.get(uuid)) |info| info.jobs else null;
+    const old_running: bool = if (state.pane_shell.get(uuid)) |info| info.running else false;
     if (jobs_opt) |new_jobs| {
         if (old_jobs) |old| {
             if (old == 0 and new_jobs > 0) {
@@ -331,7 +333,41 @@ fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
 
     if (phase_start) {
         const now_ms: u64 = @intCast(std.time.milliTimestamp());
-        state.setPaneShellRunning(uuid, running, started_at_opt orelse now_ms, cmd, cwd, jobs_opt);
+        const started_at_ms = started_at_opt orelse now_ms;
+        state.setPaneShellRunning(uuid, running, started_at_ms, cmd, cwd, jobs_opt);
+
+        if (old_running != running) {
+            if (state.config._lua_runtime) |rt| {
+                rt.lua.createTable(0, 10);
+                _ = rt.lua.pushString("pane_shell_running_changed");
+                rt.lua.setField(-2, "event");
+                _ = rt.lua.pushString(uuid[0..]);
+                rt.lua.setField(-2, "pane_uuid");
+                rt.lua.pushBoolean(old_running);
+                rt.lua.setField(-2, "previous_running");
+                rt.lua.pushBoolean(running);
+                rt.lua.setField(-2, "running");
+                _ = rt.lua.pushString("start");
+                rt.lua.setField(-2, "phase");
+                if (cmd) |c| {
+                    _ = rt.lua.pushString(c);
+                    rt.lua.setField(-2, "command");
+                }
+                if (cwd) |c| {
+                    _ = rt.lua.pushString(c);
+                    rt.lua.setField(-2, "cwd");
+                }
+                if (jobs_opt) |j| {
+                    rt.lua.pushInteger(j);
+                    rt.lua.setField(-2, "jobs");
+                }
+                rt.lua.pushInteger(@intCast(started_at_ms));
+                rt.lua.setField(-2, "started_at_ms");
+                rt.lua.pushInteger(@intCast(now_ms));
+                rt.lua.setField(-2, "now_ms");
+                lua_events.emitAutocmdWithPayloadOnStack(rt, "pane_shell_running_changed");
+            }
+        }
     } else {
         const now_ms: u64 = @intCast(std.time.milliTimestamp());
         var computed_dur: ?u64 = dur_opt;
@@ -344,6 +380,68 @@ fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
         state.setPaneShell(uuid, cmd, cwd, status_opt, computed_dur, jobs_opt);
         if (state.pane_shell.getPtr(uuid)) |info_ptr| {
             info_ptr.started_at_ms = null;
+        }
+
+        if (state.config._lua_runtime) |rt| {
+            rt.lua.createTable(0, 10);
+            _ = rt.lua.pushString("command_finished");
+            rt.lua.setField(-2, "event");
+            _ = rt.lua.pushString(uuid[0..]);
+            rt.lua.setField(-2, "pane_uuid");
+            if (cmd) |c| {
+                _ = rt.lua.pushString(c);
+                rt.lua.setField(-2, "command");
+            }
+            if (cwd) |c| {
+                _ = rt.lua.pushString(c);
+                rt.lua.setField(-2, "cwd");
+            }
+            if (status_opt) |s| {
+                rt.lua.pushInteger(s);
+                rt.lua.setField(-2, "status");
+            }
+            if (computed_dur) |d| {
+                rt.lua.pushInteger(@intCast(d));
+                rt.lua.setField(-2, "duration_ms");
+            }
+            if (jobs_opt) |j| {
+                rt.lua.pushInteger(j);
+                rt.lua.setField(-2, "jobs");
+            }
+            rt.lua.pushInteger(@intCast(now_ms));
+            rt.lua.setField(-2, "now_ms");
+            lua_events.emitAutocmdWithPayloadOnStack(rt, "command_finished");
+        }
+
+        if (old_running != running) {
+            if (state.config._lua_runtime) |rt| {
+                rt.lua.createTable(0, 10);
+                _ = rt.lua.pushString("pane_shell_running_changed");
+                rt.lua.setField(-2, "event");
+                _ = rt.lua.pushString(uuid[0..]);
+                rt.lua.setField(-2, "pane_uuid");
+                rt.lua.pushBoolean(old_running);
+                rt.lua.setField(-2, "previous_running");
+                rt.lua.pushBoolean(running);
+                rt.lua.setField(-2, "running");
+                _ = rt.lua.pushString("end");
+                rt.lua.setField(-2, "phase");
+                if (cmd) |c| {
+                    _ = rt.lua.pushString(c);
+                    rt.lua.setField(-2, "command");
+                }
+                if (cwd) |c| {
+                    _ = rt.lua.pushString(c);
+                    rt.lua.setField(-2, "cwd");
+                }
+                if (jobs_opt) |j| {
+                    rt.lua.pushInteger(j);
+                    rt.lua.setField(-2, "jobs");
+                }
+                rt.lua.pushInteger(@intCast(now_ms));
+                rt.lua.setField(-2, "now_ms");
+                lua_events.emitAutocmdWithPayloadOnStack(rt, "pane_shell_running_changed");
+            }
         }
     }
 

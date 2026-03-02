@@ -6,6 +6,7 @@ const SesClient = @import("ses_client.zig").SesClient;
 const Pane = @import("pane.zig").Pane;
 const helpers = @import("helpers.zig");
 const TabFocusKind = @import("state.zig").TabFocusKind;
+const lua_events = @import("lua_events.zig");
 
 fn setLayoutFocusedSplitId(self: anytype, pane: *Pane) void {
     if (pane.floating) return;
@@ -217,6 +218,25 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
     };
 
     self.syncStateToSes();
+
+    if (self.config._lua_runtime) |rt| {
+        rt.lua.createTable(0, 8);
+        _ = rt.lua.pushString("pane_focus_changed");
+        rt.lua.setField(-2, "event");
+        _ = rt.lua.pushString(pane.uuid[0..]);
+        rt.lua.setField(-2, "pane_uuid");
+        if (focused_from) |prev| {
+            _ = rt.lua.pushString(prev[0..]);
+            rt.lua.setField(-2, "previous_pane_uuid");
+        }
+        _ = rt.lua.pushString(if (pane.floating) "float" else "split");
+        rt.lua.setField(-2, "pane_type");
+        rt.lua.pushInteger(@intCast(self.active_tab + 1));
+        rt.lua.setField(-2, "active_tab");
+        rt.lua.pushInteger(@intCast(std.time.milliTimestamp()));
+        rt.lua.setField(-2, "now_ms");
+        lua_events.emitAutocmdWithPayloadOnStack(rt, "pane_focus_changed");
+    }
 }
 
 pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
