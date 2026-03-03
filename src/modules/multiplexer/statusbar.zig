@@ -169,6 +169,9 @@ fn isClickable(mod: *const core.Segment) bool {
 
 fn isButtonActive(mod: *const core.Segment, ctx: *shp.Context) bool {
     if (mod.button_active_bash) |code| {
+        if (callbackIdFromCode(code) != null) {
+            return evalLuaWhen(code, ctx, 150);
+        }
         return evalBashWhen(code, ctx, 300);
     }
     return false;
@@ -1767,18 +1770,38 @@ fn evalLuaClickCommand(code: []const u8, ctx: *shp.Context) ?[]const u8 {
     }
 
     if (rt_ptr.lua.typeOf(-1) == .table) {
+        // Unified click action contract:
+        // 1) { command = "..." }
+        // 2) { kind = "command", command = "..." }
         _ = rt_ptr.lua.getField(-1, "command");
-        if (rt_ptr.lua.typeOf(-1) == .string) {
-            const s = rt_ptr.lua.toString(-1) catch {
-                rt_ptr.lua.pop(1);
-                return null;
-            };
-            const n = @min(s.len, click_command_buf.len);
-            @memcpy(click_command_buf[0..n], s[0..n]);
-            rt_ptr.lua.pop(1);
-            return click_command_buf[0..n];
+        const has_command = rt_ptr.lua.typeOf(-1) == .string;
+        var cmd_val: []const u8 = "";
+        if (has_command) {
+            cmd_val = rt_ptr.lua.toString(-1) catch "";
         }
         rt_ptr.lua.pop(1);
+
+        if (has_command and cmd_val.len > 0) {
+            _ = rt_ptr.lua.getField(-1, "kind");
+            const kind_ok = if (rt_ptr.lua.typeOf(-1) == .string)
+                std.mem.eql(u8, (rt_ptr.lua.toString(-1) catch ""), "command")
+            else
+                true;
+            rt_ptr.lua.pop(1);
+
+            _ = rt_ptr.lua.getField(-1, "type");
+            const type_ok = if (rt_ptr.lua.typeOf(-1) == .string)
+                std.mem.eql(u8, (rt_ptr.lua.toString(-1) catch ""), "command")
+            else
+                true;
+            rt_ptr.lua.pop(1);
+
+            if (kind_ok and type_ok) {
+                const n = @min(cmd_val.len, click_command_buf.len);
+                @memcpy(click_command_buf[0..n], cmd_val[0..n]);
+                return click_command_buf[0..n];
+            }
+        }
     }
 
     return null;

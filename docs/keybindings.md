@@ -142,7 +142,7 @@ end
 return false
 ```
 
-`hexe.status.pane(0)` is kept as an alias to `ctx.pane(0)`.
+Prefer `ctx.pane(0)` (or `hx.ctx.pane(0)` when outside callback-local `ctx`).
 
 Common pane fields:
 
@@ -163,9 +163,9 @@ Common pane fields:
 - Set `HEXE_LUA_TRACE=slow` to trace only slow evaluations.
 - Optional threshold: `HEXE_LUA_TRACE_SLOW_MS` (default `8`).
 
-## Lua Events (autocmd)
+## Lua Events
 
-You can register runtime event callbacks through `hexe.autocmd`.
+You can register runtime event callbacks through `hx.events`.
 
 Supported events:
 - `pane_focus_changed`
@@ -174,42 +174,29 @@ Supported events:
 - `pane_shell_running_changed`
 - `statusbar_redraw` (throttled, default 120ms)
 
-Registration forms:
+Use the canonical helper API (`hx.events.*`):
 
 ```lua
-hexe.autocmd.pane_focus_changed = function(ev)
-  -- ev.pane_uuid, ev.previous_pane_uuid, ev.pane_type, ev.active_tab, ev.now_ms
-end
-
-hexe.autocmd.tab_changed = {
-  function(ev) end,
-  function(ev) end,
-}
-```
-
-Built-in helper `hexe.autocmd.on(event, fn)`:
-
-```lua
-hexe.autocmd.on("command_finished", function(ev)
+hx.events.on("command_finished", function(ev)
   -- ev.command, ev.cwd, ev.status, ev.duration_ms, ev.jobs, ev.pane_uuid
 end)
 
-hexe.autocmd.on("pane_shell_running_changed", function(ev)
+hx.events.on("pane_shell_running_changed", function(ev)
   -- ev.pane_uuid, ev.previous_running, ev.running, ev.phase, ev.command, ev.now_ms
 end)
 
-hexe.autocmd.on("statusbar_redraw", function(ev)
+hx.events.on("statusbar_redraw", function(ev)
   -- ev.now_ms, ev.term_width, ev.term_height, ev.active_tab, ev.tab_count, ev.interval_ms
 end)
 
 -- debounce helper (returns wrapped handler)
-hexe.autocmd.on("statusbar_redraw", hexe.autocmd.debounce(250, function(ev)
+hx.events.on("statusbar_redraw", hx.events.debounce(250, function(ev)
   -- runs at most every 250ms
 end))
 
 -- convenience helper
-hexe.autocmd.debounced_on("statusbar_redraw", 250, function(ev)
-  -- same as on(..., debounce(...))
+hx.events.once("pane_focus_changed", function(ev)
+  -- runs only once
 end)
 ```
 

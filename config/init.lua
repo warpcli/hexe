@@ -1,57 +1,7 @@
 hx = require("hexe")
 local section = HEXE_SECTION
 
-hx.autocmd = hx.autocmd or {}
-if hx.autocmd.on == nil then
-  hx.autocmd.on = function(event, fn)
-    if type(event) ~= "string" then
-      error("autocmd event must be string")
-    end
-    if type(fn) ~= "function" then
-      error("autocmd handler must be function")
-    end
-    local cur = hx.autocmd[event]
-    if cur == nil then
-      hx.autocmd[event] = fn
-    elseif type(cur) == "function" then
-      hx.autocmd[event] = { cur, fn }
-    elseif type(cur) == "table" then
-      cur[#cur + 1] = fn
-    else
-      error("autocmd slot already used by non-function value: " .. event)
-    end
-    return fn
-  end
-end
-
-if hx.autocmd.debounce == nil then
-  hx.autocmd.debounce = function(interval_ms, fn)
-    if type(interval_ms) ~= "number" or interval_ms < 0 then
-      error("debounce interval_ms must be non-negative number")
-    end
-    if type(fn) ~= "function" then
-      error("debounce fn must be function")
-    end
-    local last_now_ms = nil
-    return function(ev)
-      local now_ms = 0
-      if type(ev) == "table" and type(ev.now_ms) == "number" then
-        now_ms = ev.now_ms
-      end
-      if last_now_ms ~= nil and now_ms >= last_now_ms and (now_ms - last_now_ms) < interval_ms then
-        return nil
-      end
-      last_now_ms = now_ms
-      return fn(ev)
-    end
-  end
-end
-
-if hx.autocmd.debounced_on == nil then
-  hx.autocmd.debounced_on = function(event, interval_ms, fn)
-    return hx.autocmd.on(event, hx.autocmd.debounce(interval_ms, fn))
-  end
-end
+-- events API is provided by runtime: hx.events.on/off/once/debounce/throttle
 
 -- ============================================================================
 -- MUX Configuration (Terminal UI)
@@ -125,7 +75,7 @@ if section == nil or section == "mux" then
       title = {
         name = "title",
         value = function(ctx)
-          local t = hexe.segment.title(ctx)
+          local t = hx.segment.title(ctx)
           return {
             { text = " ", style = "bg:0 fg:1" },
             { text = t, style = "bg:1 fg:0" },
@@ -210,7 +160,7 @@ if section == nil or section == "mux" then
     name = "tabs",
     priority = 1,
     value = function(ctx)
-      return hexe.segment.tabs(ctx)
+      return hx.segment.tabs(ctx)
     end,
     tab_title = "basename",
     active_style = "bg:1 fg:0",
@@ -230,7 +180,7 @@ if section == nil or section == "mux" then
     name = "rec",
     priority = 11,
     value = function(_)
-      local st = hexe.record.status({ scope = rec_opts.scope })
+      local st = hx.status.recording(rec_opts.scope)
       if st and st.active then
         return { { text = " REC ", style = "bg:1 fg:15 bold" } }
       end
@@ -238,29 +188,17 @@ if section == nil or section == "mux" then
     end,
     button = {
       on_left_click = function(ctx)
-        local ap = hx.status.active_pod(ctx)
-        if not ap or not ap.uuid then
-          return nil
-        end
-        local st = hx.record.status({ scope = rec_opts.scope })
-        local start_cmd = hx.record.start({
-          scope = rec_opts.scope,
-          uuid = ap.uuid,
-          out = rec_opts.out,
-          capture_input = rec_opts.capture_input,
-        })
-        if not st or not st.active then
-          return start_cmd
-        end
-        if st.uuid == ap.uuid then
-          return hx.record.stop({ scope = rec_opts.scope })
-        end
-        return hx.record.stop({ scope = rec_opts.scope }) .. "; " .. start_cmd
+        local rec = hx.record.active(ctx, rec_opts)
+        if not rec then return nil end
+        return rec.switch()
       end,
       on_right_click = function(_)
         return hx.record.stop({ scope = rec_opts.scope })
       end,
-      active_when = "test \"$(hexe record status --scope pod 2>/dev/null)\" = 1",
+      active_when = function(_)
+        local st = hx.status.recording(rec_opts.scope)
+        return st and st.active == true
+      end,
       left_style = "bg:2 fg:0 bold",
       middle_style = "bg:3 fg:0 bold",
       right_style = "bg:1 fg:15 bold",
@@ -387,7 +325,7 @@ if section == nil or section == "ses" then
           title = {
             name = "title",
             value = function(ctx)
-              local t = hexe.segment.title(ctx)
+              local t = hx.segment.title(ctx)
               return {
                 { text = " ", style = "bg:0 fg:1" },
                 { text = t, style = "bg:1 fg:0" },
@@ -432,7 +370,7 @@ if section == nil or section == "shp" then
       name = "hostname",
       priority = 15,
       builtin = function(_)
-        return hexe.segment.builtin.hostname({ style = "bg:237 italic fg:15", suffix = " " })
+        return hx.segment.builtin.hostname({ style = "bg:237 italic fg:15", suffix = " " })
       end,
     },
     {
@@ -456,7 +394,7 @@ if section == nil or section == "shp" then
       name = "username",
       priority = 1,
       builtin = function(_)
-        return hexe.segment.builtin.username({ style = "bg:1 fg:0", suffix = " " })
+        return hx.segment.builtin.username({ style = "bg:1 fg:0", suffix = " " })
       end,
     },
     {
@@ -473,7 +411,7 @@ if section == nil or section == "shp" then
       name = "sudo",
       priority = 6,
       builtin = function(_)
-        return hexe.segment.builtin.sudo({ style = "bold bg:240 fg:171" })
+        return hx.segment.builtin.sudo({ style = "bold bg:240 fg:171" })
       end,
     },
     {
@@ -506,7 +444,7 @@ if section == nil or section == "shp" then
       name = "status",
       priority = 3,
       builtin = function(_)
-        return hexe.segment.builtin.status({ style = "bg:0 fg:9", prefix = " ", suffix = " " })
+        return hx.segment.builtin.status({ style = "bg:0 fg:9", prefix = " ", suffix = " " })
       end,
     },
     {
@@ -549,28 +487,28 @@ if section == nil or section == "shp" then
       name = "pod_name",
       priority = 1,
       builtin = function(_)
-        return hexe.segment.builtin.pod_name({ style = "bg:5 fg:0", prefix = "| ", suffix = " |" })
+        return hx.segment.builtin.pod_name({ style = "bg:5 fg:0", prefix = "| ", suffix = " |" })
       end,
     },
     {
       name = "git_branch",
       priority = 4,
       builtin = function(_)
-        return hexe.segment.builtin.git_branch({ style = "bg:1 fg:0", prefix = " ", suffix = " " })
+        return hx.segment.builtin.git_branch({ style = "bg:1 fg:0", prefix = " ", suffix = " " })
       end,
     },
     {
       name = "git_status",
       priority = 5,
       builtin = function(_)
-        return hexe.segment.builtin.git_status({ style = "bg:1 fg:0", prefix = " ", suffix = " " })
+        return hx.segment.builtin.git_status({ style = "bg:1 fg:0", prefix = " ", suffix = " " })
       end,
     },
     {
       name = "directory",
       priority = 2,
       builtin = function(_)
-        return hexe.segment.builtin.directory({ style = "bg:237 fg:15", suffix = " " })
+        return hx.segment.builtin.directory({ style = "bg:237 fg:15", suffix = " " })
       end,
     },
   })
