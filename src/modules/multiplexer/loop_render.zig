@@ -116,6 +116,36 @@ fn sanitizeLabelUtf8(raw: []const u8, out: *[128]u8) []const u8 {
     return out[0..wi];
 }
 
+fn composeFloatBorderLabel(state: *State, pane: *const Pane, out: *[256]u8) []const u8 {
+    const title = blk: {
+        if (pane.float_title) |t| break :blk t;
+        if (pane.float_key != 0) {
+            if (state.getLayoutFloatByKey(pane.float_key)) |fd| {
+                if (fd.title) |t| break :blk t;
+            }
+        }
+        break :blk "";
+    };
+    const pokemon = state.pane_names.get(pane.uuid) orelse "";
+
+    if (title.len == 0) return pokemon;
+    if (pokemon.len == 0) return title;
+
+    var n: usize = 0;
+    const title_n = @min(title.len, out.len);
+    @memcpy(out[0..title_n], title[0..title_n]);
+    n = title_n;
+    if (n < out.len) {
+        out[n] = ' ';
+        n += 1;
+    }
+    const remain = out.len - n;
+    const pokemon_n = @min(pokemon.len, remain);
+    @memcpy(out[n .. n + pokemon_n], pokemon[0..pokemon_n]);
+    n += pokemon_n;
+    return out[0..n];
+}
+
 pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     const renderer = &state.renderer;
 
@@ -168,12 +198,8 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             if (parent != state.active_tab) continue;
         }
 
-        const float_label_raw = if (pane.float_title) |t|
-            t
-        else if (state.pane_names.get(pane.uuid)) |n|
-            n
-        else
-            "";
+        var float_label_compose: [256]u8 = undefined;
+        const float_label_raw = composeFloatBorderLabel(state, pane, &float_label_compose);
         var float_label_buf: [128]u8 = undefined;
         const float_label = sanitizeLabelUtf8(float_label_raw, &float_label_buf);
         borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, false, float_label, pane.border_color, pane.float_style);
@@ -216,12 +242,8 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         else
             true;
         if (pane.isVisibleOnTab(state.active_tab) and can_render) {
-            const active_float_label_raw = if (pane.float_title) |t|
-                t
-            else if (state.pane_names.get(pane.uuid)) |n|
-                n
-            else
-                "";
+            var active_float_label_compose: [256]u8 = undefined;
+            const active_float_label_raw = composeFloatBorderLabel(state, pane, &active_float_label_compose);
             var active_float_label_buf: [128]u8 = undefined;
             const active_float_label = sanitizeLabelUtf8(active_float_label_raw, &active_float_label_buf);
             borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, true, active_float_label, pane.border_color, pane.float_style);

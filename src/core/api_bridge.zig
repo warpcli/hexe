@@ -3296,7 +3296,7 @@ pub export fn hexe_record_status(L: ?*LuaState) callconv(.c) c_int {
     return 1;
 }
 
-fn freeParsedSegmentForTest(seg: *config.Segment, allocator: std.mem.Allocator) void {
+fn freeParsedSegment(seg: *config.Segment, allocator: std.mem.Allocator) void {
     allocator.free(seg.name);
     if (seg.command) |v| allocator.free(v);
     if (seg.builtin) |v| allocator.free(v);
@@ -3337,7 +3337,7 @@ test "parseSegmentAtPath accepts callback active_when in button table" {
     defer lua.pop(1);
 
     var seg = parseSegmentAtPath(&lua, -1, std.testing.allocator, "mux.tabs.left[1]") orelse return error.TestUnexpectedResult;
-    defer freeParsedSegmentForTest(&seg, std.testing.allocator);
+    defer freeParsedSegment(&seg, std.testing.allocator);
 
     try std.testing.expect(seg.button_active_bash != null);
     try std.testing.expect(std.mem.startsWith(u8, seg.button_active_bash.?, CALLBACK_REF_PREFIX));
@@ -3362,7 +3362,7 @@ test "parseSegmentAtPath accepts callback active_when at segment level" {
     defer lua.pop(1);
 
     var seg = parseSegmentAtPath(&lua, -1, std.testing.allocator, "mux.tabs.left[1]") orelse return error.TestUnexpectedResult;
-    defer freeParsedSegmentForTest(&seg, std.testing.allocator);
+    defer freeParsedSegment(&seg, std.testing.allocator);
 
     try std.testing.expect(seg.button_active_bash != null);
     try std.testing.expect(std.mem.startsWith(u8, seg.button_active_bash.?, CALLBACK_REF_PREFIX));
