@@ -46,6 +46,13 @@ fn toShpStyle(seg: statusbar.RenderedSegment) shp.Style {
     };
 }
 
+fn applyFloatTitleStyleDefaults(style: shp.Style, border_palette: u8) shp.Style {
+    var out = style;
+    if (out.bg == .none) out.bg = .{ .palette = border_palette };
+    if (out.fg == .none) out.fg = .{ .palette = 0 };
+    return out;
+}
+
 fn encodeCodepointUtf8(cp: u21, out: *[4]u8) []const u8 {
     const n = std.unicode.utf8Encode(cp, out) catch {
         out[0] = '?';
@@ -323,6 +330,8 @@ pub fn drawFloatingBorder(
     name: []const u8,
     border_color: core.BorderColor,
     style: ?*const core.FloatStyle,
+    ctx: ?*shp.Context,
+    query: ?*const core.PaneQuery,
 ) void {
     // Optional shadow (draw first so border overlays it)
     if (style) |s| {
@@ -379,8 +388,32 @@ pub fn drawFloatingBorder(
     _ = bold;
     drawBorderFrame(renderer, x, y, w, h, fg, .none, .{ top_left, horizontal, top_right, vertical, bottom_right, bottom_left });
 
-    // Render module in border if present
+    // Render module/segments in border if present.
     if (style) |s| {
+        if (s.position) |pos| {
+            if (s.title_segments.len > 0 and ctx != null and query != null) {
+                const tctx = ctx.?;
+                const tq = query.?;
+
+                var total_width: u16 = 0;
+                for (s.title_segments) |*seg| {
+                    total_width +|= statusbar.calcModuleWidth(tctx, tq, seg);
+                }
+
+                const inner_w = floatTitleInnerWidth(w);
+                if (inner_w == 0 or total_width == 0) return;
+                const place = floatTitlePlacement(x, y, w, h, pos, @min(total_width, inner_w));
+
+                var cur_x = place.x;
+                const max_x = x + w -| 2;
+                for (s.title_segments) |*seg| {
+                    if (cur_x >= max_x) break;
+                    cur_x = statusbar.drawModule(renderer, tctx, tq, seg, cur_x, place.y, false);
+                }
+                return;
+            }
+        }
+
         if (s.module) |*module| {
             if (s.position) |pos| {
                 // Run the module to get output
@@ -399,10 +432,11 @@ pub fn drawFloatingBorder(
 
                 // If module formatting produced no visible text, fallback to raw name.
                 if (segments.total_len == 0 and name.len > 0) {
-                    const fallback_style = if (module.outputs.len > 0)
+                    const base_style = if (module.outputs.len > 0)
                         shp.Style.parse(module.outputs[0].style)
                     else
                         shp.Style{};
+                    const fallback_style = applyFloatTitleStyleDefaults(base_style, color);
 
                     const fallback_len = @min(inner_w, statusbar.measureText(name));
                     const fallback_place = floatTitlePlacement(x, y, w, h, pos, fallback_len);
@@ -424,7 +458,8 @@ pub fn drawFloatingBorder(
                     const remain = max_x - cur_x;
                     const clipped = text_width.clipTextToWidth(seg.text, remain);
                     if (clipped.len == 0) continue;
-                    cur_x = statusbar.drawStyledText(renderer, cur_x, place.y, clipped, toShpStyle(seg));
+                    const seg_style = applyFloatTitleStyleDefaults(toShpStyle(seg), color);
+                    cur_x = statusbar.drawStyledText(renderer, cur_x, place.y, clipped, seg_style);
                 }
             }
         }

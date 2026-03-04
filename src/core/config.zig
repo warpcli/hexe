@@ -171,6 +171,7 @@ pub const FloatStyle = struct {
     // Optional module in border
     position: ?FloatStylePosition = null,
     module: ?Segment = null,
+    title_segments: []const Segment = &[_]Segment{},
 };
 
 pub const FloatAttributes = struct {
@@ -365,42 +366,52 @@ pub const LayoutFloatDef = struct {
         if (self.command) |c| allocator.free(@constCast(c));
         if (self.title) |t| allocator.free(@constCast(t));
         if (self.style) |*style_ptr| {
-            if (style_ptr.module) |*mod| {
-                var module = @constCast(mod);
-                // Free segment fields
-                allocator.free(@constCast(module.name));
-                if (module.outputs.len > 0) {
-                    for (module.outputs) |*out| {
-                        allocator.free(@constCast(out.style));
-                        allocator.free(@constCast(out.format));
+            const freeSegment = struct {
+                fn call(seg: *Segment, a: std.mem.Allocator) void {
+                    a.free(@constCast(seg.name));
+                    if (seg.outputs.len > 0) {
+                        for (seg.outputs) |*out| {
+                            a.free(@constCast(out.style));
+                            a.free(@constCast(out.format));
+                        }
+                        a.free(seg.outputs);
                     }
-                    allocator.free(module.outputs);
+                    if (seg.command) |cmd| a.free(@constCast(cmd));
+                    if (seg.builtin) |b| a.free(@constCast(b));
+                    if (seg.progress_show_when) |s| a.free(@constCast(s));
+                    if (seg.on_click) |cmd| a.free(@constCast(cmd));
+                    if (seg.on_right_click) |cmd| a.free(@constCast(cmd));
+                    if (seg.on_middle_click) |cmd| a.free(@constCast(cmd));
+                    if (seg.button_active_bash) |cmd| a.free(@constCast(cmd));
+                    if (seg.button_left_style) |s| a.free(@constCast(s));
+                    if (seg.button_middle_style) |s| a.free(@constCast(s));
+                    if (seg.button_right_style) |s| a.free(@constCast(s));
+                    if (seg.when) |*w| {
+                        var when = @constCast(w);
+                        when.deinit(a);
+                    }
+                    if (seg.spinner) |*sp| {
+                        var spinner = @constCast(sp);
+                        spinner.deinit(a);
+                    }
+                    a.free(@constCast(seg.active_style));
+                    a.free(@constCast(seg.inactive_style));
+                    a.free(@constCast(seg.separator));
+                    a.free(@constCast(seg.separator_style));
+                    a.free(@constCast(seg.tab_title));
+                    a.free(@constCast(seg.left_arrow));
+                    a.free(@constCast(seg.right_arrow));
                 }
-                if (module.command) |cmd| allocator.free(@constCast(cmd));
-                if (module.builtin) |b| allocator.free(@constCast(b));
-                if (module.progress_show_when) |s| allocator.free(@constCast(s));
-                if (module.on_click) |cmd| allocator.free(@constCast(cmd));
-                if (module.on_right_click) |cmd| allocator.free(@constCast(cmd));
-                if (module.on_middle_click) |cmd| allocator.free(@constCast(cmd));
-                if (module.button_active_bash) |cmd| allocator.free(@constCast(cmd));
-                if (module.button_left_style) |s| allocator.free(@constCast(s));
-                if (module.button_middle_style) |s| allocator.free(@constCast(s));
-                if (module.button_right_style) |s| allocator.free(@constCast(s));
-                if (module.when) |*w| {
-                    var when = @constCast(w);
-                    when.deinit(allocator);
+            }.call;
+
+            if (style_ptr.module) |*mod| {
+                freeSegment(@constCast(mod), allocator);
+            }
+            if (style_ptr.title_segments.len > 0) {
+                for (style_ptr.title_segments) |*seg_ptr| {
+                    freeSegment(@constCast(seg_ptr), allocator);
                 }
-                if (module.spinner) |*sp| {
-                    var spinner = @constCast(sp);
-                    spinner.deinit(allocator);
-                }
-                allocator.free(@constCast(module.active_style));
-                allocator.free(@constCast(module.inactive_style));
-                allocator.free(@constCast(module.separator));
-                allocator.free(@constCast(module.separator_style));
-                allocator.free(@constCast(module.tab_title));
-                allocator.free(@constCast(module.left_arrow));
-                allocator.free(@constCast(module.right_arrow));
+                allocator.free(style_ptr.title_segments);
             }
         }
         if (self.isolation) |*iso| {
@@ -1376,9 +1387,34 @@ fn parseFloatStyle(runtime: *LuaRuntime, allocator: std.mem.Allocator) FloatStyl
         if (runtime.getString(-1, "position")) |pos_str| {
             result.position = std.meta.stringToEnum(FloatStylePosition, pos_str);
         }
-        // For float titles we allow omitting `name` and default to "title".
-        // The module outputs define styling for the title text.
-        result.module = parseSegmentWithDefaultName(runtime, allocator, "title");
+
+        if (runtime.pushTable(-1, "segments")) {
+            defer runtime.pop();
+            const len = runtime.getArrayLen(-1);
+            if (len > 0) {
+                const segs = allocator.alloc(Segment, len) catch null;
+                if (segs) |arr| {
+                    var count: usize = 0;
+                    for (1..len + 1) |i| {
+                        if (!runtime.pushArrayElement(-1, i)) continue;
+                        const seg = parseSegmentWithDefaultName(runtime, allocator, "title") orelse {
+                            runtime.pop();
+                            continue;
+                        };
+                        runtime.pop();
+                        arr[count] = seg;
+                        count += 1;
+                    }
+                    result.title_segments = arr[0..count];
+                }
+            }
+        }
+
+        if (result.title_segments.len == 0) {
+            // For float titles we allow omitting `name` and default to "title".
+            // The module outputs define styling for the title text.
+            result.module = parseSegmentWithDefaultName(runtime, allocator, "title");
+        }
         runtime.pop();
     }
 

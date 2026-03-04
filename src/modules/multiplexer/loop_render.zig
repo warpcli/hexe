@@ -1,4 +1,6 @@
 const std = @import("std");
+const core = @import("core");
+const shp = @import("shp");
 
 const State = @import("state.zig").State;
 const CursorInfo = @import("render_core.zig").CursorInfo;
@@ -116,6 +118,72 @@ fn sanitizeLabelUtf8(raw: []const u8, out: *[128]u8) []const u8 {
     return out[0..wi];
 }
 
+fn composeFloatBorderLabel(state: *State, pane: *const Pane, out: *[256]u8) []const u8 {
+    const title = blk: {
+        if (pane.float_title) |t| break :blk t;
+        if (pane.float_key != 0) {
+            if (state.getLayoutFloatByKey(pane.float_key)) |fd| {
+                if (fd.title) |t| break :blk t;
+            }
+        }
+        break :blk "";
+    };
+    const pokemon = state.pane_names.get(pane.uuid) orelse "";
+
+    if (title.len == 0) return pokemon;
+    if (pokemon.len == 0) return title;
+
+    var n: usize = 0;
+    const title_n = @min(title.len, out.len);
+    @memcpy(out[0..title_n], title[0..title_n]);
+    n = title_n;
+    if (n < out.len) {
+        out[n] = ' ';
+        n += 1;
+    }
+    const remain = out.len - n;
+    const pokemon_n = @min(pokemon.len, remain);
+    @memcpy(out[n .. n + pokemon_n], pokemon[0..pokemon_n]);
+    n += pokemon_n;
+    return out[0..n];
+}
+
+fn populateFloatTitleContext(state: *State, pane: *Pane, ctx: *shp.Context, now_ms: u64) void {
+    ctx.terminal_width = state.term_width;
+    ctx.home = std.posix.getenv("HOME");
+    ctx.now_ms = now_ms;
+    ctx.tab_count = @intCast(@min(state.tabs.items.len, @as(usize, std.math.maxInt(u16))));
+    ctx.active_tab = @intCast(state.active_tab);
+    ctx.session_name = state.session_name;
+    ctx.focus_is_float = true;
+    ctx.focus_is_split = false;
+    ctx.alt_screen = pane.vt.inAltScreen();
+
+    if (state.getPaneShell(pane.uuid)) |info| {
+        if (info.cmd) |c| ctx.last_command = c;
+        if (info.cwd) |c| ctx.cwd = c;
+        if (info.status) |st| ctx.exit_status = st;
+        if (info.duration_ms) |d| ctx.cmd_duration_ms = d;
+        if (info.jobs) |j| ctx.jobs = j;
+        ctx.shell_running = info.running;
+        if (info.cmd) |c| ctx.shell_running_cmd = c;
+        ctx.shell_started_at_ms = info.started_at_ms;
+    }
+
+    ctx.float_key = pane.float_key;
+    ctx.float_sticky = pane.sticky;
+    ctx.float_global = pane.parent_tab == null;
+    if (pane.float_key != 0) {
+        if (state.getLayoutFloatByKey(pane.float_key)) |fd| {
+            ctx.float_destroyable = fd.attributes.destroy;
+            ctx.float_exclusive = fd.attributes.exclusive;
+            ctx.float_per_cwd = fd.attributes.per_cwd;
+            ctx.float_isolated = fd.attributes.isolated;
+            ctx.float_global = ctx.float_global or fd.attributes.global;
+        }
+    }
+}
+
 pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     const renderer = &state.renderer;
 
@@ -158,6 +226,10 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         borders.drawSplitBorders(renderer, state.currentLayout(), &state.config.splits, state.term_width, content_height);
     }
 
+    const now_ms: u64 = @intCast(std.time.milliTimestamp());
+    statusbar.beginExternalCallbackEval(state, state.config._lua_runtime);
+    defer statusbar.endExternalCallbackEval();
+
     // Draw visible floats (on top of splits).
     // Draw inactive floats first, then active one last so it's on top.
     for (state.floats.items, 0..) |pane, i| {
@@ -168,15 +240,15 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             if (parent != state.active_tab) continue;
         }
 
-        const float_label_raw = if (pane.float_title) |t|
-            t
-        else if (state.pane_names.get(pane.uuid)) |n|
-            n
-        else
-            "";
+        var float_label_compose: [256]u8 = undefined;
+        const float_label_raw = composeFloatBorderLabel(state, pane, &float_label_compose);
         var float_label_buf: [128]u8 = undefined;
         const float_label = sanitizeLabelUtf8(float_label_raw, &float_label_buf);
-        borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, false, float_label, pane.border_color, pane.float_style);
+        var float_ctx = shp.Context.init(state.allocator);
+        defer float_ctx.deinit();
+        populateFloatTitleContext(state, pane, &float_ctx, now_ms);
+        const float_query: core.PaneQuery = statusbar.queryFromContext(&float_ctx);
+        borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, false, float_label, pane.border_color, pane.float_style, &float_ctx, &float_query);
         if (state.float_rename_uuid) |uuid| {
             if (std.mem.eql(u8, &uuid, &pane.uuid)) {
                 float_title.drawTitleEditor(renderer, pane, state.float_rename_buf.items);
@@ -216,15 +288,15 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         else
             true;
         if (pane.isVisibleOnTab(state.active_tab) and can_render) {
-            const active_float_label_raw = if (pane.float_title) |t|
-                t
-            else if (state.pane_names.get(pane.uuid)) |n|
-                n
-            else
-                "";
+            var active_float_label_compose: [256]u8 = undefined;
+            const active_float_label_raw = composeFloatBorderLabel(state, pane, &active_float_label_compose);
             var active_float_label_buf: [128]u8 = undefined;
             const active_float_label = sanitizeLabelUtf8(active_float_label_raw, &active_float_label_buf);
-            borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, true, active_float_label, pane.border_color, pane.float_style);
+            var float_ctx = shp.Context.init(state.allocator);
+            defer float_ctx.deinit();
+            populateFloatTitleContext(state, pane, &float_ctx, now_ms);
+            const float_query: core.PaneQuery = statusbar.queryFromContext(&float_ctx);
+            borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, true, active_float_label, pane.border_color, pane.float_style, &float_ctx, &float_query);
             if (state.float_rename_uuid) |uuid| {
                 if (std.mem.eql(u8, &uuid, &pane.uuid)) {
                     float_title.drawTitleEditor(renderer, pane, state.float_rename_buf.items);

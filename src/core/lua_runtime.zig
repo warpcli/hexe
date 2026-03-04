@@ -45,14 +45,14 @@ fn hexe_autocmd_on(L: ?*LuaState) callconv(.c) c_int {
     var event_idx: i32 = 1;
     var fn_idx: i32 = 2;
 
-    // Support both dot and colon calls:
-    // - hexe.autocmd.on("event", fn)
-    // - hexe.autocmd:on("event", fn)
+    // Support both dot and colon calls on the internal autocmd table:
+    // - hx.events.on("event", fn) (canonical public API)
+    // - hexe.autocmd.on("event", fn) / hexe.autocmd:on("event", fn) (storage path)
     if (argc >= 3 and lua.typeOf(1) == .table and lua.typeOf(2) == .string and lua.typeOf(3) == .function) {
         event_idx = 2;
         fn_idx = 3;
     } else if (!(argc >= 2 and lua.typeOf(1) == .string and lua.typeOf(2) == .function)) {
-        _ = lua.pushString("usage: hexe.autocmd.on(event_name, fn)");
+        _ = lua.pushString("usage: hx.events.on(event_name, fn)");
         lua.raiseError();
     }
 
@@ -74,7 +74,7 @@ fn hexe_autocmd_on(L: ?*LuaState) callconv(.c) c_int {
     _ = lua.getField(-1, "autocmd");
     if (lua.typeOf(-1) != .table) {
         lua.pop(2);
-        _ = lua.pushString("hexe.autocmd table is missing");
+        _ = lua.pushString("event handler storage table is missing");
         lua.raiseError();
     }
 
@@ -120,6 +120,103 @@ fn hexe_autocmd_on(L: ?*LuaState) callconv(.c) c_int {
     // Return the registered function.
     lua.pushValue(fn_idx);
     return 1;
+}
+
+fn injectRecordTargetHelper(lua: *Lua) void {
+    const code =
+        "if type(hexe)=='table' and type(hexe.record)=='table' then " ++
+        "local __rec=hexe.record; " ++
+        "if __rec.target==nil then " ++
+        "__rec.target=function(target, defaults) " ++
+        "local base={}; " ++
+        "if type(defaults)=='table' then for k,v in pairs(defaults) do base[k]=v end end; " ++
+        "if type(target)=='string' then base.uuid=target " ++
+        "elseif type(target)=='table' then for k,v in pairs(target) do base[k]=v end end; " ++
+        "local function mk(extra) local o={}; for k,v in pairs(base) do o[k]=v end; if type(extra)=='table' then for k,v in pairs(extra) do o[k]=v end end; return o end; " ++
+        "local out={}; " ++
+        "out.start=function(extra) return __rec.start(mk(extra)) end; " ++
+        "out.stop=function(extra) return __rec.stop(mk(extra)) end; " ++
+        "out.toggle=function(extra) return __rec.toggle(mk(extra)) end; " ++
+        "out.status=function(extra) return __rec.status(mk(extra)) end; " ++
+        "out.switch=function(extra) " ++
+        "local o=mk(extra); local sc=o.scope or 'pod'; " ++
+        "local st=__rec.status({ scope=sc }); local start_cmd=__rec.start(o); " ++
+        "if not st or not st.active then return start_cmd end; " ++
+        "if sc=='pod' and o.uuid and st.uuid and st.uuid==o.uuid then return __rec.stop({ scope=sc }) end; " ++
+        "return __rec.stop({ scope=sc }) .. '; ' .. start_cmd end; " ++
+        "return out end; " ++
+        "end; " ++
+        "if __rec.active==nil then " ++
+        "__rec.active=function(c, defaults) " ++
+        "local ap=(hexe.status and hexe.status.active_pod) and hexe.status.active_pod(c) or nil; " ++
+        "if not ap or not ap.uuid then return nil end; " ++
+        "return __rec.target({ uuid=ap.uuid }, defaults) end; " ++
+        "end; " ++
+        "end";
+
+    const z = std.heap.page_allocator.dupeZ(u8, code) catch return;
+    defer std.heap.page_allocator.free(z);
+    lua.loadString(z) catch return;
+    lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
+        lua.pop(1);
+        return;
+    };
+}
+
+fn injectStatusHelpers(lua: *Lua) void {
+    const code =
+        "if type(hexe)=='table' then " ++
+        // Canonical ctx helpers.
+        "hexe.ctx=hexe.ctx or {}; " ++
+        "if hexe.ctx.current==nil then hexe.ctx.current=function() local c=rawget(_G,'ctx'); if type(c)=='table' then return c end; return nil end end; " ++
+        "if hexe.ctx.pane==nil then hexe.ctx.pane=function(sel) local c=hexe.ctx.current(); if c and type(c.pane)=='function' then return c.pane(sel) end; return nil end end; " ++
+        // Canonical exec helper namespace.
+        "hexe.exec=hexe.exec or {}; " ++
+        "if hexe.exec.run==nil and type(hexe.api)=='table' and type(hexe.api.exec)=='function' then hexe.exec.run=hexe.api.exec end; " ++
+        // Canonical events namespace (backed by hexe.autocmd storage).
+        "hexe.events=hexe.events or {}; " ++
+        "if hexe.events.on==nil and type(hexe.autocmd)=='table' and type(hexe.autocmd.on)=='function' then hexe.events.on=hexe.autocmd.on end; " ++
+        "if hexe.events.off==nil then hexe.events.off=function(event,fn) " ++
+        "if type(event)~='string' then return false end; " ++
+        "local ac=hexe.autocmd or {}; local cur=ac[event]; if cur==nil then return false end; " ++
+        "if fn==nil then ac[event]=nil; return true end; " ++
+        "if type(cur)=='function' then if cur==fn then ac[event]=nil; return true end; return false end; " ++
+        "if type(cur)=='table' then local w=1; local removed=false; for i=1,#cur do local f=cur[i]; if f~=fn then cur[w]=f; w=w+1 else removed=true end end; for i=w,#cur do cur[i]=nil end; if #cur==0 then ac[event]=nil end; return removed end; " ++
+        "return false end end; " ++
+        "if hexe.events.once==nil then hexe.events.once=function(event,fn) " ++
+        "if type(fn)~='function' then return nil end; local wrap=nil; wrap=function(ev) hexe.events.off(event,wrap); return fn(ev) end; return hexe.events.on(event,wrap) end end; " ++
+        "if hexe.events.debounce==nil then hexe.events.debounce=function(interval_ms,fn) " ++
+        "if type(interval_ms)~='number' or interval_ms<0 or type(fn)~='function' then return fn end; local last=nil; return function(ev) local now=0; if type(ev)=='table' and type(ev.now_ms)=='number' then now=ev.now_ms end; if last~=nil and now>=last and (now-last)<interval_ms then return nil end; last=now; return fn(ev) end end end; " ++
+        "if hexe.events.throttle==nil then hexe.events.throttle=function(interval_ms,fn) " ++
+        "if type(interval_ms)~='number' or interval_ms<0 or type(fn)~='function' then return fn end; local last=nil; return function(ev) local now=0; if type(ev)=='table' and type(ev.now_ms)=='number' then now=ev.now_ms end; if last~=nil and now>=last and (now-last)<interval_ms then return nil end; last=now; return fn(ev) end end end; " ++
+        "hexe.status=hexe.status or {}; " ++
+        "if hexe.status.current==nil then hexe.status.current=function(c) if type(c)=='table' then return c end; return hexe.ctx.current() end end; " ++
+        "if hexe.status.pane==nil then hexe.status.pane=function(sel,c) local cx=hexe.status.current(c); if type(cx)=='table' and type(cx.pane)=='function' then return cx.pane(sel) end; return nil end end; " ++
+        "if hexe.status.active_pod==nil then " ++
+        "hexe.status.active_pod=function(c) " ++
+        "local cx=hexe.status.current(c); " ++
+        "if type(cx)~='table' then return nil end; " ++
+        "local p=nil; if type(cx.pane)=='function' then p=cx.pane(0) else p=cx end; " ++
+        "if type(p)~='table' then return nil end; " ++
+        "local u=p.uuid or p.pane_uuid or os.getenv('HEXE_PANE_UUID') or os.getenv('HEXE_FOCUSED_PANE_UUID') or os.getenv('HEXE_STATUS_FOCUSED_PANE_UUID'); " ++
+        "if not u or u=='' then return nil end; " ++
+        "return { uuid=u, pane=p } end; " ++
+        "end; " ++
+        "if hexe.status.active_pod_uuid==nil then " ++
+        "hexe.status.active_pod_uuid=function(c) local ap=hexe.status.active_pod(c); return ap and ap.uuid or nil end; " ++
+        "end; " ++
+        "if hexe.status.recording==nil then " ++
+        "hexe.status.recording=function(scope) if type(hexe.record)=='table' and type(hexe.record.status)=='function' then return hexe.record.status({ scope=scope or 'pod' }) end; return { active=false, scope=scope or 'pod' } end; " ++
+        "end; " ++
+        "end";
+
+    const z = std.heap.page_allocator.dupeZ(u8, code) catch return;
+    defer std.heap.page_allocator.free(z);
+    lua.loadString(z) catch return;
+    lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
+        lua.pop(1);
+        return;
+    };
 }
 
 /// Configuration loading status
@@ -741,7 +838,8 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "status");
     lua.setField(-2, "record");
 
-    // hexe.autocmd = { on = fn }
+    // Internal storage table for event handlers.
+    // Public API is injected as hx.events.* in injectStatusHelpers().
     lua.createTable(0, 1);
     lua.pushFunction(hexe_autocmd_on);
     lua.setField(-2, "on");
@@ -810,7 +908,7 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.pushFunction(hexe_segment_title);
     lua.setField(-2, "title");
 
-    // hexe.segment.builtin.<name>({ ...settings... }) -> descriptor table
+    // hx.segment.builtin.<name>({ ...settings... }) -> descriptor table
     lua.createTable(0, 23);
     lua.pushFunction(hexe_segment_builtin_tabs);
     lua.setField(-2, "tabs");
@@ -879,6 +977,10 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setGlobal("hexe");
     lua.pushValue(-1); // duplicate
     lua.setGlobal("hx");
+
+    // hexe.record(target).start/stop/toggle helper (target = uuid or opts table)
+    injectRecordTargetHelper(lua);
+    injectStatusHelpers(lua);
 }
 
 fn hexeLoader(state: ?*LuaState) callconv(.c) c_int {

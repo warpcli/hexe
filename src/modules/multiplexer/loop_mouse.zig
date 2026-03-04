@@ -25,7 +25,19 @@ fn runStatusbarAction(state: *State, command: []const u8) void {
     };
     defer state.allocator.free(wrapped);
 
+    var env_map_opt = std.process.getEnvMap(state.allocator) catch null;
+    defer if (env_map_opt) |*m| m.deinit();
+
+    if (env_map_opt) |*env_map| {
+        if (state.getCurrentFocusedUuid()) |uuid| {
+            env_map.put("HEXE_PANE_UUID", uuid[0..]) catch {};
+            env_map.put("HEXE_FOCUSED_PANE_UUID", uuid[0..]) catch {};
+            env_map.put("HEXE_STATUS_FOCUSED_PANE_UUID", uuid[0..]) catch {};
+        }
+    }
+
     var child = std.process.Child.init(&.{ "/bin/bash", "-lc", wrapped }, state.allocator);
+    if (env_map_opt) |*env_map| child.env_map = env_map;
     child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Ignore;
     child.stderr_behavior = .Ignore;

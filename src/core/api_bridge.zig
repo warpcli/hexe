@@ -156,6 +156,39 @@ fn parsePromptCallbackField(lua: *Lua, allocator: std.mem.Allocator, field_name:
     };
 }
 
+fn parseCommandOrCallbackField(lua: *Lua, allocator: std.mem.Allocator, field_name: []const u8) ?[]const u8 {
+    return switch (lua.typeOf(-1)) {
+        .nil => null,
+        .string => blk: {
+            const s = lua.toString(-1) catch break :blk null;
+            if (s.len == 0) break :blk null;
+            break :blk allocator.dupe(u8, s) catch null;
+        },
+        .function => parsePromptCallbackField(lua, allocator, field_name),
+        else => blk: {
+            const msg = std.fmt.allocPrint(allocator, "{s} must be string command or function(ctx)", .{field_name}) catch "command field type is invalid";
+            defer if (!std.mem.eql(u8, msg, "command field type is invalid")) allocator.free(msg);
+            _ = lua.pushString(msg);
+            lua.raiseError();
+            break :blk null;
+        },
+    };
+}
+
+fn rejectRemovedField(lua: *Lua, allocator: std.mem.Allocator, table_idx: i32, base_path: []const u8, field_name: []const u8, guidance: []const u8) void {
+    const field_z = allocator.dupeZ(u8, field_name) catch return;
+    defer allocator.free(field_z);
+
+    _ = lua.getField(table_idx, field_z);
+    defer lua.pop(1);
+    if (lua.typeOf(-1) == .nil) return;
+
+    const msg = std.fmt.allocPrint(allocator, "{s}.{s} is removed; use {s}", .{ base_path, field_name, guidance }) catch "removed field is not supported";
+    defer if (!std.mem.eql(u8, msg, "removed field is not supported")) allocator.free(msg);
+    _ = lua.pushString(msg);
+    lua.raiseError();
+}
+
 /// Result of parsing a key array
 pub const ParsedKey = struct {
     mods: u8, // Bitmask of modifiers
@@ -905,9 +938,44 @@ pub export fn hexe_mux_float_set_defaults(L: ?*LuaState) callconv(.c) c_int {
                 }
                 lua.pop(1);
 
+                if (defaults.style.?.title_segments.len > 0) {
+                    for (defaults.style.?.title_segments) |*seg_ptr| {
+                        var seg = seg_ptr.*;
+                        freeParsedSegment(&seg, mux.allocator);
+                    }
+                    mux.allocator.free(defaults.style.?.title_segments);
+                    defaults.style.?.title_segments = &[_]config.Segment{};
+                }
+
+                _ = lua.getField(-1, "segments");
+                if (lua.typeOf(-1) == .table) {
+                    const seg_len: usize = @intCast(lua.rawLen(-1));
+                    if (seg_len > 0) {
+                        const segs = mux.allocator.alloc(config.Segment, seg_len) catch null;
+                        if (segs) |arr| {
+                            var count: usize = 0;
+                            var i: i32 = 1;
+                            while (i <= @as(i32, @intCast(seg_len))) : (i += 1) {
+                                _ = lua.rawGetIndex(-1, i);
+                                if (lua.typeOf(-1) == .table) {
+                                    if (parseSegment(lua, -1, mux.allocator)) |segment| {
+                                        arr[count] = segment;
+                                        count += 1;
+                                    }
+                                }
+                                lua.pop(1);
+                            }
+                            defaults.style.?.title_segments = arr[0..count];
+                        }
+                    }
+                }
+                lua.pop(1);
+
                 // Parse full Segment structure
-                if (parseSegment(lua, -1, mux.allocator)) |segment| {
-                    defaults.style.?.module = segment;
+                if (defaults.style.?.title_segments.len == 0) {
+                    if (parseSegment(lua, -1, mux.allocator)) |segment| {
+                        defaults.style.?.module = segment;
+                    }
                 }
             }
             lua.pop(1); // pop title table
@@ -1298,16 +1366,16 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
         const is_tbl = lua.typeOf(-1) == .table;
         lua.pop(1);
         _ = lua.getField(idx, "on_click");
-        const has_left = lua.typeOf(-1) == .string;
+        const has_left = lua.typeOf(-1) == .string or lua.typeOf(-1) == .function;
         lua.pop(1);
         _ = lua.getField(idx, "on_left_click");
-        const has_left_alias = lua.typeOf(-1) == .string;
+        const has_left_alias = lua.typeOf(-1) == .string or lua.typeOf(-1) == .function;
         lua.pop(1);
         _ = lua.getField(idx, "on_right_click");
-        const has_right = lua.typeOf(-1) == .string;
+        const has_right = lua.typeOf(-1) == .string or lua.typeOf(-1) == .function;
         lua.pop(1);
         _ = lua.getField(idx, "on_middle_click");
-        const has_mid = lua.typeOf(-1) == .string;
+        const has_mid = lua.typeOf(-1) == .string or lua.typeOf(-1) == .function;
         lua.pop(1);
         break :blk is_tbl or has_left or has_left_alias or has_right or has_mid;
     };
@@ -1329,36 +1397,59 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
 
     // Parse optional click actions.
     _ = lua.getField(idx, "on_click");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        if (s.len > 0) segment.on_click = allocator.dupe(u8, s) catch null;
+    if (callbackFieldPathAlloc(allocator, base_path, "on_click")) |field_path| {
+        defer allocator.free(field_path);
+        if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+            segment.on_click = code;
+        }
     }
     lua.pop(1);
     _ = lua.getField(idx, "on_left_click");
-    if (segment.on_click == null and lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        if (s.len > 0) segment.on_click = allocator.dupe(u8, s) catch null;
+    if (segment.on_click == null) {
+        if (callbackFieldPathAlloc(allocator, base_path, "on_left_click")) |field_path| {
+            defer allocator.free(field_path);
+            if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+                segment.on_click = code;
+            }
+        }
     }
     lua.pop(1);
 
     _ = lua.getField(idx, "on_right_click");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        if (s.len > 0) segment.on_right_click = allocator.dupe(u8, s) catch null;
+    if (callbackFieldPathAlloc(allocator, base_path, "on_right_click")) |field_path| {
+        defer allocator.free(field_path);
+        if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+            segment.on_right_click = code;
+        }
     }
     lua.pop(1);
 
     _ = lua.getField(idx, "on_middle_click");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        if (s.len > 0) segment.on_middle_click = allocator.dupe(u8, s) catch null;
+    if (callbackFieldPathAlloc(allocator, base_path, "on_middle_click")) |field_path| {
+        defer allocator.free(field_path);
+        if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+            segment.on_middle_click = code;
+        }
     }
     lua.pop(1);
 
     _ = lua.getField(idx, "button_active_bash");
-    if (lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        if (s.len > 0) segment.button_active_bash = allocator.dupe(u8, s) catch null;
+    if (callbackFieldPathAlloc(allocator, base_path, "button_active_bash")) |field_path| {
+        defer allocator.free(field_path);
+        if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+            segment.button_active_bash = code;
+        }
+    }
+    lua.pop(1);
+
+    _ = lua.getField(idx, "active_when");
+    if (segment.button_active_bash == null) {
+        if (callbackFieldPathAlloc(allocator, base_path, "active_when")) |field_path| {
+            defer allocator.free(field_path);
+            if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+                segment.button_active_bash = code;
+            }
+        }
     }
     lua.pop(1);
 
@@ -1368,18 +1459,8 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
         if (s.len > 0) segment.button_left_style = allocator.dupe(u8, s) catch null;
     }
     lua.pop(1);
-    _ = lua.getField(idx, "left_click_style");
-    if (segment.button_left_style == null and lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        if (s.len > 0) segment.button_left_style = allocator.dupe(u8, s) catch null;
-    }
-    lua.pop(1);
-    _ = lua.getField(idx, "on_left_click_style");
-    if (segment.button_left_style == null and lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        if (s.len > 0) segment.button_left_style = allocator.dupe(u8, s) catch null;
-    }
-    lua.pop(1);
+    rejectRemovedField(lua, allocator, idx, base_path, "left_click_style", "button_left_style or button.left_style");
+    rejectRemovedField(lua, allocator, idx, base_path, "on_left_click_style", "button_left_style or button.left_style");
 
     _ = lua.getField(idx, "button_middle_style");
     if (lua.typeOf(-1) == .string) {
@@ -1387,18 +1468,8 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
         if (s.len > 0) segment.button_middle_style = allocator.dupe(u8, s) catch null;
     }
     lua.pop(1);
-    _ = lua.getField(idx, "middle_click_style");
-    if (segment.button_middle_style == null and lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        if (s.len > 0) segment.button_middle_style = allocator.dupe(u8, s) catch null;
-    }
-    lua.pop(1);
-    _ = lua.getField(idx, "on_middle_click_style");
-    if (segment.button_middle_style == null and lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        if (s.len > 0) segment.button_middle_style = allocator.dupe(u8, s) catch null;
-    }
-    lua.pop(1);
+    rejectRemovedField(lua, allocator, idx, base_path, "middle_click_style", "button_middle_style or button.middle_style");
+    rejectRemovedField(lua, allocator, idx, base_path, "on_middle_click_style", "button_middle_style or button.middle_style");
 
     _ = lua.getField(idx, "button_right_style");
     if (lua.typeOf(-1) == .string) {
@@ -1406,18 +1477,8 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
         if (s.len > 0) segment.button_right_style = allocator.dupe(u8, s) catch null;
     }
     lua.pop(1);
-    _ = lua.getField(idx, "right_click_style");
-    if (segment.button_right_style == null and lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        if (s.len > 0) segment.button_right_style = allocator.dupe(u8, s) catch null;
-    }
-    lua.pop(1);
-    _ = lua.getField(idx, "on_right_click_style");
-    if (segment.button_right_style == null and lua.typeOf(-1) == .string) {
-        const s = lua.toString(-1) catch "";
-        if (s.len > 0) segment.button_right_style = allocator.dupe(u8, s) catch null;
-    }
-    lua.pop(1);
+    rejectRemovedField(lua, allocator, idx, base_path, "right_click_style", "button_right_style or button.right_style");
+    rejectRemovedField(lua, allocator, idx, base_path, "on_right_click_style", "button_right_style or button.right_style");
 
     _ = lua.getField(idx, "inverse_on_hover");
     if (lua.typeOf(-1) == .boolean) {
@@ -1454,48 +1515,72 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
         lua.pop(1);
 
         _ = lua.getField(-1, "on_click");
-        if (segment.on_click == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.on_click = allocator.dupe(u8, s) catch null;
+        if (segment.on_click == null) {
+            if (callbackFieldPathAlloc(allocator, base_path, "button.on_click")) |field_path| {
+                defer allocator.free(field_path);
+                if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+                    segment.on_click = code;
+                }
+            }
         }
         lua.pop(1);
         _ = lua.getField(-1, "on_left_click");
-        if (segment.on_click == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.on_click = allocator.dupe(u8, s) catch null;
+        if (segment.on_click == null) {
+            if (callbackFieldPathAlloc(allocator, base_path, "button.on_left_click")) |field_path| {
+                defer allocator.free(field_path);
+                if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+                    segment.on_click = code;
+                }
+            }
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "on_right_click");
-        if (segment.on_right_click == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.on_right_click = allocator.dupe(u8, s) catch null;
+        if (segment.on_right_click == null) {
+            if (callbackFieldPathAlloc(allocator, base_path, "button.on_right_click")) |field_path| {
+                defer allocator.free(field_path);
+                if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+                    segment.on_right_click = code;
+                }
+            }
         }
         lua.pop(1);
         _ = lua.getField(-1, "right_click");
-        if (segment.on_right_click == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.on_right_click = allocator.dupe(u8, s) catch null;
+        if (lua.typeOf(-1) != .nil) {
+            const msg = std.fmt.allocPrint(allocator, "{s}.button.right_click is removed; use {s}.button.on_right_click", .{ base_path, base_path }) catch "button.right_click is removed";
+            defer if (!std.mem.eql(u8, msg, "button.right_click is removed")) allocator.free(msg);
+            _ = lua.pushString(msg);
+            lua.raiseError();
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "on_middle_click");
-        if (segment.on_middle_click == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.on_middle_click = allocator.dupe(u8, s) catch null;
+        if (segment.on_middle_click == null) {
+            if (callbackFieldPathAlloc(allocator, base_path, "button.on_middle_click")) |field_path| {
+                defer allocator.free(field_path);
+                if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+                    segment.on_middle_click = code;
+                }
+            }
         }
         lua.pop(1);
         _ = lua.getField(-1, "middle_click");
-        if (segment.on_middle_click == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.on_middle_click = allocator.dupe(u8, s) catch null;
+        if (lua.typeOf(-1) != .nil) {
+            const msg = std.fmt.allocPrint(allocator, "{s}.button.middle_click is removed; use {s}.button.on_middle_click", .{ base_path, base_path }) catch "button.middle_click is removed";
+            defer if (!std.mem.eql(u8, msg, "button.middle_click is removed")) allocator.free(msg);
+            _ = lua.pushString(msg);
+            lua.raiseError();
         }
         lua.pop(1);
 
         _ = lua.getField(-1, "active_when");
-        if (segment.button_active_bash == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.button_active_bash = allocator.dupe(u8, s) catch null;
+        if (segment.button_active_bash == null) {
+            if (callbackFieldPathAlloc(allocator, base_path, "button.active_when")) |field_path| {
+                defer allocator.free(field_path);
+                if (parseCommandOrCallbackField(lua, allocator, field_path)) |code| {
+                    segment.button_active_bash = code;
+                }
+            }
         }
         lua.pop(1);
 
@@ -1506,15 +1591,19 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
         }
         lua.pop(1);
         _ = lua.getField(-1, "left_click_style");
-        if (segment.button_left_style == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.button_left_style = allocator.dupe(u8, s) catch null;
+        if (lua.typeOf(-1) != .nil) {
+            const msg = std.fmt.allocPrint(allocator, "{s}.button.left_click_style is removed; use {s}.button.left_style", .{ base_path, base_path }) catch "button.left_click_style is removed";
+            defer if (!std.mem.eql(u8, msg, "button.left_click_style is removed")) allocator.free(msg);
+            _ = lua.pushString(msg);
+            lua.raiseError();
         }
         lua.pop(1);
         _ = lua.getField(-1, "on_left_click_style");
-        if (segment.button_left_style == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.button_left_style = allocator.dupe(u8, s) catch null;
+        if (lua.typeOf(-1) != .nil) {
+            const msg = std.fmt.allocPrint(allocator, "{s}.button.on_left_click_style is removed; use {s}.button.left_style", .{ base_path, base_path }) catch "button.on_left_click_style is removed";
+            defer if (!std.mem.eql(u8, msg, "button.on_left_click_style is removed")) allocator.free(msg);
+            _ = lua.pushString(msg);
+            lua.raiseError();
         }
         lua.pop(1);
 
@@ -1525,15 +1614,19 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
         }
         lua.pop(1);
         _ = lua.getField(-1, "middle_click_style");
-        if (segment.button_middle_style == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.button_middle_style = allocator.dupe(u8, s) catch null;
+        if (lua.typeOf(-1) != .nil) {
+            const msg = std.fmt.allocPrint(allocator, "{s}.button.middle_click_style is removed; use {s}.button.middle_style", .{ base_path, base_path }) catch "button.middle_click_style is removed";
+            defer if (!std.mem.eql(u8, msg, "button.middle_click_style is removed")) allocator.free(msg);
+            _ = lua.pushString(msg);
+            lua.raiseError();
         }
         lua.pop(1);
         _ = lua.getField(-1, "on_middle_click_style");
-        if (segment.button_middle_style == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.button_middle_style = allocator.dupe(u8, s) catch null;
+        if (lua.typeOf(-1) != .nil) {
+            const msg = std.fmt.allocPrint(allocator, "{s}.button.on_middle_click_style is removed; use {s}.button.middle_style", .{ base_path, base_path }) catch "button.on_middle_click_style is removed";
+            defer if (!std.mem.eql(u8, msg, "button.on_middle_click_style is removed")) allocator.free(msg);
+            _ = lua.pushString(msg);
+            lua.raiseError();
         }
         lua.pop(1);
 
@@ -1544,15 +1637,19 @@ fn parseSegmentAtPath(lua: *Lua, idx: i32, allocator: std.mem.Allocator, base_pa
         }
         lua.pop(1);
         _ = lua.getField(-1, "right_click_style");
-        if (segment.button_right_style == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.button_right_style = allocator.dupe(u8, s) catch null;
+        if (lua.typeOf(-1) != .nil) {
+            const msg = std.fmt.allocPrint(allocator, "{s}.button.right_click_style is removed; use {s}.button.right_style", .{ base_path, base_path }) catch "button.right_click_style is removed";
+            defer if (!std.mem.eql(u8, msg, "button.right_click_style is removed")) allocator.free(msg);
+            _ = lua.pushString(msg);
+            lua.raiseError();
         }
         lua.pop(1);
         _ = lua.getField(-1, "on_right_click_style");
-        if (segment.button_right_style == null and lua.typeOf(-1) == .string) {
-            const s = lua.toString(-1) catch "";
-            if (s.len > 0) segment.button_right_style = allocator.dupe(u8, s) catch null;
+        if (lua.typeOf(-1) != .nil) {
+            const msg = std.fmt.allocPrint(allocator, "{s}.button.on_right_click_style is removed; use {s}.button.right_style", .{ base_path, base_path }) catch "button.on_right_click_style is removed";
+            defer if (!std.mem.eql(u8, msg, "button.on_right_click_style is removed")) allocator.free(msg);
+            _ = lua.pushString(msg);
+            lua.raiseError();
         }
         lua.pop(1);
 
@@ -2003,9 +2100,35 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
             }
             lua.pop(1); // pop position
 
+            _ = lua.getField(-1, "segments");
+            if (lua.typeOf(-1) == .table) {
+                const seg_len: usize = @intCast(lua.rawLen(-1));
+                if (seg_len > 0) {
+                    const segs = allocator.alloc(config.Segment, seg_len) catch null;
+                    if (segs) |arr| {
+                        var count: usize = 0;
+                        var i: i32 = 1;
+                        while (i <= @as(i32, @intCast(seg_len))) : (i += 1) {
+                            _ = lua.rawGetIndex(-1, i);
+                            if (lua.typeOf(-1) == .table) {
+                                if (parseSegment(lua, -1, allocator)) |segment| {
+                                    arr[count] = segment;
+                                    count += 1;
+                                }
+                            }
+                            lua.pop(1);
+                        }
+                        style.title_segments = arr[0..count];
+                    }
+                }
+            }
+            lua.pop(1); // pop segments
+
             // Parse full Segment structure
-            if (parseSegment(lua, -1, allocator)) |segment| {
-                style.module = segment;
+            if (style.title_segments.len == 0) {
+                if (parseSegment(lua, -1, allocator)) |segment| {
+                    style.module = segment;
+                }
             }
         }
         lua.pop(1); // pop title table
@@ -3079,12 +3202,17 @@ fn buildRecordCommand(lua: *Lua, action: enum { start, stop, toggle, status }) ?
         cmd.appendSlice(qout) catch return null;
     }
     if (std.mem.eql(u8, scope, "pod") and target_flag.len > 0 and (action == .start or action == .toggle)) {
-        const qtarget = shellQuote(allocator, target_value) catch return null;
-        defer allocator.free(qtarget);
         cmd.appendSlice(" ") catch return null;
         cmd.appendSlice(target_flag) catch return null;
         cmd.appendSlice(" ") catch return null;
-        cmd.appendSlice(qtarget) catch return null;
+        if (std.mem.startsWith(u8, target_value, "$HEXE_") or std.mem.startsWith(u8, target_value, "${HEXE_")) {
+            // Allow runtime env expansion for hexe-provided dynamic targets.
+            cmd.appendSlice(target_value) catch return null;
+        } else {
+            const qtarget = shellQuote(allocator, target_value) catch return null;
+            defer allocator.free(qtarget);
+            cmd.appendSlice(qtarget) catch return null;
+        }
     }
     if ((action == .start or action == .toggle) and capture_input) {
         cmd.appendSlice(" --capture-input") catch return null;
@@ -3095,7 +3223,7 @@ fn buildRecordCommand(lua: *Lua, action: enum { start, stop, toggle, status }) ?
 pub export fn hexe_record_start(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
     const cmd = buildRecordCommand(lua, .start) orelse {
-        _ = lua.pushString("record.start: expected opts table with scope='pod'");
+        _ = lua.pushString("record.start: expected opts table with scope='pod' or 'mux'");
         lua.raiseError();
     };
     defer std.heap.page_allocator.free(cmd);
@@ -3106,7 +3234,7 @@ pub export fn hexe_record_start(L: ?*LuaState) callconv(.c) c_int {
 pub export fn hexe_record_stop(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
     const cmd = buildRecordCommand(lua, .stop) orelse {
-        _ = lua.pushString("record.stop: expected opts table with scope='pod'");
+        _ = lua.pushString("record.stop: expected opts table with scope='pod' or 'mux'");
         lua.raiseError();
     };
     defer std.heap.page_allocator.free(cmd);
@@ -3117,7 +3245,7 @@ pub export fn hexe_record_stop(L: ?*LuaState) callconv(.c) c_int {
 pub export fn hexe_record_toggle(L: ?*LuaState) callconv(.c) c_int {
     const lua: *Lua = @ptrCast(L);
     const cmd = buildRecordCommand(lua, .toggle) orelse {
-        _ = lua.pushString("record.toggle: expected opts table with scope='pod'");
+        _ = lua.pushString("record.toggle: expected opts table with scope='pod' or 'mux'");
         lua.raiseError();
     };
     defer std.heap.page_allocator.free(cmd);
@@ -3188,6 +3316,7 @@ pub export fn hexe_record_status(L: ?*LuaState) callconv(.c) c_int {
     var pid: i32 = 0;
     var started_ms: i64 = 0;
     var out: []const u8 = "";
+    var uuid: []const u8 = "";
     var lines = std.mem.tokenizeAny(u8, data, "\n");
     while (lines.next()) |line| {
         var kv = std.mem.splitScalar(u8, line, '=');
@@ -3196,6 +3325,7 @@ pub export fn hexe_record_status(L: ?*LuaState) callconv(.c) c_int {
         if (std.mem.eql(u8, k, "pid")) pid = std.fmt.parseInt(i32, v, 10) catch 0;
         if (std.mem.eql(u8, k, "started_ms")) started_ms = std.fmt.parseInt(i64, v, 10) catch 0;
         if (std.mem.eql(u8, k, "out")) out = v;
+        if (std.mem.eql(u8, k, "uuid")) uuid = v;
     }
 
     const active = pid > 0 and std.c.kill(pid, 0) == 0;
@@ -3203,7 +3333,7 @@ pub export fn hexe_record_status(L: ?*LuaState) callconv(.c) c_int {
         std.fs.cwd().deleteFile(state_path) catch {};
     }
 
-    lua.createTable(0, 5);
+    lua.createTable(0, 6);
     lua.pushBoolean(active);
     lua.setField(-2, "active");
     _ = lua.pushString(scope);
@@ -3215,10 +3345,86 @@ pub export fn hexe_record_status(L: ?*LuaState) callconv(.c) c_int {
             _ = lua.pushString(out);
             lua.setField(-2, "out");
         }
+        if (uuid.len > 0) {
+            _ = lua.pushString(uuid);
+            lua.setField(-2, "uuid");
+        }
         if (started_ms > 0) {
             lua.pushInteger(started_ms);
             lua.setField(-2, "started_ms");
         }
     }
     return 1;
+}
+
+fn freeParsedSegment(seg: *config.Segment, allocator: std.mem.Allocator) void {
+    allocator.free(seg.name);
+    if (seg.command) |v| allocator.free(v);
+    if (seg.builtin) |v| allocator.free(v);
+    if (seg.progress_show_when) |v| allocator.free(v);
+    if (seg.on_click) |v| allocator.free(v);
+    if (seg.on_right_click) |v| allocator.free(v);
+    if (seg.on_middle_click) |v| allocator.free(v);
+    if (seg.button_active_bash) |v| allocator.free(v);
+    if (seg.button_left_style) |v| allocator.free(v);
+    if (seg.button_middle_style) |v| allocator.free(v);
+    if (seg.button_right_style) |v| allocator.free(v);
+    if (seg.when) |*w| {
+        var when = w.*;
+        when.deinit(allocator);
+    }
+    if (seg.spinner) |*sp| {
+        var spinner = sp.*;
+        spinner.deinit(allocator);
+    }
+}
+
+test "parseSegmentAtPath accepts callback active_when in button table" {
+    var lua = try Lua.init(std.testing.allocator);
+    defer lua.deinit();
+
+    const chunk =
+        "seg = {" ++
+        "name='rec'," ++
+        "value=function(_) return 'REC' end," ++
+        "button={ active_when=function(_) return true end }" ++
+        "}";
+    const z = try std.testing.allocator.dupeZ(u8, chunk);
+    defer std.testing.allocator.free(z);
+    try lua.loadString(z);
+    try lua.protectedCall(.{ .args = 0, .results = 0 });
+
+    _ = try lua.getGlobal("seg");
+    defer lua.pop(1);
+
+    var seg = parseSegmentAtPath(&lua, -1, std.testing.allocator, "mux.tabs.left[1]") orelse return error.TestUnexpectedResult;
+    defer freeParsedSegment(&seg, std.testing.allocator);
+
+    try std.testing.expect(seg.button_active_bash != null);
+    try std.testing.expect(std.mem.startsWith(u8, seg.button_active_bash.?, CALLBACK_REF_PREFIX));
+}
+
+test "parseSegmentAtPath accepts callback active_when at segment level" {
+    var lua = try Lua.init(std.testing.allocator);
+    defer lua.deinit();
+
+    const chunk =
+        "seg = {" ++
+        "name='rec'," ++
+        "value=function(_) return 'REC' end," ++
+        "active_when=function(_) return true end" ++
+        "}";
+    const z = try std.testing.allocator.dupeZ(u8, chunk);
+    defer std.testing.allocator.free(z);
+    try lua.loadString(z);
+    try lua.protectedCall(.{ .args = 0, .results = 0 });
+
+    _ = try lua.getGlobal("seg");
+    defer lua.pop(1);
+
+    var seg = parseSegmentAtPath(&lua, -1, std.testing.allocator, "mux.tabs.left[1]") orelse return error.TestUnexpectedResult;
+    defer freeParsedSegment(&seg, std.testing.allocator);
+
+    try std.testing.expect(seg.button_active_bash != null);
+    try std.testing.expect(std.mem.startsWith(u8, seg.button_active_bash.?, CALLBACK_REF_PREFIX));
 }
