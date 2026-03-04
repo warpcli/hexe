@@ -19,6 +19,7 @@ const loop_mouse = @import("loop_mouse.zig");
 const loop_render = @import("loop_render.zig");
 const float_completion = @import("float_completion.zig");
 const keybinds = @import("keybinds.zig");
+const worker_runtime = @import("worker_runtime.zig");
 
 const LoopTimerContext = struct {
     state: *State,
@@ -425,6 +426,13 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
 pub fn runMainLoop(state: *State) !void {
     const allocator = state.allocator;
 
+    var bg_runtime = worker_runtime.WorkerRuntime.init(allocator, .{});
+    try bg_runtime.start();
+    defer bg_runtime.deinit();
+
+    var bg_results: std.ArrayList(worker_runtime.Result) = .empty;
+    defer bg_results.deinit(allocator);
+
     try xev.detect();
     var loop = try xev.Loop.init(.{});
     defer loop.deinit();
@@ -624,6 +632,11 @@ pub fn runMainLoop(state: *State) !void {
 
         try loop.run(.once);
         if (!state.running) break;
+
+        bg_runtime.drainResults(&bg_results);
+        if (bg_results.items.len > 0) {
+            bg_results.clearRetainingCapacity();
+        }
 
         // Clear skip flag from previous iteration.
         state.skip_dead_check = false;
