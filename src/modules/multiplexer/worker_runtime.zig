@@ -4,6 +4,7 @@ pub const JobKind = enum {
     status_when,
     status_command,
     pane_metadata,
+    render_precompute,
 };
 
 pub const StatusWhenJob = struct {
@@ -40,16 +41,25 @@ pub const PaneMetadataJob = struct {
     pid: i32,
 };
 
+pub const RenderPrecomputeJob = struct {
+    pane_count: u16,
+    float_count: u16,
+    term_width: u16,
+    term_height: u16,
+};
+
 pub const JobPayload = union(JobKind) {
     status_when: StatusWhenJob,
     status_command: StatusCommandJob,
     pane_metadata: PaneMetadataJob,
+    render_precompute: RenderPrecomputeJob,
 
     pub fn deinit(self: *JobPayload, allocator: std.mem.Allocator) void {
         switch (self.*) {
             .status_when => |*v| v.deinit(allocator),
             .status_command => |*v| v.deinit(allocator),
             .pane_metadata => {},
+            .render_precompute => {},
         }
     }
 
@@ -76,6 +86,7 @@ pub const JobPayload = union(JobKind) {
             },
             .status_command => |v| .{ .status_command = .{ .command = try allocator.dupe(u8, v.command) } },
             .pane_metadata => |v| .{ .pane_metadata = v },
+            .render_precompute => |v| .{ .render_precompute = v },
         };
     }
 };
@@ -116,6 +127,7 @@ pub const ResultPayload = union(JobKind) {
     status_when: StatusWhenResult,
     status_command: StatusCommandResult,
     pane_metadata: PaneMetadataResult,
+    render_precompute: RenderPrecomputeResult,
 };
 
 pub const StatusWhenResult = struct {
@@ -135,6 +147,11 @@ pub const PaneMetadataResult = struct {
     pid: i32,
     value_len: u16,
     value: [512]u8,
+};
+
+pub const RenderPrecomputeResult = struct {
+    ok: bool,
+    estimated_cells: u32,
 };
 
 pub const Config = struct {
@@ -366,6 +383,7 @@ fn runJob(payload: JobPayload) ResultPayload {
         .status_when => |job| .{ .status_when = .{ .matched = runStatusWhen(job) } },
         .status_command => |job| .{ .status_command = runStatusCommand(job) },
         .pane_metadata => |job| .{ .pane_metadata = runPaneMetadata(job) },
+        .render_precompute => |job| .{ .render_precompute = runRenderPrecompute(job) },
     };
 }
 
@@ -453,4 +471,13 @@ fn runPaneMetadata(job: PaneMetadataJob) PaneMetadataResult {
     }
 
     return out;
+}
+
+fn runRenderPrecompute(job: RenderPrecomputeJob) RenderPrecomputeResult {
+    const panes: u32 = @as(u32, job.pane_count) + @as(u32, job.float_count);
+    const viewport_cells: u32 = @as(u32, job.term_width) * @as(u32, job.term_height);
+    return .{
+        .ok = true,
+        .estimated_cells = viewport_cells * @max(panes, 1),
+    };
 }

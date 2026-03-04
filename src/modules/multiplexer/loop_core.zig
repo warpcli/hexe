@@ -51,6 +51,15 @@ fn asyncStatusEnabled() bool {
     return true;
 }
 
+fn asyncRenderPrepEnabled() bool {
+    const raw = std.posix.getenv("HEXE_MUX_ASYNC_RENDER_PREP") orelse return false;
+    if (std.mem.eql(u8, raw, "1")) return true;
+    if (std.ascii.eqlIgnoreCase(raw, "true")) return true;
+    if (std.ascii.eqlIgnoreCase(raw, "on")) return true;
+    if (std.ascii.eqlIgnoreCase(raw, "yes")) return true;
+    return false;
+}
+
 fn applyPostQueryFeatureModes(state: *State) void {
     const stdout = std.fs.File.stdout();
     var tty_buf: [1024]u8 = undefined;
@@ -466,6 +475,9 @@ pub fn runMainLoop(state: *State) !void {
     var meta_proc_job_id: ?u64 = null;
     var meta_cwd_job_id: ?u64 = null;
     var last_worker_stats_log_ms: i64 = std.time.milliTimestamp();
+    var render_prep_generation: u64 = 1;
+    var render_prep_job_id: ?u64 = null;
+    var render_prep_inflight_generation: u64 = 0;
 
     try xev.detect();
     var loop = try xev.Loop.init(.{});
@@ -705,6 +717,15 @@ pub fn runMainLoop(state: *State) !void {
                     state.needs_render = true;
                 }
 
+                for (bg_results.items) |result| {
+                    if (result.kind != .render_precompute) continue;
+                    if (render_prep_job_id) |job_id| {
+                        if (job_id == result.job_id and result.generation == render_prep_inflight_generation) {
+                            render_prep_job_id = null;
+                        }
+                    }
+                }
+
                 bg_results.clearRetainingCapacity();
             }
 
@@ -788,6 +809,30 @@ pub fn runMainLoop(state: *State) !void {
                 meta_target_pid = null;
                 meta_proc_job_id = null;
                 meta_cwd_job_id = null;
+            }
+
+            if (asyncRenderPrepEnabled() and state.needs_render and render_prep_job_id == null) {
+                var pane_count: u16 = 0;
+                var it = state.currentLayout().splitIterator();
+                while (it.next()) |_| {
+                    pane_count +%= 1;
+                }
+
+                const req: worker_runtime.JobRequest = .{
+                    .generation = render_prep_generation,
+                    .key_hash = @as(u64, render_prep_generation),
+                    .payload = .{ .render_precompute = .{
+                        .pane_count = pane_count,
+                        .float_count = @intCast(state.floats.items.len),
+                        .term_width = state.term_width,
+                        .term_height = state.term_height,
+                    } },
+                };
+                if (rt.enqueue(req)) |job_id| {
+                    render_prep_job_id = job_id;
+                    render_prep_inflight_generation = render_prep_generation;
+                    render_prep_generation +%= 1;
+                } else |_| {}
             }
         }
 
