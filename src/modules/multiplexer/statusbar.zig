@@ -82,8 +82,13 @@ const WhenCacheEntry = struct {
     last_result: bool,
 };
 
+const InflightEntry = struct {
+    job_id: u64,
+    generation: u64,
+};
+
 threadlocal var when_bash_cache: ?std.AutoHashMap(usize, WhenCacheEntry) = null;
-threadlocal var when_bash_inflight: ?std.AutoHashMap(usize, u64) = null;
+threadlocal var when_bash_inflight: ?std.AutoHashMap(usize, InflightEntry) = null;
 threadlocal var when_lua_cache: ?std.AutoHashMap(usize, WhenCacheEntry) = null;
 threadlocal var when_lua_rt: ?LuaRuntime = null;
 threadlocal var callback_lua_rt: ?*LuaRuntime = null;
@@ -109,7 +114,7 @@ const CommandCacheEntry = struct {
 };
 threadlocal var progress_text_cache: ?std.AutoHashMap(usize, ProgressCacheEntry) = null;
 threadlocal var command_text_cache: ?std.AutoHashMap(usize, CommandCacheEntry) = null;
-threadlocal var command_inflight: ?std.AutoHashMap(usize, u64) = null;
+threadlocal var command_inflight: ?std.AutoHashMap(usize, InflightEntry) = null;
 threadlocal var hover_x: ?u16 = null;
 threadlocal var hover_y: ?u16 = null;
 threadlocal var statusbar_redraw_last_emit_ms: ?u64 = null;
@@ -133,8 +138,8 @@ pub fn applyWorkerResults(results: []const worker_runtime.Result) bool {
         switch (result.kind) {
             .status_when => {
                 const key: usize = @intCast(result.key_hash);
-                if (when_inflight.get(key)) |job_id| {
-                    if (job_id == result.job_id) {
+                if (when_inflight.get(key)) |entry| {
+                    if (entry.job_id == result.job_id and entry.generation == result.generation) {
                         _ = when_inflight.remove(key);
                     }
                 }
@@ -147,8 +152,8 @@ pub fn applyWorkerResults(results: []const worker_runtime.Result) bool {
             },
             .status_command => {
                 const key: usize = @intCast(result.key_hash);
-                if (cmd_inflight.get(key)) |job_id| {
-                    if (job_id == result.job_id) {
+                if (cmd_inflight.get(key)) |entry| {
+                    if (entry.job_id == result.job_id and entry.generation == result.generation) {
                         _ = cmd_inflight.remove(key);
                     }
                 }
@@ -324,9 +329,9 @@ pub fn deinitThreadlocals() void {
     }
 }
 
-fn getWhenInFlightMap() *std.AutoHashMap(usize, u64) {
+fn getWhenInFlightMap() *std.AutoHashMap(usize, InflightEntry) {
     if (when_bash_inflight == null) {
-        when_bash_inflight = std.AutoHashMap(usize, u64).init(std.heap.page_allocator);
+        when_bash_inflight = std.AutoHashMap(usize, InflightEntry).init(std.heap.page_allocator);
     }
     return &when_bash_inflight.?;
 }
@@ -345,9 +350,9 @@ fn getCommandCache() *std.AutoHashMap(usize, CommandCacheEntry) {
     return &command_text_cache.?;
 }
 
-fn getCommandInFlightMap() *std.AutoHashMap(usize, u64) {
+fn getCommandInFlightMap() *std.AutoHashMap(usize, InflightEntry) {
     if (command_inflight == null) {
-        command_inflight = std.AutoHashMap(usize, u64).init(std.heap.page_allocator);
+        command_inflight = std.AutoHashMap(usize, InflightEntry).init(std.heap.page_allocator);
     }
     return &command_inflight.?;
 }
@@ -357,7 +362,7 @@ fn progressKey(mod: *const core.config.Segment) usize {
 }
 
 fn commandKey(s: []const u8) usize {
-    return (@intFromPtr(s.ptr) << 1) ^ s.len;
+    return @intCast(std.hash.Wyhash.hash(0, s));
 }
 
 fn getRandomdoStateMap() *std.AutoHashMap(usize, RandomdoState) {
@@ -440,7 +445,7 @@ fn randomdoTextFor(ctx: *shp.Context, mod: *const core.config.Segment, visible: 
 }
 
 fn whenKey(s: []const u8) usize {
-    return (@intFromPtr(s.ptr) << 1) ^ s.len;
+    return @intCast(std.hash.Wyhash.hash(0, s));
 }
 
 fn getWhenCache(map_ptr: *?std.AutoHashMap(usize, WhenCacheEntry)) *std.AutoHashMap(usize, WhenCacheEntry) {
@@ -514,7 +519,7 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
             };
 
             if (rt.enqueue(request)) |job_id| {
-                inflight.put(key, job_id) catch {};
+                inflight.put(key, .{ .job_id = job_id, .generation = now }) catch {};
             } else |_| {}
         }
 
@@ -1487,7 +1492,7 @@ pub fn runSegment(module: *const core.Segment, buf: []u8) ![]const u8 {
                     .payload = .{ .status_command = .{ .command = cmd } },
                 };
                 if (rt.enqueue(request)) |job_id| {
-                    inflight.put(key, job_id) catch {};
+                    inflight.put(key, .{ .job_id = job_id, .generation = now_ms }) catch {};
                 } else |_| {}
             }
 
