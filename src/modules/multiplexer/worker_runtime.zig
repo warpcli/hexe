@@ -122,7 +122,9 @@ pub const StatusWhenResult = struct {
 };
 
 pub const StatusCommandResult = struct {
-    exit_code: i32,
+    ok: bool,
+    output_len: u16,
+    output: [512]u8,
 };
 
 pub const PaneMetadataResult = struct {
@@ -281,7 +283,7 @@ pub const WorkerRuntime = struct {
 fn runJob(payload: JobPayload) ResultPayload {
     return switch (payload) {
         .status_when => |job| .{ .status_when = .{ .matched = runStatusWhen(job) } },
-        .status_command => .{ .status_command = .{ .exit_code = 0 } },
+        .status_command => |job| .{ .status_command = runStatusCommand(job) },
         .pane_metadata => .{ .pane_metadata = .{ .ok = true } },
     };
 }
@@ -315,4 +317,25 @@ fn runStatusWhen(job: StatusWhenJob) bool {
 
     _ = child.kill() catch {};
     return false;
+}
+
+fn runStatusCommand(job: StatusCommandJob) StatusCommandResult {
+    var out: StatusCommandResult = .{ .ok = false, .output_len = 0, .output = undefined };
+
+    const result = std.process.Child.run(.{
+        .allocator = std.heap.page_allocator,
+        .argv = &.{ "/bin/sh", "-c", job.command },
+    }) catch return out;
+    defer std.heap.page_allocator.free(result.stdout);
+    defer std.heap.page_allocator.free(result.stderr);
+
+    var len = result.stdout.len;
+    while (len > 0 and (result.stdout[len - 1] == '\n' or result.stdout[len - 1] == '\r')) {
+        len -= 1;
+    }
+    const copy_len = @min(len, out.output.len);
+    @memcpy(out.output[0..copy_len], result.stdout[0..copy_len]);
+    out.output_len = @intCast(copy_len);
+    out.ok = true;
+    return out;
 }

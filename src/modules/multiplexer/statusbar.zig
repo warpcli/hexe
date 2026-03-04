@@ -102,7 +102,14 @@ const ProgressCacheEntry = struct {
     text: [256]u8,
     len: usize,
 };
+const CommandCacheEntry = struct {
+    last_eval_ms: u64,
+    text: [512]u8,
+    len: usize,
+};
 threadlocal var progress_text_cache: ?std.AutoHashMap(usize, ProgressCacheEntry) = null;
+threadlocal var command_text_cache: ?std.AutoHashMap(usize, CommandCacheEntry) = null;
+threadlocal var command_inflight: ?std.AutoHashMap(usize, u64) = null;
 threadlocal var hover_x: ?u16 = null;
 threadlocal var hover_y: ?u16 = null;
 threadlocal var statusbar_redraw_last_emit_ms: ?u64 = null;
@@ -117,24 +124,48 @@ pub fn applyWorkerResults(results: []const worker_runtime.Result) bool {
     if (results.len == 0) return false;
 
     var changed = false;
-    const cache = getWhenCache(&when_bash_cache);
-    const inflight = getWhenInFlightMap();
+    const when_cache = getWhenCache(&when_bash_cache);
+    const when_inflight = getWhenInFlightMap();
+    const cmd_cache = getCommandCache();
+    const cmd_inflight = getCommandInFlightMap();
 
     for (results) |result| {
-        if (result.kind != .status_when) continue;
+        switch (result.kind) {
+            .status_when => {
+                const key: usize = @intCast(result.key_hash);
+                if (when_inflight.get(key)) |job_id| {
+                    if (job_id == result.job_id) {
+                        _ = when_inflight.remove(key);
+                    }
+                }
 
-        const key: usize = @intCast(result.key_hash);
-        if (inflight.get(key)) |job_id| {
-            if (job_id == result.job_id) {
-                _ = inflight.remove(key);
-            }
+                if (result.payload != .status_when) continue;
+                const matched = result.payload.status_when.matched;
+                const completed_ms: u64 = if (result.completed_ms < 0) 0 else @intCast(result.completed_ms);
+                when_cache.put(key, .{ .last_eval_ms = completed_ms, .last_result = matched }) catch {};
+                changed = true;
+            },
+            .status_command => {
+                const key: usize = @intCast(result.key_hash);
+                if (cmd_inflight.get(key)) |job_id| {
+                    if (job_id == result.job_id) {
+                        _ = cmd_inflight.remove(key);
+                    }
+                }
+
+                if (result.payload != .status_command) continue;
+                const payload = result.payload.status_command;
+                if (!payload.ok) continue;
+
+                const completed_ms: u64 = if (result.completed_ms < 0) 0 else @intCast(result.completed_ms);
+                var entry = CommandCacheEntry{ .last_eval_ms = completed_ms, .text = undefined, .len = payload.output_len };
+                const out = payload.output[0..payload.output_len];
+                @memcpy(entry.text[0..out.len], out);
+                cmd_cache.put(key, entry) catch {};
+                changed = true;
+            },
+            else => {},
         }
-
-        if (result.payload != .status_when) continue;
-        const matched = result.payload.status_when.matched;
-        const completed_ms: u64 = if (result.completed_ms < 0) 0 else @intCast(result.completed_ms);
-        cache.put(key, .{ .last_eval_ms = completed_ms, .last_result = matched }) catch {};
-        changed = true;
     }
 
     return changed;
@@ -153,6 +184,12 @@ pub fn endExternalCallbackEval() void {
 fn statusbarRedrawEventIntervalMs() u64 {
     const raw = std.posix.getenv("HEXE_STATUSBAR_REDRAW_EVENT_MS") orelse return 120;
     return std.fmt.parseInt(u64, raw, 10) catch 120;
+}
+
+fn commandRefreshIntervalMs() u64 {
+    const raw = std.posix.getenv("HEXE_STATUS_COMMAND_INTERVAL_MS") orelse return 500;
+    const parsed = std.fmt.parseInt(u64, raw, 10) catch 500;
+    return @min(@max(parsed, 50), 10_000);
 }
 
 fn emitStatusbarRedrawEventIfDue(state: *State, ctx: *const shp.Context, term_width: u16, term_height: u16, active_tab: usize) void {
@@ -275,6 +312,16 @@ pub fn deinitThreadlocals() void {
         cache.deinit();
         progress_text_cache = null;
     }
+
+    if (command_text_cache) |*cache| {
+        cache.deinit();
+        command_text_cache = null;
+    }
+
+    if (command_inflight) |*map| {
+        map.deinit();
+        command_inflight = null;
+    }
 }
 
 fn getWhenInFlightMap() *std.AutoHashMap(usize, u64) {
@@ -291,8 +338,26 @@ fn getProgressTextCache() *std.AutoHashMap(usize, ProgressCacheEntry) {
     return &progress_text_cache.?;
 }
 
+fn getCommandCache() *std.AutoHashMap(usize, CommandCacheEntry) {
+    if (command_text_cache == null) {
+        command_text_cache = std.AutoHashMap(usize, CommandCacheEntry).init(std.heap.page_allocator);
+    }
+    return &command_text_cache.?;
+}
+
+fn getCommandInFlightMap() *std.AutoHashMap(usize, u64) {
+    if (command_inflight == null) {
+        command_inflight = std.AutoHashMap(usize, u64).init(std.heap.page_allocator);
+    }
+    return &command_inflight.?;
+}
+
 fn progressKey(mod: *const core.config.Segment) usize {
     return (@intFromPtr(mod.name.ptr) << 1) ^ @as(usize, mod.priority) ^ @as(usize, @intFromEnum(mod.kind));
+}
+
+fn commandKey(s: []const u8) usize {
+    return (@intFromPtr(s.ptr) << 1) ^ s.len;
 }
 
 fn getRandomdoStateMap() *std.AutoHashMap(usize, RandomdoState) {
@@ -1400,6 +1465,40 @@ pub fn styleColorToRender(col: shp.Color) Color {
 
 pub fn runSegment(module: *const core.Segment, buf: []u8) ![]const u8 {
     if (module.command) |cmd| {
+        if (async_runtime) |rt| {
+            const now_ms: u64 = @intCast(std.time.milliTimestamp());
+            const key = commandKey(cmd);
+            const cache = getCommandCache();
+            const inflight = getCommandInFlightMap();
+            const refresh_ms = commandRefreshIntervalMs();
+
+            if (cache.get(key)) |entry| {
+                if (now_ms >= entry.last_eval_ms and (now_ms - entry.last_eval_ms) < refresh_ms) {
+                    const copy_cached = @min(entry.len, buf.len);
+                    @memcpy(buf[0..copy_cached], entry.text[0..copy_cached]);
+                    return buf[0..copy_cached];
+                }
+            }
+
+            if (!inflight.contains(key)) {
+                const request: worker_runtime.JobRequest = .{
+                    .generation = now_ms,
+                    .key_hash = key,
+                    .payload = .{ .status_command = .{ .command = cmd } },
+                };
+                if (rt.enqueue(request)) |job_id| {
+                    inflight.put(key, job_id) catch {};
+                } else |_| {}
+            }
+
+            if (cache.get(key)) |entry| {
+                const copy_cached = @min(entry.len, buf.len);
+                @memcpy(buf[0..copy_cached], entry.text[0..copy_cached]);
+                return buf[0..copy_cached];
+            }
+            return "";
+        }
+
         const result = std.process.Child.run(.{
             .allocator = std.heap.page_allocator,
             .argv = &.{ "/bin/sh", "-c", cmd },
