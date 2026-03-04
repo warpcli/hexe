@@ -465,6 +465,7 @@ pub fn runMainLoop(state: *State) !void {
     var meta_target_pid: ?i32 = null;
     var meta_proc_job_id: ?u64 = null;
     var meta_cwd_job_id: ?u64 = null;
+    var last_worker_stats_log_ms: i64 = std.time.milliTimestamp();
 
     try xev.detect();
     var loop = try xev.Loop.init(.{});
@@ -705,6 +706,28 @@ pub fn runMainLoop(state: *State) !void {
                 }
 
                 bg_results.clearRetainingCapacity();
+            }
+
+            const stats_now_ms = std.time.milliTimestamp();
+            if (stats_now_ms - last_worker_stats_log_ms >= 2000) {
+                last_worker_stats_log_ms = stats_now_ms;
+                const stats = rt.snapshotStats();
+                const avg_duration_us: u64 = if (stats.completed > 0)
+                    @intCast((stats.total_duration_ns / stats.completed) / 1000)
+                else
+                    0;
+                mux.debugLog(
+                    "worker stats: enq={} done={} qfull={} roverdrops={} max_jobs={} max_results={} avg_job_us={}",
+                    .{
+                        stats.enqueued,
+                        stats.completed,
+                        stats.queue_full_drops,
+                        stats.result_overflow_drops,
+                        stats.max_jobs_depth,
+                        stats.max_results_depth,
+                        avg_duration_us,
+                    },
+                );
             }
 
             const focused: ?*Pane = if (state.active_floating) |idx|

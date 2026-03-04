@@ -143,6 +143,16 @@ pub const Config = struct {
     max_results: usize = 256,
 };
 
+pub const Stats = struct {
+    enqueued: u64,
+    queue_full_drops: u64,
+    completed: u64,
+    result_overflow_drops: u64,
+    max_jobs_depth: usize,
+    max_results_depth: usize,
+    total_duration_ns: u128,
+};
+
 pub const WorkerRuntime = struct {
     allocator: std.mem.Allocator,
     config: Config,
@@ -155,6 +165,15 @@ pub const WorkerRuntime = struct {
     jobs: std.ArrayList(Job) = .empty,
     results: std.ArrayList(Result) = .empty,
     workers: std.ArrayList(std.Thread) = .empty,
+    stats: Stats = .{
+        .enqueued = 0,
+        .queue_full_drops = 0,
+        .completed = 0,
+        .result_overflow_drops = 0,
+        .max_jobs_depth = 0,
+        .max_results_depth = 0,
+        .total_duration_ns = 0,
+    },
 
     pub fn init(allocator: std.mem.Allocator, config: Config) WorkerRuntime {
         return .{
@@ -205,6 +224,7 @@ pub const WorkerRuntime = struct {
         defer self.lock.unlock();
 
         if (self.jobs.items.len >= self.config.max_jobs) {
+            self.stats.queue_full_drops += 1;
             return error.QueueFull;
         }
 
@@ -221,8 +241,18 @@ pub const WorkerRuntime = struct {
             .submitted_ms = std.time.milliTimestamp(),
             .payload = owned_payload,
         });
+        self.stats.enqueued += 1;
+        if (self.jobs.items.len > self.stats.max_jobs_depth) {
+            self.stats.max_jobs_depth = self.jobs.items.len;
+        }
         self.cv_jobs.signal();
         return id;
+    }
+
+    pub fn snapshotStats(self: *WorkerRuntime) Stats {
+        self.lock.lock();
+        defer self.lock.unlock();
+        return self.stats;
     }
 
     pub fn drainResults(self: *WorkerRuntime, out: *std.ArrayList(Result)) void {
@@ -241,8 +271,12 @@ pub const WorkerRuntime = struct {
     fn pushResult(self: *WorkerRuntime, result: Result) void {
         if (self.results.items.len >= self.config.max_results) {
             _ = self.results.orderedRemove(0);
+            self.stats.result_overflow_drops += 1;
         }
         self.results.append(self.allocator, result) catch {};
+        if (self.results.items.len > self.stats.max_results_depth) {
+            self.stats.max_results_depth = self.results.items.len;
+        }
     }
 
     fn workerMain(self: *WorkerRuntime) void {
@@ -270,6 +304,8 @@ pub const WorkerRuntime = struct {
             const duration_ns = ended_ns - started_ns;
 
             self.lock.lock();
+            self.stats.completed += 1;
+            self.stats.total_duration_ns += duration_ns;
             self.pushResult(.{
                 .job_id = job.id,
                 .kind = job.kind,
