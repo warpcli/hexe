@@ -7,15 +7,22 @@ pub const JobKind = enum {
 };
 
 pub const StatusWhenJob = struct {
-    script: []u8,
+    script: []const u8,
+    shell_running: bool,
+    alt_screen: bool,
+    timeout_ms: u32,
+    last_command: ?[]const u8,
+    cwd: ?[]const u8,
 
     pub fn deinit(self: *StatusWhenJob, allocator: std.mem.Allocator) void {
         allocator.free(self.script);
+        if (self.last_command) |v| allocator.free(v);
+        if (self.cwd) |v| allocator.free(v);
     }
 };
 
 pub const StatusCommandJob = struct {
-    command: []u8,
+    command: []const u8,
 
     pub fn deinit(self: *StatusCommandJob, allocator: std.mem.Allocator) void {
         allocator.free(self.command);
@@ -47,7 +54,25 @@ pub const JobPayload = union(JobKind) {
 
     pub fn clone(self: JobPayload, allocator: std.mem.Allocator) !JobPayload {
         return switch (self) {
-            .status_when => |v| .{ .status_when = .{ .script = try allocator.dupe(u8, v.script) } },
+            .status_when => |v| blk: {
+                const script = try allocator.dupe(u8, v.script);
+                errdefer allocator.free(script);
+
+                const last_command = if (v.last_command) |cmd| try allocator.dupe(u8, cmd) else null;
+                errdefer if (last_command) |cmd| allocator.free(cmd);
+
+                const cwd = if (v.cwd) |cwd_v| try allocator.dupe(u8, cwd_v) else null;
+                errdefer if (cwd) |cwd_v| allocator.free(cwd_v);
+
+                break :blk .{ .status_when = .{
+                    .script = script,
+                    .shell_running = v.shell_running,
+                    .alt_screen = v.alt_screen,
+                    .timeout_ms = v.timeout_ms,
+                    .last_command = last_command,
+                    .cwd = cwd,
+                } };
+            },
             .status_command => |v| .{ .status_command = .{ .command = try allocator.dupe(u8, v.command) } },
             .pane_metadata => |v| .{ .pane_metadata = v },
         };
@@ -55,7 +80,6 @@ pub const JobPayload = union(JobKind) {
 };
 
 pub const JobRequest = struct {
-    kind: JobKind,
     generation: u64,
     key_hash: u64,
     payload: JobPayload,
@@ -179,9 +203,11 @@ pub const WorkerRuntime = struct {
         const id = self.next_job_id;
         self.next_job_id += 1;
 
+        const payload_kind: JobKind = std.meta.activeTag(request.payload);
+
         try self.jobs.append(self.allocator, .{
             .id = id,
-            .kind = request.kind,
+            .kind = payload_kind,
             .generation = request.generation,
             .key_hash = request.key_hash,
             .submitted_ms = std.time.milliTimestamp(),
@@ -254,8 +280,39 @@ pub const WorkerRuntime = struct {
 
 fn runJob(payload: JobPayload) ResultPayload {
     return switch (payload) {
-        .status_when => .{ .status_when = .{ .matched = false } },
+        .status_when => |job| .{ .status_when = .{ .matched = runStatusWhen(job) } },
         .status_command => .{ .status_command = .{ .exit_code = 0 } },
         .pane_metadata => .{ .pane_metadata = .{ .ok = true } },
     };
+}
+
+fn runStatusWhen(job: StatusWhenJob) bool {
+    var env_map = std.process.EnvMap.init(std.heap.page_allocator);
+    defer env_map.deinit();
+
+    env_map.put("HEXE_STATUS_PROCESS_RUNNING", if (job.shell_running) "1" else "0") catch {};
+    env_map.put("HEXE_STATUS_ALT_SCREEN", if (job.alt_screen) "1" else "0") catch {};
+    if (job.last_command) |cmd| env_map.put("HEXE_STATUS_LAST_CMD", cmd) catch {};
+    if (job.cwd) |cwd| env_map.put("HEXE_STATUS_CWD", cwd) catch {};
+
+    var child = std.process.Child.init(&.{ "/bin/bash", "-c", job.script }, std.heap.page_allocator);
+    child.env_map = &env_map;
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+
+    child.spawn() catch return false;
+
+    const start_ms = std.time.milliTimestamp();
+    while (std.time.milliTimestamp() - start_ms < job.timeout_ms) {
+        const wait_res = std.posix.waitpid(child.id, std.posix.W.NOHANG);
+        if (wait_res.pid == child.id) {
+            child.id = undefined;
+            return std.posix.W.IFEXITED(wait_res.status) and std.posix.W.EXITSTATUS(wait_res.status) == 0;
+        }
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+
+    _ = child.kill() catch {};
+    return false;
 }

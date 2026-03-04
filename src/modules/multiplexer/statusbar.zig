@@ -12,6 +12,7 @@ const Renderer = @import("render_core.zig").Renderer;
 const lua_events = @import("lua_events.zig");
 const Color = core.style.Color;
 const Pane = @import("pane.zig").Pane;
+const worker_runtime = @import("worker_runtime.zig");
 const segment_render = core.segment_render;
 const DEFAULT_OUTPUTS = [_]core.config.OutputDef{.{ .style = "", .format = "$output" }};
 const CALLBACK_REF_PREFIX = "__hexe_cb_ref:";
@@ -82,6 +83,7 @@ const WhenCacheEntry = struct {
 };
 
 threadlocal var when_bash_cache: ?std.AutoHashMap(usize, WhenCacheEntry) = null;
+threadlocal var when_bash_inflight: ?std.AutoHashMap(usize, u64) = null;
 threadlocal var when_lua_cache: ?std.AutoHashMap(usize, WhenCacheEntry) = null;
 threadlocal var when_lua_rt: ?LuaRuntime = null;
 threadlocal var callback_lua_rt: ?*LuaRuntime = null;
@@ -105,6 +107,38 @@ threadlocal var hover_x: ?u16 = null;
 threadlocal var hover_y: ?u16 = null;
 threadlocal var statusbar_redraw_last_emit_ms: ?u64 = null;
 threadlocal var click_command_buf: [1024]u8 = [_]u8{0} ** 1024;
+threadlocal var async_runtime: ?*worker_runtime.WorkerRuntime = null;
+
+pub fn setAsyncRuntime(rt: ?*worker_runtime.WorkerRuntime) void {
+    async_runtime = rt;
+}
+
+pub fn applyWorkerResults(results: []const worker_runtime.Result) bool {
+    if (results.len == 0) return false;
+
+    var changed = false;
+    const cache = getWhenCache(&when_bash_cache);
+    const inflight = getWhenInFlightMap();
+
+    for (results) |result| {
+        if (result.kind != .status_when) continue;
+
+        const key: usize = @intCast(result.key_hash);
+        if (inflight.get(key)) |job_id| {
+            if (job_id == result.job_id) {
+                _ = inflight.remove(key);
+            }
+        }
+
+        if (result.payload != .status_when) continue;
+        const matched = result.payload.status_when.matched;
+        const completed_ms: u64 = if (result.completed_ms < 0) 0 else @intCast(result.completed_ms);
+        cache.put(key, .{ .last_eval_ms = completed_ms, .last_result = matched }) catch {};
+        changed = true;
+    }
+
+    return changed;
+}
 
 pub fn beginExternalCallbackEval(state: *State, lua_rt: ?*LuaRuntime) void {
     callback_state = state;
@@ -209,6 +243,11 @@ pub fn deinitThreadlocals() void {
         when_bash_cache = null;
     }
 
+    if (when_bash_inflight) |*map| {
+        map.deinit();
+        when_bash_inflight = null;
+    }
+
     // Deinit when_lua_cache if it was initialized
     if (when_lua_cache) |*cache| {
         cache.deinit();
@@ -236,6 +275,13 @@ pub fn deinitThreadlocals() void {
         cache.deinit();
         progress_text_cache = null;
     }
+}
+
+fn getWhenInFlightMap() *std.AutoHashMap(usize, u64) {
+    if (when_bash_inflight == null) {
+        when_bash_inflight = std.AutoHashMap(usize, u64).init(std.heap.page_allocator);
+    }
+    return &when_bash_inflight.?;
 }
 
 fn getProgressTextCache() *std.AutoHashMap(usize, ProgressCacheEntry) {
@@ -384,6 +430,32 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     const map = getWhenCache(&when_bash_cache);
     if (map.get(key)) |e| {
         if (now - e.last_eval_ms < ttl_ms) return e.last_result;
+    }
+
+    if (async_runtime) |rt| {
+        const inflight = getWhenInFlightMap();
+        if (!inflight.contains(key)) {
+            const request: worker_runtime.JobRequest = .{
+                .generation = now,
+                .key_hash = key,
+                .payload = .{ .status_when = .{
+                    .script = code,
+                    .shell_running = ctx.shell_running,
+                    .alt_screen = ctx.alt_screen,
+                    .timeout_ms = getConditionTimeout(),
+                    .last_command = ctx.last_command,
+                    .cwd = if (ctx.cwd.len > 0) ctx.cwd else null,
+                } },
+            };
+
+            if (rt.enqueue(request)) |job_id| {
+                inflight.put(key, job_id) catch {};
+            } else |_| {}
+        }
+
+        if (map.get(key)) |e| return e.last_result;
+        map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
+        return false;
     }
 
     // Export a few useful ctx vars.

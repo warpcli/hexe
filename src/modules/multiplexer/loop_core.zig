@@ -19,6 +19,7 @@ const loop_mouse = @import("loop_mouse.zig");
 const loop_render = @import("loop_render.zig");
 const float_completion = @import("float_completion.zig");
 const keybinds = @import("keybinds.zig");
+const statusbar = @import("statusbar.zig");
 const worker_runtime = @import("worker_runtime.zig");
 
 const LoopTimerContext = struct {
@@ -428,6 +429,8 @@ pub fn runMainLoop(state: *State) !void {
 
     var bg_runtime = worker_runtime.WorkerRuntime.init(allocator, .{});
     try bg_runtime.start();
+    statusbar.setAsyncRuntime(&bg_runtime);
+    defer statusbar.setAsyncRuntime(null);
     defer bg_runtime.deinit();
 
     var bg_results: std.ArrayList(worker_runtime.Result) = .empty;
@@ -635,6 +638,9 @@ pub fn runMainLoop(state: *State) !void {
 
         bg_runtime.drainResults(&bg_results);
         if (bg_results.items.len > 0) {
+            if (statusbar.applyWorkerResults(bg_results.items)) {
+                state.needs_render = true;
+            }
             bg_results.clearRetainingCapacity();
         }
 
