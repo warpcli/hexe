@@ -938,9 +938,44 @@ pub export fn hexe_mux_float_set_defaults(L: ?*LuaState) callconv(.c) c_int {
                 }
                 lua.pop(1);
 
+                if (defaults.style.?.title_segments.len > 0) {
+                    for (defaults.style.?.title_segments) |*seg_ptr| {
+                        var seg = seg_ptr.*;
+                        freeParsedSegment(&seg, mux.allocator);
+                    }
+                    mux.allocator.free(defaults.style.?.title_segments);
+                    defaults.style.?.title_segments = &[_]config.Segment{};
+                }
+
+                _ = lua.getField(-1, "segments");
+                if (lua.typeOf(-1) == .table) {
+                    const seg_len: usize = @intCast(lua.rawLen(-1));
+                    if (seg_len > 0) {
+                        const segs = mux.allocator.alloc(config.Segment, seg_len) catch null;
+                        if (segs) |arr| {
+                            var count: usize = 0;
+                            var i: i32 = 1;
+                            while (i <= @as(i32, @intCast(seg_len))) : (i += 1) {
+                                _ = lua.rawGetIndex(-1, i);
+                                if (lua.typeOf(-1) == .table) {
+                                    if (parseSegment(lua, -1, mux.allocator)) |segment| {
+                                        arr[count] = segment;
+                                        count += 1;
+                                    }
+                                }
+                                lua.pop(1);
+                            }
+                            defaults.style.?.title_segments = arr[0..count];
+                        }
+                    }
+                }
+                lua.pop(1);
+
                 // Parse full Segment structure
-                if (parseSegment(lua, -1, mux.allocator)) |segment| {
-                    defaults.style.?.module = segment;
+                if (defaults.style.?.title_segments.len == 0) {
+                    if (parseSegment(lua, -1, mux.allocator)) |segment| {
+                        defaults.style.?.module = segment;
+                    }
                 }
             }
             lua.pop(1); // pop title table
@@ -2065,9 +2100,35 @@ fn parseLayoutFloat(lua: *Lua, idx: i32, allocator: std.mem.Allocator) ?config.L
             }
             lua.pop(1); // pop position
 
+            _ = lua.getField(-1, "segments");
+            if (lua.typeOf(-1) == .table) {
+                const seg_len: usize = @intCast(lua.rawLen(-1));
+                if (seg_len > 0) {
+                    const segs = allocator.alloc(config.Segment, seg_len) catch null;
+                    if (segs) |arr| {
+                        var count: usize = 0;
+                        var i: i32 = 1;
+                        while (i <= @as(i32, @intCast(seg_len))) : (i += 1) {
+                            _ = lua.rawGetIndex(-1, i);
+                            if (lua.typeOf(-1) == .table) {
+                                if (parseSegment(lua, -1, allocator)) |segment| {
+                                    arr[count] = segment;
+                                    count += 1;
+                                }
+                            }
+                            lua.pop(1);
+                        }
+                        style.title_segments = arr[0..count];
+                    }
+                }
+            }
+            lua.pop(1); // pop segments
+
             // Parse full Segment structure
-            if (parseSegment(lua, -1, allocator)) |segment| {
-                style.module = segment;
+            if (style.title_segments.len == 0) {
+                if (parseSegment(lua, -1, allocator)) |segment| {
+                    style.module = segment;
+                }
             }
         }
         lua.pop(1); // pop title table

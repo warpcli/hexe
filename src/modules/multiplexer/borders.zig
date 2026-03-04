@@ -330,6 +330,8 @@ pub fn drawFloatingBorder(
     name: []const u8,
     border_color: core.BorderColor,
     style: ?*const core.FloatStyle,
+    ctx: ?*shp.Context,
+    query: ?*const core.PaneQuery,
 ) void {
     // Optional shadow (draw first so border overlays it)
     if (style) |s| {
@@ -386,8 +388,32 @@ pub fn drawFloatingBorder(
     _ = bold;
     drawBorderFrame(renderer, x, y, w, h, fg, .none, .{ top_left, horizontal, top_right, vertical, bottom_right, bottom_left });
 
-    // Render module in border if present
+    // Render module/segments in border if present.
     if (style) |s| {
+        if (s.position) |pos| {
+            if (s.title_segments.len > 0 and ctx != null and query != null) {
+                const tctx = ctx.?;
+                const tq = query.?;
+
+                var total_width: u16 = 0;
+                for (s.title_segments) |*seg| {
+                    total_width +|= statusbar.calcModuleWidth(tctx, tq, seg);
+                }
+
+                const inner_w = floatTitleInnerWidth(w);
+                if (inner_w == 0 or total_width == 0) return;
+                const place = floatTitlePlacement(x, y, w, h, pos, @min(total_width, inner_w));
+
+                var cur_x = place.x;
+                const max_x = x + w -| 2;
+                for (s.title_segments) |*seg| {
+                    if (cur_x >= max_x) break;
+                    cur_x = statusbar.drawModule(renderer, tctx, tq, seg, cur_x, place.y, false);
+                }
+                return;
+            }
+        }
+
         if (s.module) |*module| {
             if (s.position) |pos| {
                 // Run the module to get output

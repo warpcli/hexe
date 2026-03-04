@@ -106,6 +106,16 @@ threadlocal var hover_y: ?u16 = null;
 threadlocal var statusbar_redraw_last_emit_ms: ?u64 = null;
 threadlocal var click_command_buf: [1024]u8 = [_]u8{0} ** 1024;
 
+pub fn beginExternalCallbackEval(state: *State, lua_rt: ?*LuaRuntime) void {
+    callback_state = state;
+    callback_lua_rt = lua_rt;
+}
+
+pub fn endExternalCallbackEval() void {
+    callback_state = null;
+    callback_lua_rt = null;
+}
+
 fn statusbarRedrawEventIntervalMs() u64 {
     const raw = std.posix.getenv("HEXE_STATUSBAR_REDRAW_EVENT_MS") orelse return 120;
     return std.fmt.parseInt(u64, raw, 10) catch 120;
@@ -330,7 +340,7 @@ fn getWhenCache(map_ptr: *?std.AutoHashMap(usize, WhenCacheEntry)) *std.AutoHash
 }
 
 /// Build a PaneQuery from the populated rendering context.
-fn queryFromContext(ctx: *const shp.Context) core.PaneQuery {
+pub fn queryFromContext(ctx: *const shp.Context) core.PaneQuery {
     return .{
         .is_float = ctx.focus_is_float,
         .is_split = ctx.focus_is_split,
