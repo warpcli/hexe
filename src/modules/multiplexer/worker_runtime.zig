@@ -6,13 +6,68 @@ pub const JobKind = enum {
     pane_metadata,
 };
 
+pub const StatusWhenJob = struct {
+    script: []u8,
+
+    pub fn deinit(self: *StatusWhenJob, allocator: std.mem.Allocator) void {
+        allocator.free(self.script);
+    }
+};
+
+pub const StatusCommandJob = struct {
+    command: []u8,
+
+    pub fn deinit(self: *StatusCommandJob, allocator: std.mem.Allocator) void {
+        allocator.free(self.command);
+    }
+};
+
+pub const PaneMetadataField = enum {
+    cwd,
+    process,
+};
+
+pub const PaneMetadataJob = struct {
+    pane_uuid: [32]u8,
+    field: PaneMetadataField,
+};
+
+pub const JobPayload = union(JobKind) {
+    status_when: StatusWhenJob,
+    status_command: StatusCommandJob,
+    pane_metadata: PaneMetadataJob,
+
+    pub fn deinit(self: *JobPayload, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .status_when => |*v| v.deinit(allocator),
+            .status_command => |*v| v.deinit(allocator),
+            .pane_metadata => {},
+        }
+    }
+
+    pub fn clone(self: JobPayload, allocator: std.mem.Allocator) !JobPayload {
+        return switch (self) {
+            .status_when => |v| .{ .status_when = .{ .script = try allocator.dupe(u8, v.script) } },
+            .status_command => |v| .{ .status_command = .{ .command = try allocator.dupe(u8, v.command) } },
+            .pane_metadata => |v| .{ .pane_metadata = v },
+        };
+    }
+};
+
+pub const JobRequest = struct {
+    kind: JobKind,
+    generation: u64,
+    key_hash: u64,
+    payload: JobPayload,
+};
+
 pub const Job = struct {
     id: u64,
     kind: JobKind,
     generation: u64,
     key_hash: u64,
     submitted_ms: i64,
-    payload: ?[]u8,
+    payload: JobPayload,
 };
 
 pub const ResultStatus = enum {
@@ -29,6 +84,25 @@ pub const Result = struct {
     completed_ms: i64,
     duration_ns: u64,
     status: ResultStatus,
+    payload: ResultPayload,
+};
+
+pub const ResultPayload = union(JobKind) {
+    status_when: StatusWhenResult,
+    status_command: StatusCommandResult,
+    pane_metadata: PaneMetadataResult,
+};
+
+pub const StatusWhenResult = struct {
+    matched: bool,
+};
+
+pub const StatusCommandResult = struct {
+    exit_code: i32,
+};
+
+pub const PaneMetadataResult = struct {
+    ok: bool,
 };
 
 pub const Config = struct {
@@ -79,8 +153,8 @@ pub const WorkerRuntime = struct {
 
         for (self.workers.items) |t| t.join();
 
-        for (self.jobs.items) |job| {
-            if (job.payload) |buf| self.allocator.free(buf);
+        for (self.jobs.items) |*job| {
+            job.payload.deinit(self.allocator);
         }
 
         self.jobs.deinit(self.allocator);
@@ -88,12 +162,12 @@ pub const WorkerRuntime = struct {
         self.workers.deinit(self.allocator);
     }
 
-    pub fn enqueue(self: *WorkerRuntime, kind: JobKind, generation: u64, key_hash: u64, payload: ?[]const u8) !u64 {
-        var owned_payload: ?[]u8 = null;
-        if (payload) |bytes| {
-            owned_payload = try self.allocator.dupe(u8, bytes);
+    pub fn enqueue(self: *WorkerRuntime, request: JobRequest) !u64 {
+        const owned_payload = try request.payload.clone(self.allocator);
+        errdefer {
+            var cleanup_payload = owned_payload;
+            cleanup_payload.deinit(self.allocator);
         }
-        errdefer if (owned_payload) |buf| self.allocator.free(buf);
 
         self.lock.lock();
         defer self.lock.unlock();
@@ -107,9 +181,9 @@ pub const WorkerRuntime = struct {
 
         try self.jobs.append(self.allocator, .{
             .id = id,
-            .kind = kind,
-            .generation = generation,
-            .key_hash = key_hash,
+            .kind = request.kind,
+            .generation = request.generation,
+            .key_hash = request.key_hash,
             .submitted_ms = std.time.milliTimestamp(),
             .payload = owned_payload,
         });
@@ -153,10 +227,10 @@ pub const WorkerRuntime = struct {
             self.lock.unlock();
 
             const started_ns: u64 = @intCast(std.time.nanoTimestamp());
+            const result_payload = runJob(job.payload);
 
-            if (job.payload) |buf| {
-                self.allocator.free(buf);
-            }
+            var payload_cleanup = job.payload;
+            payload_cleanup.deinit(self.allocator);
 
             const ended_ns: u64 = @intCast(std.time.nanoTimestamp());
             const duration_ns = ended_ns - started_ns;
@@ -171,8 +245,17 @@ pub const WorkerRuntime = struct {
                 .completed_ms = std.time.milliTimestamp(),
                 .duration_ns = duration_ns,
                 .status = .ok,
+                .payload = result_payload,
             });
             self.lock.unlock();
         }
     }
 };
+
+fn runJob(payload: JobPayload) ResultPayload {
+    return switch (payload) {
+        .status_when => .{ .status_when = .{ .matched = false } },
+        .status_command => .{ .status_command = .{ .exit_code = 0 } },
+        .pane_metadata => .{ .pane_metadata = .{ .ok = true } },
+    };
+}
