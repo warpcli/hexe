@@ -8,6 +8,7 @@ const xev = @import("xev").Dynamic;
 const terminal = @import("terminal.zig");
 
 const State = @import("state.zig").State;
+const Pane = @import("pane.zig").Pane;
 const SesClient = @import("ses_client.zig").SesClient;
 const helpers = @import("helpers.zig");
 
@@ -32,6 +33,14 @@ const LoopTimerContext = struct {
 };
 
 const TERMINAL_QUERY_TIMEOUT_MS: i64 = 1200;
+
+fn paneMetadataKeyHash(uuid: [32]u8, field: worker_runtime.PaneMetadataField, pid: i32) u64 {
+    var buf: [37]u8 = undefined;
+    @memcpy(buf[0..32], &uuid);
+    buf[32] = @intFromEnum(field);
+    std.mem.writeInt(i32, buf[33..37], pid, .little);
+    return std.hash.Wyhash.hash(0, &buf);
+}
 
 fn asyncStatusEnabled() bool {
     const raw = std.posix.getenv("HEXE_MUX_ASYNC_STATUS") orelse return true;
@@ -451,6 +460,12 @@ pub fn runMainLoop(state: *State) !void {
     var bg_results: std.ArrayList(worker_runtime.Result) = .empty;
     defer bg_results.deinit(allocator);
 
+    var meta_generation: u64 = 1;
+    var meta_target_uuid: ?[32]u8 = null;
+    var meta_target_pid: ?i32 = null;
+    var meta_proc_job_id: ?u64 = null;
+    var meta_cwd_job_id: ?u64 = null;
+
     try xev.detect();
     var loop = try xev.Loop.init(.{});
     defer loop.deinit();
@@ -657,7 +672,78 @@ pub fn runMainLoop(state: *State) !void {
                 if (statusbar.applyWorkerResults(bg_results.items)) {
                     state.needs_render = true;
                 }
+
+                for (bg_results.items) |result| {
+                    if (result.kind != .pane_metadata) continue;
+                    if (meta_proc_job_id) |job_id| {
+                        if (job_id == result.job_id) meta_proc_job_id = null;
+                    }
+                    if (meta_cwd_job_id) |job_id| {
+                        if (job_id == result.job_id) meta_cwd_job_id = null;
+                    }
+                }
+
                 bg_results.clearRetainingCapacity();
+            }
+
+            const focused: ?*Pane = if (state.active_floating) |idx|
+                if (idx < state.floats.items.len) state.floats.items[idx] else null
+            else
+                state.currentLayout().getFocusedPane();
+
+            if (focused) |pane| {
+                if (pane.backend == .local) {
+                    if (pane.getFgPid()) |fg_pid| {
+                        const pid: i32 = @intCast(fg_pid);
+                        const uuid = pane.uuid;
+                        const target_changed = blk: {
+                            if (meta_target_uuid == null or meta_target_pid == null) break :blk true;
+                            if (!std.mem.eql(u8, &meta_target_uuid.?, &uuid)) break :blk true;
+                            if (meta_target_pid.? != pid) break :blk true;
+                            break :blk false;
+                        };
+
+                        if (target_changed) {
+                            meta_generation +%= 1;
+                            meta_target_uuid = uuid;
+                            meta_target_pid = pid;
+                            meta_proc_job_id = null;
+                            meta_cwd_job_id = null;
+                        }
+
+                        if (meta_proc_job_id == null) {
+                            const req: worker_runtime.JobRequest = .{
+                                .generation = meta_generation,
+                                .key_hash = paneMetadataKeyHash(uuid, .process, pid),
+                                .payload = .{ .pane_metadata = .{ .pane_uuid = uuid, .field = .process, .pid = pid } },
+                            };
+                            if (rt.enqueue(req)) |job_id| {
+                                meta_proc_job_id = job_id;
+                            } else |_| {}
+                        }
+
+                        if (meta_cwd_job_id == null) {
+                            const req: worker_runtime.JobRequest = .{
+                                .generation = meta_generation,
+                                .key_hash = paneMetadataKeyHash(uuid, .cwd, pid),
+                                .payload = .{ .pane_metadata = .{ .pane_uuid = uuid, .field = .cwd, .pid = pid } },
+                            };
+                            if (rt.enqueue(req)) |job_id| {
+                                meta_cwd_job_id = job_id;
+                            } else |_| {}
+                        }
+                    } else {
+                        meta_target_uuid = null;
+                        meta_target_pid = null;
+                        meta_proc_job_id = null;
+                        meta_cwd_job_id = null;
+                    }
+                }
+            } else {
+                meta_target_uuid = null;
+                meta_target_pid = null;
+                meta_proc_job_id = null;
+                meta_cwd_job_id = null;
             }
         }
 

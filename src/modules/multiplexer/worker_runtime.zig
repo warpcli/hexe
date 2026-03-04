@@ -37,6 +37,7 @@ pub const PaneMetadataField = enum {
 pub const PaneMetadataJob = struct {
     pane_uuid: [32]u8,
     field: PaneMetadataField,
+    pid: i32,
 };
 
 pub const JobPayload = union(JobKind) {
@@ -129,6 +130,11 @@ pub const StatusCommandResult = struct {
 
 pub const PaneMetadataResult = struct {
     ok: bool,
+    pane_uuid: [32]u8,
+    field: PaneMetadataField,
+    pid: i32,
+    value_len: u16,
+    value: [512]u8,
 };
 
 pub const Config = struct {
@@ -284,7 +290,7 @@ fn runJob(payload: JobPayload) ResultPayload {
     return switch (payload) {
         .status_when => |job| .{ .status_when = .{ .matched = runStatusWhen(job) } },
         .status_command => |job| .{ .status_command = runStatusCommand(job) },
-        .pane_metadata => .{ .pane_metadata = .{ .ok = true } },
+        .pane_metadata => |job| .{ .pane_metadata = runPaneMetadata(job) },
     };
 }
 
@@ -337,5 +343,39 @@ fn runStatusCommand(job: StatusCommandJob) StatusCommandResult {
     @memcpy(out.output[0..copy_len], result.stdout[0..copy_len]);
     out.output_len = @intCast(copy_len);
     out.ok = true;
+    return out;
+}
+
+fn runPaneMetadata(job: PaneMetadataJob) PaneMetadataResult {
+    var out: PaneMetadataResult = .{
+        .ok = false,
+        .pane_uuid = job.pane_uuid,
+        .field = job.field,
+        .pid = job.pid,
+        .value_len = 0,
+        .value = undefined,
+    };
+
+    var path_buf: [64]u8 = undefined;
+    switch (job.field) {
+        .process => {
+            const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/comm", .{job.pid}) catch return out;
+            const file = std.fs.openFileAbsolute(path, .{}) catch return out;
+            defer file.close();
+
+            const len = file.read(&out.value) catch return out;
+            if (len == 0) return out;
+            const end = if (out.value[len - 1] == '\n') len - 1 else len;
+            out.value_len = @intCast(end);
+            out.ok = true;
+        },
+        .cwd => {
+            const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{job.pid}) catch return out;
+            const link = std.posix.readlink(path, &out.value) catch return out;
+            out.value_len = @intCast(link.len);
+            out.ok = true;
+        },
+    }
+
     return out;
 }
