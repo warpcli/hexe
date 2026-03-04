@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.0.16] - 2026-03-04
+
+### <!-- 0 -->⛰️  Features
+
+- Add support for multiple border title segments
+- Improve floating window title rendering
+- Enhance Lua scripting with new APIs and syntax
+- Add Lua function support for statusbar click actions
+
 ## [0.0.15] - 2026-03-02
 
 ### <!-- 0 -->⛰️  Features
