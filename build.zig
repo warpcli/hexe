@@ -167,7 +167,19 @@ pub fn build(b: *std.Build) void {
         .root_module = ses_test_module,
     });
 
+    // Test step for multiplexer worker runtime tests
+    const mux_test_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/multiplexer/worker_runtime_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const mux_tests = b.addTest(.{
+        .root_module = mux_test_module,
+    });
+
     const run_ses_tests = b.addRunArtifact(ses_tests);
+    const run_mux_tests = b.addRunArtifact(mux_tests);
     const test_step = b.step("test", "Run SES error handling tests");
     test_step.dependOn(&run_ses_tests.step);
+    test_step.dependOn(&run_mux_tests.step);
 }

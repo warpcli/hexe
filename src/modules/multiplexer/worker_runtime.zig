@@ -153,6 +153,45 @@ pub const Stats = struct {
     total_duration_ns: u128,
 };
 
+pub const InflightKey = u64;
+
+pub const InflightEntry = struct {
+    job_id: u64,
+    generation: u64,
+};
+
+pub const InflightTracker = struct {
+    map: std.AutoHashMap(InflightKey, InflightEntry),
+
+    pub fn init(allocator: std.mem.Allocator) InflightTracker {
+        return .{ .map = std.AutoHashMap(InflightKey, InflightEntry).init(allocator) };
+    }
+
+    pub fn deinit(self: *InflightTracker) void {
+        self.map.deinit();
+    }
+
+    pub fn tryStart(self: *InflightTracker, key: InflightKey, entry: InflightEntry) bool {
+        if (self.map.contains(key)) return false;
+        self.map.put(key, entry) catch return false;
+        return true;
+    }
+
+    pub fn clearIfCurrent(self: *InflightTracker, key: InflightKey, result: Result) bool {
+        if (self.map.get(key)) |entry| {
+            if (entry.job_id == result.job_id and entry.generation == result.generation) {
+                _ = self.map.remove(key);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn contains(self: *const InflightTracker, key: InflightKey) bool {
+        return self.map.contains(key);
+    }
+};
+
 pub const WorkerRuntime = struct {
     allocator: std.mem.Allocator,
     config: Config,
