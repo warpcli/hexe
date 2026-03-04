@@ -33,6 +33,15 @@ const LoopTimerContext = struct {
 
 const TERMINAL_QUERY_TIMEOUT_MS: i64 = 1200;
 
+fn asyncStatusEnabled() bool {
+    const raw = std.posix.getenv("HEXE_MUX_ASYNC_STATUS") orelse return true;
+    if (std.mem.eql(u8, raw, "0")) return false;
+    if (std.ascii.eqlIgnoreCase(raw, "false")) return false;
+    if (std.ascii.eqlIgnoreCase(raw, "off")) return false;
+    if (std.ascii.eqlIgnoreCase(raw, "no")) return false;
+    return true;
+}
+
 fn applyPostQueryFeatureModes(state: *State) void {
     const stdout = std.fs.File.stdout();
     var tty_buf: [1024]u8 = undefined;
@@ -427,11 +436,17 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
 pub fn runMainLoop(state: *State) !void {
     const allocator = state.allocator;
 
-    var bg_runtime = worker_runtime.WorkerRuntime.init(allocator, .{});
-    try bg_runtime.start();
-    statusbar.setAsyncRuntime(&bg_runtime);
-    defer statusbar.setAsyncRuntime(null);
-    defer bg_runtime.deinit();
+    var bg_runtime: ?worker_runtime.WorkerRuntime = null;
+    if (asyncStatusEnabled()) {
+        var rt = worker_runtime.WorkerRuntime.init(allocator, .{});
+        try rt.start();
+        bg_runtime = rt;
+        statusbar.setAsyncRuntime(&bg_runtime.?);
+    }
+    defer {
+        statusbar.setAsyncRuntime(null);
+        if (bg_runtime) |*rt| rt.deinit();
+    }
 
     var bg_results: std.ArrayList(worker_runtime.Result) = .empty;
     defer bg_results.deinit(allocator);
@@ -636,12 +651,14 @@ pub fn runMainLoop(state: *State) !void {
         try loop.run(.once);
         if (!state.running) break;
 
-        bg_runtime.drainResults(&bg_results);
-        if (bg_results.items.len > 0) {
-            if (statusbar.applyWorkerResults(bg_results.items)) {
-                state.needs_render = true;
+        if (bg_runtime) |*rt| {
+            rt.drainResults(&bg_results);
+            if (bg_results.items.len > 0) {
+                if (statusbar.applyWorkerResults(bg_results.items)) {
+                    state.needs_render = true;
+                }
+                bg_results.clearRetainingCapacity();
             }
-            bg_results.clearRetainingCapacity();
         }
 
         // Clear skip flag from previous iteration.
