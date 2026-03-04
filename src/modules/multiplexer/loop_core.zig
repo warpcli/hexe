@@ -681,6 +681,27 @@ pub fn runMainLoop(state: *State) !void {
                     if (meta_cwd_job_id) |job_id| {
                         if (job_id == result.job_id) meta_cwd_job_id = null;
                     }
+
+                    if (result.generation != meta_generation) continue;
+                    if (result.payload != .pane_metadata) continue;
+                    const meta = result.payload.pane_metadata;
+                    if (!meta.ok) continue;
+
+                    if (meta_target_uuid == null or meta_target_pid == null) continue;
+                    if (!std.mem.eql(u8, &meta_target_uuid.?, &meta.pane_uuid)) continue;
+                    if (meta_target_pid.? != meta.pid) continue;
+
+                    const pane = state.findPaneByUuid(meta.pane_uuid) orelse continue;
+                    if (pane.backend != .local) continue;
+                    const pane_pid: i32 = if (pane.getFgPid()) |pid| @intCast(pid) else continue;
+                    if (pane_pid != meta.pid) continue;
+
+                    const value = meta.value[0..meta.value_len];
+                    switch (meta.field) {
+                        .process => state.setPaneProc(meta.pane_uuid, value, meta.pid),
+                        .cwd => state.setPaneShell(meta.pane_uuid, null, value, null, null, null),
+                    }
+                    state.needs_render = true;
                 }
 
                 bg_results.clearRetainingCapacity();
