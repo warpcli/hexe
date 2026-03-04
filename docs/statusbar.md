@@ -57,9 +57,12 @@ You can also provide arrays with `left`, `center`, `right` using your preferred 
   -- optional click behavior
   button = {
     on_left_click = "hexe record toggle --scope pod --out /tmp/pod.cast",
-    on_right_click = "hexe record stop --scope pod --out /tmp/pod.cast",
-    active_when = "test \"$(hexe record status --scope pod 2>/dev/null)\" = 1",
-    left_style = "bg:2 fg:0",
+  on_right_click = "hexe record stop --scope pod --out /tmp/pod.cast",
+  active_when = function(_)
+    local st = hx.status.recording("pod")
+    return st and st.active == true
+  end,
+  left_style = "bg:2 fg:0",
     middle_style = "bg:3 fg:0",
     right_style = "bg:1 fg:0",
     inverse_on_hover = true,
@@ -97,7 +100,13 @@ Kind is inferred from fields (`value`, `builtin`, `button`, `progress`); you do 
 
 Unlike prompt, statusbar is not builtin-allowlisted: statusbar can use `value`, `builtin`, `button`, and `progress` segment kinds and full statusbar builtins (including `spinner`).
 
-`on_click`, `on_right_click`, and `on_middle_click` run shell commands on statusbar clicks.
+`on_click`, `on_right_click`, and `on_middle_click` support:
+
+- string shell commands
+- callback functions returning either:
+  - string command
+  - `{ command = "..." }`
+  - `{ kind = "command", command = "..." }`
 
 Clickable segments are treated as buttons and automatically render with reverse colors while hovered.
 
@@ -111,21 +120,20 @@ Button click-state behavior:
 - Clicking the same button again unclicks (toggle off).
 - If already clicked with one button, clicking a different button unclicks (does not switch to the other clicked state).
 
-When using Lua config helpers, `hx.record.status({ scope = "pod" })` now returns a table like `{ active = true|false, scope = "pod", pid = ..., out = "...", started_ms = ... }`.
+`hx.status.recording("pod")` returns a table like `{ active = true|false, scope = "pod", pid = ..., out = "...", started_ms = ... }`.
 
 Recording command helper sugar is available:
 
 ```lua
 button = {
   on_left_click = function(ctx)
-    local ap = hx.status.active_pod(ctx)
-    if not ap then return nil end
-    return hx.record.toggle({
+    local rec = hx.record.active(ctx, {
       scope = "pod",
-      uuid = ap.uuid,
       out = "/tmp/hexe-active-pod.cast",
       capture_input = false,
     })
+    if not rec then return nil end
+    return rec.switch()
   end,
   on_right_click = function(_)
     return hx.record.stop({ scope = "pod" })
@@ -134,6 +142,11 @@ button = {
 ```
 
 `hx.status.active_pod(ctx?)` returns `{ uuid = "...", pane = <pane_table> }` for the focused pane.
+
+Unified recording helpers:
+
+- `hx.record.target(target, defaults?)` -> `{ start(), stop(), toggle(), status(), switch() }`
+- `hx.record.active(ctx?, defaults?)` -> same helper object for focused pod (or `nil`)
 
 Statusbar button actions export focused pane UUID env vars at click time:
 
@@ -262,14 +275,14 @@ Convenience constructor:
 
 ```lua
 builtin = function(_)
-  return hexe.segment.builtin.git_status({
+  return hx.segment.builtin.git_status({
     style = "bg:1 fg:0",
     suffix = " ",
   })
 end
 ```
 
-Use `hexe.segment.builtin` (or `hx.segment.builtin`). The typo alias `hexe.segment.buildin` has been removed.
+Use `hx.segment.builtin`. The old typo alias `segment.buildin` has been removed.
 
 ## Width and Priority
 

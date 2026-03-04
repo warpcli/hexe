@@ -228,13 +228,13 @@ when = function(ctx)
   return p and p.focus_split
 end
 
-local r = hx.api.exec("git rev-parse --abbrev-ref HEAD", { timeout = 80, cache = 500 })
+local r = hx.exec.run("git rev-parse --abbrev-ref HEAD", { timeout = 80, cache = 500 })
 if r.status == 0 and r.output ~= "" then
   -- r.output, r.cached, r.timeout, r.elapsed_ms
 end
 ```
 
-`hx.api.exec(cmd, opts?)` runs a shell command (`/bin/bash -lc`) and returns:
+`hx.exec.run(cmd, opts?)` runs a shell command (`/bin/bash -lc`) and returns:
 
 - `output` (stdout fallback to stderr)
 - `status` (exit code)

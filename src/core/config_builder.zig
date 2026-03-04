@@ -146,6 +146,14 @@ pub const MuxConfigBuilder = struct {
             result.module = try duplicateSegment(mod, allocator);
         }
 
+        if (style.title_segments.len > 0) {
+            const title_segments = try allocator.alloc(config.Segment, style.title_segments.len);
+            for (style.title_segments, 0..) |seg, i| {
+                title_segments[i] = try duplicateSegment(seg, allocator);
+            }
+            result.title_segments = title_segments;
+        }
+
         return result;
     }
 

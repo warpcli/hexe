@@ -140,7 +140,7 @@ You can build descriptors with helpers:
 
 ```lua
 builtin = function(_)
-  return hexe.segment.builtin.directory({
+  return hx.segment.builtin.directory({
     style = "bg:237 fg:15",
     suffix = " ",
   })
@@ -168,7 +168,7 @@ Legacy forms like `when = { lua = ... }`, token tables, and bash/env conditions 
 
 ## Lua Context (`ctx`)
 
-Prompt Lua callbacks (`value`, `builtin`, and `when.lua`) receive `ctx`:
+Prompt Lua callbacks (`value`, `builtin`, and `when`) receive `ctx`:
 
 - `ctx.cwd`
 - `ctx.home`
