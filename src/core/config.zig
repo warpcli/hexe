@@ -5,6 +5,13 @@ const LuaRuntime = lua_runtime.LuaRuntime;
 
 const log = std.log.scoped(.config);
 
+fn shouldLoadLocalConfig() bool {
+    if (std.posix.getenv("HEXE_SKIP_LOCAL_CONFIG")) |v| {
+        return !std.mem.eql(u8, v, "1");
+    }
+    return true;
+}
+
 threadlocal var PARSE_ERROR: ?[]const u8 = null;
 
 fn setParseError(allocator: std.mem.Allocator, msg: []const u8) void {
@@ -507,6 +514,8 @@ pub const SesConfig = struct {
         // Pop config return value (if any) from stack
         runtime.pop();
 
+        if (!shouldLoadLocalConfig()) return config;
+
         // Try to load local .hexe.lua from current directory
         const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;
         defer allocator.free(local_path);
@@ -765,6 +774,18 @@ pub const Config = struct {
 
         // Pop config return value (if any) from stack
         runtime.pop();
+
+        if (!shouldLoadLocalConfig()) {
+            applyBuilderConfig(runtime, &config, allocator);
+            if (config.status != .@"error") {
+                if (PARSE_ERROR) |msg| {
+                    config.status = .@"error";
+                    config.status_message = msg;
+                    PARSE_ERROR = null;
+                }
+            }
+            return config;
+        }
 
         // Try to load local .hexe.lua from current directory
         const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;

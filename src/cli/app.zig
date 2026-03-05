@@ -510,7 +510,7 @@ pub fn main() !void {
     const matches = try app.parseFrom(normalized_args.items);
 
     if (!matches.containsArgs()) {
-        try runMuxNew("", false, "");
+        try runMuxNew("", false, "", true);
         return;
     }
 
@@ -705,7 +705,7 @@ pub fn main() !void {
             } else if (m.containsArg("test-only")) {
                 setGeneratedTestInstance();
             }
-            try runMuxNew(m.getSingleValue("name") orelse "", m.containsArg("debug"), m.getSingleValue("logfile") orelse "");
+            try runMuxNew(m.getSingleValue("name") orelse "", m.containsArg("debug"), m.getSingleValue("logfile") orelse "", false);
             return;
         }
         if (mux_matches.subcommandMatches("attach")) |m| {
@@ -1000,13 +1000,45 @@ fn showNestedMuxConfirmation(pane_uuid: []const u8) !bool {
     return resp.response_type == 1;
 }
 
-fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8) !void {
+fn shouldLoadLocalLayoutPrompt() bool {
+    if (std.posix.getenv("HEXE_SKIP_LOCAL_CONFIG")) |v| {
+        return !std.mem.eql(u8, v, "1");
+    }
+    return true;
+}
+
+fn askUseLocalLayout() bool {
+    const stdin_fd = std.posix.STDIN_FILENO;
+    const stdout_fd = std.posix.STDOUT_FILENO;
+    if (!std.posix.isatty(stdin_fd) or !std.posix.isatty(stdout_fd)) return true;
+
+    const stdout = std.fs.File.stdout();
+    stdout.writeAll("Local .hexe.lua found. Load local layout? [Y/n]: ") catch return true;
+
+    var line_buf: [32]u8 = undefined;
+    const n = std.posix.read(stdin_fd, line_buf[0..]) catch return true;
+    if (n == 0) return true;
+    const line = std.mem.trim(u8, line_buf[0..n], " \t\r\n");
+    if (line.len == 0) return true;
+    if (std.ascii.eqlIgnoreCase(line, "y") or std.ascii.eqlIgnoreCase(line, "yes")) return true;
+    return false;
+}
+
+fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8, prompt_local_layout: bool) !void {
     if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
         if (pane_uuid.len >= 32) {
             if (!try showNestedMuxConfirmation(pane_uuid)) {
                 return;
             }
         }
+    }
+
+    if (prompt_local_layout and shouldLoadLocalLayoutPrompt()) {
+        if (std.fs.cwd().access(".hexe.lua", .{})) |_| {
+            if (!askUseLocalLayout()) {
+                setEnvVar("HEXE_SKIP_LOCAL_CONFIG", "1");
+            }
+        } else |_| {}
     }
 
     try mux.run(.{
