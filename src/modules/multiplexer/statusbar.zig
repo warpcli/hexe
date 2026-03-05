@@ -105,6 +105,9 @@ threadlocal var hover_x: ?u16 = null;
 threadlocal var hover_y: ?u16 = null;
 threadlocal var statusbar_redraw_last_emit_ms: ?u64 = null;
 threadlocal var click_command_buf: [1024]u8 = [_]u8{0} ** 1024;
+threadlocal var eval_cache_ctx_ptr: usize = 0;
+threadlocal var eval_cache_frame_ms: u64 = 0;
+threadlocal var eval_cache_ready: bool = false;
 
 pub fn beginExternalCallbackEval(state: *State, lua_rt: ?*LuaRuntime) void {
     callback_state = state;
@@ -236,6 +239,20 @@ pub fn deinitThreadlocals() void {
         cache.deinit();
         progress_text_cache = null;
     }
+
+    if (command_eval_cache) |*cache| {
+        cache.deinit();
+        command_eval_cache = null;
+    }
+
+    if (builtin_desc_cache) |*cache| {
+        cache.deinit();
+        builtin_desc_cache = null;
+    }
+
+    eval_cache_ctx_ptr = 0;
+    eval_cache_frame_ms = 0;
+    eval_cache_ready = false;
 }
 
 fn getProgressTextCache() *std.AutoHashMap(usize, ProgressCacheEntry) {
@@ -811,6 +828,42 @@ const LuaEval = struct {
     }
 };
 
+const LuaEvalCacheEntry = struct {
+    eval: LuaEval,
+};
+
+threadlocal var command_eval_cache: ?std.AutoHashMap(usize, LuaEvalCacheEntry) = null;
+
+fn getCommandEvalCache() *std.AutoHashMap(usize, LuaEvalCacheEntry) {
+    if (command_eval_cache == null) {
+        command_eval_cache = std.AutoHashMap(usize, LuaEvalCacheEntry).init(std.heap.page_allocator);
+    }
+    return &command_eval_cache.?;
+}
+
+fn resetFrameEvalCachesIfNeeded(ctx: *shp.Context) void {
+    const ctx_ptr = @intFromPtr(ctx);
+    if (eval_cache_ready and eval_cache_ctx_ptr == ctx_ptr and eval_cache_frame_ms == ctx.now_ms) return;
+
+    eval_cache_ctx_ptr = ctx_ptr;
+    eval_cache_frame_ms = ctx.now_ms;
+    eval_cache_ready = true;
+
+    if (command_eval_cache) |*cache| cache.clearRetainingCapacity();
+    if (builtin_desc_cache) |*cache| cache.clearRetainingCapacity();
+}
+
+fn evalLuaCommandCached(code: []const u8, ctx: *shp.Context) LuaEval {
+    resetFrameEvalCachesIfNeeded(ctx);
+    const key = whenKey(code);
+    const cache = getCommandEvalCache();
+    if (cache.get(key)) |entry| return entry.eval;
+
+    const eval = evalLuaCommand(code, ctx);
+    cache.put(key, .{ .eval = eval }) catch {};
+    return eval;
+}
+
 fn evalLuaCommand(code: []const u8, ctx: *shp.Context) LuaEval {
     var out: LuaEval = .{};
     const trace_start_ms = std.time.milliTimestamp();
@@ -967,6 +1020,30 @@ const BuiltinDesc = struct {
         return self.spinner_colors_buf[0..self.spinner_colors_len];
     }
 };
+
+const BuiltinDescCacheEntry = struct {
+    desc: BuiltinDesc,
+};
+
+threadlocal var builtin_desc_cache: ?std.AutoHashMap(usize, BuiltinDescCacheEntry) = null;
+
+fn getBuiltinDescCache() *std.AutoHashMap(usize, BuiltinDescCacheEntry) {
+    if (builtin_desc_cache == null) {
+        builtin_desc_cache = std.AutoHashMap(usize, BuiltinDescCacheEntry).init(std.heap.page_allocator);
+    }
+    return &builtin_desc_cache.?;
+}
+
+fn evalLuaBuiltinDescCached(code: []const u8, ctx: *shp.Context) BuiltinDesc {
+    resetFrameEvalCachesIfNeeded(ctx);
+    const key = whenKey(code);
+    const cache = getBuiltinDescCache();
+    if (cache.get(key)) |entry| return entry.desc;
+
+    const desc = evalLuaBuiltinDesc(code, ctx);
+    cache.put(key, .{ .desc = desc }) catch {};
+    return desc;
+}
 
 fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
     var desc: BuiltinDesc = .{};
@@ -2061,10 +2138,10 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
         }
         if (mod.command) |cmd| {
             if (mod.kind == .builtin) {
-                const bdesc = evalLuaBuiltinDesc(cmd, ctx);
+                const bdesc = evalLuaBuiltinDescCached(cmd, ctx);
                 spinner_allowed = spinner_allowed and (bdesc.name() != null);
             } else {
-                const gate_eval = evalLuaCommand(cmd, ctx);
+                const gate_eval = evalLuaCommandCached(cmd, ctx);
                 const gate_text = gate_eval.textSlice();
                 spinner_allowed = spinner_allowed and (gate_eval.seg_count > 0 or gate_text.len > 0);
             }
@@ -2128,7 +2205,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
         } else if (mod.command) |cmd| {
             if (!command_output_ready) {
                 if (mod.kind == .builtin) {
-                    const bdesc = evalLuaBuiltinDesc(cmd, ctx);
+                    const bdesc = evalLuaBuiltinDescCached(cmd, ctx);
                     if (bdesc.name()) |builtin_name| {
                         if (std.mem.eql(u8, builtin_name, "spinner")) {
                             var cfg = core.config.SpinnerDef{};
@@ -2191,7 +2268,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                             if (ctx.now_ms - entry.last_eval_ms < mod.progress_every_ms) {
                                 command_output = entry.text[0..entry.len];
                             } else {
-                                command_eval = evalLuaCommand(cmd, ctx);
+                                command_eval = evalLuaCommandCached(cmd, ctx);
                                 command_output = command_eval.textSlice();
                                 const n = @min(command_output.len, entry.text.len);
                                 @memcpy(entry.text[0..n], command_output[0..n]);
@@ -2200,7 +2277,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                                 command_output = entry.text[0..entry.len];
                             }
                         } else {
-                            command_eval = evalLuaCommand(cmd, ctx);
+                            command_eval = evalLuaCommandCached(cmd, ctx);
                             command_output = command_eval.textSlice();
                             var buf: [256]u8 = [_]u8{0} ** 256;
                             const n = @min(command_output.len, buf.len);
@@ -2208,7 +2285,7 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                             cache.put(key, .{ .last_eval_ms = ctx.now_ms, .text = buf, .len = n }) catch {};
                         }
                     } else {
-                        command_eval = evalLuaCommand(cmd, ctx);
+                        command_eval = evalLuaCommandCached(cmd, ctx);
                         command_output = command_eval.textSlice();
                     }
                 }
@@ -2307,10 +2384,10 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: *co
         }
         if (mod.command) |cmd| {
             if (mod.kind == .builtin) {
-                const bdesc = evalLuaBuiltinDesc(cmd, ctx);
+                const bdesc = evalLuaBuiltinDescCached(cmd, ctx);
                 spinner_allowed = spinner_allowed and (bdesc.name() != null);
             } else {
-                const gate_eval = evalLuaCommand(cmd, ctx);
+                const gate_eval = evalLuaCommandCached(cmd, ctx);
                 const gate_text = gate_eval.textSlice();
                 spinner_allowed = spinner_allowed and (gate_eval.seg_count > 0 or gate_text.len > 0);
             }
@@ -2358,7 +2435,7 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: *co
         } else if (mod.command) |cmd| {
             if (!command_output_ready) {
                 if (mod.kind == .builtin) {
-                    const bdesc = evalLuaBuiltinDesc(cmd, ctx);
+                    const bdesc = evalLuaBuiltinDescCached(cmd, ctx);
                     if (bdesc.name()) |builtin_name| {
                         if (std.mem.eql(u8, builtin_name, "spinner")) {
                             var cfg = core.config.SpinnerDef{};
@@ -2422,7 +2499,7 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: *co
                             if (ctx.now_ms - entry.last_eval_ms < mod.progress_every_ms) {
                                 command_output = entry.text[0..entry.len];
                             } else {
-                                command_eval = evalLuaCommand(cmd, ctx);
+                                command_eval = evalLuaCommandCached(cmd, ctx);
                                 command_output = command_eval.textSlice();
                                 const n = @min(command_output.len, entry.text.len);
                                 @memcpy(entry.text[0..n], command_output[0..n]);
@@ -2431,7 +2508,7 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: *co
                                 command_output = entry.text[0..entry.len];
                             }
                         } else {
-                            command_eval = evalLuaCommand(cmd, ctx);
+                            command_eval = evalLuaCommandCached(cmd, ctx);
                             command_output = command_eval.textSlice();
                             var buf: [256]u8 = [_]u8{0} ** 256;
                             const n = @min(command_output.len, buf.len);
@@ -2439,7 +2516,7 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: *co
                             cache.put(key, .{ .last_eval_ms = ctx.now_ms, .text = buf, .len = n }) catch {};
                         }
                     } else {
-                        command_eval = evalLuaCommand(cmd, ctx);
+                        command_eval = evalLuaCommandCached(cmd, ctx);
                         command_output = command_eval.textSlice();
                     }
                 }
