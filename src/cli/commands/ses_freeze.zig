@@ -1,11 +1,12 @@
 const std = @import("std");
 const core = @import("core");
 const ipc = core.ipc;
+const session_config = core.session_config;
 const com = @import("com.zig");
 
 const print = std.debug.print;
 
-/// Run `hexe ses freeze` — snapshot current session as .hexe.lua to stdout.
+/// Save current mux layout to .hexe.lua in CWD and register in sessions.json.
 pub fn runSesFreeze(allocator: std.mem.Allocator) !void {
     const wire = core.wire;
     const posix = std.posix;
@@ -83,32 +84,52 @@ pub fn runSesFreeze(allocator: std.mem.Allocator) !void {
     else
         "session";
 
-    // Get current working directory as root
+    // Get current working directory as root and registry path
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     const cwd = std.posix.getcwd(&cwd_buf) catch "/tmp";
 
-    // Output .hexe.lua to stdout
-    const stdout = std.fs.File.stdout();
+    const default_name = std.fs.path.basename(cwd);
+    const layout_name = if (session_name.len > 0) session_name else default_name;
 
-    stdout.writeAll("return {\n") catch return;
-    w(stdout, "  name = \"{s}\",\n", .{session_name});
-    writeLuaString(stdout, "  root = \"", cwd, "\",\n") catch return;
+    const output_path = ".hexe.lua";
+    const tmp_path = ".hexe.lua.tmp";
+    const file = std.fs.cwd().createFile(tmp_path, .{ .truncate = true }) catch {
+        print("Error: cannot create {s}\n", .{tmp_path});
+        return;
+    };
+    defer file.close();
+
+    file.writeAll("return {\n") catch return;
+    w(file, "  name = \"{s}\",\n", .{layout_name});
+    writeLuaString(file, "  root = \"", cwd, "\",\n") catch return;
 
     // Tabs
     const tabs_val = root_obj.get("tabs") orelse {
-        stdout.writeAll("}\n") catch {};
+        file.writeAll("}\n") catch {};
+        std.fs.cwd().rename(tmp_path, output_path) catch {
+            print("Error: cannot write {s}\n", .{output_path});
+            return;
+        };
+        try session_config.upsertLayoutRegistryEntry(allocator, layout_name, cwd);
+        print("Saved {s} ({s})\n", .{ output_path, layout_name });
         return;
     };
     const tabs_arr = switch (tabs_val) {
         .array => |a| a,
         else => {
-            stdout.writeAll("}\n") catch {};
+            file.writeAll("}\n") catch {};
+            std.fs.cwd().rename(tmp_path, output_path) catch {
+                print("Error: cannot write {s}\n", .{output_path});
+                return;
+            };
+            try session_config.upsertLayoutRegistryEntry(allocator, layout_name, cwd);
+            print("Saved {s} ({s})\n", .{ output_path, layout_name });
             return;
         },
     };
 
     // Build a CWD map for all panes across all tabs
-    stdout.writeAll("  tabs = {\n") catch return;
+    file.writeAll("  tabs = {\n") catch return;
 
     for (tabs_arr.items, 0..) |tab_val, ti| {
         const tab = switch (tab_val) {
@@ -153,8 +174,8 @@ pub fn runSesFreeze(allocator: std.mem.Allocator) !void {
             }
         }
 
-        stdout.writeAll("    {\n") catch return;
-        w(stdout, "      name = \"{s}\",\n", .{tab_name});
+        file.writeAll("    {\n") catch return;
+        w(file, "      name = \"{s}\",\n", .{tab_name});
 
         // Check if there's a tree (split structure)
         if (tab.get("tree")) |tree_val| {
@@ -173,9 +194,9 @@ pub fn runSesFreeze(allocator: std.mem.Allocator) !void {
 
                 if (type_str) |ts| {
                     if (std.mem.eql(u8, ts, "split")) {
-                        stdout.writeAll("      split = ") catch return;
-                        writeLuaSplitTree(stdout, tree, &cwd_map, cwd, 3) catch return;
-                        stdout.writeAll(",\n") catch return;
+                        file.writeAll("      split = ") catch return;
+                        writeLuaSplitTree(file, tree, &cwd_map, cwd, 3) catch return;
+                        file.writeAll(",\n") catch return;
                     } else if (std.mem.eql(u8, ts, "pane")) {
                         // Single pane — check for cmd/cwd
                         const pane_id = if (tree.get("id")) |id_val|
@@ -188,7 +209,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator) !void {
                         if (pane_id) |pid| {
                             if (cwd_map.get(pid)) |pane_cwd| {
                                 if (!std.mem.eql(u8, pane_cwd, cwd)) {
-                                    w(stdout, "      split = {{ cwd = \"{s}\" }},\n", .{pane_cwd});
+                                    w(file, "      split = {{ cwd = \"{s}\" }},\n", .{pane_cwd});
                                 }
                             }
                         }
@@ -197,12 +218,12 @@ pub fn runSesFreeze(allocator: std.mem.Allocator) !void {
             }
         }
 
-        stdout.writeAll("    }") catch return;
-        if (ti + 1 < tabs_arr.items.len) stdout.writeAll(",") catch {};
-        stdout.writeAll("\n") catch return;
+        file.writeAll("    }") catch return;
+        if (ti + 1 < tabs_arr.items.len) file.writeAll(",") catch {};
+        file.writeAll("\n") catch return;
     }
 
-    stdout.writeAll("  },\n") catch return;
+    file.writeAll("  },\n") catch return;
 
     // Floats
     const floats_val = root_obj.get("floats");
@@ -210,21 +231,21 @@ pub fn runSesFreeze(allocator: std.mem.Allocator) !void {
         switch (fv) {
             .array => |floats_arr| {
                 if (floats_arr.items.len > 0) {
-                    stdout.writeAll("  floats = {\n") catch return;
+                    file.writeAll("  floats = {\n") catch return;
                     for (floats_arr.items, 0..) |float_val, fi| {
                         const float = switch (float_val) {
                             .object => |o| o,
                             else => continue,
                         };
 
-                        stdout.writeAll("    {") catch return;
+                        file.writeAll("    {") catch return;
 
                         if (float.get("float_key")) |key_val| {
                             switch (key_val) {
                                 .integer => |k| {
                                     if (k > 0 and k < 128) {
                                         const key_char: u8 = @intCast(k);
-                                        w(stdout, " key = \"{c}\",", .{key_char});
+                                        w(file, " key = \"{c}\",", .{key_char});
                                     }
                                 },
                                 else => {},
@@ -233,29 +254,35 @@ pub fn runSesFreeze(allocator: std.mem.Allocator) !void {
 
                         if (float.get("float_width_pct")) |wv| {
                             switch (wv) {
-                                .integer => |v| w(stdout, " width = {d},", .{v}),
+                                .integer => |v| w(file, " width = {d},", .{v}),
                                 else => {},
                             }
                         }
                         if (float.get("float_height_pct")) |h| {
                             switch (h) {
-                                .integer => |v| w(stdout, " height = {d},", .{v}),
+                                .integer => |v| w(file, " height = {d},", .{v}),
                                 else => {},
                             }
                         }
 
-                        stdout.writeAll(" }") catch return;
-                        if (fi + 1 < floats_arr.items.len) stdout.writeAll(",") catch {};
-                        stdout.writeAll("\n") catch return;
+                        file.writeAll(" }") catch return;
+                        if (fi + 1 < floats_arr.items.len) file.writeAll(",") catch {};
+                        file.writeAll("\n") catch return;
                     }
-                    stdout.writeAll("  },\n") catch return;
+                    file.writeAll("  },\n") catch return;
                 }
             },
             else => {},
         }
     }
 
-    stdout.writeAll("}\n") catch return;
+    file.writeAll("}\n") catch return;
+    std.fs.cwd().rename(tmp_path, output_path) catch {
+        print("Error: cannot write {s}\n", .{output_path});
+        return;
+    };
+    try session_config.upsertLayoutRegistryEntry(allocator, layout_name, cwd);
+    print("Saved {s} ({s})\n", .{ output_path, layout_name });
 }
 
 /// Helper: formatted write to a File using a stack buffer.

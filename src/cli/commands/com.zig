@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("core");
 const ipc = core.ipc;
+const session_config = core.session_config;
 
 pub const runMuxFloat = @import("mux_float.zig").runMuxFloat;
 pub const runMuxRecord = @import("mux_record.zig").runMuxRecord;
@@ -266,6 +267,77 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
             print(" key={c}", .{se.key});
         }
         print("\n", .{});
+    }
+}
+
+pub fn runSessionLayoutList(allocator: std.mem.Allocator, json_output: bool) !void {
+    var registry = try session_config.loadLayoutRegistry(allocator);
+    defer session_config.deinitLayoutRegistry(allocator, &registry);
+
+    std.mem.sort(session_config.LayoutRegistryEntry, registry.entries, {}, struct {
+        fn lessThan(_: void, a: session_config.LayoutRegistryEntry, b: session_config.LayoutRegistryEntry) bool {
+            return std.mem.lessThan(u8, a.name, b.name);
+        }
+    }.lessThan);
+
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const cwd = std.posix.getcwd(&cwd_buf) catch "";
+
+    if (json_output) {
+        const stdout = std.fs.File.stdout();
+        try stdout.writeAll("[");
+        for (registry.entries, 0..) |entry, i| {
+            if (i > 0) try stdout.writeAll(",");
+            try stdout.writeAll("\n  {\"name\":\"");
+            writeJsonStr(stdout, entry.name);
+            try stdout.writeAll("\",\"path\":\"");
+            writeJsonStr(stdout, entry.path);
+            try stdout.writeAll("\"");
+
+            if (std.mem.eql(u8, cwd, entry.path)) {
+                const config_path = try std.fmt.allocPrint(allocator, "{s}/.hexe.lua", .{entry.path});
+                defer allocator.free(config_path);
+                if (session_config.parseSessionLua(allocator, config_path)) |cfg| {
+                    try stdout.writeAll(",\"details\":{");
+                    if (cfg.name) |n| {
+                        try stdout.writeAll("\"name\":\"");
+                        writeJsonStr(stdout, n);
+                        try stdout.writeAll("\",");
+                    }
+                    try stdout.writeAll("\"tabs\":");
+                    var b1: [32]u8 = undefined;
+                    const tabs_s = std.fmt.bufPrint(&b1, "{d}", .{cfg.tabs.len}) catch "0";
+                    try stdout.writeAll(tabs_s);
+                    try stdout.writeAll(",\"floats\":");
+                    var b2: [32]u8 = undefined;
+                    const floats_s = std.fmt.bufPrint(&b2, "{d}", .{cfg.floats.len}) catch "0";
+                    try stdout.writeAll(floats_s);
+                    try stdout.writeAll("}");
+                } else |_| {}
+            }
+            try stdout.writeAll("}");
+        }
+        try stdout.writeAll("\n]\n");
+        return;
+    }
+
+    if (registry.entries.len == 0) {
+        print("No layouts found\n", .{});
+        return;
+    }
+
+    for (registry.entries) |entry| {
+        print("{s}  {s}\n", .{ entry.name, entry.path });
+        if (std.mem.eql(u8, cwd, entry.path)) {
+            const config_path = std.fmt.allocPrint(allocator, "{s}/.hexe.lua", .{entry.path}) catch continue;
+            defer allocator.free(config_path);
+            if (session_config.parseSessionLua(allocator, config_path)) |cfg| {
+                if (cfg.name) |n| print("  name: {s}\n", .{n});
+                print("  tabs: {d}\n", .{cfg.tabs.len});
+                print("  floats: {d}\n", .{cfg.floats.len});
+                if (cfg.root) |r| print("  root: {s}\n", .{r});
+            } else |_| {}
+        }
     }
 }
 
