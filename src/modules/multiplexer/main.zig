@@ -303,6 +303,33 @@ pub fn run(mux_args: MuxArgs) !void {
             try loop_core.runMainLoop(&state);
             return;
         };
+
+        // Prefer layout-config name when provided.
+        if (config.name) |loaded_name| {
+            const duped = allocator.dupe(u8, loaded_name) catch null;
+            if (duped) |d| {
+                if (state.session_name_owned) |old| {
+                    allocator.free(old);
+                }
+                state.session_name = d;
+                state.session_name_owned = d;
+
+                state.ses_client.updateSession(state.uuid, state.session_name) catch {};
+                if (state.ses_client.resolved_name) |resolved| {
+                    if (!std.mem.eql(u8, resolved, state.session_name)) {
+                        const resolved_duped = allocator.dupe(u8, resolved) catch null;
+                        if (resolved_duped) |rn| {
+                            if (state.session_name_owned) |old2| {
+                                allocator.free(old2);
+                            }
+                            state.session_name = rn;
+                            state.session_name_owned = rn;
+                        }
+                    }
+                }
+            }
+        }
+
         state.applySessionConfig(config, mux_args.session_tab_filter) catch |err| {
             debugLog("applySessionConfig failed: {s}", .{@errorName(err)});
             std.debug.print("Error applying session config: {s}\n", .{@errorName(err)});
