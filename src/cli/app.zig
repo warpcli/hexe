@@ -77,6 +77,7 @@ fn parseOptionalI64(value: ?[]const u8, field_name: []const u8) !i64 {
 
 fn normalizeTopLevelCommand(command: []const u8) []const u8 {
     if (std.mem.eql(u8, command, "ses")) return "session";
+    if (std.mem.eql(u8, command, "lay")) return "layout";
     if (std.mem.eql(u8, command, "mux")) return "multiplexer";
     if (std.mem.eql(u8, command, "shp")) return "shell";
     if (std.mem.eql(u8, command, "pop")) return "popup";
@@ -104,6 +105,7 @@ fn printHelpRoot() void {
     print("{s}Usage{s}: hexe <command> [subcommand] [options]\n\n", .{ help_ansi.SECTION, help_ansi.RESET });
     print("{s}Commands{s}:\n", .{ help_ansi.SECTION, help_ansi.RESET });
     print("  {s}session{s}      {s}(alias: ses){s}  Session daemon management\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+    print("  {s}layout{s}       {s}(alias: lay){s}  Saved session layouts (.lua)\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
     print("  {s}multiplexer{s}  {s}(alias: mux){s}  Terminal multiplexer\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
     print("  {s}pod{s}          {s}(alias: pod){s}  Per-pane PTY daemon\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
     print("  {s}shell{s}        {s}(alias: shp){s}  Shell prompt renderer\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
@@ -116,7 +118,12 @@ fn printHelpRoot() void {
 fn printHelpCommand(command: []const u8) void {
     if (std.mem.eql(u8, command, "session")) {
         print("{s}{s}session{s} {s}(alias: ses){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-        print("Subcommands: daemon, status, list, kill, clear, export, stats, open, freeze\n", .{});
+        print("Subcommands: daemon, status, list, kill, clear, export, stats\n", .{});
+        return;
+    }
+    if (std.mem.eql(u8, command, "layout")) {
+        print("{s}{s}layout{s} {s}(alias: lay){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
+        print("Subcommands: list, open, save\n", .{});
         return;
     }
     if (std.mem.eql(u8, command, "multiplexer")) {
@@ -164,6 +171,9 @@ pub fn main() !void {
 
     var ses_cmd = app.createCommand("session", "Session daemon management");
     ses_cmd.setProperty(.help_on_empty_args);
+
+    var layout_cmd = app.createCommand("layout", "Saved session layouts (.lua)");
+    layout_cmd.setProperty(.help_on_empty_args);
 
     var pod_cmd = app.createCommand("pod", "Per-pane PTY daemon");
     pod_cmd.setProperty(.help_on_empty_args);
@@ -215,15 +225,6 @@ pub fn main() !void {
     var ses_stats_cmd = app.createCommand("stats", "Show resource usage statistics");
     try ses_stats_cmd.addArg(Arg.singleValueOption("instance", 'I', null));
 
-    var ses_open = app.createCommand("open", "Open a session from .hexe.lua config");
-    try ses_open.addArg(Arg.positional("target", null, null));
-    try ses_open.addArg(Arg.booleanOption("debug", 'd', null));
-    try ses_open.addArg(Arg.singleValueOption("logfile", 'L', null));
-    try ses_open.addArg(Arg.singleValueOption("instance", 'I', null));
-
-    var ses_freeze = app.createCommand("freeze", "Snapshot current session as .hexe.lua");
-    try ses_freeze.addArg(Arg.singleValueOption("instance", 'I', null));
-
     try ses_cmd.addSubcommands(&[_]yazap.Command{
         ses_daemon,
         ses_status_cmd,
@@ -232,9 +233,22 @@ pub fn main() !void {
         ses_clear,
         ses_export_cmd,
         ses_stats_cmd,
-        ses_open,
-        ses_freeze,
     });
+
+    var layout_list = app.createCommand("list", "List saved session layouts");
+    try layout_list.addArg(Arg.booleanOption("json", 'j', null));
+
+    var layout_open = app.createCommand("open", "Open a saved session layout");
+    try layout_open.addArg(Arg.positional("target", null, null));
+    try layout_open.addArg(Arg.booleanOption("debug", 'd', null));
+    try layout_open.addArg(Arg.singleValueOption("logfile", 'L', null));
+    try layout_open.addArg(Arg.singleValueOption("instance", 'I', null));
+
+    var layout_save = app.createCommand("save", "Save current session as .hexe.lua");
+    try layout_save.addArg(Arg.singleValueOption("instance", 'I', null));
+    try layout_save.addArg(Arg.singleValueOption("scope", null, null));
+
+    try layout_cmd.addSubcommands(&[_]yazap.Command{ layout_list, layout_open, layout_save });
 
     // POD subcommands
     var pod_daemon = app.createCommand("daemon", "Start a per-pane pod daemon");
@@ -459,7 +473,7 @@ pub fn main() !void {
     try record_toggle.addArg(Arg.booleanOption("capture-input", null, null));
     try record_cmd.addSubcommands(&[_]yazap.Command{ record_start, record_stop, record_status, record_toggle });
 
-    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, pod_cmd, mux_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd });
+    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, mux_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd });
 
     const raw_args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, raw_args);
@@ -497,6 +511,17 @@ pub fn main() !void {
     const matches = try app.parseFrom(normalized_args.items);
 
     if (!matches.containsArgs()) {
+        var has_local_layout = false;
+        if (std.fs.cwd().access(".hexe.lua", .{})) |_| {
+            has_local_layout = true;
+        } else |_| {}
+        if (has_local_layout and shouldLoadLocalLayoutPrompt()) {
+            if (askUseLocalLayout()) {
+                try cli_cmds.runSesOpen(allocator, ".", false, "", "");
+                return;
+            }
+        }
+
         try runMuxNew("", false, "");
         return;
     }
@@ -551,7 +576,12 @@ pub fn main() !void {
             try ses_stats.run(allocator);
             return;
         }
-        if (ses_matches.subcommandMatches("open")) |m| {
+    } else if (matches.subcommandMatches("layout")) |layout_matches| {
+        if (layout_matches.subcommandMatches("list")) |m| {
+            try cli_cmds.runSessionLayoutList(allocator, m.containsArg("json"));
+            return;
+        }
+        if (layout_matches.subcommandMatches("open")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runSesOpen(
@@ -563,10 +593,15 @@ pub fn main() !void {
             );
             return;
         }
-        if (ses_matches.subcommandMatches("freeze")) |m| {
+        if (layout_matches.subcommandMatches("save")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
-            try cli_cmds.runSesFreeze(allocator);
+            const scope_raw = m.getSingleValue("scope") orelse "both";
+            const scope = std.meta.stringToEnum(cli_cmds.LayoutSaveScope, scope_raw) orelse {
+                print("Error: invalid --scope (use local|global|both)\n", .{});
+                return;
+            };
+            try cli_cmds.runSesFreeze(allocator, scope);
             return;
         }
     } else if (matches.subcommandMatches("pod")) |pod_matches| {
@@ -980,6 +1015,30 @@ fn showNestedMuxConfirmation(pane_uuid: []const u8) !bool {
     posix.close(fd);
 
     return resp.response_type == 1;
+}
+
+fn shouldLoadLocalLayoutPrompt() bool {
+    if (std.posix.getenv("HEXE_SKIP_LOCAL_CONFIG")) |v| {
+        return !std.mem.eql(u8, v, "1");
+    }
+    return true;
+}
+
+fn askUseLocalLayout() bool {
+    const stdin_fd = std.posix.STDIN_FILENO;
+    const stdout_fd = std.posix.STDOUT_FILENO;
+    if (!std.posix.isatty(stdin_fd) or !std.posix.isatty(stdout_fd)) return true;
+
+    const stdout = std.fs.File.stdout();
+    stdout.writeAll("Local .hexe.lua found. Load local layout? [Y/n]: ") catch return true;
+
+    var line_buf: [32]u8 = undefined;
+    const n = std.posix.read(stdin_fd, line_buf[0..]) catch return true;
+    if (n == 0) return true;
+    const line = std.mem.trim(u8, line_buf[0..n], " \t\r\n");
+    if (line.len == 0) return true;
+    if (std.ascii.eqlIgnoreCase(line, "y") or std.ascii.eqlIgnoreCase(line, "yes")) return true;
+    return false;
 }
 
 fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8) !void {

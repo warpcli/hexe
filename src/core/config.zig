@@ -5,6 +5,13 @@ const LuaRuntime = lua_runtime.LuaRuntime;
 
 const log = std.log.scoped(.config);
 
+fn shouldLoadLocalConfig() bool {
+    if (std.posix.getenv("HEXE_SKIP_LOCAL_CONFIG")) |v| {
+        return !std.mem.eql(u8, v, "1");
+    }
+    return true;
+}
+
 threadlocal var PARSE_ERROR: ?[]const u8 = null;
 
 fn setParseError(allocator: std.mem.Allocator, msg: []const u8) void {
@@ -507,6 +514,8 @@ pub const SesConfig = struct {
         // Pop config return value (if any) from stack
         runtime.pop();
 
+        if (!shouldLoadLocalConfig()) return config;
+
         // Try to load local .hexe.lua from current directory
         const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;
         defer allocator.free(local_path);
@@ -604,6 +613,8 @@ pub const Config = struct {
         float_toggle,
         float_nudge,
         focus_move,
+        layout_save,
+        layout_load,
     };
 
     pub const BindAction = union(BindActionTag) {
@@ -628,6 +639,8 @@ pub const Config = struct {
         float_toggle: u8, // float key (matches FloatDef.key)
         float_nudge: BindKeyKind, // up/down/left/right
         focus_move: BindKeyKind, // up/down/left/right
+        layout_save,
+        layout_load,
     };
 
     pub const Bind = struct {
@@ -766,6 +779,18 @@ pub const Config = struct {
         // Pop config return value (if any) from stack
         runtime.pop();
 
+        if (!shouldLoadLocalConfig()) {
+            applyBuilderConfig(runtime, &config, allocator);
+            if (config.status != .@"error") {
+                if (PARSE_ERROR) |msg| {
+                    config.status = .@"error";
+                    config.status_message = msg;
+                    PARSE_ERROR = null;
+                }
+            }
+            return config;
+        }
+
         // Try to load local .hexe.lua from current directory
         const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;
         defer allocator.free(local_path);
@@ -815,6 +840,15 @@ pub const Config = struct {
             runtime.pop();
         } else {
             log.warn("no mux section in local config", .{});
+        }
+
+        // Optional top-level layout keybindings from .hexe.lua
+        // Format: return { keybingings = { ... }, layout = { ... } }
+        if (runtime.pushTable(-1, "keybingings")) {
+            const old_count = config.input.binds.len;
+            config.input.binds = parseBinds(runtime, allocator, config.input.binds);
+            log.info("parsed {} local layout keybindings (was {})", .{ config.input.binds.len, old_count });
+            runtime.pop();
         }
 
         // Pop local config table
@@ -1242,6 +1276,8 @@ fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction
     if (std.mem.eql(u8, action_type, "tab.next")) return .tab_next;
     if (std.mem.eql(u8, action_type, "tab.prev")) return .tab_prev;
     if (std.mem.eql(u8, action_type, "tab.close")) return .tab_close;
+    if (std.mem.eql(u8, action_type, "layout.save")) return .layout_save;
+    if (std.mem.eql(u8, action_type, "layout.load")) return .layout_load;
 
     if (std.mem.eql(u8, action_type, "split.resize")) {
         const dir = runtime.getString(-1, "dir") orelse return null;
@@ -1288,6 +1324,8 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     if (std.mem.eql(u8, action, "tab.next")) return .tab_next;
     if (std.mem.eql(u8, action, "tab.prev")) return .tab_prev;
     if (std.mem.eql(u8, action, "tab.close")) return .tab_close;
+    if (std.mem.eql(u8, action, "layout.save")) return .layout_save;
+    if (std.mem.eql(u8, action, "layout.load")) return .layout_load;
     return null;
 }
 

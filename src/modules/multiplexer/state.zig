@@ -660,6 +660,10 @@ pub const State = struct {
         return state_session.applySessionConfig(self, config, tab_filter);
     }
 
+    pub fn replaceWithSessionConfig(self: *State, config: core.SessionConfig, tab_filter: ?[]const u8) !void {
+        return state_session.replaceWithSessionConfig(self, config, tab_filter);
+    }
+
     pub fn serializeState(self: *State) ![]const u8 {
         return state_serialize.serializeState(self);
     }

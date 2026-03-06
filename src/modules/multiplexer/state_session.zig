@@ -63,6 +63,28 @@ pub fn applySessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]c
     self.force_full_render = true;
 }
 
+/// Replace current runtime tabs/floats with a session config.
+pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]const u8) !void {
+    // Remove floating panes.
+    for (self.floats.items) |pane| {
+        pane.deinit();
+        self.allocator.destroy(pane);
+    }
+    self.floats.clearRetainingCapacity();
+    self.active_floating = null;
+
+    // Remove all tabs.
+    for (self.tabs.items) |*tab| {
+        tab.deinit();
+    }
+    self.tabs.clearRetainingCapacity();
+    self.tab_last_floating_uuid.clearRetainingCapacity();
+    self.tab_last_focus_kind.clearRetainingCapacity();
+    self.active_tab = 0;
+
+    try applySessionConfig(self, config, tab_filter);
+}
+
 fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     // Generate tab name
     const name_owned = self.allocator.dupe(u8, tab_config.name) catch
@@ -100,7 +122,8 @@ fn buildSplitTree(self: anytype, layout: *Layout, split_config: SplitConfig) !vo
     switch (split_config) {
         .pane => |pane_config| {
             // Single pane
-            const cwd = resolvePaneCwd(pane_config.cwd);
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd = resolvePaneCwd(pane_config.cwd) orelse (std.posix.getcwd(&cwd_buf) catch null);
             const first_pane = try layout.createFirstPane(cwd);
 
             // If cmd is set, type it into the shell
@@ -159,7 +182,8 @@ fn buildSplitTree(self: anytype, layout: *Layout, split_config: SplitConfig) !vo
 fn collectLeafPanes(self: anytype, layout: *Layout, config: SplitConfig, panes: *std.ArrayList(*Pane), cmds: *std.ArrayList(?[]const u8)) !void {
     switch (config) {
         .pane => |pane_config| {
-            const cwd = resolvePaneCwd(pane_config.cwd);
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd = resolvePaneCwd(pane_config.cwd) orelse (std.posix.getcwd(&cwd_buf) catch null);
             const id = layout.next_split_id;
             layout.next_split_id += 1;
 

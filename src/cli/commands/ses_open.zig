@@ -26,7 +26,7 @@ pub fn runSesOpen(
         return;
     } orelse {
         print("Error: config not found for '{s}'\n", .{target});
-        print("Looked for .hexe.lua in directory, or ~/.local/share/hexe/sessions/{s}.lua\n", .{target});
+        print("Looked for .hexe.lua in directory/path or registered layout name in sessions.json\n", .{});
         return;
     };
     defer allocator.free(resolved.path);

@@ -399,6 +399,10 @@ fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
     // Pop config return value (if any) from stack
     runtime.pop();
 
+    if (std.posix.getenv("HEXE_SKIP_LOCAL_CONFIG")) |v| {
+        if (std.mem.eql(u8, v, "1")) return config;
+    }
+
     // Try to load local .hexe.lua from current directory
     const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;
     defer allocator.free(local_path);

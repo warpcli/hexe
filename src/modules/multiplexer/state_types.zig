@@ -19,6 +19,8 @@ pub const PendingAction = enum {
     pane_close, // Close split pane only (not tab)
     adopt_choose, // Choosing which orphaned pane to adopt
     adopt_confirm, // Confirming destroy vs swap
+    layout_save_choose, // Choosing local/global/both for layout save
+    layout_load_choose, // Choosing detach/replace for local layout load
 };
 
 /// A tab contains a layout with splits.

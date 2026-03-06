@@ -71,11 +71,167 @@ pub fn getSessionsDir(allocator: std.mem.Allocator) ![]const u8 {
     return std.fmt.allocPrint(allocator, "{s}/.local/share/hexe/sessions", .{home});
 }
 
+/// Get the sessions index file (~/.local/share/hexe/sessions.json).
+pub fn getSessionsIndexPath(allocator: std.mem.Allocator) ![]const u8 {
+    if (posix.getenv("XDG_DATA_HOME")) |xdg| {
+        return std.fmt.allocPrint(allocator, "{s}/hexe/sessions.json", .{xdg});
+    }
+    const home = posix.getenv("HOME") orelse return error.NoHome;
+    return std.fmt.allocPrint(allocator, "{s}/.local/share/hexe/sessions.json", .{home});
+}
+
+pub const LayoutRegistryEntry = struct {
+    name: []const u8,
+    path: []const u8,
+};
+
+pub const LayoutRegistry = struct {
+    entries: []LayoutRegistryEntry = &.{},
+};
+
+pub fn deinitLayoutRegistry(allocator: std.mem.Allocator, registry: *LayoutRegistry) void {
+    for (registry.entries) |entry| {
+        allocator.free(entry.name);
+        allocator.free(entry.path);
+    }
+    if (registry.entries.len > 0) allocator.free(registry.entries);
+    registry.entries = &.{};
+}
+
+pub fn loadLayoutRegistry(allocator: std.mem.Allocator) !LayoutRegistry {
+    const index_path = try getSessionsIndexPath(allocator);
+    defer allocator.free(index_path);
+
+    const file = std.fs.cwd().openFile(index_path, .{}) catch |err| {
+        if (err == error.FileNotFound) return .{};
+        return err;
+    };
+    defer file.close();
+
+    const raw = try file.readToEndAlloc(allocator, 1024 * 1024);
+    defer allocator.free(raw);
+    if (raw.len == 0) return .{};
+
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch return .{};
+    defer parsed.deinit();
+
+    const root = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return .{},
+    };
+    const layouts_val = root.get("layouts") orelse return .{};
+    const layouts = switch (layouts_val) {
+        .array => |arr| arr,
+        else => return .{},
+    };
+
+    var entries = std.ArrayList(LayoutRegistryEntry).empty;
+    defer entries.deinit(allocator);
+
+    for (layouts.items) |item| {
+        const obj = switch (item) {
+            .object => |o| o,
+            else => continue,
+        };
+        const name = switch (obj.get("name") orelse continue) {
+            .string => |s| s,
+            else => continue,
+        };
+        const path = switch (obj.get("path") orelse continue) {
+            .string => |s| s,
+            else => continue,
+        };
+        try entries.append(allocator, .{
+            .name = try allocator.dupe(u8, name),
+            .path = try allocator.dupe(u8, path),
+        });
+    }
+
+    return .{ .entries = try entries.toOwnedSlice(allocator) };
+}
+
+pub fn saveLayoutRegistry(allocator: std.mem.Allocator, registry: LayoutRegistry) !void {
+    const index_path = try getSessionsIndexPath(allocator);
+    defer allocator.free(index_path);
+
+    if (std.fs.path.dirname(index_path)) |parent| {
+        try std.fs.cwd().makePath(parent);
+    }
+
+    const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{index_path});
+    defer allocator.free(tmp_path);
+
+    const file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
+    defer file.close();
+
+    var out = std.ArrayList(u8).empty;
+    defer out.deinit(allocator);
+    const writer = out.writer(allocator);
+
+    try writer.writeAll("{\n  \"version\": 1,\n  \"layouts\": [");
+    for (registry.entries, 0..) |entry, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writer.writeAll("\n    {\"name\":\"");
+        try writeJsonEscaped(writer, entry.name);
+        try writer.writeAll("\",\"path\":\"");
+        try writeJsonEscaped(writer, entry.path);
+        try writer.writeAll("\"}");
+    }
+    try writer.writeAll("\n  ]\n}\n");
+
+    try file.writeAll(out.items);
+    try std.fs.cwd().rename(tmp_path, index_path);
+}
+
+pub fn upsertLayoutRegistryEntry(allocator: std.mem.Allocator, name: []const u8, path: []const u8) !void {
+    var registry = try loadLayoutRegistry(allocator);
+    defer deinitLayoutRegistry(allocator, &registry);
+
+    for (registry.entries) |*entry| {
+        if (std.mem.eql(u8, entry.name, name)) {
+            allocator.free(entry.path);
+            entry.path = try allocator.dupe(u8, path);
+            try saveLayoutRegistry(allocator, registry);
+            return;
+        }
+    }
+
+    var list = try std.ArrayList(LayoutRegistryEntry).initCapacity(allocator, registry.entries.len + 1);
+    defer list.deinit(allocator);
+    for (registry.entries) |entry| {
+        try list.append(allocator, .{
+            .name = try allocator.dupe(u8, entry.name),
+            .path = try allocator.dupe(u8, entry.path),
+        });
+    }
+    try list.append(allocator, .{
+        .name = try allocator.dupe(u8, name),
+        .path = try allocator.dupe(u8, path),
+    });
+
+    var next = LayoutRegistry{ .entries = try list.toOwnedSlice(allocator) };
+    defer deinitLayoutRegistry(allocator, &next);
+    try saveLayoutRegistry(allocator, next);
+}
+
+fn writeJsonEscaped(writer: anytype, s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => try writer.writeByte(c),
+        }
+    }
+}
+
 /// Resolve a CLI argument to a .hexe.lua config path.
 ///
 /// - If arg is a directory (or "."), look for .hexe.lua inside it.
 /// - If arg contains ":" suffix, split into name:tab_filter.
-/// - If arg is a bare name, look in ~/.local/share/hexe/sessions/<name>.lua.
+/// - If arg is a bare name, resolve from ~/.local/share/hexe/sessions.json.
 /// - If arg is a file path, use it directly.
 ///
 /// Returns struct with path and optional tab filter.
@@ -132,15 +288,19 @@ pub fn resolveConfigPath(allocator: std.mem.Allocator, arg: []const u8) !?Resolv
         return .{ .path = path, .tab_filter = tab_filter };
     }
 
-    // Treat as session name, look in sessions dir
-    const sessions_dir = getSessionsDir(allocator) catch return null;
-    defer allocator.free(sessions_dir);
-    const path = try std.fmt.allocPrint(allocator, "{s}/{s}.lua", .{ sessions_dir, target });
-    std.fs.cwd().access(path, .{}) catch {
-        allocator.free(path);
-        return null;
-    };
-    return .{ .path = path, .tab_filter = tab_filter };
+    // Treat as registered layout name from sessions.json
+    var registry = loadLayoutRegistry(allocator) catch return null;
+    defer deinitLayoutRegistry(allocator, &registry);
+    for (registry.entries) |entry| {
+        if (!std.mem.eql(u8, entry.name, target)) continue;
+        const path = try std.fmt.allocPrint(allocator, "{s}/.hexe.lua", .{entry.path});
+        std.fs.cwd().access(path, .{}) catch {
+            allocator.free(path);
+            return null;
+        };
+        return .{ .path = path, .tab_filter = tab_filter };
+    }
+    return null;
 }
 
 /// Parse a .hexe.lua file into a SessionConfig.
@@ -164,21 +324,25 @@ pub fn parseSessionLua(allocator: std.mem.Allocator, path: []const u8) !SessionC
 
     var config = SessionConfig{};
 
-    // Read top-level fields
-    if (runtime.getStringAlloc(-1, "name")) |s| config.name = s;
-    if (runtime.getStringAlloc(-1, "root")) |s| config.root = s;
+    // Supported formats:
+    // 1) Legacy: return { name=..., tabs=..., floats=... }
+    // 2) New:    return { keybingings={...}, layout={ name=..., tabs=..., floats=... } }
+    var table_idx: i32 = -1;
+    var layout_pushed = false;
+    if (runtime.pushTable(-1, "layout")) {
+        table_idx = -1;
+        layout_pushed = true;
+    }
+    defer if (layout_pushed) runtime.pop();
 
-    // Read on_start
-    config.on_start = parseStringArray(allocator, &runtime, -1, "on_start") catch &.{};
+    // Read layout fields
+    if (runtime.getStringAlloc(table_idx, "name")) |s| config.name = s;
+    if (runtime.getStringAlloc(table_idx, "root")) |s| config.root = s;
 
-    // Read on_stop
-    config.on_stop = parseStringArray(allocator, &runtime, -1, "on_stop") catch &.{};
-
-    // Read tabs
-    config.tabs = parseTabs(allocator, &runtime, -1) catch &.{};
-
-    // Read global floats
-    config.floats = parseFloats(allocator, &runtime, -1) catch &.{};
+    config.on_start = parseStringArray(allocator, &runtime, table_idx, "on_start") catch &.{};
+    config.on_stop = parseStringArray(allocator, &runtime, table_idx, "on_stop") catch &.{};
+    config.tabs = parseTabs(allocator, &runtime, table_idx) catch &.{};
+    config.floats = parseFloats(allocator, &runtime, table_idx) catch &.{};
 
     return config;
 }

@@ -598,7 +598,7 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "when");
 
     // hx.action = { mux_quit = "mux.quit", tab_new = "tab.new", ... }
-    lua.createTable(0, 19);
+    lua.createTable(0, 21);
     _ = lua.pushString("mux.quit");
     lua.setField(-2, "mux_quit");
     _ = lua.pushString("mux.detach");
@@ -639,6 +639,10 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "float_nudge");
     _ = lua.pushString("focus.move");
     lua.setField(-2, "focus_move");
+    _ = lua.pushString("layout.save");
+    lua.setField(-2, "layout_save");
+    _ = lua.pushString("layout.load");
+    lua.setField(-2, "layout_load");
     lua.setField(-2, "action");
 
     // hx.mode = { act_and_consume = "act_and_consume", act_and_passthrough = "act_and_passthrough", passthrough_only = "passthrough_only" }
