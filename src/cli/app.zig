@@ -511,7 +511,18 @@ pub fn main() !void {
     const matches = try app.parseFrom(normalized_args.items);
 
     if (!matches.containsArgs()) {
-        try runMuxNew("", false, "", true);
+        var has_local_layout = false;
+        if (std.fs.cwd().access(".hexe.lua", .{})) |_| {
+            has_local_layout = true;
+        } else |_| {}
+        if (has_local_layout and shouldLoadLocalLayoutPrompt()) {
+            if (askUseLocalLayout()) {
+                try cli_cmds.runSesOpen(allocator, ".", false, "", "");
+                return;
+            }
+        }
+
+        try runMuxNew("", false, "");
         return;
     }
 
@@ -711,7 +722,7 @@ pub fn main() !void {
             } else if (m.containsArg("test-only")) {
                 setGeneratedTestInstance();
             }
-            try runMuxNew(m.getSingleValue("name") orelse "", m.containsArg("debug"), m.getSingleValue("logfile") orelse "", false);
+            try runMuxNew(m.getSingleValue("name") orelse "", m.containsArg("debug"), m.getSingleValue("logfile") orelse "");
             return;
         }
         if (mux_matches.subcommandMatches("attach")) |m| {
@@ -1030,21 +1041,13 @@ fn askUseLocalLayout() bool {
     return false;
 }
 
-fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8, prompt_local_layout: bool) !void {
+fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8) !void {
     if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
         if (pane_uuid.len >= 32) {
             if (!try showNestedMuxConfirmation(pane_uuid)) {
                 return;
             }
         }
-    }
-
-    if (prompt_local_layout and shouldLoadLocalLayoutPrompt()) {
-        if (std.fs.cwd().access(".hexe.lua", .{})) |_| {
-            if (!askUseLocalLayout()) {
-                setEnvVar("HEXE_SKIP_LOCAL_CONFIG", "1");
-            }
-        } else |_| {}
     }
 
     try mux.run(.{

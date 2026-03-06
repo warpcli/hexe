@@ -100,7 +100,8 @@ fn buildSplitTree(self: anytype, layout: *Layout, split_config: SplitConfig) !vo
     switch (split_config) {
         .pane => |pane_config| {
             // Single pane
-            const cwd = resolvePaneCwd(pane_config.cwd);
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd = resolvePaneCwd(pane_config.cwd) orelse (std.posix.getcwd(&cwd_buf) catch null);
             const first_pane = try layout.createFirstPane(cwd);
 
             // If cmd is set, type it into the shell
@@ -159,7 +160,8 @@ fn buildSplitTree(self: anytype, layout: *Layout, split_config: SplitConfig) !vo
 fn collectLeafPanes(self: anytype, layout: *Layout, config: SplitConfig, panes: *std.ArrayList(*Pane), cmds: *std.ArrayList(?[]const u8)) !void {
     switch (config) {
         .pane => |pane_config| {
-            const cwd = resolvePaneCwd(pane_config.cwd);
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const cwd = resolvePaneCwd(pane_config.cwd) orelse (std.posix.getcwd(&cwd_buf) catch null);
             const id = layout.next_split_id;
             layout.next_split_id += 1;
 
