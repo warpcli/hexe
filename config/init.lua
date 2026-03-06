@@ -19,12 +19,12 @@ local function load_layout_config()
   end
 
   if not cfg_dir then
-    return { keybingings = {}, default_layout = nil }
+    return { keybingings = {}, layout = nil }
   end
 
   local ok, cfg = pcall(dofile, cfg_dir .. "/layout.lua")
   if not ok or type(cfg) ~= "table" then
-    return { keybingings = {}, default_layout = nil }
+    return { keybingings = {}, layout = nil }
   end
 
   if type(cfg.keybingings) ~= "table" then
@@ -298,8 +298,8 @@ end
 -- SES Configuration (Session Manager)
 -- ============================================================================
 if section == nil or section == "ses" then
-  if layout_cfg.default_layout then
-    hx.ses.layout.define(layout_cfg.default_layout)
+  if layout_cfg.layout then
+    hx.ses.layout.define(layout_cfg.layout)
   end
 end
 

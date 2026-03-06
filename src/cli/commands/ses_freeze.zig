@@ -113,26 +113,28 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
     defer file.close();
 
     file.writeAll("return {\n") catch return;
-    w(file, "  name = \"{s}\",\n", .{layout_name});
-    writeLuaString(file, "  root = \"", cwd, "\",\n") catch return;
+    file.writeAll("  keybingings = {},\n") catch return;
+    file.writeAll("  layout = {\n") catch return;
+    w(file, "    name = \"{s}\",\n", .{layout_name});
+    writeLuaString(file, "    root = \"", cwd, "\",\n") catch return;
 
     // Tabs
     const tabs_val = root_obj.get("tabs") orelse {
-        file.writeAll("}\n") catch {};
+        file.writeAll("  }\n}\n") catch {};
         try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
         return;
     };
     const tabs_arr = switch (tabs_val) {
         .array => |a| a,
         else => {
-            file.writeAll("}\n") catch {};
+            file.writeAll("  }\n}\n") catch {};
             try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
             return;
         },
     };
 
     // Build a CWD map for all panes across all tabs
-    file.writeAll("  tabs = {\n") catch return;
+    file.writeAll("    tabs = {\n") catch return;
 
     for (tabs_arr.items, 0..) |tab_val, ti| {
         const tab = switch (tab_val) {
@@ -177,8 +179,8 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
             }
         }
 
-        file.writeAll("    {\n") catch return;
-        w(file, "      name = \"{s}\",\n", .{tab_name});
+        file.writeAll("      {\n") catch return;
+        w(file, "        name = \"{s}\",\n", .{tab_name});
 
         // Check if there's a tree (split structure)
         if (tab.get("tree")) |tree_val| {
@@ -197,7 +199,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
 
                 if (type_str) |ts| {
                     if (std.mem.eql(u8, ts, "split")) {
-                        file.writeAll("      split = ") catch return;
+                        file.writeAll("        split = ") catch return;
                         writeLuaSplitTree(file, tree, &cwd_map, cwd, 3) catch return;
                         file.writeAll(",\n") catch return;
                     } else if (std.mem.eql(u8, ts, "pane")) {
@@ -212,7 +214,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
                         if (pane_id) |pid| {
                             if (cwd_map.get(pid)) |pane_cwd| {
                                 if (!std.mem.eql(u8, pane_cwd, cwd)) {
-                                    w(file, "      split = {{ cwd = \"{s}\" }},\n", .{pane_cwd});
+                                    w(file, "        split = {{ cwd = \"{s}\" }},\n", .{pane_cwd});
                                 }
                             }
                         }
@@ -221,12 +223,12 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
             }
         }
 
-        file.writeAll("    }") catch return;
+        file.writeAll("      }") catch return;
         if (ti + 1 < tabs_arr.items.len) file.writeAll(",") catch {};
         file.writeAll("\n") catch return;
     }
 
-    file.writeAll("  },\n") catch return;
+    file.writeAll("    },\n") catch return;
 
     // Floats
     const floats_val = root_obj.get("floats");
@@ -234,14 +236,14 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
         switch (fv) {
             .array => |floats_arr| {
                 if (floats_arr.items.len > 0) {
-                    file.writeAll("  floats = {\n") catch return;
+                    file.writeAll("    floats = {\n") catch return;
                     for (floats_arr.items, 0..) |float_val, fi| {
                         const float = switch (float_val) {
                             .object => |o| o,
                             else => continue,
                         };
 
-                        file.writeAll("    {") catch return;
+                        file.writeAll("      {") catch return;
 
                         if (float.get("float_key")) |key_val| {
                             switch (key_val) {
@@ -272,14 +274,14 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
                         if (fi + 1 < floats_arr.items.len) file.writeAll(",") catch {};
                         file.writeAll("\n") catch return;
                     }
-                    file.writeAll("  },\n") catch return;
+                    file.writeAll("    },\n") catch return;
                 }
             },
             else => {},
         }
     }
 
-    file.writeAll("}\n") catch return;
+    file.writeAll("  }\n}\n") catch return;
     try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
 }
 

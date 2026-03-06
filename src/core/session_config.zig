@@ -324,21 +324,25 @@ pub fn parseSessionLua(allocator: std.mem.Allocator, path: []const u8) !SessionC
 
     var config = SessionConfig{};
 
-    // Read top-level fields
-    if (runtime.getStringAlloc(-1, "name")) |s| config.name = s;
-    if (runtime.getStringAlloc(-1, "root")) |s| config.root = s;
+    // Supported formats:
+    // 1) Legacy: return { name=..., tabs=..., floats=... }
+    // 2) New:    return { keybingings={...}, layout={ name=..., tabs=..., floats=... } }
+    var table_idx: i32 = -1;
+    var layout_pushed = false;
+    if (runtime.pushTable(-1, "layout")) {
+        table_idx = -1;
+        layout_pushed = true;
+    }
+    defer if (layout_pushed) runtime.pop();
 
-    // Read on_start
-    config.on_start = parseStringArray(allocator, &runtime, -1, "on_start") catch &.{};
+    // Read layout fields
+    if (runtime.getStringAlloc(table_idx, "name")) |s| config.name = s;
+    if (runtime.getStringAlloc(table_idx, "root")) |s| config.root = s;
 
-    // Read on_stop
-    config.on_stop = parseStringArray(allocator, &runtime, -1, "on_stop") catch &.{};
-
-    // Read tabs
-    config.tabs = parseTabs(allocator, &runtime, -1) catch &.{};
-
-    // Read global floats
-    config.floats = parseFloats(allocator, &runtime, -1) catch &.{};
+    config.on_start = parseStringArray(allocator, &runtime, table_idx, "on_start") catch &.{};
+    config.on_stop = parseStringArray(allocator, &runtime, table_idx, "on_stop") catch &.{};
+    config.tabs = parseTabs(allocator, &runtime, table_idx) catch &.{};
+    config.floats = parseFloats(allocator, &runtime, table_idx) catch &.{};
 
     return config;
 }

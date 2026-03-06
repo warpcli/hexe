@@ -840,6 +840,15 @@ pub const Config = struct {
             log.warn("no mux section in local config", .{});
         }
 
+        // Optional top-level layout keybindings from .hexe.lua
+        // Format: return { keybingings = { ... }, layout = { ... } }
+        if (runtime.pushTable(-1, "keybingings")) {
+            const old_count = config.input.binds.len;
+            config.input.binds = parseBinds(runtime, allocator, config.input.binds);
+            log.info("parsed {} local layout keybindings (was {})", .{ config.input.binds.len, old_count });
+            runtime.pop();
+        }
+
         // Pop local config table
         runtime.pop();
 

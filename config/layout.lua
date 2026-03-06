@@ -7,7 +7,7 @@ return {
     { key = { hx.key.ctrl, hx.key.alt, hx.key["0"] }, action = { type = hx.action.float_toggle, float = "p" } },
   },
 
-  default_layout = {
+  layout = {
     name = "default",
     enabled = true,
     tabs = {
