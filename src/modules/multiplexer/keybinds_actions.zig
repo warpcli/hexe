@@ -387,6 +387,40 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             state.needs_render = true;
             return true;
         },
+        .layout_load => {
+            if (std.fs.cwd().access(".hexe.lua", .{})) |_| {} else |_| {
+                state.notifications.showFor("No local .hexe.lua", 1400);
+                state.needs_render = true;
+                return true;
+            }
+
+            var items = std.ArrayList([]const u8).empty;
+            defer items.deinit(state.allocator);
+
+            const detach_item = state.allocator.dupe(u8, "detach") catch return true;
+            const replace_item = state.allocator.dupe(u8, "replace") catch {
+                state.allocator.free(detach_item);
+                return true;
+            };
+
+            items.append(state.allocator, detach_item) catch {
+                state.allocator.free(detach_item);
+                state.allocator.free(replace_item);
+                return true;
+            };
+            items.append(state.allocator, replace_item) catch {
+                state.allocator.free(replace_item);
+                return true;
+            };
+
+            state.popups.showPickerOwned(items.items, .{ .title = "Load local layout: detach or replace" }) catch {
+                for (items.items) |item| state.allocator.free(item);
+                return true;
+            };
+            state.pending_action = .layout_load_choose;
+            state.needs_render = true;
+            return true;
+        },
     }
 }
 

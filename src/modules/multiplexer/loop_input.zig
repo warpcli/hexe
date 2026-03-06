@@ -255,6 +255,46 @@ fn runLayoutSaveWithScope(state: *State, scope: []const u8) void {
     state.notifications.showFor("layout save requested", 1200);
 }
 
+fn runLayoutOpenDetached(state: *State) void {
+    var env_map_opt = std.process.getEnvMap(state.allocator) catch null;
+    defer if (env_map_opt) |*m| m.deinit();
+
+    if (env_map_opt) |*env_map| {
+        env_map.remove("HEXE_PANE_UUID");
+        env_map.remove("HEXE_FOCUSED_PANE_UUID");
+        env_map.remove("HEXE_STATUS_FOCUSED_PANE_UUID");
+    }
+
+    var child = std.process.Child.init(&.{ "/bin/bash", "-lc", "(hexe lay open .) >/dev/null 2>&1 &" }, state.allocator);
+    if (env_map_opt) |*env_map| child.env_map = env_map;
+    child.stdin_behavior = .Ignore;
+    child.stdout_behavior = .Ignore;
+    child.stderr_behavior = .Ignore;
+
+    child.spawn() catch {
+        state.notifications.showFor("layout open spawn failed", 1400);
+        return;
+    };
+    _ = child.wait() catch {};
+    actions.performDetach(state);
+}
+
+fn replaceFromLocalLayout(state: *State) void {
+    const cfg = core.session_config.parseSessionLua(state.allocator, ".hexe.lua") catch {
+        state.notifications.showFor("failed to parse .hexe.lua", 1500);
+        return;
+    };
+
+    state.replaceWithSessionConfig(cfg, null) catch {
+        state.notifications.showFor("failed to apply local layout", 1500);
+        return;
+    };
+
+    state.notifications.showFor("local layout loaded", 1200);
+    state.needs_render = true;
+    state.force_full_render = true;
+}
+
 fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
     if (!state.popups.isBlocked()) return false;
     defer freeParsedEventPayload(state, parsed_event);
@@ -300,6 +340,17 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                             else => "both",
                         };
                         runLayoutSaveWithScope(state, scope);
+                    }
+                    state.pending_action = null;
+                    state.popups.clearResults();
+                },
+                .layout_load_choose => {
+                    if (state.popups.getPickerResult()) |selected| {
+                        switch (selected) {
+                            0 => runLayoutOpenDetached(state),
+                            1 => replaceFromLocalLayout(state),
+                            else => {},
+                        }
                     }
                     state.pending_action = null;
                     state.popups.clearResults();

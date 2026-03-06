@@ -614,6 +614,7 @@ pub const Config = struct {
         float_nudge,
         focus_move,
         layout_save,
+        layout_load,
     };
 
     pub const BindAction = union(BindActionTag) {
@@ -639,6 +640,7 @@ pub const Config = struct {
         float_nudge: BindKeyKind, // up/down/left/right
         focus_move: BindKeyKind, // up/down/left/right
         layout_save,
+        layout_load,
     };
 
     pub const Bind = struct {
@@ -1275,6 +1277,7 @@ fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction
     if (std.mem.eql(u8, action_type, "tab.prev")) return .tab_prev;
     if (std.mem.eql(u8, action_type, "tab.close")) return .tab_close;
     if (std.mem.eql(u8, action_type, "layout.save")) return .layout_save;
+    if (std.mem.eql(u8, action_type, "layout.load")) return .layout_load;
 
     if (std.mem.eql(u8, action_type, "split.resize")) {
         const dir = runtime.getString(-1, "dir") orelse return null;
@@ -1322,6 +1325,7 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     if (std.mem.eql(u8, action, "tab.prev")) return .tab_prev;
     if (std.mem.eql(u8, action, "tab.close")) return .tab_close;
     if (std.mem.eql(u8, action, "layout.save")) return .layout_save;
+    if (std.mem.eql(u8, action, "layout.load")) return .layout_load;
     return null;
 }
 

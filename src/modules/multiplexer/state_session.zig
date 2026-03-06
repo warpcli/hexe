@@ -63,6 +63,28 @@ pub fn applySessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]c
     self.force_full_render = true;
 }
 
+/// Replace current runtime tabs/floats with a session config.
+pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]const u8) !void {
+    // Remove floating panes.
+    for (self.floats.items) |pane| {
+        pane.deinit();
+        self.allocator.destroy(pane);
+    }
+    self.floats.clearRetainingCapacity();
+    self.active_floating = null;
+
+    // Remove all tabs.
+    for (self.tabs.items) |*tab| {
+        tab.deinit();
+    }
+    self.tabs.clearRetainingCapacity();
+    self.tab_last_floating_uuid.clearRetainingCapacity();
+    self.tab_last_focus_kind.clearRetainingCapacity();
+    self.active_tab = 0;
+
+    try applySessionConfig(self, config, tab_filter);
+}
+
 fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     // Generate tab name
     const name_owned = self.allocator.dupe(u8, tab_config.name) catch
