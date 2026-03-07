@@ -41,11 +41,10 @@ pub fn runSesOpen(
         }
         return;
     };
+    defer config.deinit(allocator);
 
     // Apply tab filter
-    if (resolved.tab_filter) |filter| {
-        config.filter_tab = filter;
-    }
+    const selected_tab_filter = resolved.tab_filter orelse config.filter_tab;
 
     // Resolve root directory
     var root_path: ?[]const u8 = null;
@@ -84,6 +83,6 @@ pub fn runSesOpen(
         .debug = debug,
         .log_file = if (log_file.len > 0) log_file else null,
         .session_config_path = resolved.path,
-        .session_tab_filter = config.filter_tab,
+        .session_tab_filter = selected_tab_filter,
     });
 }

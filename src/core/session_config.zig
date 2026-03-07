@@ -13,6 +13,12 @@ pub const SplitDir = enum {
 pub const PaneConfig = struct {
     cmd: ?[]const u8 = null,
     cwd: ?[]const u8 = null, // relative to root, resolved at apply time
+
+    pub fn deinit(self: *PaneConfig, allocator: std.mem.Allocator) void {
+        if (self.cmd) |cmd| allocator.free(cmd);
+        if (self.cwd) |cwd| allocator.free(cwd);
+        self.* = .{};
+    }
 };
 
 /// A node in the split tree: either a single pane or a split.
@@ -24,12 +30,26 @@ pub const SplitConfig = union(enum) {
         dir: SplitDir,
         children: []SplitChild,
     };
+
+    pub fn deinit(self: *SplitConfig, allocator: std.mem.Allocator) void {
+        switch (self.*) {
+            .pane => |*pane| pane.deinit(allocator),
+            .split => |*split| {
+                for (split.children) |*child| child.deinit(allocator);
+                if (split.children.len > 0) allocator.free(split.children);
+            },
+        }
+    }
 };
 
 /// A child in an N-ary split, with an optional size percentage.
 pub const SplitChild = struct {
     size: ?u8 = null, // percentage, null = equal
     node: SplitConfig,
+
+    pub fn deinit(self: *SplitChild, allocator: std.mem.Allocator) void {
+        self.node.deinit(allocator);
+    }
 };
 
 /// A float pane definition.
@@ -42,6 +62,12 @@ pub const FloatConfig = struct {
     pos_y: u8 = 50,
     title: ?[]const u8 = null,
     global: bool = false,
+
+    pub fn deinit(self: *FloatConfig, allocator: std.mem.Allocator) void {
+        if (self.cmd) |cmd| allocator.free(cmd);
+        if (self.title) |title| allocator.free(title);
+        self.* = .{};
+    }
 };
 
 /// A tab definition.
@@ -49,6 +75,18 @@ pub const TabConfig = struct {
     name: []const u8,
     split: ?SplitConfig = null, // null = single pane with default shell
     floats: []FloatConfig = &.{},
+
+    pub fn deinit(self: *TabConfig, allocator: std.mem.Allocator) void {
+        allocator.free(self.name);
+        if (self.split) |*split| split.deinit(allocator);
+        for (self.floats) |*float| float.deinit(allocator);
+        if (self.floats.len > 0) allocator.free(self.floats);
+        self.* = .{
+            .name = "",
+            .split = null,
+            .floats = &.{},
+        };
+    }
 };
 
 /// Top-level session configuration parsed from .hexe.lua.
@@ -60,6 +98,21 @@ pub const SessionConfig = struct {
     tabs: []TabConfig = &.{},
     floats: []FloatConfig = &.{}, // global floats
     filter_tab: ?[]const u8 = null, // if set, only launch this tab
+
+    pub fn deinit(self: *SessionConfig, allocator: std.mem.Allocator) void {
+        if (self.name) |name| allocator.free(name);
+        if (self.root) |root| allocator.free(root);
+        for (self.on_start) |cmd| allocator.free(cmd);
+        if (self.on_start.len > 0) allocator.free(self.on_start);
+        for (self.on_stop) |cmd| allocator.free(cmd);
+        if (self.on_stop.len > 0) allocator.free(self.on_stop);
+        for (self.tabs) |*tab| tab.deinit(allocator);
+        if (self.tabs.len > 0) allocator.free(self.tabs);
+        for (self.floats) |*float| float.deinit(allocator);
+        if (self.floats.len > 0) allocator.free(self.floats);
+        if (self.filter_tab) |filter| allocator.free(filter);
+        self.* = .{};
+    }
 };
 
 /// Get the sessions directory (~/.local/share/hexe/sessions/).

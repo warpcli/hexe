@@ -278,10 +278,11 @@ fn runLayoutOpenDetached(state: *State) void {
 }
 
 fn replaceFromLocalLayout(state: *State) void {
-    const cfg = core.session_config.parseSessionLua(state.allocator, ".hexe.lua") catch {
+    var cfg = core.session_config.parseSessionLua(state.allocator, ".hexe.lua") catch {
         state.notifications.showFor("failed to parse .hexe.lua", 1500);
         return;
     };
+    defer cfg.deinit(state.allocator);
 
     if (cfg.name) |desired_name| {
         const name_owned = state.allocator.dupe(u8, desired_name) catch null;

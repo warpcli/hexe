@@ -291,7 +291,7 @@ pub fn run(mux_args: MuxArgs) !void {
         // Launch from session config (.hexe.lua)
         debugLog("applying session config from: {s}", .{config_path});
         const session_config = core.session_config;
-        const config = session_config.parseSessionLua(allocator, config_path) catch |err| {
+        var config = session_config.parseSessionLua(allocator, config_path) catch |err| {
             if (err == error.FileNotFound) {
                 std.debug.print("Session config not found: {s}\n", .{config_path});
             } else {
@@ -303,6 +303,7 @@ pub fn run(mux_args: MuxArgs) !void {
             try loop_core.runMainLoop(&state);
             return;
         };
+        defer config.deinit(allocator);
 
         // Prefer layout-config name when provided.
         if (config.name) |loaded_name| {
