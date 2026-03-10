@@ -385,9 +385,45 @@ fn stdinCallback(
 fn cleanupDeadFloat(state: *State, index: usize) void {
     if (index >= state.floats.items.len) return;
 
+    const pane = state.floats.items[index];
     const was_active = if (state.active_floating) |af| af == index else false;
-    const exit_code = state.floats.items[index].getExitCode();
-    const pane = state.floats.orderedRemove(index);
+    const exit_code = pane.getExitCode();
+
+    if (pane.float_key != 0 and !pane.capture_output) {
+        if (pane.retained_after_exit) return;
+        pane.retained_after_exit = true;
+
+        mux.debugLog("float pane retained after exit: uuid={s} exit_code={d} focused={}", .{
+            pane.uuid[0..8],
+            exit_code,
+            was_active,
+        });
+
+        if (exit_code != 0) {
+            const msg = std.fmt.allocPrint(
+                state.allocator,
+                "Float exited with code {d}",
+                .{exit_code},
+            ) catch "Float exited unexpectedly";
+            defer if (!std.mem.eql(u8, msg, "Float exited unexpectedly")) state.allocator.free(msg);
+            state.notifications.showFor(msg, 3000);
+        }
+
+        if (was_active) {
+            state.active_floating = null;
+            state.cursor_needs_restore = true;
+            if (state.currentLayout().getFocusedPane()) |tiled| {
+                state.syncPaneFocus(tiled, pane.uuid);
+            }
+        }
+
+        state.needs_render = true;
+        state.force_full_render = true;
+        state.renderer.invalidate();
+        return;
+    }
+
+    _ = state.floats.orderedRemove(index);
 
     mux.debugLog("float pane died: uuid={s} exit_code={d} focused={}", .{ pane.uuid[0..8], exit_code, was_active });
 

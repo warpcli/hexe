@@ -330,7 +330,7 @@ if section == nil or section == "shp" then
       name = "distro",
       priority = 10,
       value = function(_)
-        local p = io.popen("/env/dot/.func/shell/distrologo")
+        local p = io.popen("~/.config/profile/functions/shell/distrologo")
         if not p then
           return nil
         end

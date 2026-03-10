@@ -360,6 +360,7 @@ fn redirectStderrToLog(log_path: []const u8) void {
 /// Write buffer capacity for non-blocking PTY writes.
 /// Large enough to absorb typical clipboard pastes without dropping data.
 const PTY_WRITE_BUF_CAP: usize = 256 * 1024;
+const POD_EXIT_ATTACH_GRACE_MS: i64 = 300;
 
 const Pod = struct {
     allocator: std.mem.Allocator,
@@ -382,6 +383,7 @@ const Pod = struct {
     // OSC 7 CWD tracking
     osc7_scanner: Osc7Scanner = .{},
     osc7_cwd: ?[]u8 = null,
+    vt_client_ever_attached: bool = false,
 
     const RunOptions = struct {
         write_meta: bool,
@@ -469,6 +471,7 @@ const Pod = struct {
 
         var should_stop = false;
         var callback_error: ?anyerror = null;
+        var exit_grace_deadline_ms: ?i64 = null;
         var pty_armed = false;
         var client_completion_0: xev.Completion = .{};
         var client_completion_1: xev.Completion = .{};
@@ -523,15 +526,27 @@ const Pod = struct {
         ticker.run(&loop, &timer_completion, 100, TimerContext, &timer_ctx, timerCallback);
 
         while (true) {
-            // Exit if the child shell/process exited.
-            if (self.pty.pollStatus() != null) break;
+            var waiting_for_initial_vt_attach = false;
+            if (self.pty.pollStatus() != null) {
+                self.flushRemainingPtyOutput(buf);
+                if (self.client != null or self.vt_client_ever_attached) {
+                    break;
+                }
+                if (exit_grace_deadline_ms == null) {
+                    exit_grace_deadline_ms = std.time.milliTimestamp() + POD_EXIT_ATTACH_GRACE_MS;
+                }
+                if (std.time.milliTimestamp() >= exit_grace_deadline_ms.?) {
+                    break;
+                }
+                waiting_for_initial_vt_attach = true;
+            }
 
-            if (should_stop) break;
+            if (should_stop and !waiting_for_initial_vt_attach) break;
             if (callback_error) |err| return err;
 
             try loop.run(.once);
 
-            if (should_stop) break;
+            if (should_stop and !waiting_for_initial_vt_attach) break;
             if (callback_error) |err| return err;
         }
     }
@@ -799,22 +814,7 @@ const Pod = struct {
             return .disarm;
         }
 
-        const data = pty_ctx.io_buf[0..n];
-        pty_ctx.pod.scanOsc7(data);
-        if (containsClearSeq(data)) {
-            pty_ctx.pod.backlog.clear();
-        }
-        pty_ctx.pod.backlog.append(data);
-        if (pty_ctx.pod.client) |*client| {
-            pod_protocol.writeFrame(client, .output, data) catch {
-                debugLog("ptyCallback: writeFrame FAILED, closing client fd={d}", .{client.fd});
-                client.close();
-                pty_ctx.pod.client = null;
-            };
-        } else if (pty_ctx.pod.observers.items.len == 0) {
-            debugLog("ptyCallback: no client, data goes to backlog only ({d} bytes)", .{data.len});
-        }
-        pty_ctx.pod.broadcastToObservers(data);
+        pty_ctx.pod.processPtyOutput(pty_ctx.io_buf[0..n]);
 
         return .rearm;
     }
@@ -1038,6 +1038,38 @@ const Pod = struct {
         }
     }
 
+    fn processPtyOutput(self: *Pod, data: []const u8) void {
+        self.scanOsc7(data);
+        if (containsClearSeq(data)) {
+            self.backlog.clear();
+        }
+        self.backlog.append(data);
+        if (self.client) |*client| {
+            pod_protocol.writeFrame(client, .output, data) catch {
+                debugLog("processPtyOutput: writeFrame FAILED, closing client fd={d}", .{client.fd});
+                client.close();
+                self.client = null;
+            };
+        } else if (self.observers.items.len == 0) {
+            debugLog("processPtyOutput: no client, data goes to backlog only ({d} bytes)", .{data.len});
+        }
+        self.broadcastToObservers(data);
+    }
+
+    fn flushRemainingPtyOutput(self: *Pod, io_buf: []u8) void {
+        while (true) {
+            const n = self.pty.read(io_buf) catch |err| switch (err) {
+                error.WouldBlock => return,
+                else => {
+                    debugLog("flushRemainingPtyOutput: read error: {s}", .{@errorName(err)});
+                    return;
+                },
+            };
+            if (n == 0) return;
+            self.processPtyOutput(io_buf[0..n]);
+        }
+    }
+
     fn handleFrame(self: *Pod, frame: pod_protocol.Frame) void {
         switch (frame.frame_type) {
             .input => {
@@ -1071,6 +1103,7 @@ const Pod = struct {
             self.client = null;
             return;
         };
+        self.vt_client_ever_attached = true;
         self.reader.reset();
 
         // Replay backlog.

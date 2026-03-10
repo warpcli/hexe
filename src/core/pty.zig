@@ -140,11 +140,15 @@ pub const Pty = struct {
             if (has_spaces) {
                 const cmd_z = std.heap.c_allocator.dupeZ(u8, shell) catch posix.exit(1);
                 var argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null };
-                posix.execvpeZ("/bin/sh", &argv, envp) catch posix.exit(1);
+                const err = posix.execvpeZ("/bin/sh", &argv, envp);
+                writeExecFailure(shell, err);
+                posix.exit(execFailureExitCode(err));
             } else {
                 const shell_z = std.heap.c_allocator.dupeZ(u8, shell) catch posix.exit(1);
                 var argv = [_:null]?[*:0]const u8{ shell_z, null };
-                posix.execvpeZ(shell_z, &argv, envp) catch posix.exit(1);
+                const err = posix.execvpeZ(shell_z, &argv, envp);
+                writeExecFailure(shell, err);
+                posix.exit(execFailureExitCode(err));
             }
             unreachable;
         }
@@ -190,6 +194,29 @@ pub const Pty = struct {
             if (std.mem.eql(u8, kv[0], "HEXE_PANE_UUID")) return kv[1];
         }
         return null;
+    }
+
+    fn execFailureExitCode(err: anyerror) u8 {
+        return switch (err) {
+            error.FileNotFound => 127,
+            error.AccessDenied, error.PermissionDenied, error.InvalidExe => 126,
+            else => 126,
+        };
+    }
+
+    fn execFailureReason(err: anyerror) []const u8 {
+        return switch (err) {
+            error.FileNotFound => "command not found",
+            error.AccessDenied, error.PermissionDenied => "permission denied",
+            error.InvalidExe => "not executable",
+            else => @errorName(err),
+        };
+    }
+
+    fn writeExecFailure(command: []const u8, err: anyerror) void {
+        var buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "hexe: {s}: {s}\r\n", .{ command, execFailureReason(err) }) catch return;
+        _ = posix.write(posix.STDERR_FILENO, msg) catch {};
     }
 
     fn buildEnv(extra_env: ?[]const [2][]const u8) ![*:null]const ?[*:0]const u8 {

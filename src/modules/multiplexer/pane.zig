@@ -89,6 +89,12 @@ pub const Pane = struct {
     ses_cwd: ?[]const u8 = null,
     // Exit status for local panes (set when process exits)
     exit_status: ?u32 = null,
+    // Named floats keep their last frame after exit so the same toggle can hide
+    // them cleanly and the next toggle can recreate them.
+    retained_after_exit: bool = false,
+    // Recovery hack for default shell panes only. Explicit command panes
+    // must trust VT cursor visibility so TUIs can hide the cursor correctly.
+    force_cursor_visible_when_child_fg: bool = false,
     // Capture raw output for blocking floats
     capture_output: bool = false,
     captured_output: std.ArrayList(u8) = .empty,
@@ -195,6 +201,7 @@ pub const Pane = struct {
         extra_env: ?[]const []const u8,
     ) !void {
         self.* = .{ .allocator = allocator, .id = id, .x = x, .y = y, .width = width, .height = height };
+        self.force_cursor_visible_when_child_fg = command == null;
 
         // Generate UUID first so we can pass it to the spawned process
         self.uuid = core.ipc.generateUuid();
@@ -318,6 +325,7 @@ pub const Pane = struct {
 
         self.uuid = uuid;
         self.backend = .{ .pod = .{ .pane_id = pane_id, .vt_fd = vt_fd } };
+        self.force_cursor_visible_when_child_fg = false;
 
         // Reset VT state (will be reconstructed from pod backlog replay).
         self.vt.deinit();
@@ -348,6 +356,7 @@ pub const Pane = struct {
                 errdefer new_pty.close();
                 try new_pty.setSize(self.width, self.height);
                 self.backend = .{ .local = new_pty };
+                self.force_cursor_visible_when_child_fg = true;
 
                 self.osc_buf.deinit(self.allocator);
                 self.osc_buf = .empty;
@@ -506,15 +515,19 @@ pub const Pane = struct {
         return self.vt.getCursorStyle();
     }
 
+    fn shouldForceCursorVisibleForLocalChild(force_cursor_visible_when_child_fg: bool, child_pid: posix.pid_t, fg_pid: ?posix.pid_t) bool {
+        return force_cursor_visible_when_child_fg and fg_pid != null and fg_pid.? == child_pid;
+    }
+
     /// Check if cursor should be visible.
-    /// For local panes, if the shell is in foreground (no app running),
-    /// always show cursor regardless of VT state (apps may not restore it on exit).
+    /// For default local shell panes, if the shell is in foreground (no app
+    /// running), always show cursor regardless of VT state so a misbehaving app
+    /// can't strand the shell with a hidden cursor.
     pub fn isCursorVisible(self: *Pane) bool {
         if (self.backend == .local) {
             const pty = self.backend.local;
             const fg_pid = self.getFgPid();
-            // If foreground process is the shell itself, always show cursor
-            if (fg_pid != null and fg_pid.? == pty.child_pid) {
+            if (shouldForceCursorVisibleForLocalChild(self.force_cursor_visible_when_child_fg, pty.child_pid, fg_pid)) {
                 return true;
             }
         }
@@ -681,3 +694,16 @@ pub const Pane = struct {
         }
     }
 };
+
+test "explicit command panes do not force cursor visible when child stays foreground" {
+    try std.testing.expect(!Pane.shouldForceCursorVisibleForLocalChild(false, 1234, 1234));
+}
+
+test "default shell panes force cursor visible when shell is foreground" {
+    try std.testing.expect(Pane.shouldForceCursorVisibleForLocalChild(true, 1234, 1234));
+}
+
+test "cursor visibility override requires a foreground pid match" {
+    try std.testing.expect(!Pane.shouldForceCursorVisibleForLocalChild(true, 1234, null));
+    try std.testing.expect(!Pane.shouldForceCursorVisibleForLocalChild(true, 1234, 5678));
+}

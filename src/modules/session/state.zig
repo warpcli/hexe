@@ -1247,8 +1247,12 @@ pub const SesState = struct {
         try self.panes.put(uuid, pane);
         self.dirty = true;
 
-        // Connect VT channel (③) to POD — best-effort.
-        _ = self.connectPodVt(uuid, pod_socket_path, pane_id);
+        // Connect VT channel (③) to POD. If this fails, the pod either died
+        // before VT attach or never became usable, so tear it down now.
+        if (!self.connectPodVt(uuid, pod_socket_path, pane_id)) {
+            self.killPane(uuid) catch {};
+            return error.PodVtAttachFailed;
+        }
 
         // Add to client's pane list
         if (self.getClient(client_id)) |client| {

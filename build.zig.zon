@@ -23,8 +23,8 @@
             .hash = "zlua-0.1.0-hGRpCww-BQCx3cX6zbKWfTgOx6B7Peo4P17RK2hm7-xV",
         },
         .libvoid = .{
-            .url = "git+https://github.com/bresilla/libvoid#0.0.11",
-            .hash = "libvoid-0.0.11-gWw8RXaGBQDtudLae9j3ixad0ZS13KLmrK-lDAdOcuGo",
+            .url = "git+https://github.com/libzig/libvoid#0.0.12",
+            .hash = "libvoid-0.0.12-gWw8RXaGBQBbIZ3cq9aTXUO1Hox72eROxl4JM5azndna",
         },
         .libvaxis = .{
             .url = "git+https://github.com/rockorager/libvaxis#67bbc1ee072aa390838c66caf4ed47edee282dc4",
@@ -35,8 +35,8 @@
             .hash = "yazap-0.6.3-Z1t-EmrzAQA-8vFR-JGpI7vCSpHv5_6z6PAIDq2X4PoH",
         },
         .liblink = .{
-            .url = "git+https://github.com/bresilla/liblink#0.0.7",
-            .hash = "liblink-0.0.7-ZagJAh8sCwDq2iLxLqi8KsxyweuNTI_L7-KAWgQEWPGV",
+            .url = "git+https://github.com/libzig/liblink#0.0.13",
+            .hash = "liblink-0.0.13-gQe8cxyDCwCS346uD6q8CCpd6RHyMNhVT0od7Z1jQzsg",
         },
     },
     .fingerprint = 0x4c99ab0b473f252d,

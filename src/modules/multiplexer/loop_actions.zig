@@ -595,6 +595,13 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 else => false,
             };
             if (!pane.isAlive() or missing_in_ses) {
+                const was_visible_on_tab = pane.isVisibleOnTab(state.active_tab);
+                const was_active = if (state.active_floating) |af| af == existing_idx else false;
+                const old_uuid = state.getCurrentFocusedUuid();
+                if (was_active) {
+                    state.syncPaneUnfocus(pane);
+                }
+
                 const stale = state.floats.orderedRemove(existing_idx);
                 stale.deinit();
                 state.allocator.destroy(stale);
@@ -607,10 +614,24 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                     }
                 }
 
+                if (was_active) {
+                    state.active_floating = null;
+                    state.cursor_needs_restore = true;
+                    if (state.currentLayout().getFocusedPane()) |tiled| {
+                        state.syncPaneFocus(tiled, old_uuid);
+                    }
+                }
+
                 state.syncStateToSes();
                 state.needs_render = true;
                 state.force_full_render = true;
                 state.renderer.invalidate();
+
+                // A visible stale float should clear on toggle; only hidden stale
+                // instances fall through to immediate recreation.
+                if (was_active or was_visible_on_tab) {
+                    return;
+                }
                 continue;
             }
 
