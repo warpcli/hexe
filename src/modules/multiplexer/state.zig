@@ -202,7 +202,14 @@ pub const State = struct {
     last_scroll_key: u8 = 0, // 5=pageup, 6=pagedown
     last_scroll_time_ms: i64 = 0,
 
-    pub fn init(allocator: std.mem.Allocator, width: u16, height: u16, debug: bool, log_file: ?[]const u8) !State {
+    pub fn init(
+        allocator: std.mem.Allocator,
+        width: u16,
+        height: u16,
+        debug: bool,
+        log_file: ?[]const u8,
+        transport: core.FrontendTransport,
+    ) !State {
         const cfg = core.Config.load(allocator);
         const pop_cfg = pop.PopConfig.load(allocator);
         const ses_cfg = core.SesConfig.load(allocator);
@@ -269,7 +276,7 @@ pub const State = struct {
             .layout_width = width,
             .layout_height = layout_h,
             .renderer = try Renderer.init(allocator, width, height),
-            .ses_client = SesClient.initLocalIpc(allocator, uuid, session_name, true, debug, log_file, .terminal),
+            .ses_client = SesClient.initWithTransport(allocator, uuid, session_name, true, debug, log_file, .terminal, transport),
             .notifications = NotificationManager.initWithConfig(allocator, pop_cfg.carrier.notification),
             .overlays = OverlayManager.initWithConfig(allocator, pop_cfg.widgets.keycast),
             .popups = pop.PopupManager.init(allocator),

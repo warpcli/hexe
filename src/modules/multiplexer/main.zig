@@ -9,6 +9,7 @@ const c = @cImport({
 
 const SesClient = core.FrontendClient;
 const FrontendAttach = core.FrontendAttach;
+const FrontendTransport = core.FrontendTransport;
 const DetachedSessionInfo = core.FrontendDetachedSessionInfo;
 const OrphanedPaneInfo = core.FrontendOrphanedPaneInfo;
 
@@ -77,6 +78,7 @@ pub const MuxArgs = struct {
     log_file: ?[]const u8 = null,
     session_config_path: ?[]const u8 = null,
     session_tab_filter: ?[]const u8 = null,
+    transport: FrontendTransport = .{ .local_ipc = .{} },
 };
 
 /// Entry point for mux - can be called directly from unified CLI.
@@ -93,7 +95,7 @@ pub fn run(mux_args: MuxArgs) !void {
     if (mux_args.list) {
         const tmp_uuid = core.ipc.generateUuid();
         const tmp_name = core.ipc.generateSessionName();
-        var ses = SesClient.initLocalIpc(allocator, tmp_uuid, tmp_name, false, false, null, .terminal); // keepalive=false for temp connection
+        var ses = SesClient.initWithTransport(allocator, tmp_uuid, tmp_name, false, false, null, .terminal, mux_args.transport); // keepalive=false for temp connection
         defer ses.deinit();
         ses.connect() catch {
             std.debug.print("Could not connect to ses daemon\n", .{});
@@ -194,7 +196,7 @@ pub fn run(mux_args: MuxArgs) !void {
     const size = terminal.getTermSize();
 
     // Initialize state.
-    var state = try State.init(allocator, size.cols, size.rows, mux_args.debug, mux_args.log_file);
+    var state = try State.init(allocator, size.cols, size.rows, mux_args.debug, mux_args.log_file, mux_args.transport);
     defer {
         statusbar.deinitThreadlocals();
         state.deinit();
@@ -352,6 +354,21 @@ pub fn main() !void {
         } else if ((std.mem.eql(u8, arg, "--logfile") or std.mem.eql(u8, arg, "-L")) and i + 1 < args.len) {
             i += 1;
             mux_args.log_file = args[i];
+        } else if (std.mem.eql(u8, arg, "--no-autostart-ses")) {
+            mux_args.transport = .{ .local_ipc = .{
+                .autostart_ses = false,
+                .socket_path = switch (mux_args.transport) {
+                    .local_ipc => |transport| transport.socket_path,
+                },
+            } };
+        } else if (std.mem.eql(u8, arg, "--ses-socket") and i + 1 < args.len) {
+            i += 1;
+            mux_args.transport = .{ .local_ipc = .{
+                .autostart_ses = switch (mux_args.transport) {
+                    .local_ipc => |transport| transport.autostart_ses,
+                },
+                .socket_path = args[i],
+            } };
         }
     }
 

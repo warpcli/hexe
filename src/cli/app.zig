@@ -323,6 +323,8 @@ pub fn main() !void {
     try mux_new.addArg(Arg.singleValueOption("name", 'n', null));
     try mux_new.addArg(Arg.booleanOption("debug", 'd', null));
     try mux_new.addArg(Arg.singleValueOption("logfile", 'L', null));
+    try mux_new.addArg(Arg.singleValueOption("ses-socket", null, null));
+    try mux_new.addArg(Arg.booleanOption("no-autostart-ses", null, null));
     try mux_new.addArg(Arg.singleValueOption("instance", 'I', null));
     try mux_new.addArg(Arg.booleanOption("test-only", 'T', null));
 
@@ -330,6 +332,8 @@ pub fn main() !void {
     try mux_attach.addArg(Arg.positional("name", null, null));
     try mux_attach.addArg(Arg.booleanOption("debug", 'd', null));
     try mux_attach.addArg(Arg.singleValueOption("logfile", 'L', null));
+    try mux_attach.addArg(Arg.singleValueOption("ses-socket", null, null));
+    try mux_attach.addArg(Arg.booleanOption("no-autostart-ses", null, null));
     try mux_attach.addArg(Arg.singleValueOption("instance", 'I', null));
 
     var mux_record = app.createCommand("record", "Attach to mux and record asciicast");
@@ -522,7 +526,7 @@ pub fn main() !void {
             }
         }
 
-        try runMuxNew("", false, "");
+        try runMuxNew("", false, "", "", false);
         return;
     }
 
@@ -722,13 +726,25 @@ pub fn main() !void {
             } else if (m.containsArg("test-only")) {
                 setGeneratedTestInstance();
             }
-            try runMuxNew(m.getSingleValue("name") orelse "", m.containsArg("debug"), m.getSingleValue("logfile") orelse "");
+            try runMuxNew(
+                m.getSingleValue("name") orelse "",
+                m.containsArg("debug"),
+                m.getSingleValue("logfile") orelse "",
+                m.getSingleValue("ses-socket") orelse "",
+                m.containsArg("no-autostart-ses"),
+            );
             return;
         }
         if (mux_matches.subcommandMatches("attach")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
-            try runMuxAttach(m.getSingleValue("name") orelse "", m.containsArg("debug"), m.getSingleValue("logfile") orelse "");
+            try runMuxAttach(
+                m.getSingleValue("name") orelse "",
+                m.containsArg("debug"),
+                m.getSingleValue("logfile") orelse "",
+                m.getSingleValue("ses-socket") orelse "",
+                m.containsArg("no-autostart-ses"),
+            );
             return;
         }
         if (mux_matches.subcommandMatches("record")) |m| {
@@ -1041,7 +1057,14 @@ fn askUseLocalLayout() bool {
     return false;
 }
 
-fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8) !void {
+fn buildMuxTransport(socket_path: []const u8, no_autostart_ses: bool) core.FrontendTransport {
+    return .{ .local_ipc = .{
+        .autostart_ses = !no_autostart_ses,
+        .socket_path = if (socket_path.len > 0) socket_path else null,
+    } };
+}
+
+fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
     if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
         if (pane_uuid.len >= 32) {
             if (!try showNestedMuxConfirmation(pane_uuid)) {
@@ -1054,15 +1077,17 @@ fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8) !void {
         .name = if (name.len > 0) name else null,
         .debug = debug,
         .log_file = if (log_file.len > 0) log_file else null,
+        .transport = buildMuxTransport(socket_path, no_autostart_ses),
     });
 }
 
-fn runMuxAttach(name: []const u8, debug: bool, log_file: []const u8) !void {
+fn runMuxAttach(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
     if (name.len > 0) {
         try mux.run(.{
             .attach = name,
             .debug = debug,
             .log_file = if (log_file.len > 0) log_file else null,
+            .transport = buildMuxTransport(socket_path, no_autostart_ses),
         });
     } else {
         print("Error: session name required\n", .{});

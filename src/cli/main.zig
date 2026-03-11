@@ -175,6 +175,8 @@ pub fn main() !void {
     const mux_new_name = try mux_new.string("n", "name", null);
     const mux_new_dbg = try mux_new.flag("d", "debug", null);
     const mux_new_log = try mux_new.string("L", "logfile", null);
+    const mux_new_ses_socket = try mux_new.string("", "ses-socket", null);
+    const mux_new_no_autostart = try mux_new.flag("", "no-autostart-ses", null);
     const mux_new_instance = try mux_new.string("I", "instance", null);
     const mux_new_test_only = try mux_new.flag("T", "test-only", null);
 
@@ -182,6 +184,8 @@ pub fn main() !void {
     const mux_attach_name = try mux_attach.stringPositional(null);
     const mux_attach_dbg = try mux_attach.flag("d", "debug", null);
     const mux_attach_log = try mux_attach.string("L", "logfile", null);
+    const mux_attach_ses_socket = try mux_attach.string("", "ses-socket", null);
+    const mux_attach_no_autostart = try mux_attach.flag("", "no-autostart-ses", null);
     const mux_attach_instance = try mux_attach.string("I", "instance", null);
 
     const mux_float = try mux_cmd.newCommand("float", "Spawn a transient float pane");
@@ -411,9 +415,9 @@ pub fn main() !void {
         } else if (found_pod and found_gc) {
             print("Usage: hexe pod gc [--dry-run]\n\nDelete stale pod-*.meta and broken pod@*.sock aliases.\n\nOptions:\n  -n, --dry-run            Only print what would be deleted\n", .{});
         } else if (found_mux and found_new) {
-            print("Usage: hexe mux new [OPTIONS]\n\nCreate new multiplexer session\n\nOptions:\n  -n, --name <NAME>        Session name\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n  -I, --instance <NAME>    Use instance namespace\n  -T, --test-only          Create an isolated test instance\n", .{});
+            print("Usage: hexe mux new [OPTIONS]\n\nCreate new multiplexer session\n\nOptions:\n  -n, --name <NAME>        Session name\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n      --ses-socket <PATH>  Connect to an explicit ses socket\n      --no-autostart-ses   Fail instead of starting ses automatically\n  -I, --instance <NAME>    Use instance namespace\n  -T, --test-only          Create an isolated test instance\n", .{});
         } else if (found_mux and found_attach) {
-            print("Usage: hexe mux attach [OPTIONS] <name>\n\nAttach to existing session by name or UUID prefix\n\nOptions:\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n  -I, --instance <NAME>    Target a specific instance\n", .{});
+            print("Usage: hexe mux attach [OPTIONS] <name>\n\nAttach to existing session by name or UUID prefix\n\nOptions:\n  -d, --debug              Enable debug output\n  -L, --logfile <PATH>     Log debug output to PATH\n      --ses-socket <PATH>  Connect to an explicit ses socket\n      --no-autostart-ses   Fail instead of starting ses automatically\n  -I, --instance <NAME>    Target a specific instance\n", .{});
         } else if (found_mux and found_float) {
             print("Usage: hexe mux float [OPTIONS]\n\nSpawn a transient float pane (blocking)\n\nOptions:\n  -c, --command <COMMAND>       Command to run in the float\n      --title <TEXT>            Border title for the float\n      --cwd <PATH>              Working directory for the float\n      --result-file <PATH>      Read selection from PATH after exit\n      --pass-env                Send current environment to the pod\n      --extra-env <KEY=VAL,..>   Extra environment variables (comma-separated)\n      --isolated                Run command with filesystem/cgroup isolation (deprecated, use --isolation)\n      --isolation <PROFILE>     Isolation profile: none, minimal, default, balanced, sandbox, full\n      --size <W,H,X,Y>          Size and position: width%,height%,shift_x,shift_y\n      --focus                   Dim background to focus on the float\n      --key <KEY>               Exit key to close float (default: Esc)\n                                Format: Esc, C-q (Ctrl+Q), A-q (Alt+Q), C-A-q\n  -I, --instance <NAME>         Target a specific instance\n", .{});
         } else if (found_shp and found_prompt) {
@@ -457,7 +461,7 @@ pub fn main() !void {
         if (err == error.SubCommandRequired) {
             // Default to 'hexe mux new' if no arguments given
             if (args.len == 1) {
-                try runMuxNew("", false, "");
+                try runMuxNew("", false, "", "", false);
                 return;
             }
             // Show help for the deepest command that happened
@@ -615,10 +619,10 @@ pub fn main() !void {
                 // Always isolate test sessions, even if HEXE_INSTANCE is set in the environment.
                 setGeneratedTestInstance();
             }
-            try runMuxNew(mux_new_name.*, mux_new_dbg.*, mux_new_log.*);
+            try runMuxNew(mux_new_name.*, mux_new_dbg.*, mux_new_log.*, mux_new_ses_socket.*, mux_new_no_autostart.*);
         } else if (mux_attach.happened) {
             if (mux_attach_instance.*.len > 0) setInstanceFromCli(mux_attach_instance.*);
-            try runMuxAttach(mux_attach_name.*, mux_attach_dbg.*, mux_attach_log.*);
+            try runMuxAttach(mux_attach_name.*, mux_attach_dbg.*, mux_attach_log.*, mux_attach_ses_socket.*, mux_attach_no_autostart.*);
         } else if (mux_float.happened) {
             if (mux_float_instance.*.len > 0) setInstanceFromCli(mux_float_instance.*);
             const exit_key = if (mux_float_exit_key.*.len > 0) mux_float_exit_key.* else "Esc";
@@ -827,7 +831,14 @@ fn showNestedMuxConfirmation(pane_uuid: []const u8) !bool {
     return resp.response_type == 1;
 }
 
-fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8) !void {
+fn buildMuxTransport(socket_path: []const u8, no_autostart_ses: bool) core.FrontendTransport {
+    return .{ .local_ipc = .{
+        .autostart_ses = !no_autostart_ses,
+        .socket_path = if (socket_path.len > 0) socket_path else null,
+    } };
+}
+
+fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
     // Check if we're already inside a mux (nested session)
     if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
         if (pane_uuid.len >= 32) {
@@ -844,16 +855,18 @@ fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8) !void {
         .name = if (name.len > 0) name else null,
         .debug = debug,
         .log_file = if (log_file.len > 0) log_file else null,
+        .transport = buildMuxTransport(socket_path, no_autostart_ses),
     });
 }
 
-fn runMuxAttach(name: []const u8, debug: bool, log_file: []const u8) !void {
+fn runMuxAttach(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
     if (name.len > 0) {
         // Call mux run() directly with attach option
         try mux.run(.{
             .attach = name,
             .debug = debug,
             .log_file = if (log_file.len > 0) log_file else null,
+            .transport = buildMuxTransport(socket_path, no_autostart_ses),
         });
     } else {
         print("Error: session name required\n", .{});
