@@ -54,11 +54,12 @@ pub fn applySessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]c
         return;
     }
 
-    // Set active tab to first
     self.active_tab = 0;
-
-    // Sync state to SES
-    self.syncStateToSes();
+    if (self.tabs.items.len > 0) {
+        if (self.tabs.items[0].layout.getFocusedPane()) |pane| {
+            self.syncPaneFocus(pane, null);
+        }
+    }
     self.renderer.invalidate();
     self.force_full_render = true;
 }
@@ -116,6 +117,12 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     try self.tabs.append(self.allocator, tab);
     try self.tab_last_floating_uuid.append(self.allocator, null);
     try self.tab_last_focus_kind.append(self.allocator, .split);
+
+    self.active_tab = self.tabs.items.len - 1;
+    const created_tab = &self.tabs.items[self.active_tab];
+    const focused = created_tab.layout.getFocusedPane() orelse return error.InvalidLayout;
+    self.syncSessionTabAdded(created_tab.uuid, created_tab.name, focused.uuid);
+    self.syncActiveTabLayout();
 }
 
 fn buildSplitTree(self: anytype, layout: *Layout, split_config: SplitConfig) !void {
@@ -190,23 +197,11 @@ fn collectLeafPanes(self: anytype, layout: *Layout, config: SplitConfig, panes: 
             const pane = try self.allocator.create(Pane);
             errdefer self.allocator.destroy(pane);
 
-            if (layout.ses_client) |ses| {
-                if (ses.isConnected()) {
-                    if (ses.createPane(null, cwd, null, null, null, null, null)) |result| {
-                        if (ses.getVtFd()) |vt_fd| {
-                            try pane.initWithPod(self.allocator, id, 0, 0, layout.width, layout.height, result.pane_id, vt_fd, result.uuid);
-                        } else {
-                            try pane.init(self.allocator, id, 0, 0, layout.width, layout.height);
-                        }
-                    } else |_| {
-                        try pane.init(self.allocator, id, 0, 0, layout.width, layout.height);
-                    }
-                } else {
-                    try pane.init(self.allocator, id, 0, 0, layout.width, layout.height);
-                }
-            } else {
-                try pane.init(self.allocator, id, 0, 0, layout.width, layout.height);
-            }
+            const ses = layout.ses_client orelse return error.SesUnavailable;
+            if (!ses.isConnected()) return error.SesUnavailable;
+            const result = try ses.createPane(null, cwd, null, null, null, null, null);
+            const vt_fd = ses.getVtFd() orelse return error.SesUnavailable;
+            try pane.initWithPod(self.allocator, id, 0, 0, layout.width, layout.height, result.pane_id, vt_fd, result.uuid);
 
             layout.configurePaneNotifications(pane);
             try layout.splits.put(id, pane);

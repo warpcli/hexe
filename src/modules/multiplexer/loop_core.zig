@@ -14,7 +14,6 @@ const helpers = @import("helpers.zig");
 const mux = @import("main.zig");
 const loop_input = @import("loop_input.zig");
 const loop_ipc = @import("loop_ipc.zig");
-const loop_local_watchers = @import("loop_local_watchers.zig");
 const loop_mouse = @import("loop_mouse.zig");
 const loop_render = @import("loop_render.zig");
 const float_completion = @import("float_completion.zig");
@@ -86,13 +85,8 @@ fn applyDeferredPaneExits(state: *State) void {
 
     for (pending.items) |uuid| {
         if (state.findPaneByUuid(uuid)) |pane| {
-            switch (pane.backend) {
-                .pod => |*pod| {
-                    pod.dead = true;
-                    state.needs_render = true;
-                },
-                else => {},
-            }
+            pane.backend.pod.dead = true;
+            state.needs_render = true;
         }
     }
 }
@@ -515,7 +509,6 @@ pub fn runMainLoop(state: *State) !void {
         tty_restore.interface.flush() catch {};
     }
 
-    var buffer: [1024 * 1024]u8 = undefined; // Larger buffer for efficiency
     var ses_vt_buffer: [1024 * 1024]u8 = undefined;
     var ses_ctl_buffer: [1024 * 1024]u8 = undefined;
     var stdin_buffer: [64 * 1024]u8 = undefined;
@@ -523,33 +516,6 @@ pub fn runMainLoop(state: *State) !void {
     var ses_vt_watcher: SesVtWatcher = .{ .loop = &loop };
     var ses_ctl_watcher: SesCtlWatcher = .{ .loop = &loop };
     var stdin_watcher: StdinWatcher = .{ .loop = &loop };
-    var local_pane_watchers: std.AutoHashMap(posix.fd_t, *loop_local_watchers.LocalPaneWatcher) = std.AutoHashMap(posix.fd_t, *loop_local_watchers.LocalPaneWatcher).init(allocator);
-    defer {
-        var it = local_pane_watchers.iterator();
-        while (it.next()) |entry| {
-            allocator.destroy(entry.value_ptr.*);
-        }
-        local_pane_watchers.deinit();
-    }
-    var pending_local_pane_remove_fds: std.ArrayList(loop_local_watchers.PendingLocalRemove) = .empty;
-    defer pending_local_pane_remove_fds.deinit(allocator);
-    var pending_dead_splits: std.ArrayList(u16) = .empty;
-    defer pending_dead_splits.deinit(allocator);
-
-    var float_pane_watchers: std.AutoHashMap(posix.fd_t, *loop_local_watchers.FloatPaneWatcher) = std.AutoHashMap(posix.fd_t, *loop_local_watchers.FloatPaneWatcher).init(allocator);
-    defer {
-        var it2 = float_pane_watchers.iterator();
-        while (it2.next()) |entry| {
-            allocator.destroy(entry.value_ptr.*);
-        }
-        float_pane_watchers.deinit();
-    }
-    var pending_float_remove_fds: std.ArrayList(loop_local_watchers.PendingFloatRemove) = .empty;
-    defer pending_float_remove_fds.deinit(allocator);
-    var pending_dead_float_uuids: std.ArrayList([32]u8) = .empty;
-    defer pending_dead_float_uuids.deinit(allocator);
-    var next_local_generation: u64 = 1;
-    var next_float_generation: u64 = 1;
 
     // Frame timing.
     var last_render: i64 = std.time.milliTimestamp();
@@ -575,8 +541,6 @@ pub fn runMainLoop(state: *State) !void {
     // Reusable lists for dead pane tracking (avoid per-iteration allocations).
     var dead_splits: std.ArrayList(u16) = .empty;
     defer dead_splits.deinit(allocator);
-    var dead_floating: std.ArrayList(usize) = .empty;
-    defer dead_floating.deinit(allocator);
 
     // Main loop.
     while (state.running) {
@@ -585,79 +549,6 @@ pub fn runMainLoop(state: *State) !void {
         ensureSesVtWatcherArmed(state, &ses_vt_watcher, &ses_vt_buffer);
         ensureSesCtlWatcherArmed(state, &ses_ctl_watcher, &ses_ctl_buffer);
         ensureStdinWatcherArmed(state, &stdin_watcher, &stdin_buffer);
-
-        for (pending_local_pane_remove_fds.items) |pending| {
-            if (local_pane_watchers.get(pending.fd)) |node| {
-                if (node.slot.generation == pending.generation) {
-                    if (local_pane_watchers.fetchRemove(pending.fd)) |kv| {
-                        allocator.destroy(kv.value);
-                    }
-                }
-            }
-        }
-        pending_local_pane_remove_fds.clearRetainingCapacity();
-
-        var local_it = state.currentLayout().splitIterator();
-        while (local_it.next()) |pane| {
-            if (!pane.*.hasPollableFd()) continue;
-            const fd = pane.*.getFd();
-            if (!local_pane_watchers.contains(fd)) {
-                const node = allocator.create(loop_local_watchers.LocalPaneWatcher) catch continue;
-                node.* = .{
-                    .slot = .{
-                        .state = state,
-                        .fd = fd,
-                        .generation = next_local_generation,
-                        .buffer = &buffer,
-                        .pending_dead_splits = &pending_dead_splits,
-                        .pending_remove_fds = &pending_local_pane_remove_fds,
-                    },
-                };
-                next_local_generation += 1;
-                local_pane_watchers.put(fd, node) catch {
-                    allocator.destroy(node);
-                    continue;
-                };
-                const file = xev.File.initFd(fd);
-                file.poll(&loop, &node.completion, .read, loop_local_watchers.LocalPaneSlot, &node.slot, loop_local_watchers.localPaneCallback);
-            }
-        }
-
-        for (pending_float_remove_fds.items) |pending| {
-            if (float_pane_watchers.get(pending.fd)) |node| {
-                if (node.slot.generation == pending.generation) {
-                    if (float_pane_watchers.fetchRemove(pending.fd)) |kv| {
-                        allocator.destroy(kv.value);
-                    }
-                }
-            }
-        }
-        pending_float_remove_fds.clearRetainingCapacity();
-
-        for (state.floats.items) |pane| {
-            if (!pane.hasPollableFd()) continue;
-            const fd = pane.getFd();
-            if (!float_pane_watchers.contains(fd)) {
-                const node = allocator.create(loop_local_watchers.FloatPaneWatcher) catch continue;
-                node.* = .{
-                    .slot = .{
-                        .state = state,
-                        .fd = fd,
-                        .generation = next_float_generation,
-                        .buffer = &buffer,
-                        .pending_dead_float_uuids = &pending_dead_float_uuids,
-                        .pending_remove_fds = &pending_float_remove_fds,
-                    },
-                };
-                next_float_generation += 1;
-                float_pane_watchers.put(fd, node) catch {
-                    allocator.destroy(node);
-                    continue;
-                };
-                const file = xev.File.initFd(fd);
-                file.poll(&loop, &node.completion, .read, loop_local_watchers.FloatPaneSlot, &node.slot, loop_local_watchers.floatPaneCallback);
-            }
-        }
 
         try loop.run(.once);
         if (!state.running) break;
@@ -762,40 +653,13 @@ pub fn runMainLoop(state: *State) !void {
         }
 
         dead_splits.clearRetainingCapacity();
-        for (pending_dead_splits.items) |dead_id| {
-            dead_splits.append(allocator, dead_id) catch {};
-        }
-        pending_dead_splits.clearRetainingCapacity();
-
-        // Handle floating panes queued by xev callbacks.
-        dead_floating.clearRetainingCapacity();
-
-        for (pending_dead_float_uuids.items) |dead_uuid| {
-            for (state.floats.items, 0..) |pane, fi| {
-                if (std.mem.eql(u8, &pane.uuid, &dead_uuid)) {
-                    dead_floating.append(allocator, fi) catch {};
-                    break;
-                }
-            }
-        }
-        pending_dead_float_uuids.clearRetainingCapacity();
-
-        // Check for dead pod panes (no per-pane fd to detect HUP).
         {
-            var pod_pane_it = state.currentLayout().splitIterator();
-            while (pod_pane_it.next()) |pane| {
-                if (!pane.*.hasPollableFd() and !pane.*.isAlive()) {
+            var pane_it = state.currentLayout().splitIterator();
+            while (pane_it.next()) |pane| {
+                if (!pane.*.isAlive()) {
                     dead_splits.append(allocator, pane.*.id) catch {};
                 }
             }
-        }
-
-        // Remove dead floats (in reverse order to preserve indices).
-        var df_idx: usize = dead_floating.items.len;
-        while (df_idx > 0) {
-            df_idx -= 1;
-            const fi = dead_floating.items[df_idx];
-            cleanupDeadFloat(state, fi);
         }
         // Ensure active_floating is still valid.
         if (state.active_floating) |af| {
@@ -872,68 +736,57 @@ pub fn runMainLoop(state: *State) !void {
         if (state.needs_respawn) {
             state.needs_respawn = false;
             if (state.currentLayout().getFocusedPane()) |pane| {
-                switch (pane.backend) {
-                    .local => {
-                        pane.respawn() catch {
-                            state.notifications.show("Respawn failed");
+                var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+                var cwd = state.getReliableCwd(pane);
+                if (cwd == null) {
+                    cwd = std.posix.getcwd(&cwd_buf) catch null;
+                }
+                const old_aux = state.ses_client.getPaneAux(pane.uuid) catch SesClient.PaneAuxInfo{
+                    .created_from = null,
+                    .focused_from = null,
+                };
+                state.ses_client.killPane(pane.uuid) catch {};
+                if (state.ses_client.createPane(null, cwd, null, null, null, null, null)) |result| {
+                    const vt_fd = state.ses_client.getVtFd();
+                    var replaced = true;
+                    if (vt_fd) |fd| {
+                        pane.replaceWithPod(result.pane_id, fd, result.uuid) catch {
+                            replaced = false;
                         };
+                    } else replaced = false;
+                    if (replaced) {
+                        const pane_type: SesClient.PaneType = if (pane.floating) .float else .split;
+                        const cursor = pane.getCursorPos();
+                        const cursor_style = pane.vt.getCursorStyle();
+                        const cursor_visible = pane.vt.isCursorVisible();
+                        const alt_screen = pane.vt.inAltScreen();
+                        const layout_path = helpers.getLayoutPath(state, pane) catch null;
+                        defer if (layout_path) |path| state.allocator.free(path);
+                        state.ses_client.updatePaneAux(
+                            pane.uuid,
+                            state.active_tab,
+                            pane.floating,
+                            pane.focused,
+                            pane_type,
+                            old_aux.created_from,
+                            old_aux.focused_from,
+                            .{ .x = cursor.x, .y = cursor.y },
+                            cursor_style,
+                            cursor_visible,
+                            alt_screen,
+                            .{ .cols = pane.width, .rows = pane.height },
+                            pane.getPwd(),
+                            null,
+                            null,
+                            layout_path,
+                        ) catch {};
                         state.skip_dead_check = true;
                         state.needs_render = true;
-                    },
-                    .pod => {
-                        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-                        var cwd = state.getReliableCwd(pane);
-                        if (cwd == null) {
-                            cwd = std.posix.getcwd(&cwd_buf) catch null;
-                        }
-                        const old_aux = state.ses_client.getPaneAux(pane.uuid) catch SesClient.PaneAuxInfo{
-                            .created_from = null,
-                            .focused_from = null,
-                        };
-                        state.ses_client.killPane(pane.uuid) catch {};
-                        if (state.ses_client.createPane(null, cwd, null, null, null, null, null)) |result| {
-                            const vt_fd = state.ses_client.getVtFd();
-                            var replaced = true;
-                            if (vt_fd) |fd| {
-                                pane.replaceWithPod(result.pane_id, fd, result.uuid) catch {
-                                    replaced = false;
-                                };
-                            } else replaced = false;
-                            if (replaced) {
-                                const pane_type: SesClient.PaneType = if (pane.floating) .float else .split;
-                                const cursor = pane.getCursorPos();
-                                const cursor_style = pane.vt.getCursorStyle();
-                                const cursor_visible = pane.vt.isCursorVisible();
-                                const alt_screen = pane.vt.inAltScreen();
-                                const layout_path = helpers.getLayoutPath(state, pane) catch null;
-                                defer if (layout_path) |path| state.allocator.free(path);
-                                state.ses_client.updatePaneAux(
-                                    pane.uuid,
-                                    state.active_tab,
-                                    pane.floating,
-                                    pane.focused,
-                                    pane_type,
-                                    old_aux.created_from,
-                                    old_aux.focused_from,
-                                    .{ .x = cursor.x, .y = cursor.y },
-                                    cursor_style,
-                                    cursor_visible,
-                                    alt_screen,
-                                    .{ .cols = pane.width, .rows = pane.height },
-                                    pane.getPwd(),
-                                    null,
-                                    null,
-                                    layout_path,
-                                ) catch {};
-                                state.skip_dead_check = true;
-                                state.needs_render = true;
-                            } else {
-                                state.notifications.show("Respawn failed");
-                            }
-                        } else |_| {
-                            state.notifications.show("Respawn failed");
-                        }
-                    },
+                    } else {
+                        state.notifications.show("Respawn failed");
+                    }
+                } else |_| {
+                    state.notifications.show("Respawn failed");
                 }
             }
         }

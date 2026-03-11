@@ -243,8 +243,7 @@ pub const State = struct {
 
     /// Best-effort foreground process info keyed by pane UUID.
     ///
-    /// For local PTY panes we can read this directly in mux.
-    /// For pod panes we query it from ses (which can inspect /proc).
+    /// SES is the authority for this metadata and may update it asynchronously.
     pane_proc: std.AutoHashMap([32]u8, PaneProcInfo),
 
     /// Pane names (Pokemon names) keyed by pane UUID
@@ -627,29 +626,24 @@ pub const State = struct {
 
     pub fn writePaneInput(self: *State, pane: *Pane, data: []const u8) void {
         if (data.len == 0) return;
-
-        switch (pane.backend) {
-            .local => pane.write(data) catch {},
-            .pod => |pod| {
-                self.flushPendingMuxVtWrites();
-                const frame_type = @intFromEnum(core.pod_protocol.FrameType.input);
-                const queued = self.mux_vt_write_queue.enqueueFrame(
-                    self.allocator,
-                    pod.pane_id,
-                    frame_type,
-                    data,
-                    max_pending_mux_vt_bytes,
-                ) catch {
-                    self.noteMuxVtQueueOverflow();
-                    return;
-                };
-                if (!queued) {
-                    self.noteMuxVtQueueOverflow();
-                    return;
-                }
-                self.flushPendingMuxVtWrites();
-            },
+        const pod = pane.backend.pod;
+        self.flushPendingMuxVtWrites();
+        const frame_type = @intFromEnum(core.pod_protocol.FrameType.input);
+        const queued = self.mux_vt_write_queue.enqueueFrame(
+            self.allocator,
+            pod.pane_id,
+            frame_type,
+            data,
+            max_pending_mux_vt_bytes,
+        ) catch {
+            self.noteMuxVtQueueOverflow();
+            return;
+        };
+        if (!queued) {
+            self.noteMuxVtQueueOverflow();
+            return;
         }
+        self.flushPendingMuxVtWrites();
     }
 
     pub const PendingKeyTimerKind = enum { delayed_press, tap_pending, hold, hold_fired, repeat_wait, repeat_active, repeat_locked };
@@ -987,38 +981,26 @@ pub const State = struct {
             const cwd: ?[]const u8 = if (create_idx < cwds.items.len) cwds.items[create_idx] else null;
 
             const pane = self.allocator.create(Pane) catch break;
-            if (tab.layout.ses_client) |ses| {
-                if (ses.isConnected()) {
-                    if (ses.createPane(null, cwd, null, null, null, null, null)) |result| {
-                        if (ses.getVtFd()) |vt_fd| {
-                            pane.initWithPod(self.allocator, next_id, 0, 0, tab.layout.width, tab.layout.height, result.pane_id, vt_fd, result.uuid) catch {
-                                self.allocator.destroy(pane);
-                                break;
-                            };
-                        } else {
-                            pane.init(self.allocator, next_id, 0, 0, tab.layout.width, tab.layout.height) catch {
-                                self.allocator.destroy(pane);
-                                break;
-                            };
-                        }
-                    } else |_| {
-                        pane.init(self.allocator, next_id, 0, 0, tab.layout.width, tab.layout.height) catch {
-                            self.allocator.destroy(pane);
-                            break;
-                        };
-                    }
-                } else {
-                    pane.init(self.allocator, next_id, 0, 0, tab.layout.width, tab.layout.height) catch {
-                        self.allocator.destroy(pane);
-                        break;
-                    };
-                }
-            } else {
-                pane.init(self.allocator, next_id, 0, 0, tab.layout.width, tab.layout.height) catch {
-                    self.allocator.destroy(pane);
-                    break;
-                };
+            const ses = tab.layout.ses_client orelse {
+                self.allocator.destroy(pane);
+                break;
+            };
+            if (!ses.isConnected()) {
+                self.allocator.destroy(pane);
+                break;
             }
+            const result = ses.createPane(null, cwd, null, null, null, null, null) catch {
+                self.allocator.destroy(pane);
+                break;
+            };
+            const vt_fd = ses.getVtFd() orelse {
+                self.allocator.destroy(pane);
+                break;
+            };
+            pane.initWithPod(self.allocator, next_id, 0, 0, tab.layout.width, tab.layout.height, result.pane_id, vt_fd, result.uuid) catch {
+                self.allocator.destroy(pane);
+                break;
+            };
             tab.layout.configurePaneNotifications(pane);
             tab.layout.splits.put(next_id, pane) catch {
                 pane.deinit();

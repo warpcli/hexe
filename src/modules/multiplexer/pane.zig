@@ -13,7 +13,6 @@ const pop = @import("pop");
 const NotificationManager = pop.notification.NotificationManager;
 
 const Backend = union(enum) {
-    local: core.Pty,
     /// Pod-backed pane — VT routed through SES.
     pod: struct {
         pane_id: u16,
@@ -87,14 +86,11 @@ pub const Pane = struct {
     navigatable: bool = false,
     // Cached CWD from ses daemon (for pod panes where /proc access is in ses)
     ses_cwd: ?[]const u8 = null,
-    // Exit status for local panes (set when process exits)
+    // Exit status for the most recent observed process exit, if available.
     exit_status: ?u32 = null,
     // Named floats keep their last frame after exit so the same toggle can hide
     // them cleanly and the next toggle can recreate them.
     retained_after_exit: bool = false,
-    // Recovery hack for default shell panes only. Explicit command panes
-    // must trust VT cursor visibility so TUIs can hide the cursor correctly.
-    force_cursor_visible_when_child_fg: bool = false,
     // Capture raw output for blocking floats
     capture_output: bool = false,
     captured_output: std.ArrayList(u8) = .empty,
@@ -184,54 +180,6 @@ pub const Pane = struct {
         self.setVisibleOnTab(tab, !self.isVisibleOnTab(tab));
     }
 
-    pub fn init(self: *Pane, allocator: std.mem.Allocator, id: u16, x: u16, y: u16, width: u16, height: u16) !void {
-        return self.initWithCommand(allocator, id, x, y, width, height, null, null, null);
-    }
-
-    pub fn initWithCommand(
-        self: *Pane,
-        allocator: std.mem.Allocator,
-        id: u16,
-        x: u16,
-        y: u16,
-        width: u16,
-        height: u16,
-        command: ?[]const u8,
-        cwd: ?[]const u8,
-        extra_env: ?[]const []const u8,
-    ) !void {
-        self.* = .{ .allocator = allocator, .id = id, .x = x, .y = y, .width = width, .height = height };
-        self.force_cursor_visible_when_child_fg = command == null;
-
-        // Generate UUID first so we can pass it to the spawned process
-        self.uuid = core.ipc.generateUuid();
-
-        const cmd = command orelse (posix.getenv("SHELL") orelse "/bin/sh");
-        var env_pairs: ?[]const [2][]const u8 = null;
-        defer if (env_pairs) |pairs| allocator.free(pairs);
-
-        // Always include HEXE_PANE_UUID in the environment
-        const uuid_env = [_][2][]const u8{.{ "HEXE_PANE_UUID", &self.uuid }};
-        var pty = if (extra_env) |env_lines| blk: {
-            env_pairs = try buildEnvPairsWithExtra(allocator, env_lines, &uuid_env);
-            break :blk try core.Pty.spawnWithEnv(cmd, cwd, env_pairs);
-        } else try core.Pty.spawnWithEnv(cmd, cwd, &uuid_env);
-        errdefer pty.close();
-        try pty.setSize(width, height);
-
-        self.backend = .{ .local = pty };
-
-        try self.vt.init(allocator, width, height);
-        errdefer self.vt.deinit();
-
-        self.notifications = NotificationManager.init(allocator);
-        self.notifications_initialized = true;
-        self.popups = pop.PopupManager.init(allocator);
-        self.popups_initialized = true;
-        self.pokemon_state = widgets.PokemonState.init(allocator);
-        self.pokemon_initialized = true;
-    }
-
     /// Initialize a pane backed by a per-pane pod process.
     /// VT data is routed through the SES VT channel.
     pub fn initWithPod(self: *Pane, allocator: std.mem.Allocator, id: u16, x: u16, y: u16, width: u16, height: u16, pane_id: u16, vt_fd: posix.fd_t, uuid: [32]u8) !void {
@@ -254,10 +202,6 @@ pub const Pane = struct {
     }
 
     pub fn deinit(self: *Pane) void {
-        switch (self.backend) {
-            .local => |*pty| pty.close(),
-            .pod => {}, // VT channel is shared, not owned by pane
-        }
         self.vt.deinit();
         self.osc_buf.deinit(self.allocator);
         self.captured_output.deinit(self.allocator);
@@ -286,27 +230,6 @@ pub const Pane = struct {
         }
     }
 
-    fn buildEnvPairsWithExtra(allocator: std.mem.Allocator, lines: []const []const u8, extra: []const [2][]const u8) ![]const [2][]const u8 {
-        var pairs: std.ArrayList([2][]const u8) = .empty;
-        errdefer pairs.deinit(allocator);
-
-        // Add extra pairs first (like HEXE_PANE_UUID)
-        for (extra) |pair| {
-            try pairs.append(allocator, pair);
-        }
-
-        // Then add parsed lines
-        for (lines) |line| {
-            const eq = std.mem.indexOfScalar(u8, line, '=') orelse continue;
-            if (eq == 0 or eq + 1 > line.len) continue;
-            const key = line[0..eq];
-            const value = line[eq + 1 ..];
-            try pairs.append(allocator, .{ key, value });
-        }
-
-        return pairs.toOwnedSlice(allocator);
-    }
-
     /// Set cached CWD from ses daemon (for pod panes)
     pub fn setSesCwd(self: *Pane, cwd: ?[]u8) void {
         if (self.ses_cwd) |old| {
@@ -317,15 +240,8 @@ pub const Pane = struct {
 
     /// Replace backend with a pod (used during reattach to adopt panes).
     pub fn replaceWithPod(self: *Pane, pane_id: u16, vt_fd: posix.fd_t, uuid: [32]u8) !void {
-        // Close old backend.
-        switch (self.backend) {
-            .local => |*pty| pty.close(),
-            .pod => {},
-        }
-
         self.uuid = uuid;
         self.backend = .{ .pod = .{ .pane_id = pane_id, .vt_fd = vt_fd } };
-        self.force_cursor_visible_when_child_fg = false;
 
         // Reset VT state (will be reconstructed from pod backlog replay).
         self.vt.deinit();
@@ -346,62 +262,6 @@ pub const Pane = struct {
         self.sendResizeToPod(self.width, self.height);
     }
 
-    /// Respawn the shell process (local panes only).
-    pub fn respawn(self: *Pane) !void {
-        switch (self.backend) {
-            .local => |*pty| {
-                pty.close();
-                const cmd = posix.getenv("SHELL") orelse "/bin/sh";
-                var new_pty = try core.Pty.spawn(cmd);
-                errdefer new_pty.close();
-                try new_pty.setSize(self.width, self.height);
-                self.backend = .{ .local = new_pty };
-                self.force_cursor_visible_when_child_fg = true;
-
-                self.osc_buf.deinit(self.allocator);
-                self.osc_buf = .empty;
-                self.vt.deinit();
-
-                try self.vt.init(self.allocator, self.width, self.height);
-
-                self.did_clear = false;
-                self.esc_tail = .{ 0, 0, 0 };
-                self.esc_tail_len = 0;
-                self.osc_in_progress = false;
-                self.osc_pending_esc = false;
-                self.osc_prev_esc = false;
-                self.osc_buf.clearRetainingCapacity();
-                self.dcs_query_state = .idle;
-                self.dcs_query_len = 0;
-                self.csi_query_state = .idle;
-                self.csi_query_len = 0;
-            },
-            .pod => return error.NotLocalPane,
-        }
-    }
-
-    /// Read from local backend and feed to VT. Returns true if data was read.
-    /// For pod panes, output comes from the VT channel (see feedPodOutput).
-    pub fn poll(self: *Pane, buffer: []u8) !bool {
-        self.did_clear = false;
-
-        return switch (self.backend) {
-            .local => |*pty| blk: {
-                const n = pty.read(buffer) catch |err| {
-                    if (err == error.WouldBlock) break :blk false;
-                    return err;
-                };
-                if (n == 0) break :blk false;
-
-                const data = buffer[0..n];
-                pane_output.processOutput(self, data);
-                try self.vt.feed(data);
-                break :blk true;
-            },
-            .pod => false, // Pod panes don't poll — data comes via feedPodOutput
-        };
-    }
-
     /// Feed output data received from the SES VT channel.
     /// Called by the event loop when a MuxVtHeader frame arrives for this pane.
     pub fn feedPodOutput(self: *Pane, data: []const u8) void {
@@ -412,16 +272,9 @@ pub const Pane = struct {
 
     /// Write input to backend.
     pub fn write(self: *Pane, data: []const u8) !void {
-        switch (self.backend) {
-            .local => |*pty| {
-                _ = try pty.write(data);
-            },
-            .pod => |pod| {
-                // Send input through SES VT channel as MuxVtHeader frame.
-                const frame_type = @intFromEnum(pod_protocol.FrameType.input);
-                wire.writeMuxVt(pod.vt_fd, pod.pane_id, frame_type, data) catch {};
-            },
-        }
+        const pod = self.backend.pod;
+        const frame_type = @intFromEnum(pod_protocol.FrameType.input);
+        wire.writeMuxVt(pod.vt_fd, pod.pane_id, frame_type, data) catch {};
     }
 
     pub fn resize(self: *Pane, x: u16, y: u16, width: u16, height: u16) !void {
@@ -431,53 +284,16 @@ pub const Pane = struct {
             self.width = width;
             self.height = height;
             try self.vt.resize(width, height);
-
-            switch (self.backend) {
-                .local => |*pty| try pty.setSize(width, height),
-                .pod => self.sendResizeToPod(width, height),
-            }
+            self.sendResizeToPod(width, height);
         }
     }
 
-    fn sendResizeToPod(self: *Pane, cols: u16, rows: u16) void {
-        switch (self.backend) {
-            .pod => |pod| {
-                var payload: [4]u8 = undefined;
-                std.mem.writeInt(u16, payload[0..2], cols, .big);
-                std.mem.writeInt(u16, payload[2..4], rows, .big);
-                const frame_type = @intFromEnum(pod_protocol.FrameType.resize);
-                wire.writeMuxVt(pod.vt_fd, pod.pane_id, frame_type, &payload) catch {};
-            },
-            else => {},
-        }
-    }
-
-    pub fn getFd(self: *Pane) posix.fd_t {
-        return switch (self.backend) {
-            .local => |pty| pty.master_fd,
-            .pod => -1, // Pod panes don't have their own fd
-        };
-    }
-
-    /// Whether this pane has a pollable fd (local panes only).
-    pub fn hasPollableFd(self: *const Pane) bool {
-        return switch (self.backend) {
-            .local => true,
-            .pod => false,
-        };
+    pub fn syncBackendSize(self: *Pane) void {
+        self.sendResizeToPod(self.width, self.height);
     }
 
     pub fn isAlive(self: *Pane) bool {
-        return switch (self.backend) {
-            .local => |*pty| blk: {
-                if (pty.pollStatus()) |status| {
-                    self.exit_status = status;
-                    break :blk false;
-                }
-                break :blk true;
-            },
-            .pod => |pod| !pod.dead,
-        };
+        return !self.backend.pod.dead;
     }
 
     pub fn getExitCode(self: *Pane) u8 {
@@ -515,100 +331,35 @@ pub const Pane = struct {
         return self.vt.getCursorStyle();
     }
 
-    fn shouldForceCursorVisibleForLocalChild(force_cursor_visible_when_child_fg: bool, child_pid: posix.pid_t, fg_pid: ?posix.pid_t) bool {
-        return force_cursor_visible_when_child_fg and fg_pid != null and fg_pid.? == child_pid;
-    }
-
-    /// Check if cursor should be visible.
-    /// For default local shell panes, if the shell is in foreground (no app
-    /// running), always show cursor regardless of VT state so a misbehaving app
-    /// can't strand the shell with a hidden cursor.
     pub fn isCursorVisible(self: *Pane) bool {
-        if (self.backend == .local) {
-            const pty = self.backend.local;
-            const fg_pid = self.getFgPid();
-            if (shouldForceCursorVisibleForLocalChild(self.force_cursor_visible_when_child_fg, pty.child_pid, fg_pid)) {
-                return true;
-            }
-        }
         return self.vt.isCursorVisible();
     }
-
-    // Static buffers for proc reads
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    var proc_buf: [256]u8 = undefined;
 
     /// Get current working directory (from OSC 7)
     pub fn getPwd(self: *Pane) ?[]const u8 {
         return self.vt.getPwd();
     }
 
-    /// Get best available current working directory.
-    /// For local panes, prefers /proc (always accurate) over OSC7 (may be stale).
     pub fn getRealCwd(self: *Pane) ?[]const u8 {
-        // For local panes, prefer /proc (always accurate) over OSC7 (may be stale)
-        if (self.backend == .local) {
-            if (self.getFgPid()) |pid| {
-                var path_buf: [64]u8 = undefined;
-                const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pid}) catch null;
-                if (path) |p| {
-                    const link = std.posix.readlink(p, &cwd_buf) catch null;
-                    if (link) |l| return l;
-                }
-            }
-        }
-
-        // Fallback to OSC7
         if (self.vt.getPwd()) |pwd| {
             return pwd;
         }
-
-        // For non-local, try /proc anyway
-        if (self.getFgPid()) |pid| {
-            var path_buf: [64]u8 = undefined;
-            const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pid}) catch return self.ses_cwd;
-            const link = std.posix.readlink(path, &cwd_buf) catch return self.ses_cwd;
-            return link;
-        }
-
         return self.ses_cwd;
     }
 
-    extern fn tcgetpgrp(fd: c_int) posix.pid_t;
-
-    /// Get foreground process group PID using tcgetpgrp.
-    /// Only available for local PTY panes.
     pub fn getFgPid(self: *Pane) ?posix.pid_t {
-        const fd = switch (self.backend) {
-            .local => |pty| pty.master_fd,
-            .pod => return null,
-        };
-
-        const pgrp = tcgetpgrp(fd);
-        if (pgrp < 0) return null;
-        return pgrp;
+        _ = self;
+        return null;
     }
 
-    /// Get foreground process name by reading /proc/<pid>/comm.
-    /// Only available for local PTY panes.
     pub fn getFgProcess(self: *Pane) ?[]const u8 {
-        const pid = self.getFgPid() orelse return null;
-        var path_buf: [64]u8 = undefined;
-        const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/comm", .{pid}) catch return null;
-        const file = std.fs.openFileAbsolute(path, .{}) catch return null;
-        defer file.close();
-        const len = file.read(&proc_buf) catch return null;
-        if (len == 0) return null;
-        const end = if (len > 0 and proc_buf[len - 1] == '\n') len - 1 else len;
-        return proc_buf[0..end];
+        _ = self;
+        return null;
     }
 
     /// Get the pane_id for pod-backed panes (used for VT routing).
     pub fn getPaneId(self: *const Pane) ?u16 {
-        return switch (self.backend) {
-            .pod => |pod| pod.pane_id,
-            .local => null,
-        };
+        return self.backend.pod.pane_id;
     }
 
     /// Scroll up by given number of lines
@@ -693,17 +444,12 @@ pub const Pane = struct {
             self.notifications.default_duration_ms = @intCast(cfg.duration_ms);
         }
     }
+    fn sendResizeToPod(self: *Pane, cols: u16, rows: u16) void {
+        const pod = self.backend.pod;
+        var payload: [4]u8 = undefined;
+        std.mem.writeInt(u16, payload[0..2], cols, .big);
+        std.mem.writeInt(u16, payload[2..4], rows, .big);
+        const frame_type = @intFromEnum(pod_protocol.FrameType.resize);
+        wire.writeMuxVt(pod.vt_fd, pod.pane_id, frame_type, &payload) catch {};
+    }
 };
-
-test "explicit command panes do not force cursor visible when child stays foreground" {
-    try std.testing.expect(!Pane.shouldForceCursorVisibleForLocalChild(false, 1234, 1234));
-}
-
-test "default shell panes force cursor visible when shell is foreground" {
-    try std.testing.expect(Pane.shouldForceCursorVisibleForLocalChild(true, 1234, 1234));
-}
-
-test "cursor visibility override requires a foreground pid match" {
-    try std.testing.expect(!Pane.shouldForceCursorVisibleForLocalChild(true, 1234, null));
-    try std.testing.expect(!Pane.shouldForceCursorVisibleForLocalChild(true, 1234, 5678));
-}

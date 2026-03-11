@@ -105,54 +105,18 @@ pub const Layout = struct {
 
     /// Create the first pane
     pub fn createFirstPane(self: *Layout, cwd: ?[]const u8) !*Pane {
+        const ses = self.ses_client orelse return error.SesUnavailable;
+        if (!ses.isConnected()) return error.SesUnavailable;
+
         const id = self.next_split_id;
         self.next_split_id += 1;
 
         const pane = try self.allocator.create(Pane);
         errdefer self.allocator.destroy(pane);
 
-        // Try to create pane via ses if available
-        if (self.ses_client) |ses| {
-            if (ses.isConnected()) {
-                const result = ses.createPane(null, cwd, null, null, null, null, null) catch {
-                    // Fall back to local spawn
-                    try pane.init(self.allocator, id, self.x, self.y, self.width, self.height);
-                    pane.focused = true;
-                    self.focused_split_id = id;
-                    try self.splits.put(id, pane);
-                    self.configurePaneNotifications(pane);
-                    const node = try self.allocator.create(LayoutNode);
-                    node.* = .{ .pane = id };
-                    self.root = node;
-                    return pane;
-                };
-
-                // Use pod from ses — VT data routed through SES VT channel.
-                const vt_fd = ses.getVtFd() orelse {
-                    try pane.init(self.allocator, id, self.x, self.y, self.width, self.height);
-                    pane.focused = true;
-                    self.focused_split_id = id;
-                    try self.splits.put(id, pane);
-                    self.configurePaneNotifications(pane);
-                    const node2 = try self.allocator.create(LayoutNode);
-                    node2.* = .{ .pane = id };
-                    self.root = node2;
-                    return pane;
-                };
-                try pane.initWithPod(self.allocator, id, self.x, self.y, self.width, self.height, result.pane_id, vt_fd, result.uuid);
-                pane.focused = true;
-                self.focused_split_id = id;
-                try self.splits.put(id, pane);
-                self.configurePaneNotifications(pane);
-                const node = try self.allocator.create(LayoutNode);
-                node.* = .{ .pane = id };
-                self.root = node;
-                return pane;
-            }
-        }
-
-        // Fall back to local PTY spawn
-        try pane.init(self.allocator, id, self.x, self.y, self.width, self.height);
+        const result = try ses.createPane(null, cwd, null, null, null, null, null);
+        const vt_fd = ses.getVtFd() orelse return error.SesUnavailable;
+        try pane.initWithPod(self.allocator, id, self.x, self.y, self.width, self.height, result.pane_id, vt_fd, result.uuid);
 
         pane.focused = true;
         self.focused_split_id = id;
@@ -169,6 +133,8 @@ pub const Layout = struct {
 
     /// Split the focused pane
     pub fn splitFocused(self: *Layout, dir: SplitDir, cwd: ?[]const u8) !?*Pane {
+        const ses = self.ses_client orelse return error.SesUnavailable;
+        if (!ses.isConnected()) return error.SesUnavailable;
         if (self.root == null) return null;
 
         const focused = self.getFocusedPane() orelse return null;
@@ -187,25 +153,9 @@ pub const Layout = struct {
         const new_x = if (dir == .horizontal) focused.x + focused.width - new_width else focused.x;
         const new_y = if (dir == .vertical) focused.y + focused.height - new_height else focused.y;
 
-        // Try to create pane via ses if available
-        if (self.ses_client) |ses| {
-            if (ses.isConnected()) {
-                if (ses.createPane(null, cwd, null, null, null, null, null)) |result| {
-                    if (ses.getVtFd()) |vt_fd| {
-                        try new_pane.initWithPod(self.allocator, new_id, new_x, new_y, new_width, new_height, result.pane_id, vt_fd, result.uuid);
-                    } else {
-                        try new_pane.init(self.allocator, new_id, new_x, new_y, new_width, new_height);
-                    }
-                } else |_| {
-                    // Fall back to local spawn
-                    try new_pane.init(self.allocator, new_id, new_x, new_y, new_width, new_height);
-                }
-            } else {
-                try new_pane.init(self.allocator, new_id, new_x, new_y, new_width, new_height);
-            }
-        } else {
-            try new_pane.init(self.allocator, new_id, new_x, new_y, new_width, new_height);
-        }
+        const result = try ses.createPane(null, cwd, null, null, null, null, null);
+        const vt_fd = ses.getVtFd() orelse return error.SesUnavailable;
+        try new_pane.initWithPod(self.allocator, new_id, new_x, new_y, new_width, new_height, result.pane_id, vt_fd, result.uuid);
         errdefer new_pane.deinit();
 
         try self.splits.put(new_id, new_pane);

@@ -304,26 +304,8 @@ fn swapFloatPositions(a: *Pane, b: *Pane) void {
     a.vt.resize(a.width, a.height) catch {};
     b.vt.resize(b.width, b.height) catch {};
 
-    switch (a.backend) {
-        .local => |*pty| pty.setSize(a.width, a.height) catch {},
-        .pod => |pod| {
-            var payload: [4]u8 = undefined;
-            std.mem.writeInt(u16, payload[0..2], a.width, .big);
-            std.mem.writeInt(u16, payload[2..4], a.height, .big);
-            const ft = @intFromEnum(core.pod_protocol.FrameType.resize);
-            core.wire.writeMuxVt(pod.vt_fd, pod.pane_id, ft, &payload) catch {};
-        },
-    }
-    switch (b.backend) {
-        .local => |*pty| pty.setSize(b.width, b.height) catch {},
-        .pod => |pod| {
-            var payload: [4]u8 = undefined;
-            std.mem.writeInt(u16, payload[0..2], b.width, .big);
-            std.mem.writeInt(u16, payload[2..4], b.height, .big);
-            const ft = @intFromEnum(core.pod_protocol.FrameType.resize);
-            core.wire.writeMuxVt(pod.vt_fd, pod.pane_id, ft, &payload) catch {};
-        },
-    }
+    a.syncBackendSize();
+    b.syncBackendSize();
 }
 
 fn restoreFocusInTab(state: *State, old_uuid: ?[32]u8) void {

@@ -121,26 +121,16 @@ fn applyDeferredPaneExits(self: anytype) void {
             var it = tab.layout.splits.valueIterator();
             while (it.next()) |pane_ptr| {
                 if (std.mem.eql(u8, &pane_ptr.*.uuid, &uuid)) {
-                    switch (pane_ptr.*.backend) {
-                        .pod => |*pod| {
-                            pod.dead = true;
-                            marked = true;
-                        },
-                        else => {},
-                    }
+                    pane_ptr.*.backend.pod.dead = true;
+                    marked = true;
                 }
             }
         }
 
         for (self.floats.items) |pane| {
             if (std.mem.eql(u8, &pane.uuid, &uuid)) {
-                switch (pane.backend) {
-                    .pod => |*pod| {
-                        pod.dead = true;
-                        marked = true;
-                    },
-                    else => {},
-                }
+                pane.backend.pod.dead = true;
+                marked = true;
             }
         }
 

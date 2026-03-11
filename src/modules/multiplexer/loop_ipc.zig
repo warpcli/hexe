@@ -793,23 +793,13 @@ fn handlePaneExited(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
         var it = tab.layout.splits.valueIterator();
         while (it.next()) |pane_ptr| {
             if (std.mem.eql(u8, &pane_ptr.*.uuid, &pu.uuid)) {
-                switch (pane_ptr.*.backend) {
-                    .pod => |*pod| {
-                        pod.dead = true;
-                    },
-                    else => {},
-                }
+                pane_ptr.*.backend.pod.dead = true;
             }
         }
     }
     for (state.floats.items) |pane| {
         if (std.mem.eql(u8, &pane.uuid, &pu.uuid)) {
-            switch (pane.backend) {
-                .pod => |*pod| {
-                    pod.dead = true;
-                },
-                else => {},
-            }
+            pane.backend.pod.dead = true;
         }
     }
     state.needs_render = true;

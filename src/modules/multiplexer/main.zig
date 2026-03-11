@@ -224,6 +224,8 @@ pub fn run(mux_args: MuxArgs) !void {
     // Connect to ses daemon FIRST (start it if needed).
     state.ses_client.connect() catch |e| {
         debugLog("ses connect failed: {s}", .{@errorName(e)});
+        std.debug.print("Could not connect to ses daemon: {s}\n", .{@errorName(e)});
+        return;
     };
     debugLog("ses connected (started={})", .{state.ses_client.just_started_daemon});
 

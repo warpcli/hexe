@@ -325,78 +325,65 @@ pub fn performDisown(state: *State) void {
         state.currentLayout().getFocusedPane();
 
     if (pane) |p| {
-        switch (p.backend) {
-            .pod => {
-                // Get current working directory from the process before orphaning.
-                var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-                var cwd = state.getReliableCwd(p);
-                if (cwd == null) {
-                    cwd = std.posix.getcwd(&cwd_buf) catch null;
-                }
+        // Get current working directory from the process before orphaning.
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var cwd = state.getReliableCwd(p);
+        if (cwd == null) {
+            cwd = std.posix.getcwd(&cwd_buf) catch null;
+        }
 
-                // Get the old pane's auxiliary info (created_from, focused_from) to inherit.
-                const old_aux = state.ses_client.getPaneAux(p.uuid) catch SesClient.PaneAuxInfo{
-                    .created_from = null,
-                    .focused_from = null,
-                };
+        // Get the old pane's auxiliary info (created_from, focused_from) to inherit.
+        const old_aux = state.ses_client.getPaneAux(p.uuid) catch SesClient.PaneAuxInfo{
+            .created_from = null,
+            .focused_from = null,
+        };
 
-                // Orphan the current pane in ses (keeps process alive).
-                state.ses_client.orphanPane(p.uuid) catch {};
+        // Orphan the current pane in ses (keeps process alive).
+        state.ses_client.orphanPane(p.uuid) catch {};
 
-                // Create a new shell via ses in the same directory and replace the pane's backend.
-                if (state.ses_client.createPane(null, cwd, null, null, null, null, null)) |result| {
-                    const vt_fd = state.ses_client.getVtFd() orelse {
-                        state.notifications.show("Disown failed: no VT channel");
-                        state.needs_render = true;
-                        return;
-                    };
-                    p.replaceWithPod(result.pane_id, vt_fd, result.uuid) catch {
-                        state.notifications.show("Disown failed: couldn't replace pane");
-                        state.needs_render = true;
-                        return;
-                    };
+        // Create a new shell via ses in the same directory and replace the pane's backend.
+        if (state.ses_client.createPane(null, cwd, null, null, null, null, null)) |result| {
+            const vt_fd = state.ses_client.getVtFd() orelse {
+                state.notifications.show("Disown failed: no VT channel");
+                state.needs_render = true;
+                return;
+            };
+            p.replaceWithPod(result.pane_id, vt_fd, result.uuid) catch {
+                state.notifications.show("Disown failed: couldn't replace pane");
+                state.needs_render = true;
+                return;
+            };
 
-                    // Sync inherited auxiliary info to the new pane.
-                    const pane_type: SesClient.PaneType = if (p.floating) .float else .split;
-                    const cursor = p.getCursorPos();
-                    const cursor_style = p.vt.getCursorStyle();
-                    const cursor_visible = p.vt.isCursorVisible();
-                    const alt_screen = p.vt.inAltScreen();
-                    const layout_path = helpers.getLayoutPath(state, p) catch null;
-                    defer if (layout_path) |path| state.allocator.free(path);
-                    state.ses_client.updatePaneAux(
-                        p.uuid,
-                        state.active_tab,
-                        p.floating,
-                        p.focused,
-                        pane_type,
-                        old_aux.created_from, // Inherit creator.
-                        old_aux.focused_from, // Inherit last focus.
-                        .{ .x = cursor.x, .y = cursor.y },
-                        cursor_style,
-                        cursor_visible,
-                        alt_screen,
-                        .{ .cols = p.width, .rows = p.height },
-                        cwd,
-                        null,
-                        null,
-                        layout_path,
-                    ) catch {};
+            // Sync inherited auxiliary info to the new pane.
+            const pane_type: SesClient.PaneType = if (p.floating) .float else .split;
+            const cursor = p.getCursorPos();
+            const cursor_style = p.vt.getCursorStyle();
+            const cursor_visible = p.vt.isCursorVisible();
+            const alt_screen = p.vt.inAltScreen();
+            const layout_path = helpers.getLayoutPath(state, p) catch null;
+            defer if (layout_path) |path| state.allocator.free(path);
+            state.ses_client.updatePaneAux(
+                p.uuid,
+                state.active_tab,
+                p.floating,
+                p.focused,
+                pane_type,
+                old_aux.created_from, // Inherit creator.
+                old_aux.focused_from, // Inherit last focus.
+                .{ .x = cursor.x, .y = cursor.y },
+                cursor_style,
+                cursor_visible,
+                alt_screen,
+                .{ .cols = p.width, .rows = p.height },
+                cwd,
+                null,
+                null,
+                layout_path,
+            ) catch {};
 
-                    state.notifications.show("Pane disowned (adopt with Alt+a)");
-                } else |_| {
-                    state.notifications.show("Disown failed: couldn't create new pane");
-                }
-            },
-            .local => {
-                // Local process - just respawn.
-                p.respawn() catch {
-                    state.notifications.show("Respawn failed");
-                    state.needs_render = true;
-                    return;
-                };
-                state.notifications.show("Pane respawned");
-            },
+            state.notifications.show("Pane disowned (adopt with Alt+a)");
+        } else |_| {
+            state.notifications.show("Disown failed: couldn't create new pane");
         }
     }
     state.needs_render = true;
@@ -597,10 +584,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 }
             }
 
-            const missing_in_ses = switch (pane.backend) {
-                .pod => !paneExistsInSes(state, pane.uuid),
-                else => false,
-            };
+            const missing_in_ses = !paneExistsInSes(state, pane.uuid);
             if (!pane.isAlive() or missing_in_ses) {
                 const was_visible_on_tab = pane.isVisibleOnTab(state.active_tab);
                 const was_active = if (state.active_floating) |af| af == existing_idx else false;
@@ -788,6 +772,7 @@ pub fn createAdhocFloatWithSize(
     size: FloatSize,
     isolation_profile: ?[]const u8,
 ) ![32]u8 {
+    _ = use_pod;
     const pane = try state.allocator.create(Pane);
     errdefer state.allocator.destroy(pane);
 
@@ -821,26 +806,12 @@ pub fn createAdhocFloatWithSize(
     const content_h = outer_h -| (pad_y * 2);
 
     const id: u16 = @intCast(100 + state.floats.items.len);
-
-    if (use_pod and state.ses_client.isConnected()) {
-        if (state.ses_client.createPane(command, cwd, null, null, env, isolation_profile, null)) |result| {
-            if (state.ses_client.getVtFd()) |vt_fd| {
-                try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
-            } else {
-                const merged_env = mergeEnvLines(state.allocator, env, extra_env) catch null;
-                defer if (merged_env) |slice| state.allocator.free(slice);
-                try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, command, cwd, merged_env);
-            }
-        } else |_| {
-            const merged_env = mergeEnvLines(state.allocator, env, extra_env) catch null;
-            defer if (merged_env) |slice| state.allocator.free(slice);
-            try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, command, cwd, merged_env);
-        }
-    } else {
-        const merged_env = mergeEnvLines(state.allocator, env, extra_env) catch null;
-        defer if (merged_env) |slice| state.allocator.free(slice);
-        try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, command, cwd, merged_env);
-    }
+    if (!state.ses_client.isConnected()) return error.SesUnavailable;
+    const merged_env = mergeEnvLines(state.allocator, env, extra_env) catch null;
+    defer if (merged_env) |slice| state.allocator.free(slice);
+    const result = try state.ses_client.createPane(command, cwd, null, null, merged_env, isolation_profile, null);
+    const vt_fd = state.ses_client.getVtFd() orelse return error.SesUnavailable;
+    try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
 
     pane.floating = true;
     pane.focused = true;
@@ -952,28 +923,17 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     else
         null;
 
-    // Try to create pane via ses if available.
-    if (state.ses_client.isConnected()) {
-        const env_parent = if (float_def.attributes.inherit_env) parent_uuid else null;
-        if (state.ses_client.createPane(float_def.command, current_dir, sticky_pwd, sticky_key, null, isolation_profile, env_parent)) |result| {
-            if (state.ses_client.getVtFd()) |vt_fd| {
-                try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
+    if (!state.ses_client.isConnected()) return error.SesUnavailable;
+    const env_parent = if (float_def.attributes.inherit_env) parent_uuid else null;
+    const result = try state.ses_client.createPane(float_def.command, current_dir, sticky_pwd, sticky_key, null, isolation_profile, env_parent);
+    const vt_fd = state.ses_client.getVtFd() orelse return error.SesUnavailable;
+    try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
 
-                // Persist sticky affinity metadata for better reclaim preference.
-                if (sticky_pwd) |pwd| {
-                    if (sticky_key) |key| {
-                        state.ses_client.setSticky(result.uuid, pwd, key) catch {};
-                    }
-                }
-            } else {
-                try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command, current_dir, null);
-            }
-        } else |_| {
-            // Fall back to local spawn.
-            try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command, current_dir, null);
+    // Persist sticky affinity metadata for better reclaim preference.
+    if (sticky_pwd) |pwd| {
+        if (sticky_key) |key| {
+            state.ses_client.setSticky(result.uuid, pwd, key) catch {};
         }
-    } else {
-        try pane.initWithCommand(state.allocator, id, content_x, content_y, content_w, content_h, float_def.command, current_dir, null);
     }
 
     pane.floating = true;

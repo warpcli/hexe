@@ -397,13 +397,8 @@ pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
 }
 
 pub fn refreshPaneCwd(self: anytype, pane: *Pane) ?[]const u8 {
-    switch (pane.backend) {
-        .pod => {
-            // Fire-and-forget: response updates pane CWD via handleSesMessage.
-            self.ses_client.requestPaneCwd(pane.uuid);
-        },
-        .local => {},
-    }
+    // Fire-and-forget: response updates pane CWD via handleSesMessage.
+    self.ses_client.requestPaneCwd(pane.uuid);
     return pane.getRealCwd();
 }
 
@@ -416,11 +411,9 @@ pub fn getSpawnCwd(_: anytype, pane: *Pane) ?[]const u8 {
 /// This is more robust than refreshPaneCwd alone since it tries fallbacks.
 /// Returns null only if ALL sources fail.
 pub fn getReliableCwd(self: anytype, pane: *Pane) ?[]const u8 {
-    // 1. For pod panes, try synchronous CWD fetch from SES (authoritative /proc read).
-    if (pane.backend == .pod) {
-        if (self.ses_client.getPaneCwdSync(pane.uuid)) |cwd| {
-            return cwd;
-        }
+    // 1. Try synchronous CWD fetch from SES (authoritative /proc read).
+    if (self.ses_client.getPaneCwdSync(pane.uuid)) |cwd| {
+        return cwd;
     }
 
     // 2. Try refreshPaneCwd (VT OSC7 / /proc / ses_cwd cache)
@@ -453,25 +446,23 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
 
     // Ensure pane metadata eventually converges even if an async response was
     // missed during reconnect/startup races.
-    if (p.backend == .pod) {
-        if (!self.pane_names.contains(p.uuid)) {
-            self.ses_client.requestPaneProcess(p.uuid);
-        }
-        if (p.getRealCwd() == null) {
-            self.ses_client.requestPaneCwd(p.uuid);
-        }
+    if (!self.pane_names.contains(p.uuid)) {
+        self.ses_client.requestPaneProcess(p.uuid);
+    }
+    if (p.getRealCwd() == null) {
+        self.ses_client.requestPaneCwd(p.uuid);
     }
 
     _ = self.refreshPaneCwd(p);
 
     // Best-effort process detection.
-    // - local PTY panes: query directly
-    // - pod panes: fire-and-forget request (response updates cache via handleSesMessage)
+    // SES owns process inspection; request a refresh and use any cached value we
+    // already have for immediate consumers.
     const fg_proc_local = p.getFgProcess();
     const fg_pid_local: ?i32 = if (p.getFgPid()) |pid| @intCast(pid) else null;
     if (fg_proc_local) |proc_name| {
         self.setPaneProc(p.uuid, proc_name, fg_pid_local);
-    } else if (p.backend == .pod) {
+    } else {
         self.ses_client.requestPaneProcess(p.uuid);
     }
 
