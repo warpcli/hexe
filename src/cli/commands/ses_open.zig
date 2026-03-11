@@ -65,7 +65,7 @@ pub fn runSesOpen(
         }
     }
 
-    // Change to root directory before launching mux
+    // Change to root directory before launching the terminal frontend
     if (root_path) |rp| {
         std.posix.chdir(rp) catch |err| {
             print("Error: cannot chdir to root '{s}': {s}\n", .{ rp, @errorName(err) });
@@ -76,7 +76,7 @@ pub fn runSesOpen(
     // Determine session name
     const session_name: ?[]const u8 = config.name;
 
-    // Launch mux with the session config
+    // Launch the terminal frontend with the session config
     const terminal = @import("terminal");
     try terminal.run(.{
         .name = session_name,

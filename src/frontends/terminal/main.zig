@@ -68,7 +68,7 @@ fn notifySessionNameChange(state: *State, change: *FrontendAttach.SessionNameCha
     }
 }
 
-/// Arguments for mux commands.
+/// Arguments for terminal frontend commands.
 pub const MuxArgs = struct {
     name: ?[]const u8 = null,
     attach: ?[]const u8 = null,
@@ -81,11 +81,11 @@ pub const MuxArgs = struct {
     transport: FrontendTransport = .{ .local_ipc = .{} },
 };
 
-/// Entry point for mux - can be called directly from unified CLI.
+/// Entry point for the terminal frontend - can be called directly from unified CLI.
 pub fn run(mux_args: MuxArgs) !void {
     const allocator = std.heap.page_allocator;
 
-    // Handle --notify: send to parent mux and exit.
+    // Handle --notify: send to parent terminal frontend and exit.
     if (mux_args.notify_message) |msg| {
         sendNotifyToParentMux(allocator, mux_args.transport, msg);
         return;
@@ -114,14 +114,14 @@ pub fn run(mux_args: MuxArgs) !void {
                 if (instance) |inst| {
                     if (inst.len > 0) {
                         std.debug.print("  [{s}] {s:<12} ({d} tabs)\n", .{ uuid_prefix, name, s.pane_count });
-                        std.debug.print("    → hexe mux attach --instance {s} {s}\n", .{ inst, uuid_prefix });
+                        std.debug.print("    → hexe terminal attach --instance {s} {s}\n", .{ inst, uuid_prefix });
                     } else {
                         std.debug.print("  [{s}] {s:<12} ({d} tabs)\n", .{ uuid_prefix, name, s.pane_count });
-                        std.debug.print("    → hexe mux attach {s}\n", .{uuid_prefix});
+                        std.debug.print("    → hexe terminal attach {s}\n", .{uuid_prefix});
                     }
                 } else {
                     std.debug.print("  [{s}] {s:<12} ({d} tabs)\n", .{ uuid_prefix, name, s.pane_count });
-                    std.debug.print("    → hexe mux attach {s}\n", .{uuid_prefix});
+                    std.debug.print("    → hexe terminal attach {s}\n", .{uuid_prefix});
                 }
             }
         }
@@ -279,7 +279,7 @@ pub fn run(mux_args: MuxArgs) !void {
             // Session/pane not found - EXIT with error, don't create new session
             debugLog("attach: both reattach methods failed, exiting", .{});
             std.debug.print("Session or pane '{s}' not found\n", .{uuid_prefix});
-            std.debug.print("Use 'hexe mux list' to see available sessions\n", .{});
+            std.debug.print("Use 'hexe terminal list' to see available sessions\n", .{});
             return; // Exit without entering main loop
         }
     } else if (mux_args.session_config_path) |config_path| {
