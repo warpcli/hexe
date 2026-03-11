@@ -364,8 +364,8 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                 .adopt_choose => {
                     // Handle picker result for selecting orphaned pane
                     if (state.popups.getPickerResult()) |selected| {
-                        if (selected < state.adopt_orphan_count) {
-                            state.adopt_selected_uuid = state.adopt_orphans[selected].uuid;
+                        if (selected < state.attach_state.adopt_orphan_count) {
+                            state.attach_state.adopt_selected_uuid = state.attach_state.adopt_orphans[selected].uuid;
                             // Now show confirm dialog
                             state.pending_action = .adopt_confirm;
                             state.popups.clearResults();
@@ -381,12 +381,12 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                 .adopt_confirm => {
                     // Handle confirm result for adopt action
                     if (state.popups.getConfirmResult()) |destroy_current| {
-                        if (state.adopt_selected_uuid) |uuid| {
+                        if (state.attach_state.adopt_selected_uuid) |uuid| {
                             actions.performAdopt(state, uuid, destroy_current);
                         }
                     }
                     state.pending_action = null;
-                    state.adopt_selected_uuid = null;
+                    state.attach_state.adopt_selected_uuid = null;
                     state.popups.clearResults();
                 },
                 .layout_save_choose => {

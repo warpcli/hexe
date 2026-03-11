@@ -176,7 +176,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .split_h => {
             // Prevent split creation during detach (race prevention)
-            if (state.detach_mode) {
+            if (state.isDetachMode()) {
                 return true; // Silently ignore during detach
             }
             const parent_uuid = state.getCurrentFocusedUuid();
@@ -198,7 +198,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .split_v => {
             // Prevent split creation during detach (race prevention)
-            if (state.detach_mode) {
+            if (state.isDetachMode()) {
                 return true; // Silently ignore during detach
             }
             const parent_uuid = state.getCurrentFocusedUuid();
@@ -239,7 +239,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .tab_new => {
             // Prevent tab creation during detach (race prevention)
-            if (state.detach_mode) {
+            if (state.isDetachMode()) {
                 return true; // Silently ignore during detach
             }
             state.setActiveFloatingIndex(null);

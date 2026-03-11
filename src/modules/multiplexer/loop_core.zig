@@ -362,18 +362,18 @@ fn stdinCallback(
 ) xev.CallbackAction {
     const slot = ctx orelse return .disarm;
     _ = result catch {
-        slot.state.detach_mode = true;
+        slot.state.setDetachMode(true);
         slot.state.running = false;
         return .disarm;
     };
 
     const n = posix.read(posix.STDIN_FILENO, slot.buffer) catch {
-        slot.state.detach_mode = true;
+        slot.state.setDetachMode(true);
         slot.state.running = false;
         return .disarm;
     };
     if (n == 0) {
-        slot.state.detach_mode = true;
+        slot.state.setDetachMode(true);
         slot.state.running = false;
         return .disarm;
     }

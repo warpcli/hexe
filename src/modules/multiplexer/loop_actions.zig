@@ -296,7 +296,7 @@ fn getCurrentFocusedPane(state: *State) ?*Pane {
 /// Perform the actual detach action.
 pub fn performDetach(state: *State) void {
     // Always set detach_mode to prevent killing panes on exit.
-    state.detach_mode = true;
+    state.setDetachMode(true);
 
     var snapshot = state.buildSessionSnapshot() catch {
         state.notifications.showFor("Failed to build session snapshot", 2000);
@@ -447,7 +447,7 @@ pub fn startAdoptFlow(state: *State) void {
     }
 
     // Get list of orphaned panes.
-    const count = state.ses_client.listOrphanedPanes(&state.adopt_orphans) catch {
+    const count = state.ses_client.listOrphanedPanes(&state.attach_state.adopt_orphans) catch {
         state.notifications.show("Failed to list orphaned panes");
         return;
     };
@@ -457,11 +457,11 @@ pub fn startAdoptFlow(state: *State) void {
         return;
     }
 
-    state.adopt_orphan_count = count;
+    state.attach_state.adopt_orphan_count = count;
 
     if (count == 1) {
         // Only one orphan - skip picker, go directly to confirm.
-        state.adopt_selected_uuid = state.adopt_orphans[0].uuid;
+        state.attach_state.adopt_selected_uuid = state.attach_state.adopt_orphans[0].uuid;
         state.pending_action = .adopt_confirm;
         state.popups.showConfirm("Destroy current pane?", .{}) catch {};
     } else {
@@ -470,7 +470,7 @@ pub fn startAdoptFlow(state: *State) void {
         var items_list: std.ArrayList([]const u8) = .empty;
         defer items_list.deinit(state.allocator);
         for (0..count) |i| {
-            items_list.append(state.allocator, state.adopt_orphans[i].uuid[0..]) catch {
+            items_list.append(state.allocator, state.attach_state.adopt_orphans[i].uuid[0..]) catch {
                 state.notifications.show("Failed to show picker");
                 return;
             };

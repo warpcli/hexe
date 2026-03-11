@@ -145,9 +145,9 @@ pub fn syncStateToSes(self: anytype) void {
     defer self.allocator.free(session_state_json);
 
     // Increment version before syncing.
-    self.state_version +%= 1;
+    const version = self.nextStateVersion();
 
-    self.ses_client.syncState(session_state_json, self.state_version) catch |e| {
+    self.ses_client.syncState(session_state_json, version) catch |e| {
         core.logging.logError("mux", "syncState failed", e);
     };
 }

@@ -15,11 +15,11 @@ const Layout = layout_mod.Layout;
 
 const Renderer = @import("render_core.zig").Renderer;
 
+const FrontendAttachState = core.FrontendAttachState;
 const FrontendSessionCache = core.FrontendSessionCache;
 const PaneShellInfo = core.FrontendPaneShellInfo;
 const PaneProcInfo = core.FrontendPaneProcInfo;
 const SesClient = core.FrontendClient;
-const OrphanedPaneInfo = core.FrontendOrphanedPaneInfo;
 
 const NotificationManager = pop.notification.NotificationManager;
 
@@ -104,8 +104,6 @@ pub const State = struct {
     floats: std.ArrayList(*Pane),
     active_floating: ?usize,
     running: bool,
-    detach_mode: bool,
-    reattach_in_progress: std.atomic.Value(bool),
     needs_render: bool,
     force_full_render: bool,
     /// When true, force cursor visible on next render (set after float death)
@@ -129,18 +127,12 @@ pub const State = struct {
     exit_intent_deadline_ms: i64,
     /// If true, respawn the focused pane after handling input
     needs_respawn: bool,
-    adopt_orphans: [32]OrphanedPaneInfo = undefined,
-    adopt_orphan_count: usize = 0,
-    adopt_selected_uuid: ?[32]u8 = null,
+    attach_state: FrontendAttachState,
     skip_dead_check: bool,
     pending_pop_response: bool,
     pending_pop_scope: pop.Scope,
     pending_pop_tab: usize,
     pending_pop_pane: ?*Pane,
-
-    /// Monotonically increasing version counter for state sync.
-    /// SES uses this to reject stale/out-of-order updates.
-    state_version: u32 = 0,
 
     osc_reply_target_uuid: ?[32]u8,
     osc_reply_targets: std.ArrayList([32]u8),
@@ -267,8 +259,6 @@ pub const State = struct {
             .floats = .empty,
             .active_floating = null,
             .running = true,
-            .detach_mode = false,
-            .reattach_in_progress = std.atomic.Value(bool).init(false),
             .needs_render = true,
             .force_full_render = true,
             .cursor_needs_restore = false,
@@ -288,6 +278,7 @@ pub const State = struct {
             .pending_exit_intent = false,
             .exit_intent_deadline_ms = 0,
             .needs_respawn = false,
+            .attach_state = .{},
             .skip_dead_check = false,
             .pending_pop_response = false,
             .pending_pop_scope = .mux,
@@ -393,16 +384,16 @@ pub const State = struct {
         // If the terminal is gone (window closed, SSH dropped), auto-detach to
         // preserve sessions even when SIGTERM arrived instead of SIGHUP.
         // tcgetattr returns EIO on a dead PTY slave.
-        if (!self.detach_mode) {
+        if (!self.attach_state.detach_mode) {
             _ = posix.tcgetattr(posix.STDIN_FILENO) catch {
-                self.detach_mode = true;
+                self.attach_state.detach_mode = true;
             };
         }
 
         // When exiting normally (not detach), tell SES to kill regular panes but
         // preserve sticky panes/floats.
         // When detaching, panes stay alive for later reattach.
-        if (!self.detach_mode and self.ses_client.isConnected()) {
+        if (!self.attach_state.detach_mode and self.ses_client.isConnected()) {
             self.ses_client.shutdown(true) catch |err| {
                 core.logging.logError("mux", "failed to send shutdown to SES", err);
             };
@@ -598,6 +589,18 @@ pub const State = struct {
 
     pub fn sessionTabCounter(self: *const State) usize {
         return self.session_cache.tab_counter;
+    }
+
+    pub fn isDetachMode(self: *const State) bool {
+        return self.attach_state.detach_mode;
+    }
+
+    pub fn setDetachMode(self: *State, enabled: bool) void {
+        self.attach_state.detach_mode = enabled;
+    }
+
+    pub fn nextStateVersion(self: *State) u32 {
+        return self.attach_state.nextStateVersion();
     }
 
     pub fn activeTabIndex(self: *const State) usize {

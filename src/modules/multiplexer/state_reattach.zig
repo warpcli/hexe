@@ -716,8 +716,8 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     mux.debugLog("reattachSession: starting with prefix={s}", .{session_id_prefix});
 
     // Set flag to prevent SIGHUP from interrupting reattach
-    self.reattach_in_progress.store(true, .release);
-    defer self.reattach_in_progress.store(false, .release);
+    self.attach_state.reattach_in_progress.store(true, .release);
+    defer self.attach_state.reattach_in_progress.store(false, .release);
 
     // Track reattach start time for timeout detection
     const reattach_start = std.time.milliTimestamp();
