@@ -904,9 +904,6 @@ pub const Server = struct {
             .register => {
                 self.handleBinaryRegister(fd, hdr.payload_len, &buf);
             },
-            .sync_state => {
-                self.handleBinarySyncState(fd, hdr.payload_len, &buf);
-            },
             .create_pane => {
                 self.handleBinaryCreatePane(fd, hdr.payload_len, &buf);
             },
@@ -1111,43 +1108,6 @@ pub const Server = struct {
         // Send Registered response with resolved name
         const resp = wire.FrontendRegistered{ .name_len = @intCast(final_name.len) };
         wire.writeControlWithTrail(fd, .registered, std.mem.asBytes(&resp), final_name) catch {};
-    }
-
-    fn handleBinarySyncState(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
-        if (payload_len < @sizeOf(wire.SyncState)) {
-            self.skipBinaryPayload(fd, payload_len, buf);
-            return;
-        }
-        const ss = wire.readStruct(wire.SyncState, fd) catch return;
-        if (ss.state_len > wire.MAX_PAYLOAD_LEN) {
-            self.skipBinaryPayload(fd, payload_len - @sizeOf(wire.SyncState), buf);
-            return;
-        }
-
-        // Read state data into allocated buffer.
-        const state_buf = self.allocator.alloc(u8, ss.state_len) catch {
-            self.skipBinaryPayload(fd, ss.state_len, buf);
-            return;
-        };
-        defer self.allocator.free(state_buf);
-        wire.readExact(fd, state_buf) catch return;
-
-        const client_id = self.findClientForCtlFd(fd) orelse return;
-        if (self.ses_state.getClient(client_id)) |client| {
-            // Reject stale/out-of-order updates based on version.
-            if (ss.version <= client.last_sync_version) {
-                ses.debugLog("sync_state: reject stale version {d} <= {d}", .{ ss.version, client.last_sync_version });
-                wire.writeControl(fd, .ok, &.{}) catch {};
-                return;
-            }
-            client.last_sync_version = ss.version;
-            if (state.SessionSnapshot.fromJson(self.allocator, state_buf)) |snapshot| {
-                client.updateSessionSnapshot(snapshot);
-            } else |err| {
-                ses.debugLog("sync_state: failed to parse canonical session snapshot: {s}", .{@errorName(err)});
-            }
-        }
-        wire.writeControl(fd, .ok, &.{}) catch {};
     }
 
     fn handleBinarySessionAddTab(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {

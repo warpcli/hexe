@@ -399,9 +399,6 @@ pub const Client = struct {
     mux_ctl_fd: ?posix.fd_t = null,
     mux_vt_fd: ?posix.fd_t = null,
 
-    /// Last accepted state sync version. Used to reject stale/out-of-order updates.
-    last_sync_version: u32 = 0,
-
     pub fn init(allocator: std.mem.Allocator, id: usize, fd: posix.fd_t) Client {
         return .{
             .id = id,

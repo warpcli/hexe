@@ -367,16 +367,6 @@ pub const SesClient = struct {
         self.vt_fd = null;
     }
 
-    /// Sync canonical session state to ses (fire-and-forget).
-    pub fn syncState(self: *SesClient, session_state_json: []const u8, version: u32) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        var msg: wire.SyncState = .{
-            .state_len = @intCast(session_state_json.len),
-            .version = version,
-        };
-        try wire.writeControlWithTrail(fd, .sync_state, std.mem.asBytes(&msg), session_state_json);
-    }
-
     pub fn sessionAddTab(
         self: *SesClient,
         tab_uuid: [32]u8,

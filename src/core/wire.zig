@@ -76,7 +76,6 @@ pub const MsgType = enum(u16) {
     pop_choose = 0x010B,
     pop_response = 0x010C,
     disconnect = 0x010D,
-    sync_state = 0x010E,
     orphan_pane = 0x010F,
     list_orphaned = 0x0110,
     adopt_pane = 0x0111,
@@ -243,13 +242,6 @@ pub const SessionReattached = extern struct {
 pub const Disconnect = extern struct {
     mode: u8 align(1), // 0=shutdown, 1=crash
     preserve_sticky: u8 align(1),
-};
-
-/// SyncState: length of canonical session snapshot JSON.
-/// Followed by: session snapshot bytes (state_len).
-pub const SyncState = extern struct {
-    state_len: u32 align(1),
-    version: u32 align(1), // Monotonically increasing version; SES rejects stale updates.
 };
 
 /// SessionAddTab: add a new tab with a single split pane to the canonical snapshot.

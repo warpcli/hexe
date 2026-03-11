@@ -136,22 +136,6 @@ fn rememberSplitFocus(self: anytype, pane: *Pane) void {
     self.rememberSplitFocus();
 }
 
-pub fn syncStateToSes(self: anytype) void {
-    if (!self.frontend_client.isConnected()) return;
-
-    var snapshot = buildSessionSnapshot(self) catch return;
-    defer snapshot.deinit();
-    const session_state_json = snapshot.toJson(self.allocator) catch return;
-    defer self.allocator.free(session_state_json);
-
-    // Increment version before syncing.
-    const version = self.nextStateVersion();
-
-    self.frontend_client.syncState(session_state_json, version) catch |e| {
-        core.logging.logError("mux", "syncState failed", e);
-    };
-}
-
 pub fn syncSessionTabAdded(self: anytype, tab_uuid: [32]u8, name: []const u8, pane_uuid: [32]u8) void {
     if (!self.frontend_client.isConnected()) return;
     self.frontend_client.sessionAddTab(tab_uuid, pane_uuid, self.activeTabIndex(), name) catch |err| {

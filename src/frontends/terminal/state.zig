@@ -792,10 +792,6 @@ pub const State = struct {
         return state_serialize.deserializeLayoutNode(self, obj);
     }
 
-    pub fn syncStateToSes(self: *State) void {
-        return state_sync.syncStateToSes(self);
-    }
-
     pub fn buildSessionSnapshot(self: *State) !core.session_model.SessionSnapshot {
         return state_sync.buildSessionSnapshot(self);
     }
