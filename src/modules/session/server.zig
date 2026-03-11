@@ -1127,6 +1127,11 @@ pub const Server = struct {
             }
             client.last_sync_version = ss.version;
             client.updateMuxState(state_buf) catch {};
+            if (state.SessionSnapshot.fromMuxJson(self.allocator, state_buf)) |snapshot| {
+                client.updateSessionSnapshot(snapshot);
+            } else |err| {
+                ses.debugLog("sync_state: failed to parse canonical session snapshot: {s}", .{@errorName(err)});
+            }
         }
         wire.writeControl(fd, .ok, &.{}) catch {};
     }
@@ -1639,11 +1644,11 @@ pub const Server = struct {
             const detached = entry.value_ptr;
 
             // Exact name match (case-insensitive).
-            if (std.ascii.eqlIgnoreCase(detached.session_name, id_prefix)) {
+            if (std.ascii.eqlIgnoreCase(detached.session_snapshot.session_name, id_prefix)) {
                 if (name_match_count < name_matches.len) {
                     name_matches[name_match_count] = .{
                         .session_id = key_ptr.*,
-                        .name = detached.session_name,
+                        .name = detached.session_snapshot.session_name,
                     };
                     name_match_count += 1;
                 }
@@ -2678,17 +2683,17 @@ pub const Server = struct {
             const hex_id: [32]u8 = std.fmt.bytesToHex(detached.session_id, .lower);
             var de: wire.DetachedSessionEntry = .{
                 .session_id = hex_id,
-                .name_len = @intCast(detached.session_name.len),
+                .name_len = @intCast(detached.session_snapshot.session_name.len),
                 .pane_count = @intCast(detached.pane_uuids.len),
                 .mux_state_len = 0,
             };
             if (full_mode) {
-                de.mux_state_len = @intCast(detached.mux_state_json.len);
+                de.mux_state_len = @intCast(detached.legacy_mux_state_json.len);
             }
             buf.appendSlice(alloc, std.mem.asBytes(&de)) catch {};
-            buf.appendSlice(alloc, detached.session_name) catch {};
+            buf.appendSlice(alloc, detached.session_snapshot.session_name) catch {};
             if (full_mode) {
-                buf.appendSlice(alloc, detached.mux_state_json) catch {};
+                buf.appendSlice(alloc, detached.legacy_mux_state_json) catch {};
             }
         }
 
@@ -2911,8 +2916,8 @@ pub const Server = struct {
             return;
         };
 
-        // Send the mux_state_json back as session_state response
-        wire.writeControl(fd, .session_state, detached_state.mux_state_json) catch {};
+        // Send the legacy mux_state_json back as session_state response.
+        wire.writeControl(fd, .session_state, detached_state.legacy_mux_state_json) catch {};
     }
 
     /// Handle apply_layout CLI request — forward layout tree to MUX.

@@ -55,11 +55,11 @@ pub fn save(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
         const hex_id: [32]u8 = std.fmt.bytesToHex(&s.session_id, .lower);
         try w.print("{{\"session_id\":\"{s}\",\"session_name\":\"{s}\",\"detached_at\":{d},\"mux_state\":\"", .{
             &hex_id,
-            s.session_name,
+            s.session_snapshot.session_name,
             s.detached_at,
         });
         // Escape mux_state_json as JSON string
-        for (s.mux_state_json) |c| {
+        for (s.legacy_mux_state_json) |c| {
             switch (c) {
                 '"' => try w.writeAll("\\\""),
                 '\\' => try w.writeAll("\\\\"),
@@ -190,10 +190,16 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
             const mux_state = (obj.get("mux_state") orelse continue).string;
             const panes_arr = (obj.get("panes") orelse continue).array;
 
-            const name_owned = try ses_state.allocator.dupe(u8, name);
-            errdefer ses_state.allocator.free(name_owned);
             const mux_owned = try ses_state.allocator.dupe(u8, mux_state);
             errdefer ses_state.allocator.free(mux_owned);
+            const snapshot = state.SessionSnapshot.fromMuxJson(ses_state.allocator, mux_owned) catch blk: {
+                const hex_sid: [32]u8 = std.fmt.bytesToHex(&sid, .lower);
+                break :blk try state.SessionSnapshot.initMinimal(ses_state.allocator, hex_sid, name);
+            };
+            errdefer {
+                var owned_snapshot = snapshot;
+                owned_snapshot.deinit();
+            }
 
             const pane_uuids = try ses_state.allocator.alloc([32]u8, panes_arr.items.len);
             errdefer ses_state.allocator.free(pane_uuids);
@@ -206,10 +212,10 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
                 }
             }
 
-            const detached = state.DetachedMuxState{
+            const detached = state.DetachedSessionState{
                 .session_id = sid,
-                .session_name = name_owned,
-                .mux_state_json = mux_owned,
+                .session_snapshot = snapshot,
+                .legacy_mux_state_json = mux_owned,
                 .pane_uuids = pane_uuids,
                 .detached_at = detached_at,
                 .allocator = ses_state.allocator,

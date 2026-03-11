@@ -544,6 +544,7 @@ test "Client.deinit: cleans up all resources" {
 
     client.session_name = try testing.allocator.dupe(u8, "test-session");
     client.last_mux_state = try testing.allocator.dupe(u8, "{}");
+    client.session_snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'a'} ** 32, "test-session");
 
     try client.appendUuid([_]u8{1} ** 32);
     try client.appendUuid([_]u8{2} ** 32);
@@ -552,11 +553,11 @@ test "Client.deinit: cleans up all resources" {
     client.deinit();
 }
 
-test "DetachedMuxState.deinit: cleans up all resources" {
-    var detached = state.DetachedMuxState{
+test "DetachedSessionState.deinit: cleans up all resources" {
+    var detached = state.DetachedSessionState{
         .session_id = [_]u8{1} ** 16,
-        .session_name = try testing.allocator.dupe(u8, "alpha"),
-        .mux_state_json = try testing.allocator.dupe(u8, "{}"),
+        .session_snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'a'} ** 32, "alpha"),
+        .legacy_mux_state_json = try testing.allocator.dupe(u8, "{}"),
         .pane_uuids = try testing.allocator.alloc([32]u8, 2),
         .detached_at = std.time.timestamp(),
         .allocator = testing.allocator,
@@ -564,6 +565,93 @@ test "DetachedMuxState.deinit: cleans up all resources" {
 
     // This should not leak - verified by test allocator
     detached.deinit();
+}
+
+test "SessionSnapshot.fromMuxJson: parses canonical session structure" {
+    const json =
+        \\{
+        \\  "version": 1,
+        \\  "timestamp": 1,
+        \\  "uuid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        \\  "session_name": "alpha",
+        \\  "tab_counter": 2,
+        \\  "active_tab": 0,
+        \\  "active_floating": 0,
+        \\  "tabs": [
+        \\    {
+        \\      "uuid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        \\      "name": "alpha-1",
+        \\      "focused_split_id": 2,
+        \\      "next_split_id": 3,
+        \\      "tree": {
+        \\        "type": "split",
+        \\        "dir": "horizontal",
+        \\        "ratio": 0.5,
+        \\        "first": { "type": "pane", "id": 1 },
+        \\        "second": { "type": "pane", "id": 2 }
+        \\      },
+        \\      "splits": [
+        \\        {
+        \\          "id": 1,
+        \\          "uuid": "11111111111111111111111111111111",
+        \\          "x": 0, "y": 0, "width": 40, "height": 20,
+        \\          "focused": false, "floating": false, "visible": true,
+        \\          "tab_visible": 0, "float_key": 0,
+        \\          "border_x": 0, "border_y": 0, "border_w": 0, "border_h": 0,
+        \\          "float_width_pct": 60, "float_height_pct": 60,
+        \\          "float_pos_x_pct": 50, "float_pos_y_pct": 50,
+        \\          "float_pad_x": 1, "float_pad_y": 0,
+        \\          "is_pwd": false, "sticky": false
+        \\        },
+        \\        {
+        \\          "id": 2,
+        \\          "uuid": "22222222222222222222222222222222",
+        \\          "x": 40, "y": 0, "width": 40, "height": 20,
+        \\          "focused": true, "floating": false, "visible": true,
+        \\          "tab_visible": 0, "float_key": 0,
+        \\          "border_x": 0, "border_y": 0, "border_w": 0, "border_h": 0,
+        \\          "float_width_pct": 60, "float_height_pct": 60,
+        \\          "float_pos_x_pct": 50, "float_pos_y_pct": 50,
+        \\          "float_pad_x": 1, "float_pad_y": 0,
+        \\          "is_pwd": false, "sticky": false
+        \\        }
+        \\      ]
+        \\    }
+        \\  ],
+        \\  "floats": [
+        \\    {
+        \\      "id": 100,
+        \\      "uuid": "33333333333333333333333333333333",
+        \\      "x": 10, "y": 5, "width": 20, "height": 10,
+        \\      "focused": true, "floating": true, "visible": true,
+        \\      "tab_visible": 1, "float_key": 102,
+        \\      "border_x": 9, "border_y": 4, "border_w": 22, "border_h": 12,
+        \\      "float_width_pct": 60, "float_height_pct": 60,
+        \\      "float_pos_x_pct": 50, "float_pos_y_pct": 50,
+        \\      "float_pad_x": 1, "float_pad_y": 0,
+        \\      "is_pwd": true, "sticky": true,
+        \\      "parent_tab": 0
+        \\    }
+        \\  ]
+        \\}
+    ;
+
+    var snapshot = try state.SessionSnapshot.fromMuxJson(testing.allocator, json);
+    defer snapshot.deinit();
+
+    try testing.expectEqualStrings("alpha", snapshot.session_name);
+    try testing.expectEqual(@as(usize, 2), snapshot.tab_counter);
+    try testing.expectEqual(@as(usize, 1), snapshot.tabs.items.len);
+    try testing.expectEqual(@as(usize, 1), snapshot.floats.items.len);
+    try testing.expect(snapshot.active_float_uuid != null);
+    try testing.expect(snapshot.focused_pane_uuid != null);
+    try testing.expect(snapshot.panes.contains([_]u8{'1'} ** 32));
+    try testing.expect(snapshot.panes.contains([_]u8{'2'} ** 32));
+    try testing.expect(snapshot.panes.contains([_]u8{'3'} ** 32));
+    try testing.expectEqualStrings("alpha-1", snapshot.tabs.items[0].name);
+    try testing.expectEqual([_]u8{'2'} ** 32, snapshot.tabs.items[0].focused_pane_uuid.?);
+    try testing.expectEqual([_]u8{'3'} ** 32, snapshot.active_float_uuid.?);
+    try testing.expectEqual([_]u8{'3'} ** 32, snapshot.focused_pane_uuid.?);
 }
 
 // ============================================================================
