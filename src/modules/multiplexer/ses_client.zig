@@ -262,14 +262,24 @@ pub const SesClient = struct {
         self.vt_fd = null;
     }
 
-    /// Sync current mux state to ses (fire-and-forget).
-    pub fn syncState(self: *SesClient, mux_state_json: []const u8, version: u32) !void {
+    /// Sync canonical session state to ses (fire-and-forget).
+    pub fn syncState(self: *SesClient, session_state_json: []const u8, version: u32) !void {
+        const fd = self.ctl_fd orelse return error.NotConnected;
+        var msg: wire.SyncState = .{
+            .state_len = @intCast(session_state_json.len),
+            .version = version,
+        };
+        try wire.writeControlWithTrail(fd, .sync_state, std.mem.asBytes(&msg), session_state_json);
+    }
+
+    /// Sync legacy mux layout JSON to ses for layout save/apply compatibility.
+    pub fn syncLayout(self: *SesClient, mux_state_json: []const u8, version: u32) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
         var msg: wire.SyncState = .{
             .state_len = @intCast(mux_state_json.len),
             .version = version,
         };
-        try wire.writeControlWithTrail(fd, .sync_state, std.mem.asBytes(&msg), mux_state_json);
+        try wire.writeControlWithTrail(fd, .layout_sync, std.mem.asBytes(&msg), mux_state_json);
     }
 
     /// Create a new pane via ses.
@@ -506,6 +516,7 @@ pub const SesClient = struct {
     pub fn updatePaneAux(
         self: *SesClient,
         uuid: [32]u8,
+        active_tab: ?usize,
         _: bool, // is_floating (not used)
         is_focused: bool,
         _: PaneType, // pane_type (not used)
@@ -526,8 +537,10 @@ pub const SesClient = struct {
             .uuid = uuid,
             .created_from = if (created_from) |cf| cf else .{0} ** 32,
             .focused_from = if (focused_from) |ff| ff else .{0} ** 32,
+            .active_tab = @intCast(active_tab orelse 0),
             .has_created_from = if (created_from != null) 1 else 0,
             .has_focused_from = if (focused_from != null) 1 else 0,
+            .has_active_tab = if (active_tab != null) 1 else 0,
             .is_focused = if (is_focused) 1 else 0,
         };
         wire.writeControl(fd, .update_pane_aux, std.mem.asBytes(&msg)) catch {};

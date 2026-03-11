@@ -907,6 +907,9 @@ pub const Server = struct {
             .sync_state => {
                 self.handleBinarySyncState(fd, hdr.payload_len, &buf);
             },
+            .layout_sync => {
+                self.handleBinaryLayoutSync(fd, hdr.payload_len, &buf);
+            },
             .create_pane => {
                 self.handleBinaryCreatePane(fd, hdr.payload_len, &buf);
             },
@@ -1126,12 +1129,36 @@ pub const Server = struct {
                 return;
             }
             client.last_sync_version = ss.version;
-            client.updateMuxState(state_buf) catch {};
-            if (state.SessionSnapshot.fromMuxJson(self.allocator, state_buf)) |snapshot| {
+            if (state.SessionSnapshot.fromJson(self.allocator, state_buf)) |snapshot| {
                 client.updateSessionSnapshot(snapshot);
             } else |err| {
                 ses.debugLog("sync_state: failed to parse canonical session snapshot: {s}", .{@errorName(err)});
             }
+        }
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinaryLayoutSync(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SyncState)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const ss = wire.readStruct(wire.SyncState, fd) catch return;
+        if (ss.state_len > wire.MAX_PAYLOAD_LEN) {
+            self.skipBinaryPayload(fd, payload_len - @sizeOf(wire.SyncState), buf);
+            return;
+        }
+
+        const state_buf = self.allocator.alloc(u8, ss.state_len) catch {
+            self.skipBinaryPayload(fd, ss.state_len, buf);
+            return;
+        };
+        defer self.allocator.free(state_buf);
+        wire.readExact(fd, state_buf) catch return;
+
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        if (self.ses_state.getClient(client_id)) |client| {
+            client.updateMuxState(state_buf) catch {};
         }
         wire.writeControl(fd, .ok, &.{}) catch {};
     }
@@ -1863,6 +1890,7 @@ pub const Server = struct {
             return;
         }
         const upa = wire.readStruct(wire.UpdatePaneAux, fd) catch return;
+        const client_id = self.findClientForCtlFd(fd);
 
         if (self.ses_state.panes.getPtr(upa.uuid)) |pane| {
             if (upa.has_created_from != 0) {
@@ -1872,6 +1900,14 @@ pub const Server = struct {
                 pane.focused_from = upa.focused_from;
             }
             pane.is_focused = (upa.is_focused != 0);
+            if (client_id) |cid| {
+                self.ses_state.updateClientSessionFocus(
+                    cid,
+                    upa.uuid,
+                    if (upa.has_active_tab != 0) upa.active_tab else null,
+                    upa.is_focused != 0,
+                );
+            }
             self.ses_state.markDirty();
         }
         wire.writeControl(fd, .ok, &.{}) catch {};

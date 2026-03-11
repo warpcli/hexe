@@ -317,8 +317,10 @@ pub const UpdatePaneAux = extern struct {
     uuid: [32]u8 align(1),
     created_from: [32]u8 align(1),
     focused_from: [32]u8 align(1),
+    active_tab: u16 align(1),
     has_created_from: u8 align(1),
     has_focused_from: u8 align(1),
+    has_active_tab: u8 align(1),
     is_focused: u8 align(1),
 };
 

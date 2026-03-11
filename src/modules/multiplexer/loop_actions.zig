@@ -364,6 +364,7 @@ pub fn performDisown(state: *State) void {
                     defer if (layout_path) |path| state.allocator.free(path);
                     state.ses_client.updatePaneAux(
                         p.uuid,
+                        state.active_tab,
                         p.floating,
                         p.focused,
                         pane_type,

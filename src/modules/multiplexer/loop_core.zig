@@ -909,6 +909,7 @@ pub fn runMainLoop(state: *State) !void {
                                 defer if (layout_path) |path| state.allocator.free(path);
                                 state.ses_client.updatePaneAux(
                                     pane.uuid,
+                                    state.active_tab,
                                     pane.floating,
                                     pane.focused,
                                     pane_type,

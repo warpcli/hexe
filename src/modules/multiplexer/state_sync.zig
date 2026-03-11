@@ -47,11 +47,19 @@ pub fn syncStateToSes(self: anytype) void {
     const mux_state_json = self.serializeState() catch return;
     defer self.allocator.free(mux_state_json);
 
+    var snapshot = core.session_model.SessionSnapshot.fromMuxJson(self.allocator, mux_state_json) catch return;
+    defer snapshot.deinit();
+    const session_state_json = snapshot.toJson(self.allocator) catch return;
+    defer self.allocator.free(session_state_json);
+
     // Increment version before syncing.
     self.state_version +%= 1;
 
-    self.ses_client.syncState(mux_state_json, self.state_version) catch |e| {
+    self.ses_client.syncState(session_state_json, self.state_version) catch |e| {
         core.logging.logError("mux", "syncState failed", e);
+    };
+    self.ses_client.syncLayout(mux_state_json, self.state_version) catch |e| {
+        core.logging.logError("mux", "syncLayout failed", e);
     };
 }
 
@@ -87,6 +95,7 @@ pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
     const focused_from = if (pane.focused) created_from else null;
     self.ses_client.updatePaneAux(
         pane.uuid,
+        self.active_tab,
         pane.floating,
         pane.focused,
         pane_type,
@@ -123,6 +132,7 @@ pub fn unfocusAllPanes(self: anytype) void {
                 defer if (layout_path) |path| self.allocator.free(path);
                 self.ses_client.updatePaneAux(
                     p.*.uuid,
+                    self.active_tab,
                     p.*.floating,
                     false,
                     pane_type,
@@ -155,6 +165,7 @@ pub fn unfocusAllPanes(self: anytype) void {
             defer if (layout_path) |path| self.allocator.free(path);
             self.ses_client.updatePaneAux(
                 fp.uuid,
+                self.active_tab,
                 fp.floating,
                 false,
                 .float,
@@ -199,6 +210,7 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
     defer if (layout_path) |path| self.allocator.free(path);
     self.ses_client.updatePaneAux(
         pane.uuid,
+        self.active_tab,
         pane.floating,
         true,
         pane_type,
@@ -216,8 +228,6 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
     ) catch |err| {
         core.logging.logError("mux", "failed IPC operation in state_sync", err);
     };
-
-    self.syncStateToSes();
 
     if (self.config._lua_runtime) |rt| {
         rt.lua.createTable(0, 8);
@@ -252,6 +262,7 @@ pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
     defer if (layout_path) |path| self.allocator.free(path);
     self.ses_client.updatePaneAux(
         pane.uuid,
+        self.active_tab,
         pane.floating,
         false,
         pane_type,
@@ -359,6 +370,7 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
     defer if (layout_path) |path| self.allocator.free(path);
     self.ses_client.updatePaneAux(
         p.uuid,
+        self.active_tab,
         p.floating,
         true,
         pane_type,

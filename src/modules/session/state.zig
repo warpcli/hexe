@@ -573,6 +573,52 @@ pub const SesState = struct {
         return session_model.SessionSnapshot.initMinimal(self.allocator, hex_id, session_name);
     }
 
+    pub fn updateClientSessionFocus(
+        self: *SesState,
+        client_id: usize,
+        pane_uuid: [32]u8,
+        active_tab_hint: ?u16,
+        is_focused: bool,
+    ) void {
+        if (!is_focused) return;
+
+        const client = self.getClient(client_id) orelse return;
+        const snapshot = if (client.session_snapshot) |*snap| snap else return;
+        const pane = snapshot.panes.get(pane_uuid) orelse return;
+
+        var active_tab: ?usize = null;
+        if (active_tab_hint) |hint| {
+            const idx: usize = @intCast(hint);
+            if (idx < snapshot.tabs.items.len) {
+                active_tab = idx;
+            }
+        }
+        if (active_tab == null) {
+            active_tab = pane.parent_tab;
+        }
+
+        snapshot.focused_pane_uuid = pane_uuid;
+        if (active_tab) |idx| {
+            snapshot.active_tab = idx;
+        }
+
+        switch (pane.kind) {
+            .split => {
+                snapshot.active_float_uuid = null;
+                if (active_tab) |idx| {
+                    snapshot.tabs.items[idx].focused_pane_uuid = pane_uuid;
+                } else if (pane.parent_tab) |idx| {
+                    if (idx < snapshot.tabs.items.len) {
+                        snapshot.tabs.items[idx].focused_pane_uuid = pane_uuid;
+                    }
+                }
+            },
+            .float => {
+                snapshot.active_float_uuid = pane_uuid;
+            },
+        }
+    }
+
     /// Check if a session name is already in use by a detached session or connected client.
     /// Optionally excludes one client id (used during re-register).
     fn isSessionNameInUse(self: *SesState, name: []const u8, exclude_client_id: ?usize) bool {

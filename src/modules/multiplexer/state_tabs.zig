@@ -13,6 +13,7 @@ const Pane = @import("pane.zig").Pane;
 const ses_client = @import("ses_client.zig");
 const OrphanedPaneInfo = ses_client.OrphanedPaneInfo;
 const state_reattach = @import("state_reattach.zig");
+const tab_switch = @import("tab_switch.zig");
 const lua_events = @import("lua_events.zig");
 
 /// Get the current tab's layout.
@@ -291,9 +292,7 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
 pub fn nextTab(self: anytype) void {
     if (self.tabs.items.len > 1) {
         const prev_tab = self.active_tab;
-        self.active_tab = (self.active_tab + 1) % self.tabs.items.len;
-        self.renderer.invalidate();
-        self.force_full_render = true;
+        tab_switch.switchToTab(self, (self.active_tab + 1) % self.tabs.items.len);
 
         if (self.config._lua_runtime) |rt| {
             rt.lua.createTable(0, 6);
@@ -316,9 +315,7 @@ pub fn nextTab(self: anytype) void {
 pub fn prevTab(self: anytype) void {
     if (self.tabs.items.len > 1) {
         const prev_tab = self.active_tab;
-        self.active_tab = if (self.active_tab == 0) self.tabs.items.len - 1 else self.active_tab - 1;
-        self.renderer.invalidate();
-        self.force_full_render = true;
+        tab_switch.switchToTab(self, if (self.active_tab == 0) self.tabs.items.len - 1 else self.active_tab - 1);
 
         if (self.config._lua_runtime) |rt| {
             rt.lua.createTable(0, 6);

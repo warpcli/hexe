@@ -724,6 +724,65 @@ test "SessionSnapshot.toJson/fromJson: round trips canonical snapshot" {
     try testing.expect(reparsed.tabs.items[0].root != null);
 }
 
+test "updateClientSessionFocus: split focus updates active tab and tab focus" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(1);
+    const client = ses_state.getClient(client_id).?;
+
+    var snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'a'} ** 32, "alpha");
+    try snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try testing.allocator.dupe(u8, "alpha-1"),
+        .focused_pane_uuid = null,
+        .allocator = testing.allocator,
+    });
+    try snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'u'} ** 32,
+        .name = try testing.allocator.dupe(u8, "alpha-2"),
+        .focused_pane_uuid = null,
+        .allocator = testing.allocator,
+    });
+    try snapshot.panes.put([_]u8{'1'} ** 32, .{ .uuid = [_]u8{'1'} ** 32, .kind = .split, .parent_tab = 1 });
+    client.updateSessionSnapshot(snapshot);
+
+    ses_state.updateClientSessionFocus(client_id, [_]u8{'1'} ** 32, 1, true);
+
+    try testing.expectEqual(@as(usize, 1), client.session_snapshot.?.active_tab);
+    try testing.expectEqual([_]u8{'1'} ** 32, client.session_snapshot.?.focused_pane_uuid.?);
+    try testing.expectEqual([_]u8{'1'} ** 32, client.session_snapshot.?.tabs.items[1].focused_pane_uuid.?);
+    try testing.expect(client.session_snapshot.?.active_float_uuid == null);
+}
+
+test "updateClientSessionFocus: float focus preserves split focus and tracks active float" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(1);
+    const client = ses_state.getClient(client_id).?;
+
+    var snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'a'} ** 32, "alpha");
+    try snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try testing.allocator.dupe(u8, "alpha-1"),
+        .focused_pane_uuid = [_]u8{'1'} ** 32,
+        .allocator = testing.allocator,
+    });
+    snapshot.active_tab = 0;
+    snapshot.focused_pane_uuid = [_]u8{'1'} ** 32;
+    try snapshot.panes.put([_]u8{'1'} ** 32, .{ .uuid = [_]u8{'1'} ** 32, .kind = .split, .parent_tab = 0 });
+    try snapshot.panes.put([_]u8{'f'} ** 32, .{ .uuid = [_]u8{'f'} ** 32, .kind = .float, .parent_tab = null });
+    client.updateSessionSnapshot(snapshot);
+
+    ses_state.updateClientSessionFocus(client_id, [_]u8{'f'} ** 32, 0, true);
+
+    try testing.expectEqual(@as(usize, 0), client.session_snapshot.?.active_tab);
+    try testing.expectEqual([_]u8{'f'} ** 32, client.session_snapshot.?.focused_pane_uuid.?);
+    try testing.expectEqual([_]u8{'f'} ** 32, client.session_snapshot.?.active_float_uuid.?);
+    try testing.expectEqual([_]u8{'1'} ** 32, client.session_snapshot.?.tabs.items[0].focused_pane_uuid.?);
+}
+
 // ============================================================================
 // Session Affinity Tests
 // ============================================================================
