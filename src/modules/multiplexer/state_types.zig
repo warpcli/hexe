@@ -5,6 +5,7 @@ const pop = @import("pop");
 
 const layout_mod = @import("layout.zig");
 const Layout = layout_mod.Layout;
+const Pane = @import("pane.zig").Pane;
 
 const NotificationManager = pop.notification.NotificationManager;
 
@@ -41,6 +42,31 @@ pub const Tab = struct {
         self.layout.deinit();
         self.notifications.deinit();
         self.popups.deinit();
+    }
+};
+
+pub const TerminalViewState = struct {
+    tabs: std.ArrayList(Tab),
+    floats: std.ArrayList(*Pane),
+
+    pub fn init() TerminalViewState {
+        return .{
+            .tabs = .empty,
+            .floats = .empty,
+        };
+    }
+
+    pub fn deinit(self: *TerminalViewState, allocator: std.mem.Allocator) void {
+        for (self.floats.items) |pane| {
+            pane.deinit();
+            allocator.destroy(pane);
+        }
+        self.floats.deinit(allocator);
+
+        for (self.tabs.items) |*tab| {
+            tab.deinit();
+        }
+        self.tabs.deinit(allocator);
     }
 };
 

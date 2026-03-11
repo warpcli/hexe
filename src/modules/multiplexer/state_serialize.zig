@@ -40,7 +40,7 @@ pub fn serializeState(self: anytype) ![]const u8 {
 
     // Tabs.
     try writer.writeAll("\"tabs\":[");
-    for (self.tabs.items, 0..) |*tab, ti| {
+    for (self.view.tabs.items, 0..) |*tab, ti| {
         const tab_uuid = self.tabUuid(ti) orelse continue;
         if (ti > 0) try writer.writeAll(",");
         try writer.writeAll("{");
@@ -78,7 +78,7 @@ pub fn serializeState(self: anytype) ![]const u8 {
 
     // Floats.
     try writer.writeAll("\"floats\":[");
-    for (self.floats.items, 0..) |pane, fi| {
+    for (self.view.floats.items, 0..) |pane, fi| {
         if (fi > 0) try writer.writeAll(",");
         try self.serializePane(writer, pane);
     }

@@ -7,6 +7,7 @@ const pop = @import("pop");
 const state_types = @import("state_types.zig");
 pub const PendingAction = state_types.PendingAction;
 pub const Tab = state_types.Tab;
+pub const TerminalViewState = state_types.TerminalViewState;
 pub const PendingFloatRequest = state_types.PendingFloatRequest;
 pub const CursorSnapshot = state_types.CursorSnapshot;
 
@@ -99,8 +100,7 @@ pub const State = struct {
     ses_config: core.SesConfig,
     session_cache: FrontendSessionCache,
     active_layout_floats: []const core.LayoutFloatDef,
-    tabs: std.ArrayList(Tab),
-    floats: std.ArrayList(*Pane),
+    view: TerminalViewState,
     running: bool,
     needs_render: bool,
     force_full_render: bool,
@@ -259,8 +259,7 @@ pub const State = struct {
             .ses_config = ses_cfg,
             .session_cache = try FrontendSessionCache.init(allocator, uuid, session_name),
             .active_layout_floats = layout_floats,
-            .tabs = .empty,
-            .floats = .empty,
+            .view = TerminalViewState.init(),
             .running = true,
             .needs_render = true,
             .force_full_render = true,
@@ -404,17 +403,7 @@ pub const State = struct {
 
         self.key_timers.deinit(self.allocator);
 
-        // Deinit floats.
-        for (self.floats.items) |pane| {
-            pane.deinit();
-            self.allocator.destroy(pane);
-        }
-        self.floats.deinit(self.allocator);
-
-        for (self.tabs.items) |*tab| {
-            tab.deinit();
-        }
-        self.tabs.deinit(self.allocator);
+        self.view.deinit(self.allocator);
         self.session_cache.deinit();
         self.config.deinit();
         var ses_cfg = self.ses_config;
@@ -607,11 +596,11 @@ pub const State = struct {
     }
 
     pub fn activeTabIndex(self: *const State) usize {
-        return self.session_cache.activeTab(self.tabs.items.len);
+        return self.session_cache.activeTab(self.view.tabs.items.len);
     }
 
     pub fn setActiveTabIndex(self: *State, idx: usize) void {
-        const clamped = if (self.tabs.items.len == 0) 0 else @min(idx, self.tabs.items.len - 1);
+        const clamped = if (self.view.tabs.items.len == 0) 0 else @min(idx, self.view.tabs.items.len - 1);
         self.session_cache.setActiveTab(clamped);
     }
 
@@ -646,13 +635,13 @@ pub const State = struct {
         self.session_cache.replaceAttachedSnapshotOwned(snapshot) catch return false;
         self.frontend_client.session_id = self.session_cache.sessionUuid();
         self.frontend_client.session_name = self.session_cache.sessionName();
-        self.setActiveTabIndex(self.session_cache.activeTab(self.tabs.items.len));
+        self.setActiveTabIndex(self.session_cache.activeTab(self.view.tabs.items.len));
         self.setActiveFloatingUuid(self.session_cache.activeFloatUuid());
         return true;
     }
 
     pub fn resetTabFocusMemory(self: *State) bool {
-        self.session_cache.resetTabFocusMemory(self.tabs.items.len) catch return false;
+        self.session_cache.resetTabFocusMemory(self.view.tabs.items.len) catch return false;
         return true;
     }
 
@@ -683,7 +672,7 @@ pub const State = struct {
 
     pub fn activeFloatingIndex(self: *State) ?usize {
         const uuid = self.session_cache.activeFloatUuid() orelse return null;
-        for (self.floats.items, 0..) |pane, idx| {
+        for (self.view.floats.items, 0..) |pane, idx| {
             if (std.mem.eql(u8, &pane.uuid, &uuid)) return idx;
         }
         self.session_cache.setActiveFloatUuid(null);
@@ -692,8 +681,8 @@ pub const State = struct {
 
     pub fn setActiveFloatingIndex(self: *State, idx: ?usize) void {
         if (idx) |value| {
-            if (value < self.floats.items.len) {
-                self.session_cache.setActiveFloatUuid(self.floats.items[value].uuid);
+            if (value < self.view.floats.items.len) {
+                self.session_cache.setActiveFloatUuid(self.view.floats.items[value].uuid);
                 return;
             }
         }
@@ -880,7 +869,7 @@ pub const State = struct {
         self.layout_width = cols;
         self.layout_height = rows - status_h;
 
-        for (self.tabs.items) |*tab| {
+        for (self.view.tabs.items) |*tab| {
             tab.layout.resize(self.layout_width, self.layout_height);
         }
 

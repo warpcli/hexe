@@ -156,7 +156,7 @@ fn handleTargetedNotify(state: *State, fd: posix.fd_t, payload_len: u32, buffer:
     }
 
     // Try to find tab with this UUID prefix.
-    for (state.tabs.items, 0..) |*tab, tab_idx| {
+    for (state.view.tabs.items, 0..) |*tab, tab_idx| {
         const tab_uuid = state.tabUuid(tab_idx) orelse continue;
         if (std.mem.startsWith(u8, &tab_uuid, &notify.uuid)) {
             const dur = if (duration > 0) duration else tab.notifications.default_duration_ms;
@@ -271,7 +271,7 @@ fn resolvePopupTarget(state: *State, uuid: [32]u8) PopupTarget {
         if (state.findPaneByUuid(uuid)) |pane| {
             return .{ .manager = &pane.popups, .scope = .pane, .pane = pane };
         }
-        for (state.tabs.items, 0..) |*tab, tab_idx| {
+        for (state.view.tabs.items, 0..) |*tab, tab_idx| {
             const tab_uuid = state.tabUuid(tab_idx) orelse continue;
             if (std.mem.startsWith(u8, &tab_uuid, &uuid)) {
                 return .{ .manager = &tab.popups, .scope = .tab, .tab_idx = tab_idx };
@@ -482,7 +482,7 @@ fn handleSendKeys(state: *State, fd: posix.fd_t, buffer: []u8) void {
     const zero_uuid: [32]u8 = .{0} ** 32;
     if (std.mem.eql(u8, &sk.uuid, &zero_uuid)) {
         // Broadcast to all panes.
-        for (state.tabs.items) |*tab| {
+        for (state.view.tabs.items) |*tab| {
             var it = tab.layout.splits.valueIterator();
             while (it.next()) |pane_ptr| {
                 pane_ptr.*.write(buffer[0..sk.data_len]) catch {};
@@ -503,7 +503,7 @@ pub fn sendPopResponse(state: *State) void {
     // Get the correct PopupManager based on scope.
     const popups: *pop.PopupManager = switch (state.pending_pop_scope) {
         .mux => &state.popups,
-        .tab => &state.tabs.items[state.pending_pop_tab].popups,
+        .tab => &state.view.tabs.items[state.pending_pop_tab].popups,
         .pane => if (state.pending_pop_pane) |pane| &pane.popups else &state.popups,
     };
 
@@ -566,12 +566,12 @@ fn handleExitIntent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
     if (remaining > 0) skipPayload(fd, remaining, buffer);
 
     // If no tabs, allow exit.
-    if (state.tabs.items.len == 0) {
+    if (state.view.tabs.items.len == 0) {
         sendExitIntentResultPub(state, true);
         return;
     }
 
-    const is_last_split = (state.currentLayout().splitCount() <= 1 and state.tabs.items.len <= 1);
+    const is_last_split = (state.currentLayout().splitCount() <= 1 and state.view.tabs.items.len <= 1);
     if (!is_last_split or !state.config.confirm_on_exit) {
         sendExitIntentResultPub(state, true);
         return;
@@ -704,7 +704,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         spawn_cwd = cwd_slice;
     } else {
         const focused_pane = if (state.activeFloatingIndex()) |idx| blk: {
-            if (idx < state.floats.items.len) break :blk state.floats.items[idx];
+            if (idx < state.view.floats.items.len) break :blk state.view.floats.items[idx];
             break :blk @as(?*Pane, null);
         } else state.currentLayout().getFocusedPane();
         if (focused_pane) |pane| {
@@ -721,7 +721,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
     var cursor_snapshot: ?CursorSnapshot = null;
     if (wait_for_exit) {
         const source_pane = if (state.activeFloatingIndex()) |idx| blk: {
-            if (idx < state.floats.items.len) break :blk state.floats.items[idx];
+            if (idx < state.view.floats.items.len) break :blk state.view.floats.items[idx];
             break :blk @as(?*Pane, null);
         } else state.currentLayout().getFocusedPane();
 
@@ -740,7 +740,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
     // Unfocus current pane.
     const old_uuid = state.getCurrentFocusedUuid();
     if (state.activeFloatingIndex()) |idx| {
-        if (idx < state.floats.items.len) state.syncPaneUnfocus(state.floats.items[idx]);
+        if (idx < state.view.floats.items.len) state.syncPaneUnfocus(state.view.floats.items[idx]);
     } else if (state.currentLayout().getFocusedPane()) |tiled| {
         state.syncPaneUnfocus(tiled);
     }
@@ -778,15 +778,15 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         return;
     };
 
-    if (state.floats.items.len > 0) {
-        state.syncPaneFocus(state.floats.items[state.floats.items.len - 1], old_uuid);
+    if (state.view.floats.items.len > 0) {
+        state.syncPaneFocus(state.view.floats.items[state.view.floats.items.len - 1], old_uuid);
         state.drop_next_input_batch = true;
     }
     state.needs_render = true;
 
     if (wait_for_exit) {
-        if (state.floats.items.len > 0) {
-            state.floats.items[state.floats.items.len - 1].capture_output = true;
+        if (state.view.floats.items.len > 0) {
+            state.view.floats.items[state.view.floats.items.len - 1].capture_output = true;
         }
         const stored_path = if (result_path_slice.len > 0) state.allocator.dupe(u8, result_path_slice) catch null else null;
         state.pending_float_requests.put(new_uuid, .{
@@ -805,7 +805,7 @@ fn handlePaneExited(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
     mux.debugLogUuid(&pu.uuid, "pane_exited received from SES", .{});
 
     // Mark the pane as dead in all tabs and floats.
-    for (state.tabs.items) |*tab| {
+    for (state.view.tabs.items) |*tab| {
         var it = tab.layout.splits.valueIterator();
         while (it.next()) |pane_ptr| {
             if (std.mem.eql(u8, &pane_ptr.*.uuid, &pu.uuid)) {
@@ -813,7 +813,7 @@ fn handlePaneExited(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
             }
         }
     }
-    for (state.floats.items) |pane| {
+    for (state.view.floats.items) |pane| {
         if (std.mem.eql(u8, &pane.uuid, &pu.uuid)) {
             pane.backend.pod.dead = true;
         }
@@ -877,7 +877,7 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
                 if (state.pop_config.widgets.pokemon.enabled) {
                     // Find the pane with this UUID and load its sprite
                     // Check all floats
-                    for (state.floats.items) |pane| {
+                    for (state.view.floats.items) |pane| {
                         const uuid_match = std.mem.eql(u8, pane.uuid[0..], resp.uuid[0..]);
                         if (uuid_match and pane.pokemon_initialized and
                             !pane.pokemon_state.manually_toggled and pane.pokemon_state.sprite_content == null)

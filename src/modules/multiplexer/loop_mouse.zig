@@ -145,8 +145,8 @@ const isFloatRenderableOnTab = float_util.isFloatRenderableOnTab;
 fn findFocusableAt(state: *State, x: u16, y: u16) ?FocusTarget {
     // Floats are topmost - check active first, then others in reverse.
     if (state.activeFloatingIndex()) |afi| {
-        if (afi < state.floats.items.len) {
-            const fp = state.floats.items[afi];
+        if (afi < state.view.floats.items.len) {
+            const fp = state.view.floats.items[afi];
             if (isFloatRenderableOnTab(fp, state.activeTabIndex())) {
                 if (x >= fp.border_x and x < fp.border_x + fp.border_w and y >= fp.border_y and y < fp.border_y + fp.border_h) {
                     return .{ .kind = .float, .pane = fp, .float_index = afi };
@@ -155,10 +155,10 @@ fn findFocusableAt(state: *State, x: u16, y: u16) ?FocusTarget {
         }
     }
 
-    var fi: usize = state.floats.items.len;
+    var fi: usize = state.view.floats.items.len;
     while (fi > 0) {
         fi -= 1;
-        const fp = state.floats.items[fi];
+        const fp = state.view.floats.items[fi];
         if (!isFloatRenderableOnTab(fp, state.activeTabIndex())) continue;
         if (x >= fp.border_x and x < fp.border_x + fp.border_w and y >= fp.border_y and y < fp.border_y + fp.border_h) {
             return .{ .kind = .float, .pane = fp, .float_index = fi };
@@ -436,8 +436,8 @@ fn copySelectionRange(state: *State, pane: *Pane, range: anytype) bool {
 
 fn forwardToFocusedAltPane(state: *State, ev: MouseEvent) bool {
     if (state.activeFloatingIndex()) |afi| {
-        if (afi < state.floats.items.len and state.floats.items[afi].vt.inAltScreen()) {
-            forwardMouseToPane(state.floats.items[afi], ev);
+        if (afi < state.view.floats.items.len and state.view.floats.items[afi].vt.inAltScreen()) {
+            forwardMouseToPane(state.view.floats.items[afi], ev);
             return true;
         }
     } else if (state.currentLayout().getFocusedPane()) |p| {
@@ -591,7 +591,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
             if (ev.is_release) {
                 state.mouse_drag = .none;
                 if (state.findPaneByUuid(d.uuid)) |pane| {
-                    state.syncSessionFloat(pane, state.activeFloatingIndex() != null and state.floats.items[state.activeFloatingIndex().?] == pane);
+                    state.syncSessionFloat(pane, state.activeFloatingIndex() != null and state.view.floats.items[state.activeFloatingIndex().?] == pane);
                 }
                 return true;
             }
@@ -608,7 +608,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                 state.overlays.hideResizeInfo();
                 state.needs_render = true;
                 if (state.findPaneByUuid(d.uuid)) |pane| {
-                    state.syncSessionFloat(pane, state.activeFloatingIndex() != null and state.floats.items[state.activeFloatingIndex().?] == pane);
+                    state.syncSessionFloat(pane, state.activeFloatingIndex() != null and state.view.floats.items[state.activeFloatingIndex().?] == pane);
                 }
                 return true;
             }
@@ -671,7 +671,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
 
     // Status bar tab switching (only on press).
     if (!ev.is_release and state.config.tabs.status.enabled and ev.y == state.term_height - 1) {
-        if (statusbar.hitTestTab(state, state.allocator, &state.config, state.term_width, state.term_height, state.tabs, state.activeTabIndex(), state.sessionName(), ev.x, ev.y)) |ti| {
+        if (statusbar.hitTestTab(state, state.allocator, &state.config, state.term_width, state.term_height, state.view.tabs, state.activeTabIndex(), state.sessionName(), ev.x, ev.y)) |ti| {
             if (ti != state.activeTabIndex()) {
                 @import("tab_switch.zig").switchToTab(state, ti);
             }
@@ -684,7 +684,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
             &state.config,
             state.term_width,
             state.term_height,
-            state.tabs,
+            state.view.tabs,
             state.activeTabIndex(),
             state.sessionName(),
             ev.x,
@@ -721,8 +721,8 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
             }
         } else {
             if (state.activeFloatingIndex()) |afi| {
-                if (afi < state.floats.items.len) {
-                    forwardMouseToPane(state.floats.items[afi], ev);
+                if (afi < state.view.floats.items.len) {
+                    forwardMouseToPane(state.view.floats.items[afi], ev);
                 }
             } else if (state.currentLayout().getFocusedPane()) |p| {
                 forwardMouseToPane(p, ev);

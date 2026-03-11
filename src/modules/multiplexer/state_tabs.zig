@@ -17,15 +17,15 @@ const lua_events = @import("lua_events.zig");
 
 /// Get the current tab's layout.
 pub fn currentLayout(self: anytype) *Layout {
-    return &self.tabs.items[self.activeTabIndex()].layout;
+    return &self.view.tabs.items[self.activeTabIndex()].layout;
 }
 
 pub fn findPaneByUuid(self: anytype, uuid: [32]u8) ?*Pane {
-    for (self.floats.items) |pane| {
+    for (self.view.floats.items) |pane| {
         if (std.mem.eql(u8, &pane.uuid, &uuid)) return pane;
     }
 
-    for (self.tabs.items) |*tab| {
+    for (self.view.tabs.items) |*tab| {
         var it = tab.layout.splits.valueIterator();
         while (it.next()) |p| {
             if (std.mem.eql(u8, &p.*.uuid, &uuid)) return p.*;
@@ -37,13 +37,13 @@ pub fn findPaneByUuid(self: anytype, uuid: [32]u8) ?*Pane {
 
 /// Find a pane by its SES-assigned pane_id (pod panes only).
 pub fn findPaneByPaneId(self: anytype, pane_id: u16) ?*Pane {
-    for (self.floats.items) |pane| {
+    for (self.view.floats.items) |pane| {
         if (pane.getPaneId()) |id| {
             if (id == pane_id) return pane;
         }
     }
 
-    for (self.tabs.items) |*tab| {
+    for (self.view.tabs.items) |*tab| {
         var it = tab.layout.splits.valueIterator();
         while (it.next()) |p| {
             if (p.*.getPaneId()) |id| {
@@ -62,10 +62,10 @@ pub fn createTab(self: anytype) !void {
     // Get cwd from currently focused pane (float or split), with fallback to mux's cwd.
     var cwd: ?[]const u8 = null;
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    if (self.tabs.items.len > 0) {
+    if (self.view.tabs.items.len > 0) {
         // Check active float first, then split pane
         const focused_pane: ?*Pane = if (self.activeFloatingIndex()) |idx| blk: {
-            if (idx < self.floats.items.len) break :blk self.floats.items[idx];
+            if (idx < self.view.floats.items.len) break :blk self.view.floats.items[idx];
             break :blk null;
         } else self.currentLayout().getFocusedPane();
 
@@ -97,17 +97,17 @@ pub fn createTab(self: anytype) !void {
     // Set pane notification config.
     tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
     const first_pane = try tab.layout.createFirstPane(cwd);
-    try self.tabs.append(self.allocator, tab);
+    try self.view.tabs.append(self.allocator, tab);
     errdefer {
-        var failed_tab = self.tabs.pop().?;
+        var failed_tab = self.view.tabs.pop().?;
         failed_tab.deinit();
     }
     if (!self.appendTabMeta(tab_uuid, name_owned)) return error.OutOfMemory;
-    errdefer self.removeTabMeta(self.tabs.items.len - 1);
+    errdefer self.removeTabMeta(self.view.tabs.items.len - 1);
     self.allocator.free(name_owned);
     if (!self.appendTabFocusMemory()) return error.OutOfMemory;
-    errdefer self.removeTabFocusMemory(self.tabs.items.len - 1);
-    self.setActiveTabIndex(self.tabs.items.len - 1);
+    errdefer self.removeTabFocusMemory(self.view.tabs.items.len - 1);
+    self.setActiveTabIndex(self.view.tabs.items.len - 1);
     self.syncPaneAux(first_pane, parent_uuid);
     self.syncSessionTabAdded(tab_uuid, self.tabName(self.activeTabIndex()), first_pane.uuid);
     self.renderer.invalidate();
@@ -116,14 +116,14 @@ pub fn createTab(self: anytype) !void {
 
 /// Close the current tab.
 pub fn closeCurrentTab(self: anytype) bool {
-    if (self.tabs.items.len <= 1) return false;
+    if (self.view.tabs.items.len <= 1) return false;
     const closing_tab = self.activeTabIndex();
     const closing_uuid = self.tabUuid(closing_tab) orelse return false;
 
     // Handle tab-bound floats belonging to this tab.
     var i: usize = 0;
-    while (i < self.floats.items.len) {
-        const fp = self.floats.items[i];
+    while (i < self.view.floats.items.len) {
+        const fp = self.view.floats.items[i];
         if (fp.parent_tab) |parent| {
             if (parent == closing_tab) {
                 // Kill this tab-bound float.
@@ -132,7 +132,7 @@ pub fn closeCurrentTab(self: anytype) bool {
                 };
                 fp.deinit();
                 self.allocator.destroy(fp);
-                _ = self.floats.orderedRemove(i);
+                _ = self.view.floats.orderedRemove(i);
                 // Clear active_floating if it was this float.
                 if (self.activeFloatingIndex()) |afi| {
                     if (afi == i) {
@@ -152,18 +152,18 @@ pub fn closeCurrentTab(self: anytype) bool {
         i += 1;
     }
 
-    var tab = self.tabs.orderedRemove(self.activeTabIndex());
+    var tab = self.view.tabs.orderedRemove(self.activeTabIndex());
     tab.deinit();
     self.removeTabMeta(self.activeTabIndex());
     self.removeTabFocusMemory(self.activeTabIndex());
-    if (self.activeTabIndex() >= self.tabs.items.len) {
-        self.setActiveTabIndex(self.tabs.items.len - 1);
+    if (self.activeTabIndex() >= self.view.tabs.items.len) {
+        self.setActiveTabIndex(self.view.tabs.items.len - 1);
     } else {
         self.setActiveTabIndex(self.activeTabIndex());
     }
     if (self.activeFloatingIndex()) |afi| {
-        if (afi < self.floats.items.len) {
-            self.syncPaneFocus(self.floats.items[afi], null);
+        if (afi < self.view.floats.items.len) {
+            self.syncPaneFocus(self.view.floats.items[afi], null);
         } else if (self.currentLayout().getFocusedPane()) |pane| {
             self.setActiveFloatingIndex(null);
             self.syncPaneFocus(pane, null);
@@ -236,7 +236,7 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
     const content_h = if (outer_h > 2 + 2 * pad_y) outer_h - 2 - 2 * pad_y else 1;
 
     // Generate pane ID (floats use 100+ offset).
-    const id: u16 = @intCast(100 + self.floats.items.len);
+    const id: u16 = @intCast(100 + self.view.floats.items.len);
 
     // Initialize pane with the adopted pod — VT routed through SES.
     const vt_fd = self.frontend_client.getVtFd() orelse return error.NoVtChannel;
@@ -299,15 +299,15 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
     // Configure pane notifications.
     pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
 
-    try self.floats.append(self.allocator, pane);
+    try self.view.floats.append(self.allocator, pane);
     // Don't set active_floating here - let user toggle it manually.
 }
 
 /// Switch to next tab.
 pub fn nextTab(self: anytype) void {
-    if (self.tabs.items.len > 1) {
+    if (self.view.tabs.items.len > 1) {
         const prev_tab = self.activeTabIndex();
-        tab_switch.switchToTab(self, (self.activeTabIndex() + 1) % self.tabs.items.len);
+        tab_switch.switchToTab(self, (self.activeTabIndex() + 1) % self.view.tabs.items.len);
 
         if (self.config._lua_runtime) |rt| {
             rt.lua.createTable(0, 6);
@@ -317,7 +317,7 @@ pub fn nextTab(self: anytype) void {
             rt.lua.setField(-2, "previous_tab");
             rt.lua.pushInteger(@intCast(self.activeTabIndex() + 1));
             rt.lua.setField(-2, "active_tab");
-            rt.lua.pushInteger(@intCast(self.tabs.items.len));
+            rt.lua.pushInteger(@intCast(self.view.tabs.items.len));
             rt.lua.setField(-2, "tab_count");
             rt.lua.pushInteger(@intCast(std.time.milliTimestamp()));
             rt.lua.setField(-2, "now_ms");
@@ -328,9 +328,9 @@ pub fn nextTab(self: anytype) void {
 
 /// Switch to previous tab.
 pub fn prevTab(self: anytype) void {
-    if (self.tabs.items.len > 1) {
+    if (self.view.tabs.items.len > 1) {
         const prev_tab = self.activeTabIndex();
-        tab_switch.switchToTab(self, if (self.activeTabIndex() == 0) self.tabs.items.len - 1 else self.activeTabIndex() - 1);
+        tab_switch.switchToTab(self, if (self.activeTabIndex() == 0) self.view.tabs.items.len - 1 else self.activeTabIndex() - 1);
 
         if (self.config._lua_runtime) |rt| {
             rt.lua.createTable(0, 6);
@@ -340,7 +340,7 @@ pub fn prevTab(self: anytype) void {
             rt.lua.setField(-2, "previous_tab");
             rt.lua.pushInteger(@intCast(self.activeTabIndex() + 1));
             rt.lua.setField(-2, "active_tab");
-            rt.lua.pushInteger(@intCast(self.tabs.items.len));
+            rt.lua.pushInteger(@intCast(self.view.tabs.items.len));
             rt.lua.setField(-2, "tab_count");
             rt.lua.pushInteger(@intCast(std.time.milliTimestamp()));
             rt.lua.setField(-2, "now_ms");
@@ -364,7 +364,7 @@ pub fn adoptOrphanedPane(self: anytype) bool {
 
     // Get the current focused pane and replace it.
     if (self.activeFloatingIndex()) |idx| {
-        const old_pane = self.floats.items[idx];
+        const old_pane = self.view.floats.items[idx];
         old_pane.replaceWithPod(result.pane_id, vt_fd, result.uuid) catch return false;
     } else if (self.currentLayout().getFocusedPane()) |pane| {
         pane.replaceWithPod(result.pane_id, vt_fd, result.uuid) catch return false;
