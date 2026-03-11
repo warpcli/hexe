@@ -3,7 +3,7 @@ const posix = std.posix;
 const core = @import("core");
 const pop = @import("pop");
 const Pane = @import("pane.zig").Pane;
-const SesClient = core.FrontendClient;
+const FrontendClient = core.FrontendClient;
 
 /// Cursor position for directional navigation
 pub const CursorPos = struct { x: u16, y: u16 };
@@ -39,8 +39,8 @@ pub const Layout = struct {
     y: u16,
     width: u16,
     height: u16,
-    // Optional ses client for pane creation
-    ses_client: ?*SesClient,
+    // Optional frontend client for pane creation
+    frontend_client: ?*FrontendClient,
     // Optional pane notification config (from pop.json)
     pane_pop_cfg: ?*const pop.NotificationStyle,
 
@@ -55,14 +55,14 @@ pub const Layout = struct {
             .y = 0,
             .width = width,
             .height = height,
-            .ses_client = null,
+            .frontend_client = null,
             .pane_pop_cfg = null,
         };
     }
 
-    /// Set the ses client for pane creation
-    pub fn setSesClient(self: *Layout, client: *SesClient) void {
-        self.ses_client = client;
+    /// Set the frontend client for pane creation
+    pub fn setFrontendClient(self: *Layout, client: *FrontendClient) void {
+        self.frontend_client = client;
     }
 
     /// Set the pane notification config from pop.json
@@ -105,8 +105,8 @@ pub const Layout = struct {
 
     /// Create the first pane
     pub fn createFirstPane(self: *Layout, cwd: ?[]const u8) !*Pane {
-        const ses = self.ses_client orelse return error.SesUnavailable;
-        if (!ses.isConnected()) return error.SesUnavailable;
+        const client = self.frontend_client orelse return error.SesUnavailable;
+        if (!client.isConnected()) return error.SesUnavailable;
 
         const id = self.next_split_id;
         self.next_split_id += 1;
@@ -114,8 +114,8 @@ pub const Layout = struct {
         const pane = try self.allocator.create(Pane);
         errdefer self.allocator.destroy(pane);
 
-        const result = try ses.createPane(null, cwd, null, null, null, null, null);
-        const vt_fd = ses.getVtFd() orelse return error.SesUnavailable;
+        const result = try client.createPane(null, cwd, null, null, null, null, null);
+        const vt_fd = client.getVtFd() orelse return error.SesUnavailable;
         try pane.initWithPod(self.allocator, id, self.x, self.y, self.width, self.height, result.pane_id, vt_fd, result.uuid);
 
         pane.focused = true;
@@ -133,8 +133,8 @@ pub const Layout = struct {
 
     /// Split the focused pane
     pub fn splitFocused(self: *Layout, dir: SplitDir, cwd: ?[]const u8) !?*Pane {
-        const ses = self.ses_client orelse return error.SesUnavailable;
-        if (!ses.isConnected()) return error.SesUnavailable;
+        const client = self.frontend_client orelse return error.SesUnavailable;
+        if (!client.isConnected()) return error.SesUnavailable;
         if (self.root == null) return null;
 
         const focused = self.getFocusedPane() orelse return null;
@@ -153,8 +153,8 @@ pub const Layout = struct {
         const new_x = if (dir == .horizontal) focused.x + focused.width - new_width else focused.x;
         const new_y = if (dir == .vertical) focused.y + focused.height - new_height else focused.y;
 
-        const result = try ses.createPane(null, cwd, null, null, null, null, null);
-        const vt_fd = ses.getVtFd() orelse return error.SesUnavailable;
+        const result = try client.createPane(null, cwd, null, null, null, null, null);
+        const vt_fd = client.getVtFd() orelse return error.SesUnavailable;
         try new_pane.initWithPod(self.allocator, new_id, new_x, new_y, new_width, new_height, result.pane_id, vt_fd, result.uuid);
         errdefer new_pane.deinit();
 
@@ -561,9 +561,9 @@ pub const Layout = struct {
             // Tell ses to kill only if the pane is still alive.
             // Dead panes already reported by SES should be removed locally
             // without another synchronous kill request.
-            if (self.ses_client) |ses| {
+            if (self.frontend_client) |client| {
                 if (kv.value.isAlive()) {
-                    ses.killPane(kv.value.uuid) catch {};
+                    client.killPane(kv.value.uuid) catch {};
                 }
             }
             kv.value.deinit();
@@ -592,9 +592,9 @@ pub const Layout = struct {
         }
 
         if (self.splits.fetchRemove(id_to_close)) |kv| {
-            if (self.ses_client) |ses| {
+            if (self.frontend_client) |client| {
                 if (kv.value.isAlive()) {
-                    ses.killPane(kv.value.uuid) catch {};
+                    client.killPane(kv.value.uuid) catch {};
                 }
             }
             kv.value.deinit();

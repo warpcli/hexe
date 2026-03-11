@@ -5,8 +5,6 @@ const vaxis = @import("vaxis");
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
-const SesClient = core.FrontendClient;
-
 const input = @import("input.zig");
 
 const actions = @import("loop_actions.zig");
@@ -334,7 +332,7 @@ fn replaceFromLocalLayout(state: *State) void {
 
     if (cfg.name) |desired_name| {
         if (state.setSessionName(desired_name)) {
-            if (core.FrontendAttach.syncSessionIdentity(state.allocator, &state.ses_client, &state.session_cache) catch null) |change| {
+            if (core.FrontendAttach.syncSessionIdentity(state.allocator, &state.frontend_client, &state.session_cache) catch null) |change| {
                 var owned_change = change;
                 defer owned_change.deinit(state.allocator);
             }

@@ -19,7 +19,7 @@ const FrontendAttachState = core.FrontendAttachState;
 const FrontendSessionCache = core.FrontendSessionCache;
 const PaneShellInfo = core.FrontendPaneShellInfo;
 const PaneProcInfo = core.FrontendPaneProcInfo;
-const SesClient = core.FrontendClient;
+const FrontendClient = core.FrontendClient;
 
 const NotificationManager = pop.notification.NotificationManager;
 
@@ -116,7 +116,7 @@ pub const State = struct {
     layout_width: u16,
     layout_height: u16,
     renderer: Renderer,
-    ses_client: SesClient,
+    frontend_client: FrontendClient,
     notifications: NotificationManager,
     overlays: OverlayManager,
     popups: pop.PopupManager,
@@ -276,7 +276,7 @@ pub const State = struct {
             .layout_width = width,
             .layout_height = layout_h,
             .renderer = try Renderer.init(allocator, width, height),
-            .ses_client = SesClient.initWithTransport(allocator, uuid, session_name, true, debug, log_file, .terminal, transport),
+            .frontend_client = FrontendClient.initWithTransport(allocator, uuid, session_name, true, debug, log_file, .terminal, transport),
             .notifications = NotificationManager.initWithConfig(allocator, pop_cfg.carrier.notification),
             .overlays = OverlayManager.initWithConfig(allocator, pop_cfg.widgets.keycast),
             .popups = pop.PopupManager.init(allocator),
@@ -377,8 +377,8 @@ pub const State = struct {
 
         // Don't update pane name to float title - keep the pod's Pokemon name
         // Best-effort: store title in ses memory for reattach.
-        // if (self.ses_client.isConnected()) {
-        //     self.ses_client.updatePaneName(pane.uuid, pane.float_title) catch {};
+        // if (self.frontend_client.isConnected()) {
+        //     self.frontend_client.updatePaneName(pane.uuid, pane.float_title) catch {};
         // }
 
         self.clearFloatRename();
@@ -400,8 +400,8 @@ pub const State = struct {
         // When exiting normally (not detach), tell SES to kill regular panes but
         // preserve sticky panes/floats.
         // When detaching, panes stay alive for later reattach.
-        if (!self.attach_state.detach_mode and self.ses_client.isConnected()) {
-            self.ses_client.shutdown(true) catch |err| {
+        if (!self.attach_state.detach_mode and self.frontend_client.isConnected()) {
+            self.frontend_client.shutdown(true) catch |err| {
                 core.logging.logError("mux", "failed to send shutdown to SES", err);
             };
         }
@@ -432,7 +432,7 @@ pub const State = struct {
         self.mux_vt_write_queue.deinit(self.allocator);
         self.bracketed_paste_buf.deinit(self.allocator);
         self.renderer.deinit();
-        self.ses_client.deinit();
+        self.frontend_client.deinit();
         self.notifications.deinit();
         self.overlays.deinit();
         self.popups.deinit();
@@ -506,10 +506,10 @@ pub const State = struct {
 
     fn handleMuxVtWriteFailure(self: *State, fd: posix.fd_t) void {
         self.mux_vt_write_queue.clear();
-        if (self.ses_client.vt_fd) |live_fd| {
+        if (self.frontend_client.vt_fd) |live_fd| {
             if (live_fd == fd) {
                 posix.close(live_fd);
-                self.ses_client.vt_fd = null;
+                self.frontend_client.vt_fd = null;
             }
         }
         self.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
@@ -524,7 +524,7 @@ pub const State = struct {
     }
 
     pub fn flushPendingMuxVtWrites(self: *State) void {
-        const fd = self.ses_client.getVtFd() orelse return;
+        const fd = self.frontend_client.getVtFd() orelse return;
         self.mux_vt_write_queue.flushToFd(fd) catch {
             self.handleMuxVtWriteFailure(fd);
             return;
@@ -630,8 +630,8 @@ pub const State = struct {
 
     pub fn setSessionIdentity(self: *State, uuid: [32]u8, session_name: []const u8) bool {
         self.session_cache.setSessionIdentity(uuid, session_name) catch return false;
-        self.ses_client.session_id = self.session_cache.sessionUuid();
-        self.ses_client.session_name = self.session_cache.sessionName();
+        self.frontend_client.session_id = self.session_cache.sessionUuid();
+        self.frontend_client.session_name = self.session_cache.sessionName();
         return true;
     }
 
@@ -649,8 +649,8 @@ pub const State = struct {
 
     pub fn replaceAttachedSessionSnapshot(self: *State, snapshot: core.session_model.SessionSnapshot) bool {
         self.session_cache.replaceAttachedSnapshotOwned(snapshot) catch return false;
-        self.ses_client.session_id = self.session_cache.sessionUuid();
-        self.ses_client.session_name = self.session_cache.sessionName();
+        self.frontend_client.session_id = self.session_cache.sessionUuid();
+        self.frontend_client.session_name = self.session_cache.sessionName();
         self.setActiveTabIndex(self.session_cache.activeTab(self.tabs.items.len));
         self.setActiveFloatingUuid(self.session_cache.activeFloatUuid());
         return true;

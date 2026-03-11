@@ -8,7 +8,7 @@ const xev = @import("xev").Dynamic;
 const terminal = @import("terminal.zig");
 
 const State = @import("state.zig").State;
-const SesClient = core.FrontendClient;
+const FrontendClient = core.FrontendClient;
 const helpers = @import("helpers.zig");
 
 const mux = @import("main.zig");
@@ -80,7 +80,7 @@ fn logTerminalCapabilities(state: *State, timed_out: bool) void {
 fn applyDeferredPaneExits(state: *State) void {
     var pending: std.ArrayList([32]u8) = .empty;
     defer pending.deinit(state.allocator);
-    state.ses_client.drainPendingPaneExits(&pending);
+    state.frontend_client.drainPendingPaneExits(&pending);
     if (pending.items.len == 0) return;
 
     for (pending.items) |uuid| {
@@ -92,7 +92,7 @@ fn applyDeferredPaneExits(state: *State) void {
 }
 
 fn applyDeferredSessionSnapshots(state: *State) void {
-    const session_json = state.ses_client.drainPendingSessionState() orelse return;
+    const session_json = state.frontend_client.drainPendingSessionState() orelse return;
     defer state.allocator.free(session_json);
     _ = state.applySessionSnapshot(session_json);
 }
@@ -139,7 +139,7 @@ fn loopTimerCallback(
     }
     if (now - timer_ctx.last_heartbeat >= timer_ctx.heartbeat_interval) {
         timer_ctx.last_heartbeat = now;
-        _ = timer_ctx.state.ses_client.sendPing();
+        _ = timer_ctx.state.frontend_client.sendPing();
     }
 
     // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
@@ -189,7 +189,7 @@ const StdinWatcher = struct {
 
 fn ensureSesVtWatcherArmed(state: *State, watcher: *SesVtWatcher, buffer: []u8) void {
     if (watcher.watched_fd != null) return;
-    const vt_fd = state.ses_client.getVtFd() orelse return;
+    const vt_fd = state.frontend_client.getVtFd() orelse return;
 
     watcher.watched_fd = vt_fd;
     watcher.slot = .{ .state = state, .fd = vt_fd, .buffer = buffer, .watched_fd = &watcher.watched_fd };
@@ -200,7 +200,7 @@ fn ensureSesVtWatcherArmed(state: *State, watcher: *SesVtWatcher, buffer: []u8) 
 
 fn ensureSesCtlWatcherArmed(state: *State, watcher: *SesCtlWatcher, buffer: []u8) void {
     if (watcher.watched_fd != null) return;
-    const ctl_fd = state.ses_client.getCtlFd() orelse return;
+    const ctl_fd = state.frontend_client.getCtlFd() orelse return;
 
     watcher.watched_fd = ctl_fd;
     watcher.slot = .{ .state = state, .fd = ctl_fd, .buffer = buffer, .watched_fd = &watcher.watched_fd };
@@ -219,17 +219,17 @@ fn sesVtCallback(
     const slot = ctx orelse return .disarm;
     _ = result catch {
         if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
-        if (slot.state.ses_client.vt_fd) |vt_fd| {
+        if (slot.state.frontend_client.vt_fd) |vt_fd| {
             if (vt_fd == slot.fd) {
                 posix.close(vt_fd);
-                slot.state.ses_client.vt_fd = null;
+                slot.state.frontend_client.vt_fd = null;
                 slot.state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
             }
         }
         return .disarm;
     };
 
-    const vt_fd = slot.state.ses_client.getVtFd() orelse {
+    const vt_fd = slot.state.frontend_client.getVtFd() orelse {
         if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
         return .disarm;
     };
@@ -244,10 +244,10 @@ fn sesVtCallback(
             error.WouldBlock => break,
             else => {
                 if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
-                if (slot.state.ses_client.vt_fd) |live_fd| {
+                if (slot.state.frontend_client.vt_fd) |live_fd| {
                     if (live_fd == slot.fd) {
                         posix.close(live_fd);
-                        slot.state.ses_client.vt_fd = null;
+                        slot.state.frontend_client.vt_fd = null;
                         slot.state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
                     }
                 }
@@ -266,10 +266,10 @@ fn sesVtCallback(
         if (hdr.len > 0) {
             wire.readExact(vt_fd, slot.buffer[0..hdr.len]) catch {
                 if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
-                if (slot.state.ses_client.vt_fd) |live_fd| {
+                if (slot.state.frontend_client.vt_fd) |live_fd| {
                     if (live_fd == slot.fd) {
                         posix.close(live_fd);
-                        slot.state.ses_client.vt_fd = null;
+                        slot.state.frontend_client.vt_fd = null;
                         slot.state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
                     }
                 }
@@ -321,17 +321,17 @@ fn sesCtlCallback(
     const slot = ctx orelse return .disarm;
     _ = result catch {
         if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
-        if (slot.state.ses_client.ctl_fd) |ctl_fd| {
+        if (slot.state.frontend_client.ctl_fd) |ctl_fd| {
             if (ctl_fd == slot.fd) {
                 posix.close(ctl_fd);
-                slot.state.ses_client.ctl_fd = null;
+                slot.state.frontend_client.ctl_fd = null;
                 slot.state.notifications.showFor("Warning: Lost connection to ses daemon (CTL channel)", 5000);
             }
         }
         return .disarm;
     };
 
-    const ctl_fd = slot.state.ses_client.getCtlFd() orelse {
+    const ctl_fd = slot.state.frontend_client.getCtlFd() orelse {
         if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
         return .disarm;
     };
@@ -748,13 +748,13 @@ pub fn runMainLoop(state: *State) !void {
                 if (cwd == null) {
                     cwd = std.posix.getcwd(&cwd_buf) catch null;
                 }
-                const old_aux = state.ses_client.getPaneAux(pane.uuid) catch SesClient.PaneAuxInfo{
+                const old_aux = state.frontend_client.getPaneAux(pane.uuid) catch FrontendClient.PaneAuxInfo{
                     .created_from = null,
                     .focused_from = null,
                 };
-                state.ses_client.killPane(pane.uuid) catch {};
-                if (state.ses_client.createPane(null, cwd, null, null, null, null, null)) |result| {
-                    const vt_fd = state.ses_client.getVtFd();
+                state.frontend_client.killPane(pane.uuid) catch {};
+                if (state.frontend_client.createPane(null, cwd, null, null, null, null, null)) |result| {
+                    const vt_fd = state.frontend_client.getVtFd();
                     var replaced = true;
                     if (vt_fd) |fd| {
                         pane.replaceWithPod(result.pane_id, fd, result.uuid) catch {
@@ -762,14 +762,14 @@ pub fn runMainLoop(state: *State) !void {
                         };
                     } else replaced = false;
                     if (replaced) {
-                        const pane_type: SesClient.PaneType = if (pane.floating) .float else .split;
+                        const pane_type: FrontendClient.PaneType = if (pane.floating) .float else .split;
                         const cursor = pane.getCursorPos();
                         const cursor_style = pane.vt.getCursorStyle();
                         const cursor_visible = pane.vt.isCursorVisible();
                         const alt_screen = pane.vt.inAltScreen();
                         const layout_path = helpers.getLayoutPath(state, pane) catch null;
                         defer if (layout_path) |path| state.allocator.free(path);
-                        state.ses_client.updatePaneAux(
+                        state.frontend_client.updatePaneAux(
                             pane.uuid,
                             state.active_tab,
                             pane.floating,

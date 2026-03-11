@@ -2,7 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const core = @import("core");
 
-const SesClient = core.FrontendClient;
+const FrontendClient = core.FrontendClient;
 const Pane = @import("pane.zig").Pane;
 const helpers = @import("helpers.zig");
 const layout_mod = @import("layout.zig");
@@ -137,7 +137,7 @@ fn rememberSplitFocus(self: anytype, pane: *Pane) void {
 }
 
 pub fn syncStateToSes(self: anytype) void {
-    if (!self.ses_client.isConnected()) return;
+    if (!self.frontend_client.isConnected()) return;
 
     var snapshot = buildSessionSnapshot(self) catch return;
     defer snapshot.deinit();
@@ -147,31 +147,31 @@ pub fn syncStateToSes(self: anytype) void {
     // Increment version before syncing.
     const version = self.nextStateVersion();
 
-    self.ses_client.syncState(session_state_json, version) catch |e| {
+    self.frontend_client.syncState(session_state_json, version) catch |e| {
         core.logging.logError("mux", "syncState failed", e);
     };
 }
 
 pub fn syncSessionTabAdded(self: anytype, tab_uuid: [32]u8, name: []const u8, pane_uuid: [32]u8) void {
-    if (!self.ses_client.isConnected()) return;
-    self.ses_client.sessionAddTab(tab_uuid, pane_uuid, self.active_tab, name) catch |err| {
+    if (!self.frontend_client.isConnected()) return;
+    self.frontend_client.sessionAddTab(tab_uuid, pane_uuid, self.active_tab, name) catch |err| {
         core.logging.logError("mux", "failed sessionAddTab IPC", err);
     };
 }
 
 pub fn syncSessionTabRemoved(self: anytype, tab_uuid: [32]u8) void {
-    if (!self.ses_client.isConnected()) return;
+    if (!self.frontend_client.isConnected()) return;
     const active_tab: ?usize = if (self.tabs.items.len > 0) self.active_tab else null;
-    self.ses_client.sessionRemoveTab(tab_uuid, active_tab) catch |err| {
+    self.frontend_client.sessionRemoveTab(tab_uuid, active_tab) catch |err| {
         core.logging.logError("mux", "failed sessionRemoveTab IPC", err);
     };
 }
 
 pub fn syncSessionFloat(self: anytype, pane: *Pane, active: bool) void {
-    if (!self.ses_client.isConnected()) return;
+    if (!self.frontend_client.isConnected()) return;
     if (pane.uuid[0] == 0) return;
 
-    self.ses_client.sessionSyncFloat(
+    self.frontend_client.sessionSyncFloat(
         pane.uuid,
         self.active_tab,
         pane.parent_tab,
@@ -193,15 +193,15 @@ pub fn syncSessionFloat(self: anytype, pane: *Pane, active: bool) void {
 }
 
 pub fn syncSessionFloatRemoved(self: anytype, pane_uuid: [32]u8) void {
-    if (!self.ses_client.isConnected()) return;
+    if (!self.frontend_client.isConnected()) return;
     if (pane_uuid[0] == 0) return;
-    self.ses_client.sessionRemoveFloat(pane_uuid) catch |err| {
+    self.frontend_client.sessionRemoveFloat(pane_uuid) catch |err| {
         core.logging.logError("mux", "failed sessionRemoveFloat IPC", err);
     };
 }
 
 pub fn syncActiveTabLayout(self: anytype) void {
-    if (!self.ses_client.isConnected()) return;
+    if (!self.frontend_client.isConnected()) return;
     if (self.tabs.items.len == 0 or self.active_tab >= self.tabs.items.len) return;
 
     const tab = &self.tabs.items[self.active_tab];
@@ -218,7 +218,7 @@ pub fn syncActiveTabLayout(self: anytype) void {
     const root_json = core.session_model.layoutNodeToJson(self.allocator, session_root) catch return;
     defer self.allocator.free(root_json);
 
-    self.ses_client.sessionSyncTabLayout(
+    self.frontend_client.sessionSyncTabLayout(
         tab_uuid,
         self.active_tab,
         if (tab.layout.getFocusedPane()) |pane| pane.uuid else null,
@@ -245,7 +245,7 @@ pub fn getCurrentFocusedUuid(self: anytype) ?[32]u8 {
 }
 
 pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
-    if (!self.ses_client.isConnected()) return;
+    if (!self.frontend_client.isConnected()) return;
     if (pane.uuid[0] == 0) return;
 
     if (pane.focused) {
@@ -253,7 +253,7 @@ pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
         pane.focused = true;
     }
 
-    const pane_type: SesClient.PaneType = if (pane.floating) .float else .split;
+    const pane_type: FrontendClient.PaneType = if (pane.floating) .float else .split;
     const cursor = pane.getCursorPos();
     const cursor_style = pane.vt.getCursorStyle();
     const cursor_visible = pane.vt.isCursorVisible();
@@ -261,7 +261,7 @@ pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
     const layout_path = helpers.getLayoutPath(self, pane) catch null;
     defer if (layout_path) |path| self.allocator.free(path);
     const focused_from = if (pane.focused) created_from else null;
-    self.ses_client.updatePaneAux(
+    self.frontend_client.updatePaneAux(
         pane.uuid,
         self.active_tab,
         pane.floating,
@@ -284,21 +284,21 @@ pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
 }
 
 pub fn unfocusAllPanes(self: anytype) void {
-    if (!self.ses_client.isConnected()) return;
+    if (!self.frontend_client.isConnected()) return;
 
     for (self.tabs.items) |*tab| {
         var pane_it = tab.layout.splitIterator();
         while (pane_it.next()) |p| {
             if (p.*.uuid[0] != 0) {
                 p.*.focused = false;
-                const pane_type: SesClient.PaneType = if (p.*.floating) .float else .split;
+                const pane_type: FrontendClient.PaneType = if (p.*.floating) .float else .split;
                 const cursor = p.*.getCursorPos();
                 const cursor_style = p.*.vt.getCursorStyle();
                 const cursor_visible = p.*.vt.isCursorVisible();
                 const alt_screen = p.*.vt.inAltScreen();
                 const layout_path = helpers.getLayoutPath(self, p.*) catch null;
                 defer if (layout_path) |path| self.allocator.free(path);
-                self.ses_client.updatePaneAux(
+                self.frontend_client.updatePaneAux(
                     p.*.uuid,
                     self.active_tab,
                     p.*.floating,
@@ -331,7 +331,7 @@ pub fn unfocusAllPanes(self: anytype) void {
             const alt_screen = fp.vt.inAltScreen();
             const layout_path = helpers.getLayoutPath(self, fp) catch null;
             defer if (layout_path) |path| self.allocator.free(path);
-            self.ses_client.updatePaneAux(
+            self.frontend_client.updatePaneAux(
                 fp.uuid,
                 self.active_tab,
                 fp.floating,
@@ -366,20 +366,20 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
     }
     self.setFocusedPaneUuid(pane.uuid);
 
-    if (!self.ses_client.isConnected()) return;
+    if (!self.frontend_client.isConnected()) return;
     if (pane.uuid[0] == 0) return;
 
     self.unfocusAllPanes();
 
     pane.focused = true;
-    const pane_type: SesClient.PaneType = if (pane.floating) .float else .split;
+    const pane_type: FrontendClient.PaneType = if (pane.floating) .float else .split;
     const cursor = pane.getCursorPos();
     const cursor_style = pane.vt.getCursorStyle();
     const cursor_visible = pane.vt.isCursorVisible();
     const alt_screen = pane.vt.inAltScreen();
     const layout_path = helpers.getLayoutPath(self, pane) catch null;
     defer if (layout_path) |path| self.allocator.free(path);
-    self.ses_client.updatePaneAux(
+    self.frontend_client.updatePaneAux(
         pane.uuid,
         self.active_tab,
         pane.floating,
@@ -434,17 +434,17 @@ pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
         }
     }
 
-    if (!self.ses_client.isConnected()) return;
+    if (!self.frontend_client.isConnected()) return;
     if (pane.uuid[0] == 0) return;
 
-    const pane_type: SesClient.PaneType = if (pane.floating) .float else .split;
+    const pane_type: FrontendClient.PaneType = if (pane.floating) .float else .split;
     const cursor = pane.getCursorPos();
     const cursor_style = pane.vt.getCursorStyle();
     const cursor_visible = pane.vt.isCursorVisible();
     const alt_screen = pane.vt.inAltScreen();
     const layout_path = helpers.getLayoutPath(self, pane) catch null;
     defer if (layout_path) |path| self.allocator.free(path);
-    self.ses_client.updatePaneAux(
+    self.frontend_client.updatePaneAux(
         pane.uuid,
         self.active_tab,
         pane.floating,
@@ -468,7 +468,7 @@ pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
 
 pub fn refreshPaneCwd(self: anytype, pane: *Pane) ?[]const u8 {
     // Fire-and-forget: response updates pane CWD via handleSesMessage.
-    self.ses_client.requestPaneCwd(pane.uuid);
+    self.frontend_client.requestPaneCwd(pane.uuid);
     return pane.getRealCwd();
 }
 
@@ -482,7 +482,7 @@ pub fn getSpawnCwd(_: anytype, pane: *Pane) ?[]const u8 {
 /// Returns null only if ALL sources fail.
 pub fn getReliableCwd(self: anytype, pane: *Pane) ?[]const u8 {
     // 1. Try synchronous CWD fetch from SES (authoritative /proc read).
-    if (self.ses_client.getPaneCwdSync(pane.uuid)) |cwd| {
+    if (self.frontend_client.getPaneCwdSync(pane.uuid)) |cwd| {
         return cwd;
     }
 
@@ -503,7 +503,7 @@ pub fn getReliableCwd(self: anytype, pane: *Pane) ?[]const u8 {
 }
 
 pub fn syncFocusedPaneInfo(self: anytype) void {
-    if (!self.ses_client.isConnected()) return;
+    if (!self.frontend_client.isConnected()) return;
 
     const pane = if (self.active_floating) |idx| blk: {
         if (idx < self.floats.items.len) break :blk self.floats.items[idx];
@@ -517,10 +517,10 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
     // Ensure pane metadata eventually converges even if an async response was
     // missed during reconnect/startup races.
     if (!self.hasPaneName(p.uuid)) {
-        self.ses_client.requestPaneProcess(p.uuid);
+        self.frontend_client.requestPaneProcess(p.uuid);
     }
     if (p.getRealCwd() == null) {
-        self.ses_client.requestPaneCwd(p.uuid);
+        self.frontend_client.requestPaneCwd(p.uuid);
     }
 
     _ = self.refreshPaneCwd(p);
@@ -533,17 +533,17 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
     if (fg_proc_local) |proc_name| {
         self.setPaneProc(p.uuid, proc_name, fg_pid_local);
     } else {
-        self.ses_client.requestPaneProcess(p.uuid);
+        self.frontend_client.requestPaneProcess(p.uuid);
     }
 
-    const pane_type: SesClient.PaneType = if (p.floating) .float else .split;
+    const pane_type: FrontendClient.PaneType = if (p.floating) .float else .split;
     const cursor = p.getCursorPos();
     const cursor_style = p.vt.getCursorStyle();
     const cursor_visible = p.vt.isCursorVisible();
     const alt_screen = p.vt.inAltScreen();
     const layout_path = helpers.getLayoutPath(self, p) catch null;
     defer if (layout_path) |path| self.allocator.free(path);
-    self.ses_client.updatePaneAux(
+    self.frontend_client.updatePaneAux(
         p.uuid,
         self.active_tab,
         p.floating,

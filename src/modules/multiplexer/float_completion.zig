@@ -33,7 +33,7 @@ pub fn handleBlockingFloatCompletion(state: *State, pane: *Pane) void {
     }
 
     // Send FloatResult to SES on the ctl channel.
-    const ctl_fd = state.ses_client.getCtlFd() orelse return;
+    const ctl_fd = state.frontend_client.getCtlFd() orelse return;
     const output = stdout orelse "";
     const result = wire.FloatResult{
         .uuid = pane.uuid,

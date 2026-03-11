@@ -112,7 +112,7 @@ fn validateMuxStateJson(value: *const std.json.Value) bool {
 fn applyDeferredPaneExits(self: anytype) void {
     var pending: std.ArrayList([32]u8) = .empty;
     defer pending.deinit(self.allocator);
-    self.ses_client.drainPendingPaneExits(&pending);
+    self.frontend_client.drainPendingPaneExits(&pending);
 
     for (pending.items) |uuid| {
         var marked = false;
@@ -314,7 +314,7 @@ fn recyclePaneForFloat(self: anytype, pane: *Pane, float_state: SessionFloat, ac
 }
 
 fn hydratePaneMetadata(self: anytype, pane: *Pane, uuid: [32]u8) void {
-    if (self.ses_client.getPaneInfoSnapshot(uuid)) |snap| {
+    if (self.frontend_client.getPaneInfoSnapshot(uuid)) |snap| {
         defer if (snap.fg_name) |s| self.allocator.free(s);
         if (snap.name) |name| {
             self.setPaneNameOwned(uuid, name);
@@ -322,8 +322,8 @@ fn hydratePaneMetadata(self: anytype, pane: *Pane, uuid: [32]u8) void {
         pane.setSesCwd(snap.cwd);
         self.setPaneProc(uuid, snap.fg_name, snap.fg_pid);
     } else {
-        self.ses_client.requestPaneProcess(uuid);
-        self.ses_client.requestPaneCwd(uuid);
+        self.frontend_client.requestPaneProcess(uuid);
+        self.frontend_client.requestPaneCwd(uuid);
     }
 }
 
@@ -343,7 +343,7 @@ fn ensureAdoptInfo(
         }
     }
     if (attached_snapshot) {
-        if (self.ses_client.getPaneInfoSnapshot(uuid)) |snap| {
+        if (self.frontend_client.getPaneInfoSnapshot(uuid)) |snap| {
             defer if (snap.name) |s| self.allocator.free(s);
             defer if (snap.cwd) |s| self.allocator.free(s);
             defer if (snap.fg_name) |s| self.allocator.free(s);
@@ -354,7 +354,7 @@ fn ensureAdoptInfo(
             }
         }
     }
-    if (self.ses_client.adoptPane(uuid)) |adopt_res| {
+    if (self.frontend_client.adoptPane(uuid)) |adopt_res| {
         const info = AdoptInfo{ .pane_id = adopt_res.pane_id };
         uuid_pane_map.put(uuid, info) catch {};
         return info;
@@ -379,7 +379,7 @@ fn ensureSplitPaneView(
     if (used_uuids.contains(pane_uuid)) return null;
 
     const info = ensureAdoptInfo(self, pane_uuid, uuid_pane_map, existing_views, attached_snapshot) orelse return null;
-    const vt_fd = self.ses_client.getVtFd() orelse return null;
+    const vt_fd = self.frontend_client.getVtFd() orelse return null;
 
     const pane_id = tab.layout.next_split_id;
     tab.layout.next_split_id +%= 1;
@@ -511,7 +511,7 @@ fn restoreFloatPane(
 ) ?*Pane {
     if (used_uuids.contains(float_state.pane_uuid)) return null;
     const info = ensureAdoptInfo(self, float_state.pane_uuid, uuid_pane_map, existing_views, attached_snapshot) orelse return null;
-    const vt_fd = self.ses_client.getVtFd() orelse return null;
+    const vt_fd = self.frontend_client.getVtFd() orelse return null;
 
     const pane = blk: {
         if (existing_views) |views| {
@@ -549,8 +549,8 @@ fn restoreFloatPane(
         }
     }
 
-    if (self.ses_client.isConnected()) {
-        if (self.ses_client.getPaneName(float_state.pane_uuid)) |name| {
+    if (self.frontend_client.isConnected()) {
+        if (self.frontend_client.getPaneName(float_state.pane_uuid)) |name| {
             pane.float_title = name;
         }
     }
@@ -722,19 +722,19 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     // Track reattach start time for timeout detection
     const reattach_start = std.time.milliTimestamp();
 
-    if (!self.ses_client.isConnected()) {
-        mux.debugLog("reattachSession: ses_client not connected, aborting", .{});
+    if (!self.frontend_client.isConnected()) {
+        mux.debugLog("reattachSession: frontend_client not connected, aborting", .{});
         return false;
     }
 
     // Try to reattach session (server supports prefix matching).
-    mux.debugLog("reattachSession: calling ses_client.reattachSession", .{});
-    const result = self.ses_client.reattachSession(session_id_prefix) catch |e| {
-        mux.debugLog("reattachSession: ses_client.reattachSession failed: {s}", .{@errorName(e)});
+    mux.debugLog("reattachSession: calling frontend_client.reattachSession", .{});
+    const result = self.frontend_client.reattachSession(session_id_prefix) catch |e| {
+        mux.debugLog("reattachSession: frontend_client.reattachSession failed: {s}", .{@errorName(e)});
         return false;
     };
     if (result == null) {
-        mux.debugLog("reattachSession: ses_client.reattachSession returned null (session not found)", .{});
+        mux.debugLog("reattachSession: frontend_client.reattachSession returned null (session not found)", .{});
         return false;
     }
 
@@ -797,12 +797,12 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             continue;
         }
 
-        const adopt_result = self.ses_client.adoptPane(uuid) catch |e| {
+        const adopt_result = self.frontend_client.adoptPane(uuid) catch |e| {
             mux.debugLog("reattachSession: adoptPane failed for uuid={s}: {s}", .{ uuid[0..8], @errorName(e) });
             failed_adoptions += 1;
             continue;
         };
-        mux.debugLogUuid(&uuid, "reattachSession: adoptPane ok pane_id={d} vt_fd={?d}", .{ adopt_result.pane_id, self.ses_client.vt_fd });
+        mux.debugLogUuid(&uuid, "reattachSession: adoptPane ok pane_id={d} vt_fd={?d}", .{ adopt_result.pane_id, self.frontend_client.vt_fd });
         uuid_pane_map.put(uuid, .{ .pane_id = adopt_result.pane_id }) catch {};
     }
     mux.debugLog("reattachSession: adopted {d} panes into uuid_pane_map", .{uuid_pane_map.count()});
@@ -841,8 +841,8 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     for (snapshot.tabs.items) |snapshot_tab| {
         var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
 
-        if (self.ses_client.isConnected()) {
-            tab.layout.setSesClient(&self.ses_client);
+        if (self.frontend_client.isConnected()) {
+            tab.layout.setFrontendClient(&self.frontend_client);
         }
         tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 
@@ -1038,7 +1038,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     // This releases the attach session lock and stabilizes client identity first.
     const session_uuid = self.sessionUuid();
     mux.debugLog("reattachSession: finalizing attach uuid={s} name={s}", .{ session_uuid[0..8], self.sessionName() });
-    if (core.FrontendAttach.completeReattach(self.allocator, &self.ses_client, &self.session_cache)) |change_opt| {
+    if (core.FrontendAttach.completeReattach(self.allocator, &self.frontend_client, &self.session_cache)) |change_opt| {
         if (change_opt) |change| {
             var owned_change = change;
             defer owned_change.deinit(self.allocator);
@@ -1105,8 +1105,8 @@ pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool 
     for (snapshot.tabs.items) |snapshot_tab| {
         var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
 
-        if (self.ses_client.isConnected()) {
-            tab.layout.setSesClient(&self.ses_client);
+        if (self.frontend_client.isConnected()) {
+            tab.layout.setFrontendClient(&self.frontend_client);
         }
         tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 
@@ -1213,16 +1213,16 @@ fn intFieldCast(comptime T: type, obj: std.json.ObjectMap, key: []const u8) ?T {
 
 /// Attach to orphaned pane by UUID prefix (for --attach CLI).
 pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
-    if (!self.ses_client.isConnected()) return false;
+    if (!self.frontend_client.isConnected()) return false;
 
     // Get list of orphaned panes and find matching UUID.
     var tabs: [32]OrphanedPaneInfo = undefined;
-    const count = self.ses_client.listOrphanedPanes(&tabs) catch return false;
+    const count = self.frontend_client.listOrphanedPanes(&tabs) catch return false;
 
     for (tabs[0..count]) |p| {
         if (std.mem.startsWith(u8, &p.uuid, uuid_prefix)) {
             // Found matching pane, adopt it.
-            const result = self.ses_client.adoptPane(p.uuid) catch return false;
+            const result = self.frontend_client.adoptPane(p.uuid) catch return false;
 
             // Create a new tab with this pane.
             const tab_uuid = core.ipc.generateUuid();
@@ -1230,12 +1230,12 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             var tab_needs_cleanup = true;
             defer if (tab_needs_cleanup) tab.deinit();
 
-            if (self.ses_client.isConnected()) {
-                tab.layout.setSesClient(&self.ses_client);
+            if (self.frontend_client.isConnected()) {
+                tab.layout.setFrontendClient(&self.frontend_client);
             }
             tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 
-            const vt_fd = self.ses_client.getVtFd() orelse return false;
+            const vt_fd = self.frontend_client.getVtFd() orelse return false;
 
             const pane = self.allocator.create(Pane) catch return false;
             var pane_needs_cleanup = true;
@@ -1245,7 +1245,7 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
                 return false;
             };
 
-            if (self.ses_client.getPaneInfoSnapshot(result.uuid)) |snap| {
+            if (self.frontend_client.getPaneInfoSnapshot(result.uuid)) |snap| {
                 defer if (snap.fg_name) |s| self.allocator.free(s);
                 if (snap.name) |name| {
                     self.setPaneNameOwned(result.uuid, name);
@@ -1253,8 +1253,8 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
                 pane.setSesCwd(snap.cwd);
                 self.setPaneProc(result.uuid, snap.fg_name, snap.fg_pid);
             } else {
-                self.ses_client.requestPaneProcess(result.uuid);
-                self.ses_client.requestPaneCwd(result.uuid);
+                self.frontend_client.requestPaneProcess(result.uuid);
+                self.frontend_client.requestPaneCwd(result.uuid);
             }
 
             pane.focused = true;

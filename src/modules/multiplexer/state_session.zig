@@ -98,8 +98,8 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     const tab_uuid = core.ipc.generateUuid();
     var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
 
-    if (self.ses_client.isConnected()) {
-        tab.layout.setSesClient(&self.ses_client);
+    if (self.frontend_client.isConnected()) {
+        tab.layout.setFrontendClient(&self.frontend_client);
     }
     tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 
@@ -203,10 +203,10 @@ fn collectLeafPanes(self: anytype, layout: *Layout, config: SplitConfig, panes: 
             const pane = try self.allocator.create(Pane);
             errdefer self.allocator.destroy(pane);
 
-            const ses = layout.ses_client orelse return error.SesUnavailable;
-            if (!ses.isConnected()) return error.SesUnavailable;
-            const result = try ses.createPane(null, cwd, null, null, null, null, null);
-            const vt_fd = ses.getVtFd() orelse return error.SesUnavailable;
+            const client = layout.frontend_client orelse return error.SesUnavailable;
+            if (!client.isConnected()) return error.SesUnavailable;
+            const result = try client.createPane(null, cwd, null, null, null, null, null);
+            const vt_fd = client.getVtFd() orelse return error.SesUnavailable;
             try pane.initWithPod(self.allocator, id, 0, 0, layout.width, layout.height, result.pane_id, vt_fd, result.uuid);
 
             layout.configurePaneNotifications(pane);

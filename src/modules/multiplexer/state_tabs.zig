@@ -91,8 +91,8 @@ pub fn createTab(self: anytype) !void {
     const tab_uuid = core.ipc.generateUuid();
     var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
     // Set ses client if connected (for new tabs after startup).
-    if (self.ses_client.isConnected()) {
-        tab.layout.setSesClient(&self.ses_client);
+    if (self.frontend_client.isConnected()) {
+        tab.layout.setFrontendClient(&self.frontend_client);
     }
     // Set pane notification config.
     tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
@@ -127,7 +127,7 @@ pub fn closeCurrentTab(self: anytype) bool {
         if (fp.parent_tab) |parent| {
             if (parent == closing_tab) {
                 // Kill this tab-bound float.
-                self.ses_client.killPane(fp.uuid) catch |e| {
+                self.frontend_client.killPane(fp.uuid) catch |e| {
                     core.logging.logError("mux", "killPane failed in closeTab", e);
                 };
                 fp.deinit();
@@ -180,7 +180,7 @@ pub fn closeCurrentTab(self: anytype) bool {
 /// Adopt sticky panes from ses on startup.
 /// Finds sticky panes matching current directory and configured sticky floats.
 pub fn adoptStickyPanes(self: anytype) void {
-    if (!self.ses_client.isConnected()) return;
+    if (!self.frontend_client.isConnected()) return;
 
     // Get current working directory.
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -191,7 +191,7 @@ pub fn adoptStickyPanes(self: anytype) void {
         if (!float_def.attributes.sticky) continue;
 
         // Try to find a sticky pane in ses matching this directory + key.
-        const result = self.ses_client.findStickyPane(cwd, float_def.key) catch continue;
+        const result = self.frontend_client.findStickyPane(cwd, float_def.key) catch continue;
         if (result) |r| {
             // Found a sticky pane - adopt it as a float.
             self.adoptAsFloat(r.uuid, r.pane_id, float_def, cwd) catch continue;
@@ -239,10 +239,10 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
     const id: u16 = @intCast(100 + self.floats.items.len);
 
     // Initialize pane with the adopted pod — VT routed through SES.
-    const vt_fd = self.ses_client.getVtFd() orelse return error.NoVtChannel;
+    const vt_fd = self.frontend_client.getVtFd() orelse return error.NoVtChannel;
     try pane.initWithPod(self.allocator, id, content_x, content_y, content_w, content_h, pane_id, vt_fd, uuid);
 
-    if (self.ses_client.getPaneInfoSnapshot(uuid)) |snap| {
+    if (self.frontend_client.getPaneInfoSnapshot(uuid)) |snap| {
         defer if (snap.fg_name) |s| self.allocator.free(s);
         if (snap.name) |name| {
             self.setPaneNameOwned(uuid, name);
@@ -250,8 +250,8 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
         pane.setSesCwd(snap.cwd);
         self.setPaneProc(uuid, snap.fg_name, snap.fg_pid);
     } else {
-        self.ses_client.requestPaneProcess(uuid);
-        self.ses_client.requestPaneCwd(uuid);
+        self.frontend_client.requestPaneProcess(uuid);
+        self.frontend_client.requestPaneCwd(uuid);
     }
 
     pane.floating = true;
@@ -351,16 +351,16 @@ pub fn prevTab(self: anytype) void {
 
 /// Adopt first orphaned pane, replacing current focused pane.
 pub fn adoptOrphanedPane(self: anytype) bool {
-    if (!self.ses_client.isConnected()) return false;
+    if (!self.frontend_client.isConnected()) return false;
 
     // Get list of orphaned panes.
     var panes: [32]OrphanedPaneInfo = undefined;
-    const count = self.ses_client.listOrphanedPanes(&panes) catch return false;
+    const count = self.frontend_client.listOrphanedPanes(&panes) catch return false;
     if (count == 0) return false;
 
     // Adopt the first one.
-    const result = self.ses_client.adoptPane(panes[0].uuid) catch return false;
-    const vt_fd = self.ses_client.getVtFd() orelse return false;
+    const result = self.frontend_client.adoptPane(panes[0].uuid) catch return false;
+    const vt_fd = self.frontend_client.getVtFd() orelse return false;
 
     // Get the current focused pane and replace it.
     if (self.active_floating) |idx| {

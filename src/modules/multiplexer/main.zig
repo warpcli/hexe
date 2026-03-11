@@ -7,7 +7,7 @@ const c = @cImport({
     @cInclude("stdlib.h");
 });
 
-const SesClient = core.FrontendClient;
+const FrontendClient = core.FrontendClient;
 const FrontendAttach = core.FrontendAttach;
 const FrontendTransport = core.FrontendTransport;
 const DetachedSessionInfo = core.FrontendDetachedSessionInfo;
@@ -95,16 +95,16 @@ pub fn run(mux_args: MuxArgs) !void {
     if (mux_args.list) {
         const tmp_uuid = core.ipc.generateUuid();
         const tmp_name = core.ipc.generateSessionName();
-        var ses = SesClient.initWithTransport(allocator, tmp_uuid, tmp_name, false, false, null, .terminal, mux_args.transport); // keepalive=false for temp connection
-        defer ses.deinit();
-        ses.connect() catch {
+        var frontend = FrontendClient.initWithTransport(allocator, tmp_uuid, tmp_name, false, false, null, .terminal, mux_args.transport); // keepalive=false for temp connection
+        defer frontend.deinit();
+        frontend.connect() catch {
             std.debug.print("Could not connect to ses daemon\n", .{});
             return;
         };
 
         // List detached sessions.
         var sessions: [16]DetachedSessionInfo = undefined;
-        const sess_count = ses.listSessions(&sessions) catch 0;
+        const sess_count = frontend.listSessions(&sessions) catch 0;
         if (sess_count > 0) {
             std.debug.print("Detached sessions (attach by name or UUID prefix):\n", .{});
             const instance = std.posix.getenv("HEXE_INSTANCE");
@@ -128,7 +128,7 @@ pub fn run(mux_args: MuxArgs) !void {
 
         // List orphaned panes.
         var tabs: [32]OrphanedPaneInfo = undefined;
-        const count = ses.listOrphanedPanes(&tabs) catch 0;
+        const count = frontend.listOrphanedPanes(&tabs) catch 0;
         if (count > 0) {
             std.debug.print("Orphaned panes (disowned):\n", .{});
             for (tabs[0..count]) |p| {
@@ -234,15 +234,15 @@ pub fn run(mux_args: MuxArgs) !void {
     _ = c.setenv("HEXE_MUX_SOCKET", "1", 1);
 
     // Connect to ses daemon FIRST (start it if needed).
-    state.ses_client.connect() catch |e| {
+    state.frontend_client.connect() catch |e| {
         debugLog("ses connect failed: {s}", .{@errorName(e)});
         std.debug.print("Could not connect to ses daemon: {s}\n", .{@errorName(e)});
         return;
     };
-    debugLog("ses connected (started={})", .{state.ses_client.just_started_daemon});
+    debugLog("ses connected (started={})", .{state.frontend_client.just_started_daemon});
 
     // If server resolved to a different name (collision avoidance), update state.
-    if (FrontendAttach.reconcileResolvedName(allocator, &state.ses_client, &state.session_cache) catch null) |change| {
+    if (FrontendAttach.reconcileResolvedName(allocator, &state.frontend_client, &state.session_cache) catch null) |change| {
         var owned_change = change;
         defer owned_change.deinit(allocator);
         debugLog("session name resolved from '{s}' to '{s}'", .{ owned_change.previous_name, owned_change.resolved_name });
@@ -250,7 +250,7 @@ pub fn run(mux_args: MuxArgs) !void {
     }
 
     // Show notification if we just started the daemon.
-    if (state.ses_client.just_started_daemon) {
+    if (state.frontend_client.just_started_daemon) {
         state.notifications.showFor("ses daemon started", 2000);
     }
 
@@ -303,7 +303,7 @@ pub fn run(mux_args: MuxArgs) !void {
         // Prefer layout-config name when provided.
         if (config.name) |loaded_name| {
             if (state.setSessionName(loaded_name)) {
-                if (FrontendAttach.syncSessionIdentity(allocator, &state.ses_client, &state.session_cache) catch null) |change| {
+                if (FrontendAttach.syncSessionIdentity(allocator, &state.frontend_client, &state.session_cache) catch null) |change| {
                     var owned_change = change;
                     defer owned_change.deinit(allocator);
                 }
