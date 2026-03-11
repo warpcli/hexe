@@ -501,8 +501,8 @@ pub const ClearOrphanedPanesResult = extern struct {
     killed_panes: u16 align(1),
 };
 
-/// ApplyLayout: CLI → SES → MUX: apply a saved layout tree.
-/// uuid identifies the source pane (to find the right session/MUX).
+/// ApplyLayout: CLI → SES: apply a saved layout tree to the session owning uuid.
+/// SES mutates canonical session state, then pushes a session snapshot event.
 /// Followed by: tree_json bytes (tree_json_len).
 pub const ApplyLayout = extern struct {
     uuid: [32]u8 align(1),
@@ -593,6 +593,7 @@ pub const PaneInfoResp = extern struct {
     pid: i32 align(1),
     fg_pid: i32 align(1),
     base_pid: i32 align(1),
+    pane_id: u16 align(1),
     cols: u16 align(1),
     rows: u16 align(1),
     cursor_x: u16 align(1),

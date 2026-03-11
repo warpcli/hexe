@@ -57,6 +57,9 @@ pub fn handleSesMessage(state: *State, buffer: []u8) void {
             .pane_exited => {
                 handlePaneExited(state, fd, hdr.payload_len, buffer);
             },
+            .session_state => {
+                handleSessionState(state, fd, hdr.payload_len, buffer);
+            },
             .session_stolen => {
                 handleSessionStolen(state, fd, hdr.payload_len, buffer);
             },
@@ -69,9 +72,6 @@ pub fn handleSesMessage(state: *State, buffer: []u8) void {
             },
             .pane_info => {
                 handlePaneInfoResponse(state, fd, hdr.payload_len, buffer);
-            },
-            .apply_layout => {
-                handleApplyLayout(state, fd, hdr.payload_len, buffer);
             },
             .pane_not_found, .@"error" => {
                 skipPayload(fd, hdr.payload_len, buffer);
@@ -91,6 +91,22 @@ fn handleSessionStolen(state: *State, fd: posix.fd_t, payload_len: u32, buffer: 
     state.notifications.showFor("Session attached elsewhere; this client is closing", 3500);
     state.running = false;
     state.needs_render = true;
+}
+
+fn handleSessionState(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+    if (payload_len == 0 or payload_len > wire.MAX_PAYLOAD_LEN) {
+        skipPayload(fd, payload_len, buffer);
+        return;
+    }
+
+    const session_json = state.allocator.alloc(u8, payload_len) catch {
+        skipPayload(fd, payload_len, buffer);
+        return;
+    };
+    defer state.allocator.free(session_json);
+    wire.readExact(fd, session_json) catch return;
+
+    _ = state.applySessionSnapshot(session_json);
 }
 
 fn handleNotify(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
@@ -911,27 +927,6 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
         state.setPaneProc(resp.uuid, fg_name, fg_pid);
     }
     if (fg_name) |n| state.allocator.free(n);
-}
-
-fn handleApplyLayout(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
-    if (payload_len < @sizeOf(wire.ApplyLayout)) {
-        skipPayload(fd, payload_len, buffer);
-        return;
-    }
-    const al = wire.readStruct(wire.ApplyLayout, fd) catch return;
-
-    if (al.tree_json_len == 0 or al.tree_json_len > wire.MAX_PAYLOAD_LEN) {
-        const remaining = payload_len - @sizeOf(wire.ApplyLayout);
-        if (remaining > 0) skipPayload(fd, remaining, buffer);
-        return;
-    }
-
-    // Allocate and read tree JSON.
-    const json_buf = state.allocator.alloc(u8, al.tree_json_len) catch return;
-    defer state.allocator.free(json_buf);
-    wire.readExact(fd, json_buf) catch return;
-
-    state.applyLayout(al.uuid, json_buf);
 }
 
 fn skipPayload(fd: posix.fd_t, len: u32, buffer: []u8) void {

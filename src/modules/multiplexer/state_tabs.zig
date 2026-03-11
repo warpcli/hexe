@@ -382,6 +382,10 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     return state_reattach.reattachSession(self, session_id_prefix);
 }
 
+pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool {
+    return state_reattach.applySessionSnapshot(self, session_state_json);
+}
+
 /// Attach to orphaned pane by UUID prefix (for --attach CLI).
 pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
     return state_reattach.attachOrphanedPane(self, uuid_prefix);

@@ -91,6 +91,12 @@ fn applyDeferredPaneExits(state: *State) void {
     }
 }
 
+fn applyDeferredSessionSnapshots(state: *State) void {
+    const session_json = state.ses_client.drainPendingSessionState() orelse return;
+    defer state.allocator.free(session_json);
+    _ = state.applySessionSnapshot(session_json);
+}
+
 fn finalizeTerminalQueryIfReady(state: *State, now_ms: i64) void {
     if (!state.terminal_query_in_flight) return;
 
@@ -545,6 +551,7 @@ pub fn runMainLoop(state: *State) !void {
     // Main loop.
     while (state.running) {
         applyDeferredPaneExits(state);
+        applyDeferredSessionSnapshots(state);
         state.flushPendingMuxVtWrites();
         ensureSesVtWatcherArmed(state, &ses_vt_watcher, &ses_vt_buffer);
         ensureSesCtlWatcherArmed(state, &ses_ctl_watcher, &ses_ctl_buffer);

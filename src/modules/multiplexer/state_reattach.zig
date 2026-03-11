@@ -17,6 +17,7 @@ const SessionSnapshot = session_model.SessionSnapshot;
 const SessionLayoutNode = session_model.SessionLayoutNode;
 const SessionFloat = session_model.SessionFloat;
 const AdoptInfo = struct { pane_id: u16 };
+const ExistingPaneViews = std.AutoHashMap([32]u8, *Pane);
 
 /// Validate the structure of mux state JSON before attempting restoration.
 /// This prevents crashes from malformed/corrupted JSON.
@@ -173,6 +174,154 @@ fn clearStateForRestore(self: anytype) void {
     self.tab_last_focus_kind.clearRetainingCapacity();
 }
 
+fn deinitTabPreservingPanes(tab: *Tab) void {
+    if (tab.name_owned) |n| {
+        tab.allocator.free(n);
+    }
+    tab.layout.splits.deinit();
+    if (tab.layout.root) |root| {
+        tab.layout.freeNode(root);
+        tab.layout.root = null;
+    }
+    tab.notifications.deinit();
+    tab.popups.deinit();
+}
+
+fn captureExistingPaneViews(self: anytype, out: *ExistingPaneViews) void {
+    for (self.tabs.items) |*tab| {
+        var it = tab.layout.splits.valueIterator();
+        while (it.next()) |pane_ptr| {
+            out.put(pane_ptr.*.uuid, pane_ptr.*) catch {};
+        }
+    }
+    for (self.floats.items) |pane| {
+        out.put(pane.uuid, pane) catch {};
+    }
+}
+
+fn clearStatePreservingPanes(self: anytype) void {
+    while (self.tabs.items.len > 0) {
+        const tab_opt = self.tabs.pop();
+        if (tab_opt) |tab_const| {
+            var tab = tab_const;
+            deinitTabPreservingPanes(&tab);
+        }
+    }
+
+    self.floats.clearRetainingCapacity();
+    self.active_tab = 0;
+    self.active_floating = null;
+    self.tab_last_floating_uuid.clearRetainingCapacity();
+    self.tab_last_focus_kind.clearRetainingCapacity();
+}
+
+fn clearPaneAuxCaches(self: anytype, uuid: [32]u8) void {
+    if (self.pane_proc.fetchRemove(uuid)) |kv| {
+        var info = kv.value;
+        info.deinit(self.allocator);
+    }
+    if (self.pane_names.fetchRemove(uuid)) |kv| {
+        self.allocator.free(kv.value);
+    }
+    if (self.float_rename_uuid) |rename_uuid| {
+        if (std.mem.eql(u8, &rename_uuid, &uuid)) {
+            self.float_rename_uuid = null;
+            self.float_rename_buf.clearRetainingCapacity();
+        }
+    }
+}
+
+fn destroyUnusedPaneViews(self: anytype, existing_views: *ExistingPaneViews) void {
+    var it = existing_views.iterator();
+    while (it.next()) |entry| {
+        clearPaneAuxCaches(self, entry.key_ptr.*);
+        entry.value_ptr.*.deinit();
+        self.allocator.destroy(entry.value_ptr.*);
+    }
+}
+
+fn recyclePaneForSplit(self: anytype, tab: *Tab, pane: *Pane, pane_id: u16, pane_uuid: [32]u8, actual_focus_uuid: ?[32]u8) void {
+    pane.id = pane_id;
+    pane.uuid = pane_uuid;
+    pane.floating = false;
+    pane.focused = if (actual_focus_uuid) |focused_uuid| std.mem.eql(u8, &focused_uuid, &pane_uuid) else false;
+    pane.visible = true;
+    pane.tab_visible = 0;
+    pane.float_key = 0;
+    pane.border_x = 0;
+    pane.border_y = 0;
+    pane.border_w = 0;
+    pane.border_h = 0;
+    pane.float_width_pct = 60;
+    pane.float_height_pct = 60;
+    pane.float_pos_x_pct = 50;
+    pane.float_pos_y_pct = 50;
+    pane.float_pad_x = 1;
+    pane.float_pad_y = 0;
+    if (pane.pwd_dir) |dir| {
+        self.allocator.free(dir);
+        pane.pwd_dir = null;
+    }
+    pane.is_pwd = false;
+    pane.sticky = false;
+    pane.navigatable = false;
+    pane.retained_after_exit = false;
+    pane.capture_output = false;
+    pane.captured_output.clearRetainingCapacity();
+    pane.dim_background = false;
+    if (pane.exit_key) |k| {
+        self.allocator.free(k);
+        pane.exit_key = null;
+    }
+    pane.closed_by_exit_key = false;
+    pane.parent_tab = null;
+    pane.float_style = null;
+    if (pane.float_title) |t| {
+        self.allocator.free(t);
+        pane.float_title = null;
+    }
+    pane.backend.pod.dead = false;
+    tab.layout.configurePaneNotifications(pane);
+}
+
+fn recyclePaneForFloat(self: anytype, pane: *Pane, float_state: SessionFloat, actual_focus_uuid: ?[32]u8) void {
+    pane.uuid = float_state.pane_uuid;
+    pane.floating = true;
+    pane.focused = if (actual_focus_uuid) |focused_uuid| std.mem.eql(u8, &focused_uuid, &float_state.pane_uuid) else false;
+    pane.visible = float_state.visible;
+    pane.tab_visible = float_state.tab_visible;
+    pane.float_key = float_state.float_key;
+    pane.float_width_pct = float_state.width_pct;
+    pane.float_height_pct = float_state.height_pct;
+    pane.float_pos_x_pct = float_state.pos_x_pct;
+    pane.float_pos_y_pct = float_state.pos_y_pct;
+    pane.float_pad_x = float_state.pad_x;
+    pane.float_pad_y = float_state.pad_y;
+    pane.is_pwd = float_state.is_pwd;
+    pane.sticky = float_state.sticky;
+    pane.navigatable = false;
+    pane.parent_tab = float_state.parent_tab;
+    pane.retained_after_exit = false;
+    pane.capture_output = false;
+    pane.captured_output.clearRetainingCapacity();
+    pane.dim_background = false;
+    if (pane.exit_key) |k| {
+        self.allocator.free(k);
+        pane.exit_key = null;
+    }
+    pane.closed_by_exit_key = false;
+    pane.float_style = null;
+    if (pane.float_title) |t| {
+        self.allocator.free(t);
+        pane.float_title = null;
+    }
+    pane.backend.pod.dead = false;
+    if (!pane.is_pwd and pane.pwd_dir != null) {
+        self.allocator.free(pane.pwd_dir.?);
+        pane.pwd_dir = null;
+    }
+}
+
 fn hydratePaneMetadata(self: anytype, pane: *Pane, uuid: [32]u8) void {
     if (self.ses_client.getPaneInfoSnapshot(uuid)) |snap| {
         defer if (snap.fg_name) |s| self.allocator.free(s);
@@ -192,8 +341,29 @@ fn ensureAdoptInfo(
     self: anytype,
     uuid: [32]u8,
     uuid_pane_map: *std.AutoHashMap([32]u8, AdoptInfo),
+    existing_views: ?*ExistingPaneViews,
+    attached_snapshot: bool,
 ) ?AdoptInfo {
     if (uuid_pane_map.get(uuid)) |info| return info;
+    if (existing_views) |views| {
+        if (views.get(uuid)) |pane| {
+            if (pane.getPaneId()) |pane_id| {
+                return .{ .pane_id = pane_id };
+            }
+        }
+    }
+    if (attached_snapshot) {
+        if (self.ses_client.getPaneInfoSnapshot(uuid)) |snap| {
+            defer if (snap.name) |s| self.allocator.free(s);
+            defer if (snap.cwd) |s| self.allocator.free(s);
+            defer if (snap.fg_name) |s| self.allocator.free(s);
+            if (snap.pane_id) |pane_id| {
+                const info = AdoptInfo{ .pane_id = pane_id };
+                uuid_pane_map.put(uuid, info) catch {};
+                return info;
+            }
+        }
+    }
     if (self.ses_client.adoptPane(uuid)) |adopt_res| {
         const info = AdoptInfo{ .pane_id = adopt_res.pane_id };
         uuid_pane_map.put(uuid, info) catch {};
@@ -209,6 +379,8 @@ fn ensureSplitPaneView(
     pane_uuid: [32]u8,
     local_ids: *std.AutoHashMap([32]u8, u16),
     uuid_pane_map: *std.AutoHashMap([32]u8, AdoptInfo),
+    existing_views: ?*ExistingPaneViews,
+    attached_snapshot: bool,
     used_uuids: *std.AutoHashMap([32]u8, void),
     remembered_focus_uuid: ?[32]u8,
     actual_focus_uuid: ?[32]u8,
@@ -216,19 +388,38 @@ fn ensureSplitPaneView(
     if (local_ids.get(pane_uuid)) |existing| return existing;
     if (used_uuids.contains(pane_uuid)) return null;
 
-    const info = ensureAdoptInfo(self, pane_uuid, uuid_pane_map) orelse return null;
+    const info = ensureAdoptInfo(self, pane_uuid, uuid_pane_map, existing_views, attached_snapshot) orelse return null;
     const vt_fd = self.ses_client.getVtFd() orelse return null;
 
     const pane_id = tab.layout.next_split_id;
     tab.layout.next_split_id +%= 1;
     if (tab.layout.next_split_id == 0) tab.layout.next_split_id = 1;
 
-    const pane = self.allocator.create(Pane) catch return null;
-    errdefer self.allocator.destroy(pane);
+    const pane = blk: {
+        if (existing_views) |views| {
+            if (views.fetchRemove(pane_uuid)) |entry| {
+                const pane = entry.value;
+                if (pane.getPaneId() != info.pane_id or !std.mem.eql(u8, &pane.uuid, &pane_uuid)) {
+                    pane.replaceWithPod(info.pane_id, vt_fd, pane_uuid) catch {
+                        pane.deinit();
+                        self.allocator.destroy(pane);
+                        return null;
+                    };
+                }
+                recyclePaneForSplit(self, tab, pane, pane_id, pane_uuid, actual_focus_uuid);
+                break :blk pane;
+            }
+        }
 
-    pane.initWithPod(self.allocator, pane_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, pane_uuid) catch return null;
-    pane.focused = if (actual_focus_uuid) |focused_uuid| std.mem.eql(u8, &focused_uuid, &pane_uuid) else false;
-    pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
+        const pane = self.allocator.create(Pane) catch return null;
+        errdefer self.allocator.destroy(pane);
+
+        pane.initWithPod(self.allocator, pane_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, pane_uuid) catch return null;
+        recyclePaneForSplit(self, tab, pane, pane_id, pane_uuid, actual_focus_uuid);
+        pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
+        break :blk pane;
+    };
+
     hydratePaneMetadata(self, pane, pane_uuid);
 
     tab.layout.splits.put(pane_id, pane) catch {
@@ -265,6 +456,8 @@ fn restoreLayoutNode(
     node: *const SessionLayoutNode,
     local_ids: *std.AutoHashMap([32]u8, u16),
     uuid_pane_map: *std.AutoHashMap([32]u8, AdoptInfo),
+    existing_views: ?*ExistingPaneViews,
+    attached_snapshot: bool,
     used_uuids: *std.AutoHashMap([32]u8, void),
     remembered_focus_uuid: ?[32]u8,
     actual_focus_uuid: ?[32]u8,
@@ -277,6 +470,8 @@ fn restoreLayoutNode(
                 pane_uuid,
                 local_ids,
                 uuid_pane_map,
+                existing_views,
+                attached_snapshot,
                 used_uuids,
                 remembered_focus_uuid,
                 actual_focus_uuid,
@@ -286,8 +481,8 @@ fn restoreLayoutNode(
             return restored;
         },
         .split => |split| {
-            const first = restoreLayoutNode(self, tab, split.first, local_ids, uuid_pane_map, used_uuids, remembered_focus_uuid, actual_focus_uuid);
-            const second = restoreLayoutNode(self, tab, split.second, local_ids, uuid_pane_map, used_uuids, remembered_focus_uuid, actual_focus_uuid);
+            const first = restoreLayoutNode(self, tab, split.first, local_ids, uuid_pane_map, existing_views, attached_snapshot, used_uuids, remembered_focus_uuid, actual_focus_uuid);
+            const second = restoreLayoutNode(self, tab, split.second, local_ids, uuid_pane_map, existing_views, attached_snapshot, used_uuids, remembered_focus_uuid, actual_focus_uuid);
 
             if (first == null and second == null) return null;
             if (first == null) return second;
@@ -319,35 +514,42 @@ fn restoreFloatPane(
     self: anytype,
     float_state: SessionFloat,
     uuid_pane_map: *std.AutoHashMap([32]u8, AdoptInfo),
+    existing_views: ?*ExistingPaneViews,
+    attached_snapshot: bool,
     used_uuids: *std.AutoHashMap([32]u8, void),
     actual_focus_uuid: ?[32]u8,
 ) ?*Pane {
     if (used_uuids.contains(float_state.pane_uuid)) return null;
-    const info = ensureAdoptInfo(self, float_state.pane_uuid, uuid_pane_map) orelse return null;
+    const info = ensureAdoptInfo(self, float_state.pane_uuid, uuid_pane_map, existing_views, attached_snapshot) orelse return null;
     const vt_fd = self.ses_client.getVtFd() orelse return null;
 
-    const pane = self.allocator.create(Pane) catch return null;
-    errdefer self.allocator.destroy(pane);
+    const pane = blk: {
+        if (existing_views) |views| {
+            if (views.fetchRemove(float_state.pane_uuid)) |entry| {
+                const pane = entry.value;
+                if (pane.getPaneId() != info.pane_id or !std.mem.eql(u8, &pane.uuid, &float_state.pane_uuid)) {
+                    pane.replaceWithPod(info.pane_id, vt_fd, float_state.pane_uuid) catch {
+                        pane.deinit();
+                        self.allocator.destroy(pane);
+                        return null;
+                    };
+                }
+                break :blk pane;
+            }
+        }
 
-    const local_id: u16 = @intCast(100 + self.floats.items.len);
-    pane.initWithPod(self.allocator, local_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, float_state.pane_uuid) catch return null;
+        const pane = self.allocator.create(Pane) catch return null;
+        errdefer self.allocator.destroy(pane);
+
+        const local_id: u16 = @intCast(100 + self.floats.items.len);
+        pane.initWithPod(self.allocator, local_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, float_state.pane_uuid) catch return null;
+        pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
+        break :blk pane;
+    };
+    pane.id = @intCast(100 + self.floats.items.len);
+    pane.uuid = float_state.pane_uuid;
+    recyclePaneForFloat(self, pane, float_state, actual_focus_uuid);
     hydratePaneMetadata(self, pane, float_state.pane_uuid);
-
-    pane.floating = true;
-    pane.focused = if (actual_focus_uuid) |focused_uuid| std.mem.eql(u8, &focused_uuid, &float_state.pane_uuid) else false;
-    pane.visible = float_state.visible;
-    pane.tab_visible = float_state.tab_visible;
-    pane.float_key = float_state.float_key;
-    pane.float_width_pct = float_state.width_pct;
-    pane.float_height_pct = float_state.height_pct;
-    pane.float_pos_x_pct = float_state.pos_x_pct;
-    pane.float_pos_y_pct = float_state.pos_y_pct;
-    pane.float_pad_x = float_state.pad_x;
-    pane.float_pad_y = float_state.pad_y;
-    pane.is_pwd = float_state.is_pwd;
-    pane.sticky = float_state.sticky;
-    pane.parent_tab = float_state.parent_tab;
-    pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
 
     if (pane.float_key != 0) {
         if (self.getLayoutFloatByKey(pane.float_key)) |float_def| {
@@ -519,6 +721,8 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                 root,
                 &local_ids,
                 &uuid_pane_map,
+                null,
+                false,
                 &used_uuids,
                 snapshot_tab.focused_pane_uuid,
                 snapshot.focused_pane_uuid,
@@ -558,7 +762,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     }
 
     for (snapshot.floats.items) |float_state| {
-        const pane = restoreFloatPane(self, float_state, &uuid_pane_map, &used_uuids, snapshot.focused_pane_uuid) orelse continue;
+        const pane = restoreFloatPane(self, float_state, &uuid_pane_map, null, false, &used_uuids, snapshot.focused_pane_uuid) orelse continue;
         self.floats.append(self.allocator, pane) catch {
             pane.deinit();
             self.allocator.destroy(pane);
@@ -737,6 +941,153 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     }
 
     mux.debugLog("reattachSession: returning true, tabs={d} floats={d}", .{ self.tabs.items.len, self.floats.items.len });
+    return true;
+}
+
+pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool {
+    var snapshot = SessionSnapshot.fromJson(self.allocator, session_state_json) catch |e| {
+        mux.debugLog("applySessionSnapshot: snapshot parse failed: {s}", .{@errorName(e)});
+        return false;
+    };
+    defer snapshot.deinit();
+
+    var existing_views = ExistingPaneViews.init(self.allocator);
+    defer {
+        destroyUnusedPaneViews(self, &existing_views);
+        existing_views.deinit();
+    }
+    captureExistingPaneViews(self, &existing_views);
+    clearStatePreservingPanes(self);
+
+    self.uuid = snapshot.uuid;
+    if (self.session_name_owned) |old| self.allocator.free(old);
+    const name_owned = self.allocator.dupe(u8, snapshot.session_name) catch return false;
+    self.session_name = name_owned;
+    self.session_name_owned = name_owned;
+    self.ses_client.session_id = snapshot.uuid;
+    self.ses_client.session_name = self.session_name;
+    self.tab_counter = if (snapshot.tab_counter > 1000) 0 else snapshot.tab_counter;
+
+    const wanted_active_tab = snapshot.active_tab;
+
+    var uuid_pane_map = std.AutoHashMap([32]u8, AdoptInfo).init(self.allocator);
+    defer uuid_pane_map.deinit();
+
+    var used_uuids = std.AutoHashMap([32]u8, void).init(self.allocator);
+    defer used_uuids.deinit();
+
+    for (snapshot.tabs.items) |snapshot_tab| {
+        const tab_name = self.allocator.dupe(u8, snapshot_tab.name) catch continue;
+        var tab = Tab.initOwned(self.allocator, self.layout_width, self.layout_height, tab_name, self.pop_config.carrier.notification);
+        tab.uuid = snapshot_tab.uuid;
+
+        if (self.ses_client.isConnected()) {
+            tab.layout.setSesClient(&self.ses_client);
+        }
+        tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
+
+        var local_ids = std.AutoHashMap([32]u8, u16).init(self.allocator);
+        defer local_ids.deinit();
+
+        if (snapshot_tab.root) |root| {
+            tab.layout.root = restoreLayoutNode(
+                self,
+                &tab,
+                root,
+                &local_ids,
+                &uuid_pane_map,
+                &existing_views,
+                true,
+                &used_uuids,
+                snapshot_tab.focused_pane_uuid,
+                snapshot.focused_pane_uuid,
+            );
+        }
+
+        if (!tab.layout.splits.contains(tab.layout.focused_split_id)) {
+            var split_it = tab.layout.splits.iterator();
+            if (split_it.next()) |entry| {
+                tab.layout.focused_split_id = entry.key_ptr.*;
+            }
+        }
+
+        if (tab.layout.root == null and tab.layout.splits.count() > 0) {
+            const node = self.allocator.create(LayoutNode) catch {
+                tab.deinit();
+                continue;
+            };
+            node.* = .{ .pane = tab.layout.focused_split_id };
+            tab.layout.root = node;
+        }
+
+        self.tabs.append(self.allocator, tab) catch {
+            tab.deinit();
+            continue;
+        };
+    }
+
+    self.tab_last_floating_uuid.clearRetainingCapacity();
+    for (0..self.tabs.items.len) |_| {
+        self.tab_last_floating_uuid.append(self.allocator, null) catch return false;
+    }
+
+    self.tab_last_focus_kind.clearRetainingCapacity();
+    for (0..self.tabs.items.len) |_| {
+        self.tab_last_focus_kind.append(self.allocator, .split) catch return false;
+    }
+
+    for (snapshot.floats.items) |float_state| {
+        const pane = restoreFloatPane(self, float_state, &uuid_pane_map, &existing_views, true, &used_uuids, snapshot.focused_pane_uuid) orelse continue;
+        self.floats.append(self.allocator, pane) catch {
+            pane.deinit();
+            self.allocator.destroy(pane);
+            continue;
+        };
+    }
+
+    for (self.tabs.items) |*tab| {
+        tab.layout.pruneDeadNodes();
+        tab.layout.resize(self.layout_width, self.layout_height);
+    }
+
+    var fi: usize = 0;
+    while (fi < self.floats.items.len) : (fi += 1) {
+        const pane = self.floats.items[fi];
+        if (pane.parent_tab) |parent_idx| {
+            if (parent_idx >= self.tabs.items.len) {
+                pane.parent_tab = null;
+            }
+        }
+    }
+    self.resizeFloatingPanes();
+
+    if (self.tabs.items.len > 0) {
+        self.active_tab = @min(wanted_active_tab, self.tabs.items.len - 1);
+    } else {
+        self.active_tab = 0;
+    }
+    self.active_floating = null;
+    if (snapshot.active_float_uuid) |active_float_uuid| {
+        for (self.floats.items, 0..) |pane, idx| {
+            if (std.mem.eql(u8, &pane.uuid, &active_float_uuid)) {
+                self.active_floating = idx;
+                break;
+            }
+        }
+    }
+    if (self.active_floating) |idx| {
+        if (self.active_tab < self.tab_last_floating_uuid.items.len) {
+            self.tab_last_floating_uuid.items[self.active_tab] = self.floats.items[idx].uuid;
+        }
+        if (self.active_tab < self.tab_last_focus_kind.items.len) {
+            self.tab_last_focus_kind.items[self.active_tab] = .float;
+        }
+    }
+
+    self.renderer.invalidate();
+    self.force_full_render = true;
+    self.needs_render = true;
+    mux.debugLog("applySessionSnapshot: tabs={d} floats={d}", .{ self.tabs.items.len, self.floats.items.len });
     return true;
 }
 

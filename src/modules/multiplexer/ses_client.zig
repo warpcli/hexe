@@ -31,6 +31,7 @@ pub const SesClient = struct {
     // Pending async request tracking
     pending_cwd_uuid: ?[32]u8 = null,
     pending_pane_exits: std.ArrayList([32]u8),
+    pending_session_state: ?[]u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, session_id: [32]u8, session_name: []const u8, keepalive: bool, debug: bool, log_file: ?[]const u8) SesClient {
         return .{
@@ -52,9 +53,11 @@ pub const SesClient = struct {
         if (self.vt_fd) |fd| posix.close(fd);
         if (self.resolved_name) |rn| self.allocator.free(rn);
         self.pending_pane_exits.deinit(self.allocator);
+        if (self.pending_session_state) |json| self.allocator.free(json);
         self.ctl_fd = null;
         self.vt_fd = null;
         self.resolved_name = null;
+        self.pending_session_state = null;
     }
 
     fn queuePendingPaneExit(self: *SesClient, uuid: [32]u8) void {
@@ -69,6 +72,18 @@ pub const SesClient = struct {
         if (self.pending_pane_exits.items.len == 0) return;
         out.appendSlice(self.allocator, self.pending_pane_exits.items) catch return;
         self.pending_pane_exits.clearRetainingCapacity();
+    }
+
+    fn queuePendingSessionState(self: *SesClient, session_state_json: []const u8) void {
+        const owned = self.allocator.dupe(u8, session_state_json) catch return;
+        if (self.pending_session_state) |old| self.allocator.free(old);
+        self.pending_session_state = owned;
+    }
+
+    pub fn drainPendingSessionState(self: *SesClient) ?[]u8 {
+        const pending = self.pending_session_state orelse return null;
+        self.pending_session_state = null;
+        return pending;
     }
 
     /// Connect to the ses daemon, starting it if necessary.
@@ -585,6 +600,7 @@ pub const SesClient = struct {
     pub const PaneType = enum { split, float };
     pub const PaneAuxInfo = struct { created_from: ?[32]u8, focused_from: ?[32]u8 };
     pub const PaneInfoSnapshot = struct {
+        pane_id: ?u16,
         pid: ?i32,
         name: ?[]u8,
         cwd: ?[]u8,
@@ -798,6 +814,7 @@ pub const SesClient = struct {
         if (remaining > 0) self.skipPayload(fd, @intCast(remaining));
 
         return .{
+            .pane_id = resp.pane_id,
             .pid = if (resp.pid != 0) resp.pid else null,
             .name = name,
             .cwd = cwd,
@@ -1105,6 +1122,22 @@ pub const SesClient = struct {
                     }
                     continue;
                 },
+                .session_state => {
+                    if (hdr.payload_len > 0) {
+                        const json = self.allocator.alloc(u8, hdr.payload_len) catch {
+                            self.skipPayload(fd, hdr.payload_len);
+                            continue;
+                        };
+                        errdefer self.allocator.free(json);
+                        wire.readExact(fd, json) catch {
+                            self.allocator.free(json);
+                            continue;
+                        };
+                        self.queuePendingSessionState(json);
+                        self.allocator.free(json);
+                    }
+                    continue;
+                },
                 // Return pane_info directly — this is what we're waiting for.
                 else => return hdr,
             }
@@ -1145,6 +1178,22 @@ pub const SesClient = struct {
                         if (rem > 0) self.skipPayload(fd, rem);
                     } else {
                         self.skipPayload(fd, hdr.payload_len);
+                    }
+                    continue;
+                },
+                .session_state => {
+                    if (hdr.payload_len > 0) {
+                        const json = self.allocator.alloc(u8, hdr.payload_len) catch {
+                            self.skipPayload(fd, hdr.payload_len);
+                            continue;
+                        };
+                        errdefer self.allocator.free(json);
+                        wire.readExact(fd, json) catch {
+                            self.allocator.free(json);
+                            continue;
+                        };
+                        self.queuePendingSessionState(json);
+                        self.allocator.free(json);
                     }
                     continue;
                 },

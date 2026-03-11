@@ -2578,6 +2578,7 @@ pub const Server = struct {
             .pid = pane.child_pid,
             .fg_pid = pane.fg_pid orelse pane.child_pid,
             .base_pid = pane.child_pid,
+            .pane_id = pane.pane_id,
             .cols = pane.cols,
             .rows = pane.rows,
             .cursor_x = pane.cursor_x,
@@ -3219,7 +3220,17 @@ pub const Server = struct {
         wire.writeControl(fd, .session_state, session_json) catch {};
     }
 
-    /// Handle apply_layout CLI request — forward layout tree to MUX.
+    fn pushClientSessionSnapshot(self: *Server, client_id: usize) void {
+        const client = self.ses_state.getClient(client_id) orelse return;
+        const mux_fd = client.mux_ctl_fd orelse return;
+        const snapshot = client.session_snapshot orelse return;
+        const session_json = snapshot.toJson(self.allocator) catch return;
+        defer self.allocator.free(session_json);
+        wire.writeControl(mux_fd, .session_state, session_json) catch {};
+    }
+
+    /// Handle apply_layout CLI request — mutate canonical SES state, then push
+    /// the updated snapshot to the attached frontend.
     fn handleApplyLayout(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
         defer posix.close(fd);
 
@@ -3251,17 +3262,21 @@ pub const Server = struct {
             return;
         };
 
-        // Find MUX CTL fd for this pane.
-        const mux_fd = self.findMuxCtlForUuid(al.uuid) orelse {
-            self.sendBinaryError(fd, "no mux");
+        const pane = self.ses_state.getPane(al.uuid) orelse {
+            self.sendBinaryError(fd, "pane not found");
+            return;
+        };
+        const client_id = pane.attached_to orelse {
+            self.sendBinaryError(fd, "pane not attached");
             return;
         };
 
-        // Forward to MUX.
-        wire.writeControlWithTrail(mux_fd, .apply_layout, std.mem.asBytes(&al), json_buf) catch {
-            self.sendBinaryError(fd, "forward failed");
+        self.ses_state.applyClientSessionLayoutTemplate(client_id, al.uuid, json_buf) catch {
+            self.sendBinaryError(fd, "apply layout failed");
             return;
         };
+        self.pushClientSessionSnapshot(client_id);
+        wire.writeControl(fd, .ok, &.{}) catch {};
     }
 
     /// Find the client (MUX) that owns a given pane UUID.
