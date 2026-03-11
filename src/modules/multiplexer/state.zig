@@ -754,6 +754,22 @@ pub const State = struct {
         return state_sync.syncStateToSes(self);
     }
 
+    pub fn syncSessionTabAdded(self: *State, tab_uuid: [32]u8, name: []const u8, pane_uuid: [32]u8) void {
+        return state_sync.syncSessionTabAdded(self, tab_uuid, name, pane_uuid);
+    }
+
+    pub fn syncSessionTabRemoved(self: *State, tab_uuid: [32]u8) void {
+        return state_sync.syncSessionTabRemoved(self, tab_uuid);
+    }
+
+    pub fn syncSessionFloat(self: *State, pane: *Pane, active: bool) void {
+        return state_sync.syncSessionFloat(self, pane, active);
+    }
+
+    pub fn syncSessionFloatRemoved(self: *State, pane_uuid: [32]u8) void {
+        return state_sync.syncSessionFloatRemoved(self, pane_uuid);
+    }
+
     pub fn getCurrentFocusedUuid(self: *State) ?[32]u8 {
         return state_sync.getCurrentFocusedUuid(self);
     }

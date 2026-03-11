@@ -63,6 +63,54 @@ pub fn syncStateToSes(self: anytype) void {
     };
 }
 
+pub fn syncSessionTabAdded(self: anytype, tab_uuid: [32]u8, name: []const u8, pane_uuid: [32]u8) void {
+    if (!self.ses_client.isConnected()) return;
+    self.ses_client.sessionAddTab(tab_uuid, pane_uuid, self.active_tab, name) catch |err| {
+        core.logging.logError("mux", "failed sessionAddTab IPC", err);
+    };
+}
+
+pub fn syncSessionTabRemoved(self: anytype, tab_uuid: [32]u8) void {
+    if (!self.ses_client.isConnected()) return;
+    const active_tab: ?usize = if (self.tabs.items.len > 0) self.active_tab else null;
+    self.ses_client.sessionRemoveTab(tab_uuid, active_tab) catch |err| {
+        core.logging.logError("mux", "failed sessionRemoveTab IPC", err);
+    };
+}
+
+pub fn syncSessionFloat(self: anytype, pane: *Pane, active: bool) void {
+    if (!self.ses_client.isConnected()) return;
+    if (pane.uuid[0] == 0) return;
+
+    self.ses_client.sessionSyncFloat(
+        pane.uuid,
+        self.active_tab,
+        pane.parent_tab,
+        pane.visible,
+        pane.tab_visible,
+        pane.sticky,
+        pane.is_pwd,
+        pane.float_key,
+        pane.float_width_pct,
+        pane.float_height_pct,
+        pane.float_pos_x_pct,
+        pane.float_pos_y_pct,
+        pane.float_pad_x,
+        pane.float_pad_y,
+        active,
+    ) catch |err| {
+        core.logging.logError("mux", "failed sessionSyncFloat IPC", err);
+    };
+}
+
+pub fn syncSessionFloatRemoved(self: anytype, pane_uuid: [32]u8) void {
+    if (!self.ses_client.isConnected()) return;
+    if (pane_uuid[0] == 0) return;
+    self.ses_client.sessionRemoveFloat(pane_uuid) catch |err| {
+        core.logging.logError("mux", "failed sessionRemoveFloat IPC", err);
+    };
+}
+
 pub fn getCurrentFocusedUuid(self: anytype) ?[32]u8 {
     if (self.active_floating) |idx| {
         if (idx < self.floats.items.len) {

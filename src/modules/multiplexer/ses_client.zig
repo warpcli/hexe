@@ -282,6 +282,80 @@ pub const SesClient = struct {
         try wire.writeControlWithTrail(fd, .layout_sync, std.mem.asBytes(&msg), mux_state_json);
     }
 
+    pub fn sessionAddTab(
+        self: *SesClient,
+        tab_uuid: [32]u8,
+        pane_uuid: [32]u8,
+        tab_index: usize,
+        name: []const u8,
+    ) !void {
+        const fd = self.ctl_fd orelse return error.NotConnected;
+        var msg: wire.SessionAddTab = .{
+            .tab_uuid = tab_uuid,
+            .pane_uuid = pane_uuid,
+            .tab_index = @intCast(tab_index),
+            .name_len = @intCast(name.len),
+        };
+        try wire.writeControlWithTrail(fd, .session_add_tab, std.mem.asBytes(&msg), name);
+    }
+
+    pub fn sessionRemoveTab(self: *SesClient, tab_uuid: [32]u8, active_tab: ?usize) !void {
+        const fd = self.ctl_fd orelse return error.NotConnected;
+        var msg: wire.SessionRemoveTab = .{
+            .tab_uuid = tab_uuid,
+            .active_tab = @intCast(active_tab orelse 0),
+            .has_active_tab = if (active_tab != null) 1 else 0,
+        };
+        try wire.writeControl(fd, .session_remove_tab, std.mem.asBytes(&msg));
+    }
+
+    pub fn sessionSyncFloat(
+        self: *SesClient,
+        pane_uuid: [32]u8,
+        active_tab: ?usize,
+        parent_tab: ?usize,
+        visible: bool,
+        tab_visible: u64,
+        sticky: bool,
+        is_pwd: bool,
+        float_key: u8,
+        width_pct: u8,
+        height_pct: u8,
+        pos_x_pct: u8,
+        pos_y_pct: u8,
+        pad_x: u8,
+        pad_y: u8,
+        active: bool,
+    ) !void {
+        const fd = self.ctl_fd orelse return error.NotConnected;
+        var msg: wire.SessionSyncFloat = .{
+            .pane_uuid = pane_uuid,
+            .active_tab = @intCast(active_tab orelse 0),
+            .parent_tab = @intCast(parent_tab orelse 0),
+            .tab_visible = tab_visible,
+            .has_active_tab = if (active_tab != null) 1 else 0,
+            .has_parent_tab = if (parent_tab != null) 1 else 0,
+            .visible = @intFromBool(visible),
+            .sticky = @intFromBool(sticky),
+            .is_pwd = @intFromBool(is_pwd),
+            .float_key = float_key,
+            .width_pct = width_pct,
+            .height_pct = height_pct,
+            .pos_x_pct = pos_x_pct,
+            .pos_y_pct = pos_y_pct,
+            .pad_x = pad_x,
+            .pad_y = pad_y,
+            .active = @intFromBool(active),
+        };
+        try wire.writeControl(fd, .session_sync_float, std.mem.asBytes(&msg));
+    }
+
+    pub fn sessionRemoveFloat(self: *SesClient, pane_uuid: [32]u8) !void {
+        const fd = self.ctl_fd orelse return error.NotConnected;
+        var msg: wire.SessionRemoveFloat = .{ .pane_uuid = pane_uuid };
+        try wire.writeControl(fd, .session_remove_float, std.mem.asBytes(&msg));
+    }
+
     /// Create a new pane via ses.
     /// Returns the pane UUID, pane_id (for VT routing), and pod PID.
     /// If inherit_env_parent_uuid is set, SES will read environment from that pane's process

@@ -115,6 +115,10 @@ pub const MsgType = enum(u16) {
     apply_layout = 0x0135, // CLI → SES → MUX: apply saved layout tree
     get_session_state = 0x0136, // CLI → SES: export detached session to JSON
     session_stolen = 0x0137, // SES → MUX: this session was attached elsewhere
+    session_add_tab = 0x0138,
+    session_remove_tab = 0x0139,
+    session_sync_float = 0x013A,
+    session_remove_float = 0x013B,
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
@@ -226,6 +230,48 @@ pub const Disconnect = extern struct {
 pub const SyncState = extern struct {
     state_len: u32 align(1),
     version: u32 align(1), // Monotonically increasing version; SES rejects stale updates.
+};
+
+/// SessionAddTab: add a new tab with a single split pane to the canonical snapshot.
+/// Followed by: tab name bytes (name_len).
+pub const SessionAddTab = extern struct {
+    tab_uuid: [32]u8 align(1),
+    pane_uuid: [32]u8 align(1),
+    tab_index: u16 align(1),
+    name_len: u16 align(1),
+};
+
+/// SessionRemoveTab: remove a tab from the canonical snapshot.
+pub const SessionRemoveTab = extern struct {
+    tab_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    has_active_tab: u8 align(1),
+};
+
+/// SessionSyncFloat: upsert a float record in the canonical snapshot.
+pub const SessionSyncFloat = extern struct {
+    pane_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    parent_tab: u16 align(1),
+    tab_visible: u64 align(1),
+    has_active_tab: u8 align(1),
+    has_parent_tab: u8 align(1),
+    visible: u8 align(1),
+    sticky: u8 align(1),
+    is_pwd: u8 align(1),
+    float_key: u8 align(1),
+    width_pct: u8 align(1),
+    height_pct: u8 align(1),
+    pos_x_pct: u8 align(1),
+    pos_y_pct: u8 align(1),
+    pad_x: u8 align(1),
+    pad_y: u8 align(1),
+    active: u8 align(1),
+};
+
+/// SessionRemoveFloat: remove a float record from the canonical snapshot.
+pub const SessionRemoveFloat = extern struct {
+    pane_uuid: [32]u8 align(1),
 };
 
 /// Notify: message for the owning MUX.

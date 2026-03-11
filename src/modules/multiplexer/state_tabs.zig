@@ -95,6 +95,8 @@ pub fn createTab(self: anytype) !void {
         self.tab_counter = 0;
     }
     var tab = Tab.initOwned(self.allocator, self.layout_width, self.layout_height, name_owned, self.pop_config.carrier.notification);
+    const tab_uuid = tab.uuid;
+    const tab_name = tab.name;
     // Set ses client if connected (for new tabs after startup).
     if (self.ses_client.isConnected()) {
         tab.layout.setSesClient(&self.ses_client);
@@ -108,15 +110,16 @@ pub fn createTab(self: anytype) !void {
     try self.tab_last_focus_kind.append(self.allocator, .split);
     self.active_tab = self.tabs.items.len - 1;
     self.syncPaneAux(first_pane, parent_uuid);
+    self.syncSessionTabAdded(tab_uuid, tab_name, first_pane.uuid);
     self.renderer.invalidate();
     self.force_full_render = true;
-    self.syncStateToSes();
 }
 
 /// Close the current tab.
 pub fn closeCurrentTab(self: anytype) bool {
     if (self.tabs.items.len <= 1) return false;
     const closing_tab = self.active_tab;
+    const closing_uuid = self.tabs.items[closing_tab].uuid;
 
     // Handle tab-bound floats belonging to this tab.
     var i: usize = 0;
@@ -139,10 +142,12 @@ pub fn closeCurrentTab(self: anytype) bool {
                         self.active_floating = afi - 1;
                     }
                 }
+                self.syncSessionFloatRemoved(fp.uuid);
                 continue;
             } else if (parent > closing_tab) {
                 // Adjust index for floats on later tabs.
                 fp.parent_tab = parent - 1;
+                self.syncSessionFloat(fp, false);
             }
         }
         i += 1;
@@ -155,9 +160,19 @@ pub fn closeCurrentTab(self: anytype) bool {
     if (self.active_tab >= self.tabs.items.len) {
         self.active_tab = self.tabs.items.len - 1;
     }
+    if (self.active_floating) |afi| {
+        if (afi < self.floats.items.len) {
+            self.syncPaneFocus(self.floats.items[afi], null);
+        } else if (self.currentLayout().getFocusedPane()) |pane| {
+            self.active_floating = null;
+            self.syncPaneFocus(pane, null);
+        }
+    } else if (self.currentLayout().getFocusedPane()) |pane| {
+        self.syncPaneFocus(pane, null);
+    }
     self.renderer.invalidate();
     self.force_full_render = true;
-    self.syncStateToSes();
+    self.syncSessionTabRemoved(closing_uuid);
     return true;
 }
 

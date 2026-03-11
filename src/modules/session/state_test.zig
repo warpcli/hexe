@@ -783,6 +783,101 @@ test "updateClientSessionFocus: float focus preserves split focus and tracks act
     try testing.expectEqual([_]u8{'1'} ** 32, client.session_snapshot.?.tabs.items[0].focused_pane_uuid.?);
 }
 
+test "addClientSessionTab: inserts active tab with focused split pane" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(1);
+    const client = ses_state.getClient(client_id).?;
+
+    var snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'a'} ** 32, "alpha");
+    try snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try testing.allocator.dupe(u8, "alpha-1"),
+        .focused_pane_uuid = [_]u8{'1'} ** 32,
+        .allocator = testing.allocator,
+    });
+    try snapshot.panes.put([_]u8{'1'} ** 32, .{ .uuid = [_]u8{'1'} ** 32, .kind = .split, .parent_tab = 0 });
+    client.updateSessionSnapshot(snapshot);
+
+    try ses_state.addClientSessionTab(client_id, [_]u8{'u'} ** 32, [_]u8{'2'} ** 32, 1, "alpha-2");
+
+    try testing.expectEqual(@as(usize, 2), client.session_snapshot.?.tabs.items.len);
+    try testing.expectEqualStrings("alpha-2", client.session_snapshot.?.tabs.items[1].name);
+    try testing.expectEqual(@as(usize, 1), client.session_snapshot.?.active_tab);
+    try testing.expectEqual([_]u8{'2'} ** 32, client.session_snapshot.?.focused_pane_uuid.?);
+    try testing.expectEqual([_]u8{'2'} ** 32, client.session_snapshot.?.tabs.items[1].focused_pane_uuid.?);
+    try testing.expectEqual(@as(usize, 1), client.session_snapshot.?.panes.get([_]u8{'2'} ** 32).?.parent_tab.?);
+}
+
+test "removeClientSessionTab: removes split panes and shifts later tab parents" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(1);
+    const client = ses_state.getClient(client_id).?;
+
+    var snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'a'} ** 32, "alpha");
+    try snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try testing.allocator.dupe(u8, "alpha-1"),
+        .focused_pane_uuid = [_]u8{'1'} ** 32,
+        .allocator = testing.allocator,
+    });
+    try snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'u'} ** 32,
+        .name = try testing.allocator.dupe(u8, "alpha-2"),
+        .focused_pane_uuid = [_]u8{'2'} ** 32,
+        .allocator = testing.allocator,
+    });
+    try snapshot.panes.put([_]u8{'1'} ** 32, .{ .uuid = [_]u8{'1'} ** 32, .kind = .split, .parent_tab = 0 });
+    try snapshot.panes.put([_]u8{'2'} ** 32, .{ .uuid = [_]u8{'2'} ** 32, .kind = .split, .parent_tab = 1 });
+    client.updateSessionSnapshot(snapshot);
+
+    ses_state.removeClientSessionTab(client_id, [_]u8{'t'} ** 32, 0);
+
+    try testing.expectEqual(@as(usize, 1), client.session_snapshot.?.tabs.items.len);
+    try testing.expectEqualStrings("alpha-2", client.session_snapshot.?.tabs.items[0].name);
+    try testing.expect(client.session_snapshot.?.panes.get([_]u8{'1'} ** 32) == null);
+    try testing.expectEqual(@as(usize, 0), client.session_snapshot.?.panes.get([_]u8{'2'} ** 32).?.parent_tab.?);
+    try testing.expectEqual(@as(usize, 0), client.session_snapshot.?.active_tab);
+}
+
+test "syncClientSessionFloat: upserts visibility and active float state" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(1);
+    const client = ses_state.getClient(client_id).?;
+
+    var snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'a'} ** 32, "alpha");
+    try snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try testing.allocator.dupe(u8, "alpha-1"),
+        .focused_pane_uuid = [_]u8{'1'} ** 32,
+        .allocator = testing.allocator,
+    });
+    snapshot.active_tab = 0;
+    snapshot.focused_pane_uuid = [_]u8{'1'} ** 32;
+    try snapshot.panes.put([_]u8{'1'} ** 32, .{ .uuid = [_]u8{'1'} ** 32, .kind = .split, .parent_tab = 0 });
+    client.updateSessionSnapshot(snapshot);
+
+    try ses_state.syncClientSessionFloat(client_id, [_]u8{'f'} ** 32, 0, null, true, 1, true, false, 7, 60, 50, 40, 30, 1, 0, true);
+
+    try testing.expectEqual(@as(usize, 1), client.session_snapshot.?.floats.items.len);
+    try testing.expectEqual([_]u8{'f'} ** 32, client.session_snapshot.?.active_float_uuid.?);
+    try testing.expectEqual([_]u8{'f'} ** 32, client.session_snapshot.?.focused_pane_uuid.?);
+
+    try ses_state.syncClientSessionFloat(client_id, [_]u8{'f'} ** 32, 0, null, false, 0, true, false, 7, 60, 50, 40, 30, 1, 0, false);
+
+    try testing.expect(client.session_snapshot.?.active_float_uuid == null);
+    try testing.expectEqual([_]u8{'1'} ** 32, client.session_snapshot.?.focused_pane_uuid.?);
+
+    ses_state.removeClientSessionFloat(client_id, [_]u8{'f'} ** 32);
+    try testing.expectEqual(@as(usize, 0), client.session_snapshot.?.floats.items.len);
+    try testing.expect(client.session_snapshot.?.panes.get([_]u8{'f'} ** 32) == null);
+}
+
 // ============================================================================
 // Session Affinity Tests
 // ============================================================================

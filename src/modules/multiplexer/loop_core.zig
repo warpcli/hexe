@@ -447,7 +447,7 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
     state.needs_render = true;
     state.force_full_render = true;
     state.renderer.invalidate();
-    state.syncStateToSes();
+    state.syncSessionFloatRemoved(pane.uuid);
 
     if (was_active) {
         state.active_floating = null;

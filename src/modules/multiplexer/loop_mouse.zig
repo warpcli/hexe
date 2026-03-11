@@ -589,7 +589,9 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
             if (is_wheel) return true;
             if (ev.is_release) {
                 state.mouse_drag = .none;
-                state.syncStateToSes();
+                if (state.findPaneByUuid(d.uuid)) |pane| {
+                    state.syncSessionFloat(pane, state.active_floating != null and state.floats.items[state.active_floating.?] == pane);
+                }
                 return true;
             }
             if (!is_motion) return true;
@@ -604,7 +606,9 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                 state.mouse_drag = .none;
                 state.overlays.hideResizeInfo();
                 state.needs_render = true;
-                state.syncStateToSes();
+                if (state.findPaneByUuid(d.uuid)) |pane| {
+                    state.syncSessionFloat(pane, state.active_floating != null and state.floats.items[state.active_floating.?] == pane);
+                }
                 return true;
             }
             if (!is_motion) return true;

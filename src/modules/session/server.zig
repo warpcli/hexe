@@ -981,6 +981,18 @@ pub const Server = struct {
             .float_result => {
                 self.handleBinaryFloatResult(fd, hdr.payload_len, &buf);
             },
+            .session_add_tab => {
+                self.handleBinarySessionAddTab(fd, hdr.payload_len, &buf);
+            },
+            .session_remove_tab => {
+                self.handleBinarySessionRemoveTab(fd, hdr.payload_len, &buf);
+            },
+            .session_sync_float => {
+                self.handleBinarySessionSyncFloat(fd, hdr.payload_len, &buf);
+            },
+            .session_remove_float => {
+                self.handleBinarySessionRemoveFloat(fd, hdr.payload_len, &buf);
+            },
             // POD control channel messages
             .cwd_changed => {
                 self.handleBinaryCwdChanged(fd, hdr.payload_len, &buf);
@@ -1160,6 +1172,92 @@ pub const Server = struct {
         if (self.ses_state.getClient(client_id)) |client| {
             client.updateMuxState(state_buf) catch {};
         }
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionAddTab(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionAddTab)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const msg = wire.readStruct(wire.SessionAddTab, fd) catch return;
+        if (msg.name_len > wire.MAX_PAYLOAD_LEN or msg.name_len > buf.len) {
+            self.skipBinaryPayload(fd, msg.name_len, buf);
+            self.sendBinaryError(fd, "session_add_tab: name too large");
+            return;
+        }
+        if (msg.name_len > 0) {
+            wire.readExact(fd, buf[0..msg.name_len]) catch return;
+        }
+
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.addClientSessionTab(
+            client_id,
+            msg.tab_uuid,
+            msg.pane_uuid,
+            msg.tab_index,
+            buf[0..msg.name_len],
+        ) catch {
+            self.sendBinaryError(fd, "session_add_tab_failed");
+            return;
+        };
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionRemoveTab(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionRemoveTab)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const msg = wire.readStruct(wire.SessionRemoveTab, fd) catch return;
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.removeClientSessionTab(
+            client_id,
+            msg.tab_uuid,
+            if (msg.has_active_tab != 0) msg.active_tab else null,
+        );
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionSyncFloat(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionSyncFloat)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const msg = wire.readStruct(wire.SessionSyncFloat, fd) catch return;
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.syncClientSessionFloat(
+            client_id,
+            msg.pane_uuid,
+            if (msg.has_active_tab != 0) msg.active_tab else null,
+            if (msg.has_parent_tab != 0) msg.parent_tab else null,
+            msg.visible != 0,
+            msg.tab_visible,
+            msg.sticky != 0,
+            msg.is_pwd != 0,
+            msg.float_key,
+            msg.width_pct,
+            msg.height_pct,
+            msg.pos_x_pct,
+            msg.pos_y_pct,
+            msg.pad_x,
+            msg.pad_y,
+            msg.active != 0,
+        ) catch {
+            self.sendBinaryError(fd, "session_sync_float_failed");
+            return;
+        };
+        wire.writeControl(fd, .ok, &.{}) catch {};
+    }
+
+    fn handleBinarySessionRemoveFloat(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
+        if (payload_len < @sizeOf(wire.SessionRemoveFloat)) {
+            self.skipBinaryPayload(fd, payload_len, buf);
+            return;
+        }
+        const msg = wire.readStruct(wire.SessionRemoveFloat, fd) catch return;
+        const client_id = self.findClientForCtlFd(fd) orelse return;
+        self.ses_state.removeClientSessionFloat(client_id, msg.pane_uuid);
         wire.writeControl(fd, .ok, &.{}) catch {};
     }
 

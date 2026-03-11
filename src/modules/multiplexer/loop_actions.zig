@@ -25,6 +25,7 @@ pub fn hideOrDestroyFloat(state: *State, pane: *Pane, tab: usize) void {
     } else {
         // Normal float - just hide it.
         pane.setVisibleOnTab(tab, false);
+        state.syncSessionFloat(pane, false);
     }
 }
 
@@ -53,6 +54,7 @@ fn destroyBlockingFloat(state: *State, pane: *Pane) void {
             if (state.ses_client.isConnected()) {
                 state.ses_client.killPane(pane.uuid) catch {};
             }
+            state.syncSessionFloatRemoved(pane.uuid);
             pane.deinit();
             state.allocator.destroy(pane);
             // Fix active_floating index.
@@ -419,6 +421,7 @@ pub fn performClose(state: *State) void {
             };
             mux.debugLogUuid(&pane.uuid, "performClose: killPane done", .{});
         }
+        state.syncSessionFloatRemoved(pane.uuid);
         pane.deinit();
         state.allocator.destroy(pane);
         // Focus another float or fall back to tiled pane.
@@ -431,7 +434,6 @@ pub fn performClose(state: *State) void {
                 state.syncPaneFocus(tiled, old_uuid);
             }
         }
-        state.syncStateToSes();
         // Force full render to restore cursor state properly.
         state.force_full_render = true;
         state.renderer.invalidate();
@@ -604,6 +606,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 }
 
                 const stale = state.floats.orderedRemove(existing_idx);
+                state.syncSessionFloatRemoved(stale.uuid);
                 stale.deinit();
                 state.allocator.destroy(stale);
 
@@ -623,7 +626,6 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                     }
                 }
 
-                state.syncStateToSes();
                 state.needs_render = true;
                 state.force_full_render = true;
                 state.renderer.invalidate();
@@ -680,6 +682,8 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                     }
                 }
             }
+
+            state.syncSessionFloat(pane, state.active_floating == existing_idx and pane.isVisibleOnTab(state.active_tab));
 
             state.renderer.invalidate();
             state.force_full_render = true;
@@ -879,7 +883,7 @@ pub fn createAdhocFloatWithSize(
     try state.floats.append(state.allocator, pane);
     state.active_floating = state.floats.items.len - 1;
     state.syncPaneAux(pane, null);
-    state.syncStateToSes();
+    state.syncSessionFloat(pane, true);
 
     return pane.uuid;
 }
@@ -1035,7 +1039,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     try state.floats.append(state.allocator, pane);
     state.active_floating = state.floats.items.len - 1;
     state.syncPaneAux(pane, parent_uuid);
-    state.syncStateToSes();
+    state.syncSessionFloat(pane, true);
 }
 
 pub fn enterPaneSelectMode(state: *State, swap: bool) void {
