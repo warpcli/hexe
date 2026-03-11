@@ -35,6 +35,8 @@ pub const FrontendDetachedSessionInfo = frontend_client.DetachedSessionInfo;
 pub const FrontendOrphanedPaneInfo = frontend_client.OrphanedPaneInfo;
 pub const FrontendSessionCache = frontend_session_cache.FrontendSessionCache;
 pub const FrontendTabFocusKind = frontend_session_cache.TabFocusKind;
+pub const FrontendPaneShellInfo = frontend_session_cache.PaneShellInfo;
+pub const FrontendPaneProcInfo = frontend_session_cache.PaneProcInfo;
 pub const FrontendKind = wire.FrontendKind;
 pub const FrontendTransportKind = wire.FrontendTransportKind;
 

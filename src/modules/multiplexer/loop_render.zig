@@ -128,7 +128,7 @@ fn composeFloatBorderLabel(state: *State, pane: *const Pane, out: *[256]u8) []co
         }
         break :blk "";
     };
-    const pokemon = state.pane_names.get(pane.uuid) orelse "";
+    const pokemon = state.paneName(pane.uuid) orelse "";
 
     if (title.len == 0) return pokemon;
     if (pokemon.len == 0) return title;

@@ -333,8 +333,8 @@ fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
     const started_at_opt: ?u64 = if (ev.started_at > 0) @intCast(ev.started_at) else null;
 
     // Job count delta notifications.
-    const old_jobs: ?u16 = if (state.pane_shell.get(uuid)) |info| info.jobs else null;
-    const old_running: bool = if (state.pane_shell.get(uuid)) |info| info.running else false;
+    const old_jobs: ?u16 = if (state.getPaneShell(uuid)) |info| info.jobs else null;
+    const old_running: bool = if (state.getPaneShell(uuid)) |info| info.running else false;
     if (jobs_opt) |new_jobs| {
         if (old_jobs) |old| {
             if (old == 0 and new_jobs > 0) {
@@ -389,16 +389,14 @@ fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
     } else {
         const now_ms: u64 = @intCast(std.time.milliTimestamp());
         var computed_dur: ?u64 = dur_opt;
-        if (state.pane_shell.get(uuid)) |info| {
+        if (state.getPaneShell(uuid)) |info| {
             if (info.started_at_ms) |t0| {
                 if (now_ms >= t0) computed_dur = now_ms - t0;
             }
         }
         state.setPaneShellRunning(uuid, running, null, null, null, null);
         state.setPaneShell(uuid, cmd, cwd, status_opt, computed_dur, jobs_opt);
-        if (state.pane_shell.getPtr(uuid)) |info_ptr| {
-            info_ptr.started_at_ms = null;
-        }
+        state.clearPaneShellStartedAt(uuid);
 
         if (state.config._lua_runtime) |rt| {
             rt.lua.createTable(0, 10);
@@ -872,11 +870,7 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
             wire.readExact(fd, buffer[0..resp.name_len]) catch return;
             const pane_name = state.allocator.dupe(u8, buffer[0..resp.name_len]) catch null;
             if (pane_name) |name| {
-                // Free old name if exists
-                if (state.pane_names.get(resp.uuid)) |old_name| {
-                    state.allocator.free(old_name);
-                }
-                state.pane_names.put(resp.uuid, name) catch {};
+                state.setPaneNameOwned(resp.uuid, name);
 
                 // If pokemon widget is enabled by default, load the sprite
                 // But only if not manually toggled and content is null (first load)

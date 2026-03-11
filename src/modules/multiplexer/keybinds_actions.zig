@@ -147,7 +147,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                             pane.pokemon_state.hide();
                         } else {
                             // Get the pane's Pokemon name from pane_names cache
-                            const pokemon_name = state.pane_names.get(pane.uuid) orelse "pikachu";
+                            const pokemon_name = state.paneName(pane.uuid) orelse "pikachu";
 
                             pane.pokemon_state.loadSprite(pokemon_name, false) catch {
                                 // Fallback to pikachu if loading fails
@@ -163,7 +163,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                         pane.pokemon_state.hide();
                     } else {
                         // Get the pane's Pokemon name from pane_names cache
-                        const pokemon_name = state.pane_names.get(pane.uuid) orelse "pikachu";
+                        const pokemon_name = state.paneName(pane.uuid) orelse "pikachu";
 
                         pane.pokemon_state.loadSprite(pokemon_name, false) catch {
                             pane.pokemon_state.loadSprite("pikachu", false) catch {};

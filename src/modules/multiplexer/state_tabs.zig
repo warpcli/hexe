@@ -245,8 +245,7 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
     if (self.ses_client.getPaneInfoSnapshot(uuid)) |snap| {
         defer if (snap.fg_name) |s| self.allocator.free(s);
         if (snap.name) |name| {
-            if (self.pane_names.get(uuid)) |old_name| self.allocator.free(old_name);
-            self.pane_names.put(uuid, name) catch self.allocator.free(name);
+            self.setPaneNameOwned(uuid, name);
         }
         pane.setSesCwd(snap.cwd);
         self.setPaneProc(uuid, snap.fg_name, snap.fg_pid);

@@ -212,13 +212,8 @@ fn clearStatePreservingPanes(self: anytype) void {
 }
 
 fn clearPaneAuxCaches(self: anytype, uuid: [32]u8) void {
-    if (self.pane_proc.fetchRemove(uuid)) |kv| {
-        var info = kv.value;
-        info.deinit(self.allocator);
-    }
-    if (self.pane_names.fetchRemove(uuid)) |kv| {
-        self.allocator.free(kv.value);
-    }
+    self.removePaneProcMetadata(uuid);
+    self.removePaneName(uuid);
     if (self.float_rename_uuid) |rename_uuid| {
         if (std.mem.eql(u8, &rename_uuid, &uuid)) {
             self.float_rename_uuid = null;
@@ -322,8 +317,7 @@ fn hydratePaneMetadata(self: anytype, pane: *Pane, uuid: [32]u8) void {
     if (self.ses_client.getPaneInfoSnapshot(uuid)) |snap| {
         defer if (snap.fg_name) |s| self.allocator.free(s);
         if (snap.name) |name| {
-            if (self.pane_names.get(uuid)) |old_name| self.allocator.free(old_name);
-            self.pane_names.put(uuid, name) catch self.allocator.free(name);
+            self.setPaneNameOwned(uuid, name);
         }
         pane.setSesCwd(snap.cwd);
         self.setPaneProc(uuid, snap.fg_name, snap.fg_pid);
@@ -1255,8 +1249,7 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             if (self.ses_client.getPaneInfoSnapshot(result.uuid)) |snap| {
                 defer if (snap.fg_name) |s| self.allocator.free(s);
                 if (snap.name) |name| {
-                    if (self.pane_names.get(result.uuid)) |old_name| self.allocator.free(old_name);
-                    self.pane_names.put(result.uuid, name) catch self.allocator.free(name);
+                    self.setPaneNameOwned(result.uuid, name);
                 }
                 pane.setSesCwd(snap.cwd);
                 self.setPaneProc(result.uuid, snap.fg_name, snap.fg_pid);

@@ -492,7 +492,7 @@ pub fn getReliableCwd(self: anytype, pane: *Pane) ?[]const u8 {
     }
 
     // 3. Try shell integration CWD (updated by shell hooks)
-    if (self.pane_shell.get(pane.uuid)) |shell_info| {
+    if (self.getPaneShell(pane.uuid)) |shell_info| {
         if (shell_info.cwd) |cwd| {
             return cwd;
         }
@@ -516,7 +516,7 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
 
     // Ensure pane metadata eventually converges even if an async response was
     // missed during reconnect/startup races.
-    if (!self.pane_names.contains(p.uuid)) {
+    if (!self.hasPaneName(p.uuid)) {
         self.ses_client.requestPaneProcess(p.uuid);
     }
     if (p.getRealCwd() == null) {

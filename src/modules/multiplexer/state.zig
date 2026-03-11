@@ -16,6 +16,8 @@ const Layout = layout_mod.Layout;
 const Renderer = @import("render_core.zig").Renderer;
 
 const FrontendSessionCache = core.FrontendSessionCache;
+const PaneShellInfo = core.FrontendPaneShellInfo;
+const PaneProcInfo = core.FrontendPaneProcInfo;
 const SesClient = core.FrontendClient;
 const OrphanedPaneInfo = core.FrontendOrphanedPaneInfo;
 
@@ -40,34 +42,6 @@ const mouse_selection = @import("mouse_selection.zig");
 pub const TabFocusKind = core.FrontendTabFocusKind;
 
 const max_pending_mux_vt_bytes: usize = 8 * 1024 * 1024;
-
-pub const PaneShellInfo = struct {
-    cmd: ?[]u8 = null,
-    cwd: ?[]u8 = null,
-    status: ?i32 = null,
-    duration_ms: ?u64 = null,
-    jobs: ?u16 = null,
-
-    // Running command telemetry (best-effort, sourced from shell integration).
-    running: bool = false,
-    started_at_ms: ?u64 = null,
-
-    pub fn deinit(self: *PaneShellInfo, allocator: std.mem.Allocator) void {
-        if (self.cmd) |c| allocator.free(c);
-        if (self.cwd) |c| allocator.free(c);
-        self.* = .{};
-    }
-};
-
-pub const PaneProcInfo = struct {
-    name: ?[]u8 = null,
-    pid: ?i32 = null,
-
-    pub fn deinit(self: *PaneProcInfo, allocator: std.mem.Allocator) void {
-        if (self.name) |n| allocator.free(n);
-        self.* = .{};
-    }
-};
 
 pub const PaneBounds = struct {
     x: u16,
@@ -228,17 +202,6 @@ pub const State = struct {
     mouse_click_last_x: u16,
     mouse_click_last_y: u16,
 
-    /// Shell-provided metadata (last command, status, duration) keyed by pane UUID.
-    pane_shell: std.AutoHashMap([32]u8, PaneShellInfo),
-
-    /// Best-effort foreground process info keyed by pane UUID.
-    ///
-    /// SES is the authority for this metadata and may update it asynchronously.
-    pane_proc: std.AutoHashMap([32]u8, PaneProcInfo),
-
-    /// Pane names (Pokemon names) keyed by pane UUID
-    pane_names: std.AutoHashMap([32]u8, []u8),
-
     // Keybinding timers (hold/double-tap delayed press)
     key_timers: std.ArrayList(PendingKeyTimer),
 
@@ -375,12 +338,6 @@ pub const State = struct {
             .mouse_click_last_x = 0,
             .mouse_click_last_y = 0,
 
-            .pane_shell = std.AutoHashMap([32]u8, PaneShellInfo).init(allocator),
-
-            .pane_proc = std.AutoHashMap([32]u8, PaneProcInfo).init(allocator),
-
-            .pane_names = std.AutoHashMap([32]u8, []u8).init(allocator),
-
             .key_timers = .empty,
         };
     }
@@ -449,33 +406,6 @@ pub const State = struct {
             self.ses_client.shutdown(true) catch |err| {
                 core.logging.logError("mux", "failed to send shutdown to SES", err);
             };
-        }
-
-        // Free shell metadata.
-        {
-            var it = self.pane_shell.iterator();
-            while (it.next()) |entry| {
-                entry.value_ptr.deinit(self.allocator);
-            }
-            self.pane_shell.deinit();
-        }
-
-        // Free proc metadata.
-        {
-            var it = self.pane_proc.iterator();
-            while (it.next()) |entry| {
-                entry.value_ptr.deinit(self.allocator);
-            }
-            self.pane_proc.deinit();
-        }
-
-        // Free pane names.
-        {
-            var it = self.pane_names.iterator();
-            while (it.next()) |entry| {
-                self.allocator.free(entry.value_ptr.*);
-            }
-            self.pane_names.deinit();
         }
 
         self.key_timers.deinit(self.allocator);
@@ -978,69 +908,46 @@ pub const State = struct {
     }
 
     pub fn setPaneShell(self: *State, uuid: [32]u8, cmd: ?[]const u8, cwd: ?[]const u8, status: ?i32, duration_ms: ?u64, jobs: ?u16) void {
-        var entry = self.pane_shell.getPtr(uuid);
-        if (entry == null) {
-            self.pane_shell.put(uuid, .{}) catch return;
-            entry = self.pane_shell.getPtr(uuid);
-        }
-        if (entry) |info| {
-            if (cmd) |c| {
-                if (info.cmd) |old| self.allocator.free(old);
-                info.cmd = self.allocator.dupe(u8, c) catch info.cmd;
-            }
-            if (cwd) |c| {
-                if (info.cwd) |old| self.allocator.free(old);
-                info.cwd = self.allocator.dupe(u8, c) catch info.cwd;
-            }
-            if (status) |s| info.status = s;
-            if (duration_ms) |d| info.duration_ms = d;
-            if (jobs) |j| info.jobs = j;
-        }
+        self.session_cache.setPaneShell(uuid, cmd, cwd, status, duration_ms, jobs);
     }
 
     pub fn setPaneShellRunning(self: *State, uuid: [32]u8, running: bool, started_at_ms: ?u64, cmd: ?[]const u8, cwd: ?[]const u8, jobs: ?u16) void {
-        var entry = self.pane_shell.getPtr(uuid);
-        if (entry == null) {
-            self.pane_shell.put(uuid, .{}) catch return;
-            entry = self.pane_shell.getPtr(uuid);
-        }
-        if (entry) |info| {
-            info.running = running;
-            if (started_at_ms) |t| info.started_at_ms = t;
-            if (cmd) |c| {
-                if (info.cmd) |old| self.allocator.free(old);
-                info.cmd = self.allocator.dupe(u8, c) catch info.cmd;
-            }
-            if (cwd) |c| {
-                if (info.cwd) |old| self.allocator.free(old);
-                info.cwd = self.allocator.dupe(u8, c) catch info.cwd;
-            }
-            if (jobs) |j| info.jobs = j;
-        }
+        self.session_cache.setPaneShellRunning(uuid, running, started_at_ms, cmd, cwd, jobs);
+    }
+
+    pub fn clearPaneShellStartedAt(self: *State, uuid: [32]u8) void {
+        self.session_cache.clearPaneShellStartedAt(uuid);
     }
 
     pub fn setPaneProc(self: *State, uuid: [32]u8, name: ?[]const u8, pid: ?i32) void {
-        var entry = self.pane_proc.getPtr(uuid);
-        if (entry == null) {
-            self.pane_proc.put(uuid, .{}) catch return;
-            entry = self.pane_proc.getPtr(uuid);
-        }
-        if (entry) |info| {
-            if (name) |n| {
-                if (info.name) |old| self.allocator.free(old);
-                info.name = self.allocator.dupe(u8, n) catch info.name;
-            }
-            if (pid) |p| info.pid = p;
-        }
+        self.session_cache.setPaneProc(uuid, name, pid);
     }
 
     pub fn getPaneShell(self: *const State, uuid: [32]u8) ?PaneShellInfo {
-        if (self.pane_shell.get(uuid)) |v| return v;
-        return null;
+        return self.session_cache.getPaneShell(uuid);
     }
 
     pub fn getPaneProc(self: *const State, uuid: [32]u8) ?PaneProcInfo {
-        if (self.pane_proc.get(uuid)) |v| return v;
-        return null;
+        return self.session_cache.getPaneProc(uuid);
+    }
+
+    pub fn setPaneNameOwned(self: *State, uuid: [32]u8, name_owned: []u8) void {
+        self.session_cache.setPaneNameOwned(uuid, name_owned);
+    }
+
+    pub fn paneName(self: *const State, uuid: [32]u8) ?[]const u8 {
+        return self.session_cache.paneName(uuid);
+    }
+
+    pub fn hasPaneName(self: *const State, uuid: [32]u8) bool {
+        return self.session_cache.hasPaneName(uuid);
+    }
+
+    pub fn removePaneProcMetadata(self: *State, uuid: [32]u8) void {
+        self.session_cache.removePaneProc(uuid);
+    }
+
+    pub fn removePaneName(self: *State, uuid: [32]u8) void {
+        self.session_cache.removePaneName(uuid);
     }
 };

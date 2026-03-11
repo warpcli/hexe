@@ -15,6 +15,32 @@ pub const TabMeta = struct {
     }
 };
 
+pub const PaneShellInfo = struct {
+    cmd: ?[]u8 = null,
+    cwd: ?[]u8 = null,
+    status: ?i32 = null,
+    duration_ms: ?u64 = null,
+    jobs: ?u16 = null,
+    running: bool = false,
+    started_at_ms: ?u64 = null,
+
+    pub fn deinit(self: *PaneShellInfo, allocator: std.mem.Allocator) void {
+        if (self.cmd) |c| allocator.free(c);
+        if (self.cwd) |c| allocator.free(c);
+        self.* = .{};
+    }
+};
+
+pub const PaneProcInfo = struct {
+    name: ?[]u8 = null,
+    pid: ?i32 = null,
+
+    pub fn deinit(self: *PaneProcInfo, allocator: std.mem.Allocator) void {
+        if (self.name) |n| allocator.free(n);
+        self.* = .{};
+    }
+};
+
 pub const FrontendSessionCache = struct {
     allocator: std.mem.Allocator,
     session_uuid: [32]u8,
@@ -25,6 +51,9 @@ pub const FrontendSessionCache = struct {
     focused_pane_uuid: ?[32]u8 = null,
     attached_snapshot: ?session_model.SessionSnapshot = null,
     tabs: std.ArrayList(TabMeta),
+    pane_shell: std.AutoHashMap([32]u8, PaneShellInfo),
+    pane_proc: std.AutoHashMap([32]u8, PaneProcInfo),
+    pane_names: std.AutoHashMap([32]u8, []u8),
     tab_last_floating_uuid: std.ArrayList(?[32]u8),
     tab_last_focus_kind: std.ArrayList(TabFocusKind),
 
@@ -38,6 +67,9 @@ pub const FrontendSessionCache = struct {
             .session_uuid = session_uuid,
             .session_name_owned = try allocator.dupe(u8, session_name),
             .tabs = .empty,
+            .pane_shell = std.AutoHashMap([32]u8, PaneShellInfo).init(allocator),
+            .pane_proc = std.AutoHashMap([32]u8, PaneProcInfo).init(allocator),
+            .pane_names = std.AutoHashMap([32]u8, []u8).init(allocator),
             .tab_last_floating_uuid = .empty,
             .tab_last_focus_kind = .empty,
         };
@@ -47,6 +79,27 @@ pub const FrontendSessionCache = struct {
         if (self.attached_snapshot) |*snapshot| snapshot.deinit();
         for (self.tabs.items) |*tab| tab.deinit(self.allocator);
         self.tabs.deinit(self.allocator);
+        {
+            var it = self.pane_shell.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit(self.allocator);
+            }
+            self.pane_shell.deinit();
+        }
+        {
+            var it = self.pane_proc.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit(self.allocator);
+            }
+            self.pane_proc.deinit();
+        }
+        {
+            var it = self.pane_names.iterator();
+            while (it.next()) |entry| {
+                self.allocator.free(entry.value_ptr.*);
+            }
+            self.pane_names.deinit();
+        }
         self.tab_last_floating_uuid.deinit(self.allocator);
         self.tab_last_focus_kind.deinit(self.allocator);
         self.allocator.free(self.session_name_owned);
@@ -188,6 +241,121 @@ pub const FrontendSessionCache = struct {
     pub fn tabName(self: *const FrontendSessionCache, index: usize) ?[]const u8 {
         if (index >= self.tabs.items.len) return null;
         return self.tabs.items[index].name_owned;
+    }
+
+    pub fn setPaneShell(
+        self: *FrontendSessionCache,
+        uuid: [32]u8,
+        cmd: ?[]const u8,
+        cwd: ?[]const u8,
+        status: ?i32,
+        duration_ms: ?u64,
+        jobs: ?u16,
+    ) void {
+        var entry = self.pane_shell.getPtr(uuid);
+        if (entry == null) {
+            self.pane_shell.put(uuid, .{}) catch return;
+            entry = self.pane_shell.getPtr(uuid);
+        }
+        if (entry) |info| {
+            if (cmd) |c| {
+                if (info.cmd) |old| self.allocator.free(old);
+                info.cmd = self.allocator.dupe(u8, c) catch info.cmd;
+            }
+            if (cwd) |c| {
+                if (info.cwd) |old| self.allocator.free(old);
+                info.cwd = self.allocator.dupe(u8, c) catch info.cwd;
+            }
+            if (status) |s| info.status = s;
+            if (duration_ms) |d| info.duration_ms = d;
+            if (jobs) |j| info.jobs = j;
+        }
+    }
+
+    pub fn setPaneShellRunning(
+        self: *FrontendSessionCache,
+        uuid: [32]u8,
+        running: bool,
+        started_at_ms: ?u64,
+        cmd: ?[]const u8,
+        cwd: ?[]const u8,
+        jobs: ?u16,
+    ) void {
+        var entry = self.pane_shell.getPtr(uuid);
+        if (entry == null) {
+            self.pane_shell.put(uuid, .{}) catch return;
+            entry = self.pane_shell.getPtr(uuid);
+        }
+        if (entry) |info| {
+            info.running = running;
+            if (started_at_ms) |t| info.started_at_ms = t;
+            if (cmd) |c| {
+                if (info.cmd) |old| self.allocator.free(old);
+                info.cmd = self.allocator.dupe(u8, c) catch info.cmd;
+            }
+            if (cwd) |c| {
+                if (info.cwd) |old| self.allocator.free(old);
+                info.cwd = self.allocator.dupe(u8, c) catch info.cwd;
+            }
+            if (jobs) |j| info.jobs = j;
+        }
+    }
+
+    pub fn clearPaneShellStartedAt(self: *FrontendSessionCache, uuid: [32]u8) void {
+        if (self.pane_shell.getPtr(uuid)) |info| {
+            info.started_at_ms = null;
+        }
+    }
+
+    pub fn getPaneShell(self: *const FrontendSessionCache, uuid: [32]u8) ?PaneShellInfo {
+        return self.pane_shell.get(uuid);
+    }
+
+    pub fn setPaneProc(self: *FrontendSessionCache, uuid: [32]u8, name: ?[]const u8, pid: ?i32) void {
+        var entry = self.pane_proc.getPtr(uuid);
+        if (entry == null) {
+            self.pane_proc.put(uuid, .{}) catch return;
+            entry = self.pane_proc.getPtr(uuid);
+        }
+        if (entry) |info| {
+            if (name) |n| {
+                if (info.name) |old| self.allocator.free(old);
+                info.name = self.allocator.dupe(u8, n) catch info.name;
+            }
+            if (pid) |p| info.pid = p;
+        }
+    }
+
+    pub fn getPaneProc(self: *const FrontendSessionCache, uuid: [32]u8) ?PaneProcInfo {
+        return self.pane_proc.get(uuid);
+    }
+
+    pub fn removePaneProc(self: *FrontendSessionCache, uuid: [32]u8) void {
+        if (self.pane_proc.fetchRemove(uuid)) |kv| {
+            var info = kv.value;
+            info.deinit(self.allocator);
+        }
+    }
+
+    pub fn setPaneNameOwned(self: *FrontendSessionCache, uuid: [32]u8, name_owned: []u8) void {
+        if (self.pane_names.get(uuid)) |old_name| {
+            self.allocator.free(old_name);
+        }
+        self.pane_names.put(uuid, name_owned) catch self.allocator.free(name_owned);
+    }
+
+    pub fn paneName(self: *const FrontendSessionCache, uuid: [32]u8) ?[]const u8 {
+        return self.pane_names.get(uuid);
+    }
+
+    pub fn hasPaneName(self: *const FrontendSessionCache, uuid: [32]u8) bool {
+        return self.pane_names.contains(uuid);
+    }
+
+    pub fn removePaneName(self: *FrontendSessionCache, uuid: [32]u8) void {
+        if (self.pane_names.fetchRemove(uuid)) |kv| {
+            self.allocator.free(kv.value);
+        }
     }
 
     pub fn resetTabFocusMemory(self: *FrontendSessionCache, tab_count: usize) !void {
