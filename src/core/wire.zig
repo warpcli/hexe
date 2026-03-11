@@ -67,7 +67,6 @@ pub const MsgType = enum(u16) {
     detach = 0x0105,
     reattach = 0x0106,
     session_state = 0x0107,
-    layout_sync = 0x0108,
     notify = 0x0109,
     pop_confirm = 0x010A,
     pop_choose = 0x010B,
@@ -200,8 +199,8 @@ pub const PaneUuid = extern struct {
     uuid: [32]u8 align(1),
 };
 
-/// Detach: session_id + length of mux_state JSON.
-/// Followed by: mux_state bytes (state_len).
+/// Detach: session_id + length of canonical session snapshot JSON.
+/// Followed by: session snapshot bytes (state_len).
 pub const Detach = extern struct {
     session_id: [32]u8 align(1),
     state_len: u32 align(1),
@@ -214,7 +213,7 @@ pub const Reattach = extern struct {
 };
 
 /// SessionReattached response.
-/// Followed by: mux_state bytes (state_len), then pane_count * 32 bytes of UUIDs.
+/// Followed by: canonical session snapshot bytes (state_len), then pane_count * 32 bytes of UUIDs.
 pub const SessionReattached = extern struct {
     state_len: u32 align(1),
     pane_count: u16 align(1),
@@ -226,8 +225,8 @@ pub const Disconnect = extern struct {
     preserve_sticky: u8 align(1),
 };
 
-/// SyncState: length of mux_state JSON.
-/// Followed by: mux_state bytes (state_len).
+/// SyncState: length of canonical session snapshot JSON.
+/// Followed by: session snapshot bytes (state_len).
 pub const SyncState = extern struct {
     state_len: u32 align(1),
     version: u32 align(1), // Monotonically increasing version; SES rejects stale updates.
@@ -642,7 +641,7 @@ pub const StatusResp = extern struct {
 };
 
 /// StatusClient entry (connected mux).
-/// Followed by: name bytes (name_len), mux_state bytes (mux_state_len),
+/// Followed by: name bytes (name_len), session snapshot bytes (session_state_len),
 ///   then pane_count StatusPaneEntry entries.
 pub const StatusClient = extern struct {
     id: u16 align(1),
@@ -650,7 +649,7 @@ pub const StatusClient = extern struct {
     has_session_id: u8 align(1),
     name_len: u16 align(1),
     pane_count: u16 align(1),
-    mux_state_len: u32 align(1),
+    session_state_len: u32 align(1),
 };
 
 /// StatusPaneEntry (pane within a client or orphaned pane).
@@ -663,12 +662,12 @@ pub const StatusPaneEntry = extern struct {
 };
 
 /// DetachedSessionEntry.
-/// Followed by: name bytes (name_len), mux_state bytes (mux_state_len).
+/// Followed by: name bytes (name_len), session snapshot bytes (session_state_len).
 pub const DetachedSessionEntry = extern struct {
     session_id: [32]u8 align(1),
     name_len: u16 align(1),
     pane_count: u16 align(1),
-    mux_state_len: u32 align(1),
+    session_state_len: u32 align(1),
 };
 
 /// StickyPaneEntry.

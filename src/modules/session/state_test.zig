@@ -544,7 +544,6 @@ test "Client.deinit: cleans up all resources" {
     var client = state.Client.init(testing.allocator, 1, 99);
 
     client.session_name = try testing.allocator.dupe(u8, "test-session");
-    client.last_mux_state = try testing.allocator.dupe(u8, "{}");
     client.session_snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'a'} ** 32, "test-session");
 
     try client.appendUuid([_]u8{1} ** 32);
@@ -558,7 +557,6 @@ test "DetachedSessionState.deinit: cleans up all resources" {
     var detached = state.DetachedSessionState{
         .session_id = [_]u8{1} ** 16,
         .session_snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'a'} ** 32, "alpha"),
-        .legacy_mux_state_json = try testing.allocator.dupe(u8, "{}"),
         .pane_uuids = try testing.allocator.alloc([32]u8, 2),
         .detached_at = std.time.timestamp(),
         .allocator = testing.allocator,

@@ -47,6 +47,72 @@ fn buildSessionLayoutNode(
     return out;
 }
 
+pub fn buildSessionSnapshot(self: anytype) !core.session_model.SessionSnapshot {
+    var snapshot = try core.session_model.SessionSnapshot.initMinimal(self.allocator, self.uuid, self.session_name);
+    errdefer snapshot.deinit();
+
+    snapshot.tab_counter = self.tab_counter;
+    if (self.tabs.items.len > 0) {
+        snapshot.active_tab = @min(self.active_tab, self.tabs.items.len - 1);
+    } else {
+        snapshot.active_tab = 0;
+    }
+    snapshot.active_float_uuid = if (self.active_floating) |idx|
+        if (idx < self.floats.items.len) self.floats.items[idx].uuid else null
+    else
+        null;
+    snapshot.focused_pane_uuid = getCurrentFocusedUuid(self);
+
+    for (self.tabs.items, 0..) |*tab, tab_idx| {
+        var session_tab = core.session_model.SessionTab{
+            .uuid = tab.uuid,
+            .name = try self.allocator.dupe(u8, tab.name),
+            .root = if (tab.layout.root) |root| try buildSessionLayoutNode(self.allocator, &tab.layout, root) else null,
+            .focused_pane_uuid = if (tab.layout.getFocusedPane()) |pane| pane.uuid else null,
+            .allocator = self.allocator,
+        };
+        errdefer session_tab.deinit();
+        try snapshot.tabs.append(self.allocator, session_tab);
+
+        var pane_it = tab.layout.splits.valueIterator();
+        while (pane_it.next()) |pane_ptr| {
+            try snapshot.panes.put(pane_ptr.*.uuid, .{
+                .uuid = pane_ptr.*.uuid,
+                .kind = .split,
+                .parent_tab = tab_idx,
+            });
+        }
+    }
+
+    for (self.floats.items) |pane| {
+        try snapshot.floats.append(self.allocator, .{
+            .pane_uuid = pane.uuid,
+            .parent_tab = pane.parent_tab,
+            .visible = pane.visible,
+            .tab_visible = pane.tab_visible,
+            .sticky = pane.sticky,
+            .is_pwd = pane.is_pwd,
+            .float_key = pane.float_key,
+            .width_pct = pane.float_width_pct,
+            .height_pct = pane.float_height_pct,
+            .pos_x_pct = pane.float_pos_x_pct,
+            .pos_y_pct = pane.float_pos_y_pct,
+            .pad_x = pane.float_pad_x,
+            .pad_y = pane.float_pad_y,
+        });
+        try snapshot.panes.put(pane.uuid, .{
+            .uuid = pane.uuid,
+            .kind = .float,
+            .parent_tab = pane.parent_tab,
+            .sticky = pane.sticky,
+            .is_pwd = pane.is_pwd,
+            .float_key = pane.float_key,
+        });
+    }
+
+    return snapshot;
+}
+
 fn setLayoutFocusedSplitId(self: anytype, pane: *Pane) void {
     if (pane.floating) return;
 
@@ -83,10 +149,7 @@ fn rememberSplitFocus(self: anytype, pane: *Pane) void {
 pub fn syncStateToSes(self: anytype) void {
     if (!self.ses_client.isConnected()) return;
 
-    const mux_state_json = self.serializeState() catch return;
-    defer self.allocator.free(mux_state_json);
-
-    var snapshot = core.session_model.SessionSnapshot.fromMuxJson(self.allocator, mux_state_json) catch return;
+    var snapshot = buildSessionSnapshot(self) catch return;
     defer snapshot.deinit();
     const session_state_json = snapshot.toJson(self.allocator) catch return;
     defer self.allocator.free(session_state_json);
@@ -96,9 +159,6 @@ pub fn syncStateToSes(self: anytype) void {
 
     self.ses_client.syncState(session_state_json, self.state_version) catch |e| {
         core.logging.logError("mux", "syncState failed", e);
-    };
-    self.ses_client.syncLayout(mux_state_json, self.state_version) catch |e| {
-        core.logging.logError("mux", "syncLayout failed", e);
     };
 }
 

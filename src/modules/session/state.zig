@@ -393,7 +393,6 @@ pub const Client = struct {
     keepalive: bool,
     session_id: ?[16]u8, // mux's UUID for this client
     session_name: ?[]const u8, // Pokemon name for this session
-    last_mux_state: ?[]const u8, // temporary compatibility cache for legacy mux JSON
     session_snapshot: ?session_model.SessionSnapshot,
 
     // Binary protocol channels (Phase 3+4)
@@ -412,7 +411,6 @@ pub const Client = struct {
             .keepalive = true, // default to keepalive
             .session_id = null,
             .session_name = null,
-            .last_mux_state = null,
             .session_snapshot = null,
         };
     }
@@ -422,9 +420,6 @@ pub const Client = struct {
         if (self.session_name) |name| {
             self.allocator.free(name);
         }
-        if (self.last_mux_state) |state| {
-            self.allocator.free(state);
-        }
         if (self.session_snapshot) |*snapshot| {
             snapshot.deinit();
         }
@@ -432,15 +427,6 @@ pub const Client = struct {
 
     pub fn appendUuid(self: *Client, uuid: [32]u8) !void {
         try self.pane_uuids.append(self.allocator, uuid);
-    }
-
-    pub fn updateMuxState(self: *Client, mux_state: []const u8) !void {
-        // Free old state if exists
-        if (self.last_mux_state) |old| {
-            self.allocator.free(old);
-        }
-        // Store new state
-        self.last_mux_state = try self.allocator.dupe(u8, mux_state);
     }
 
     pub fn updateSessionSnapshot(self: *Client, snapshot: session_model.SessionSnapshot) void {
@@ -472,19 +458,15 @@ pub const DetachedSession = struct {
 };
 
 /// Detached session state stored in SES canonical form.
-/// `legacy_mux_state_json` remains only as a temporary compatibility payload
-/// until the frontend stops restoring from mux-owned JSON.
 pub const DetachedSessionState = struct {
     session_id: [16]u8,
     session_snapshot: session_model.SessionSnapshot,
-    legacy_mux_state_json: []const u8,
     pane_uuids: [][32]u8, // List of pane UUIDs in this session
     detached_at: i64,
     allocator: std.mem.Allocator,
 
     pub fn deinit(self: *DetachedSessionState) void {
         self.session_snapshot.deinit();
-        self.allocator.free(self.legacy_mux_state_json);
         self.allocator.free(self.pane_uuids);
     }
 };
@@ -558,15 +540,17 @@ pub const SesState = struct {
         self: *SesState,
         client: *const Client,
         session_id: [16]u8,
-        mux_state_json: []const u8,
+        session_state_json: []const u8,
     ) !session_model.SessionSnapshot {
         if (client.session_snapshot) |snapshot| {
             return snapshot.clone(self.allocator);
         }
 
-        if (session_model.SessionSnapshot.fromMuxJson(self.allocator, mux_state_json)) |snapshot| {
-            return snapshot;
-        } else |_| {}
+        if (session_state_json.len > 0) {
+            if (session_model.SessionSnapshot.fromJson(self.allocator, session_state_json)) |snapshot| {
+                return snapshot;
+            } else |_| {}
+        }
 
         const session_name = client.session_name orelse "unknown";
         const hex_id: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
@@ -1189,10 +1173,8 @@ pub const SesState = struct {
                 if (client.keepalive) {
                     // Auto-detach: preserve session with last known state
                     if (client.session_id) |session_id| {
-                        const mux_state = client.last_mux_state orelse "{}";
-                        ses.debugLog("removeClient: detaching session state_len={d}", .{mux_state.len});
                         // Use detachSessionDirect to avoid removing client twice
-                        self.detachSessionDirect(client, session_id, mux_state);
+                        self.detachSessionDirect(client, session_id, "");
                     } else {
                         ses.debugLog("removeClient: no session_id, killing panes", .{});
                         // No session_id yet, just kill panes
@@ -1285,7 +1267,7 @@ pub const SesState = struct {
     }
 
     /// Internal: detach session without removing client (used by removeClient)
-    fn detachSessionDirect(self: *SesState, client: *Client, session_id: [16]u8, mux_state_json: []const u8) void {
+    fn detachSessionDirect(self: *SesState, client: *Client, session_id: [16]u8, session_state_json: []const u8) void {
         const hex_id: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
         ses.debugLog("detachSessionDirect: session={s} name={s}", .{ hex_id[0..8], client.session_name orelse "null" });
 
@@ -1323,7 +1305,7 @@ pub const SesState = struct {
             ses.debugLog("detachSessionDirect: replaced existing detached session", .{});
         }
 
-        const session_snapshot = self.buildDetachedSessionSnapshot(client, session_id, mux_state_json) catch {
+        const session_snapshot = self.buildDetachedSessionSnapshot(client, session_id, session_state_json) catch {
             ses.debugLog("detachSessionDirect: failed to build session_snapshot", .{});
             pane_uuids_list.deinit(self.allocator);
             return;
@@ -1333,22 +1315,14 @@ pub const SesState = struct {
             snapshot.deinit();
         }
 
-        // Store the legacy mux state for the still-existing mux restore path.
-        const owned_json = self.allocator.dupe(u8, mux_state_json) catch {
-            ses.debugLog("detachSessionDirect: failed to dupe legacy_mux_state_json", .{});
-            pane_uuids_list.deinit(self.allocator);
-            return;
-        };
         const owned_uuids = pane_uuids_list.toOwnedSlice(self.allocator) catch {
             ses.debugLog("detachSessionDirect: failed to toOwnedSlice", .{});
-            self.allocator.free(owned_json);
             return;
         };
 
         const detached_state = DetachedSessionState{
             .session_id = session_id,
             .session_snapshot = session_snapshot,
-            .legacy_mux_state_json = owned_json,
             .pane_uuids = owned_uuids,
             .detached_at = std.time.timestamp(),
             .allocator = self.allocator,
@@ -1358,7 +1332,6 @@ pub const SesState = struct {
             ses.debugLog("detachSessionDirect: failed to put detached_state", .{});
             var snapshot = session_snapshot;
             snapshot.deinit();
-            self.allocator.free(owned_json);
             self.allocator.free(owned_uuids);
             return;
         };
@@ -1373,7 +1346,7 @@ pub const SesState = struct {
     /// Stores the full mux state for later restoration
     /// If the session already exists (re-detach), it updates the existing state
     /// Returns true on success, false if client not found
-    pub fn detachSession(self: *SesState, client_id: usize, session_id: [16]u8, session_name: []const u8, mux_state_json: []const u8) bool {
+    pub fn detachSession(self: *SesState, client_id: usize, session_id: [16]u8, session_name: []const u8, session_state_json: []const u8) bool {
         // Find client
         var client_index: ?usize = null;
         var pane_uuids_list: std.ArrayList([32]u8) = .empty;
@@ -1393,7 +1366,7 @@ pub const SesState = struct {
 
         for (self.clients.items, 0..) |*client, i| {
             if (client.id == client_id) {
-                detached_snapshot = self.buildDetachedSessionSnapshot(client, session_id, mux_state_json) catch {
+                detached_snapshot = self.buildDetachedSessionSnapshot(client, session_id, session_state_json) catch {
                     ses.debugLog("detachSession: failed to build session_snapshot", .{});
                     return false;
                 };
@@ -1461,27 +1434,10 @@ pub const SesState = struct {
                 snapshot.deinit();
             }
 
-            // Store the legacy mux state for the current mux restore path.
-            const owned_json = self.allocator.dupe(u8, mux_state_json) catch {
-                ses.debugLog("detachSession: failed to dupe legacy_mux_state_json, rolling back", .{});
-                var snapshot = session_snapshot;
-                snapshot.deinit();
-                pane_uuids_list.deinit(self.allocator);
-                // Rollback pane states
-                for (pane_backups.items) |backup| {
-                    if (self.panes.getPtr(backup.uuid)) |pane| {
-                        _ = pane.transitionState(backup.state, "detach rollback (name alloc failure)");
-                        pane.session_id = backup.session_id;
-                        pane.attached_to = backup.attached_to;
-                    }
-                }
-                return false;
-            };
             const owned_uuids = pane_uuids_list.toOwnedSlice(self.allocator) catch {
                 ses.debugLog("detachSession: failed to toOwnedSlice, rolling back", .{});
                 var snapshot = session_snapshot;
                 snapshot.deinit();
-                self.allocator.free(owned_json);
                 // Rollback pane states
                 for (pane_backups.items) |backup| {
                     if (self.panes.getPtr(backup.uuid)) |pane| {
@@ -1496,7 +1452,6 @@ pub const SesState = struct {
             const detached_state = DetachedSessionState{
                 .session_id = session_id,
                 .session_snapshot = session_snapshot,
-                .legacy_mux_state_json = owned_json,
                 .pane_uuids = owned_uuids,
                 .detached_at = std.time.timestamp(),
                 .allocator = self.allocator,
@@ -1506,7 +1461,6 @@ pub const SesState = struct {
                 ses.debugLog("detachSession: failed to put detached_state, rolling back", .{});
                 var snapshot = session_snapshot;
                 snapshot.deinit();
-                self.allocator.free(owned_json);
                 self.allocator.free(owned_uuids);
                 // Rollback pane states
                 for (pane_backups.items) |backup| {
@@ -1565,7 +1519,6 @@ pub const SesState = struct {
 
         const idx = owner_index orelse return false;
         const owner = &self.clients.items[idx];
-        const mux_state = owner.last_mux_state orelse "{}";
 
         // Tell the current owner mux to terminate cleanly.
         if (owner.mux_ctl_fd) |mfd| {
@@ -1573,7 +1526,7 @@ pub const SesState = struct {
         }
 
         // Move all panes/session metadata into detached storage.
-        self.detachSessionDirect(owner, session_id, mux_state);
+        self.detachSessionDirect(owner, session_id, "");
 
         // Close owner channels and remove the owner client.
         posix.close(owner.fd);

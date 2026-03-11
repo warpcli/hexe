@@ -907,9 +907,6 @@ pub const Server = struct {
             .sync_state => {
                 self.handleBinarySyncState(fd, hdr.payload_len, &buf);
             },
-            .layout_sync => {
-                self.handleBinaryLayoutSync(fd, hdr.payload_len, &buf);
-            },
             .create_pane => {
                 self.handleBinaryCreatePane(fd, hdr.payload_len, &buf);
             },
@@ -1149,31 +1146,6 @@ pub const Server = struct {
             } else |err| {
                 ses.debugLog("sync_state: failed to parse canonical session snapshot: {s}", .{@errorName(err)});
             }
-        }
-        wire.writeControl(fd, .ok, &.{}) catch {};
-    }
-
-    fn handleBinaryLayoutSync(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
-        if (payload_len < @sizeOf(wire.SyncState)) {
-            self.skipBinaryPayload(fd, payload_len, buf);
-            return;
-        }
-        const ss = wire.readStruct(wire.SyncState, fd) catch return;
-        if (ss.state_len > wire.MAX_PAYLOAD_LEN) {
-            self.skipBinaryPayload(fd, payload_len - @sizeOf(wire.SyncState), buf);
-            return;
-        }
-
-        const state_buf = self.allocator.alloc(u8, ss.state_len) catch {
-            self.skipBinaryPayload(fd, ss.state_len, buf);
-            return;
-        };
-        defer self.allocator.free(state_buf);
-        wire.readExact(fd, state_buf) catch return;
-
-        const client_id = self.findClientForCtlFd(fd) orelse return;
-        if (self.ses_state.getClient(client_id)) |client| {
-            client.updateMuxState(state_buf) catch {};
         }
         wire.writeControl(fd, .ok, &.{}) catch {};
     }
@@ -2791,7 +2763,7 @@ pub const Server = struct {
                 .has_session_id = 0,
                 .name_len = 0,
                 .pane_count = @intCast(client.pane_uuids.items.len),
-                .mux_state_len = 0,
+                .session_state_len = 0,
             };
 
             if (client.session_id) |sid| {
@@ -2802,22 +2774,19 @@ pub const Server = struct {
 
             const name = client.session_name orelse "";
             sc.name_len = @intCast(name.len);
-            if (full_mode) {
-                if (client.last_mux_state) |ms| {
-                    sc.mux_state_len = @intCast(ms.len);
-                }
-            }
+            const session_json = if (full_mode and client.session_snapshot != null)
+                client.session_snapshot.?.toJson(alloc) catch null
+            else
+                null;
+            defer if (session_json) |json| alloc.free(json);
+            if (session_json) |json| sc.session_state_len = @intCast(json.len);
 
             buf.appendSlice(alloc, std.mem.asBytes(&sc)) catch {
                 posix.close(fd);
                 return;
             };
             if (name.len > 0) buf.appendSlice(alloc, name) catch {};
-            if (full_mode) {
-                if (client.last_mux_state) |ms| {
-                    buf.appendSlice(alloc, ms) catch {};
-                }
-            }
+            if (session_json) |json| buf.appendSlice(alloc, json) catch {};
 
             // Pane entries for this client
             for (client.pane_uuids.items) |uuid| {
@@ -2855,16 +2824,17 @@ pub const Server = struct {
                 .session_id = hex_id,
                 .name_len = @intCast(detached.session_snapshot.session_name.len),
                 .pane_count = @intCast(detached.pane_uuids.len),
-                .mux_state_len = 0,
+                .session_state_len = 0,
             };
-            if (full_mode) {
-                de.mux_state_len = @intCast(detached.legacy_mux_state_json.len);
-            }
+            const session_json = if (full_mode)
+                detached.session_snapshot.toJson(alloc) catch null
+            else
+                null;
+            defer if (session_json) |json| alloc.free(json);
+            if (session_json) |json| de.session_state_len = @intCast(json.len);
             buf.appendSlice(alloc, std.mem.asBytes(&de)) catch {};
             buf.appendSlice(alloc, detached.session_snapshot.session_name) catch {};
-            if (full_mode) {
-                buf.appendSlice(alloc, detached.legacy_mux_state_json) catch {};
-            }
+            if (session_json) |json| buf.appendSlice(alloc, json) catch {};
         }
 
         // Orphaned panes
@@ -3028,7 +2998,157 @@ pub const Server = struct {
         wire.writeControl(fd, .clear_orphaned_panes, std.mem.asBytes(&result)) catch {};
     }
 
-    /// Handle get_layout CLI request — return last_mux_state for the pane's session.
+    const LayoutExportTabCtx = struct {
+        allocator: std.mem.Allocator,
+        ids: std.AutoHashMap([32]u8, u16),
+        ordered: std.ArrayList([32]u8),
+        next_id: u16 = 0,
+
+        fn init(allocator: std.mem.Allocator) LayoutExportTabCtx {
+            return .{
+                .allocator = allocator,
+                .ids = std.AutoHashMap([32]u8, u16).init(allocator),
+                .ordered = .empty,
+            };
+        }
+
+        fn deinit(self: *LayoutExportTabCtx) void {
+            self.ids.deinit();
+            self.ordered.deinit(self.allocator);
+        }
+
+        fn assign(self: *LayoutExportTabCtx, uuid: [32]u8) !void {
+            if (self.ids.contains(uuid)) return;
+            try self.ids.put(uuid, self.next_id);
+            try self.ordered.append(self.allocator, uuid);
+            self.next_id +%= 1;
+        }
+    };
+
+    fn collectLayoutPaneIds(ctx: *LayoutExportTabCtx, node: ?*const core.session_model.SessionLayoutNode) !void {
+        const root = node orelse return;
+        switch (root.*) {
+            .pane => |uuid| try ctx.assign(uuid),
+            .split => |split| {
+                try collectLayoutPaneIds(ctx, split.first);
+                try collectLayoutPaneIds(ctx, split.second);
+            },
+        }
+    }
+
+    fn writeLayoutExportNode(
+        writer: anytype,
+        node: ?*const core.session_model.SessionLayoutNode,
+        ids: *const std.AutoHashMap([32]u8, u16),
+    ) !void {
+        const root = node orelse {
+            try writer.writeAll("null");
+            return;
+        };
+
+        switch (root.*) {
+            .pane => |uuid| {
+                const pane_id = ids.get(uuid) orelse 0;
+                try writer.print("{{\"type\":\"pane\",\"id\":{d}}}", .{pane_id});
+            },
+            .split => |split| {
+                try writer.writeAll("{\"type\":\"split\",\"dir\":");
+                try writer.print("{f}", .{std.json.fmt(@tagName(split.dir), .{})});
+                try writer.print(",\"ratio\":{d},\"first\":", .{split.ratio});
+                try writeLayoutExportNode(writer, split.first, ids);
+                try writer.writeAll(",\"second\":");
+                try writeLayoutExportNode(writer, split.second, ids);
+                try writer.writeAll("}");
+            },
+        }
+    }
+
+    fn buildLayoutExportJson(self: *Server, snapshot: *const state.SessionSnapshot) ![]u8 {
+        var buf: std.ArrayList(u8) = .empty;
+        errdefer buf.deinit(self.allocator);
+        var writer = buf.writer(self.allocator);
+        const active_float_index = blk: {
+            if (snapshot.active_float_uuid) |active_uuid| {
+                for (snapshot.floats.items, 0..) |float_state, idx| {
+                    if (std.mem.eql(u8, &float_state.pane_uuid, &active_uuid)) {
+                        break :blk idx;
+                    }
+                }
+            }
+            break :blk null;
+        };
+
+        try writer.writeAll("{\"active_tab\":");
+        try writer.print("{d}", .{snapshot.active_tab});
+        try writer.writeAll(",\"active_floating\":");
+        if (active_float_index) |idx| {
+            try writer.print("{d}", .{idx});
+        } else {
+            try writer.writeAll("null");
+        }
+        try writer.writeAll(",\"tabs\":[");
+
+        for (snapshot.tabs.items, 0..) |tab, ti| {
+            if (ti > 0) try writer.writeAll(",");
+
+            var ctx = LayoutExportTabCtx.init(self.allocator);
+            defer ctx.deinit();
+            try collectLayoutPaneIds(&ctx, tab.root);
+
+            try writer.writeAll("{\"name\":");
+            try writer.print("{f}", .{std.json.fmt(tab.name, .{})});
+            try writer.writeAll(",\"tree\":");
+            try writeLayoutExportNode(writer, tab.root, &ctx.ids);
+            try writer.writeAll(",\"splits\":[");
+            for (ctx.ordered.items, 0..) |uuid, pi| {
+                if (pi > 0) try writer.writeAll(",");
+                const pane_id = ctx.ids.get(uuid) orelse 0;
+                try writer.print("{{\"id\":{d},\"uuid\":", .{pane_id});
+                try writer.print("{f}", .{std.json.fmt(uuid[0..], .{})});
+                if (self.ses_state.getPane(uuid)) |pane| {
+                    if (pane.cwd) |cwd| {
+                        try writer.writeAll(",\"pwd_dir\":");
+                        try writer.print("{f}", .{std.json.fmt(cwd, .{})});
+                    }
+                }
+                try writer.writeAll("}");
+            }
+            try writer.writeAll("]}");
+        }
+
+        try writer.writeAll("],\"floats\":[");
+        for (snapshot.floats.items, 0..) |float_state, fi| {
+            if (fi > 0) try writer.writeAll(",");
+            try writer.writeAll("{\"uuid\":");
+            try writer.print("{f}", .{std.json.fmt(float_state.pane_uuid[0..], .{})});
+            try writer.print(",\"visible\":{}", .{float_state.visible});
+            try writer.print(",\"tab_visible\":{d}", .{float_state.tab_visible});
+            try writer.print(",\"float_key\":{d}", .{float_state.float_key});
+            try writer.print(",\"float_width_pct\":{d}", .{float_state.width_pct});
+            try writer.print(",\"float_height_pct\":{d}", .{float_state.height_pct});
+            try writer.print(",\"float_pos_x_pct\":{d}", .{float_state.pos_x_pct});
+            try writer.print(",\"float_pos_y_pct\":{d}", .{float_state.pos_y_pct});
+            try writer.print(",\"float_pad_x\":{d}", .{float_state.pad_x});
+            try writer.print(",\"float_pad_y\":{d}", .{float_state.pad_y});
+            try writer.print(",\"is_pwd\":{}", .{float_state.is_pwd});
+            try writer.print(",\"sticky\":{}", .{float_state.sticky});
+            if (float_state.parent_tab) |parent_tab| {
+                try writer.print(",\"parent_tab\":{d}", .{parent_tab});
+            }
+            if (self.ses_state.getPane(float_state.pane_uuid)) |pane| {
+                if (pane.cwd) |cwd| {
+                    try writer.writeAll(",\"pwd_dir\":");
+                    try writer.print("{f}", .{std.json.fmt(cwd, .{})});
+                }
+            }
+            try writer.writeAll("}");
+        }
+        try writer.writeAll("]}");
+        return buf.toOwnedSlice(self.allocator);
+    }
+
+    /// Handle get_layout CLI request — derive layout export JSON from the
+    /// canonical session snapshot owned by SES.
     fn handleGetLayout(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
         defer posix.close(fd);
 
@@ -3048,13 +3168,17 @@ pub const Server = struct {
             return;
         };
 
-        const mux_state = client.last_mux_state orelse {
-            self.sendBinaryError(fd, "no mux state");
+        const snapshot = client.session_snapshot orelse {
+            self.sendBinaryError(fd, "no session snapshot");
             return;
         };
+        const layout_json = self.buildLayoutExportJson(&snapshot) catch {
+            self.sendBinaryError(fd, "layout_export_failed");
+            return;
+        };
+        defer self.allocator.free(layout_json);
 
-        // Send the raw mux_state JSON back as get_layout response.
-        wire.writeControl(fd, .get_layout, mux_state) catch {};
+        wire.writeControl(fd, .get_layout, layout_json) catch {};
     }
 
     /// Handle get_session_state CLI request — return JSON state for detached session.

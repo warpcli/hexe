@@ -748,6 +748,10 @@ pub const State = struct {
         return state_sync.syncStateToSes(self);
     }
 
+    pub fn buildSessionSnapshot(self: *State) !core.session_model.SessionSnapshot {
+        return state_sync.buildSessionSnapshot(self);
+    }
+
     pub fn syncSessionTabAdded(self: *State, tab_uuid: [32]u8, name: []const u8, pane_uuid: [32]u8) void {
         return state_sync.syncSessionTabAdded(self, tab_uuid, name, pane_uuid);
     }

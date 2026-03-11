@@ -298,16 +298,21 @@ pub fn performDetach(state: *State) void {
     // Always set detach_mode to prevent killing panes on exit.
     state.detach_mode = true;
 
-    // Serialize entire mux state.
-    const mux_state_json = state.serializeState() catch {
-        state.notifications.showFor("Failed to serialize state", 2000);
+    var snapshot = state.buildSessionSnapshot() catch {
+        state.notifications.showFor("Failed to build session snapshot", 2000);
         state.running = false;
         return;
     };
-    defer state.allocator.free(mux_state_json);
+    defer snapshot.deinit();
+    const session_state_json = snapshot.toJson(state.allocator) catch {
+        state.notifications.showFor("Failed to serialize session snapshot", 2000);
+        state.running = false;
+        return;
+    };
+    defer state.allocator.free(session_state_json);
 
     // Detach session with our UUID - panes stay grouped with full state.
-    state.ses_client.detachSession(state.uuid, mux_state_json) catch {
+    state.ses_client.detachSession(state.uuid, session_state_json) catch {
         std.debug.print("\nDetach failed - panes orphaned\n", .{});
         state.running = false;
         return;

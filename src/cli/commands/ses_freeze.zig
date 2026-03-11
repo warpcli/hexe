@@ -368,8 +368,8 @@ fn collectUsedLayoutNames(allocator: std.mem.Allocator) ![][]u8 {
         off += sc.name_len;
         if (name.len > 0) try names.append(allocator, try allocator.dupe(u8, name));
 
-        if (off + sc.mux_state_len > payload.len) break;
-        off += sc.mux_state_len;
+        if (off + sc.session_state_len > payload.len) break;
+        off += sc.session_state_len;
 
         var pi: u16 = 0;
         while (pi < sc.pane_count) : (pi += 1) {
@@ -390,8 +390,8 @@ fn collectUsedLayoutNames(allocator: std.mem.Allocator) ![][]u8 {
         const name = payload[off .. off + de.name_len];
         off += de.name_len;
         if (name.len > 0) try names.append(allocator, try allocator.dupe(u8, name));
-        if (off + de.mux_state_len > payload.len) break;
-        off += de.mux_state_len;
+        if (off + de.session_state_len > payload.len) break;
+        off += de.session_state_len;
     }
 
     return names.toOwnedSlice(allocator);

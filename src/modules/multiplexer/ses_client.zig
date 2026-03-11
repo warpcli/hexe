@@ -272,16 +272,6 @@ pub const SesClient = struct {
         try wire.writeControlWithTrail(fd, .sync_state, std.mem.asBytes(&msg), session_state_json);
     }
 
-    /// Sync legacy mux layout JSON to ses for layout save/apply compatibility.
-    pub fn syncLayout(self: *SesClient, mux_state_json: []const u8, version: u32) !void {
-        const fd = self.ctl_fd orelse return error.NotConnected;
-        var msg: wire.SyncState = .{
-            .state_len = @intCast(mux_state_json.len),
-            .version = version,
-        };
-        try wire.writeControlWithTrail(fd, .layout_sync, std.mem.asBytes(&msg), mux_state_json);
-    }
-
     pub fn sessionAddTab(
         self: *SesClient,
         tab_uuid: [32]u8,
@@ -866,15 +856,15 @@ pub const SesClient = struct {
     }
 
     /// Detach session — keeps panes grouped for later reattach.
-    pub fn detachSession(self: *SesClient, session_id: [32]u8, mux_state_json: []const u8) !void {
+    pub fn detachSession(self: *SesClient, session_id: [32]u8, session_state_json: []const u8) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
 
         // Convert 32-char hex session_id to 16 binary bytes for the struct.
         var msg: wire.Detach = .{
             .session_id = session_id,
-            .state_len = @intCast(mux_state_json.len),
+            .state_len = @intCast(session_state_json.len),
         };
-        try wire.writeControlWithTrail(fd, .detach, std.mem.asBytes(&msg), mux_state_json);
+        try wire.writeControlWithTrail(fd, .detach, std.mem.asBytes(&msg), session_state_json);
 
         const hdr = try self.readSyncResponse(fd);
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
