@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("core");
 const mux = @import("main.zig");
+const session_model = core.session_model;
 
 const state_types = @import("state_types.zig");
 const Tab = state_types.Tab;
@@ -11,6 +12,11 @@ const LayoutNode = layout_mod.LayoutNode;
 const Pane = @import("pane.zig").Pane;
 const ses_client = @import("ses_client.zig");
 const OrphanedPaneInfo = ses_client.OrphanedPaneInfo;
+
+const SessionSnapshot = session_model.SessionSnapshot;
+const SessionLayoutNode = session_model.SessionLayoutNode;
+const SessionFloat = session_model.SessionFloat;
+const AdoptInfo = struct { pane_id: u16 };
 
 /// Validate the structure of mux state JSON before attempting restoration.
 /// This prevents crashes from malformed/corrupted JSON.
@@ -144,6 +150,233 @@ fn applyDeferredPaneExits(self: anytype) void {
     }
 }
 
+fn normalizeRestoredSessionName(name: []const u8) []const u8 {
+    if (name.len >= 3) {
+        const last_char = name[name.len - 1];
+        if (last_char >= '1' and last_char <= '9' and name[name.len - 2] == '-') {
+            return name[0 .. name.len - 2];
+        }
+    }
+    return name;
+}
+
+fn clearStateForRestore(self: anytype) void {
+    while (self.tabs.items.len > 0) {
+        const tab_opt = self.tabs.pop();
+        if (tab_opt) |tab_const| {
+            var tab = tab_const;
+            tab.deinit();
+        }
+    }
+
+    while (self.floats.items.len > 0) {
+        const p_opt = self.floats.pop();
+        if (p_opt) |p| {
+            p.deinit();
+            self.allocator.destroy(p);
+        }
+    }
+
+    self.active_tab = 0;
+    self.active_floating = null;
+    self.tab_last_floating_uuid.clearRetainingCapacity();
+    self.tab_last_focus_kind.clearRetainingCapacity();
+}
+
+fn hydratePaneMetadata(self: anytype, pane: *Pane, uuid: [32]u8) void {
+    if (self.ses_client.getPaneInfoSnapshot(uuid)) |snap| {
+        defer if (snap.fg_name) |s| self.allocator.free(s);
+        if (snap.name) |name| {
+            if (self.pane_names.get(uuid)) |old_name| self.allocator.free(old_name);
+            self.pane_names.put(uuid, name) catch self.allocator.free(name);
+        }
+        pane.setSesCwd(snap.cwd);
+        self.setPaneProc(uuid, snap.fg_name, snap.fg_pid);
+    } else {
+        self.ses_client.requestPaneProcess(uuid);
+        self.ses_client.requestPaneCwd(uuid);
+    }
+}
+
+fn ensureAdoptInfo(
+    self: anytype,
+    uuid: [32]u8,
+    uuid_pane_map: *std.AutoHashMap([32]u8, AdoptInfo),
+) ?AdoptInfo {
+    if (uuid_pane_map.get(uuid)) |info| return info;
+    if (self.ses_client.adoptPane(uuid)) |adopt_res| {
+        const info = AdoptInfo{ .pane_id = adopt_res.pane_id };
+        uuid_pane_map.put(uuid, info) catch {};
+        return info;
+    } else |_| {
+        return null;
+    }
+}
+
+fn ensureSplitPaneView(
+    self: anytype,
+    tab: *Tab,
+    pane_uuid: [32]u8,
+    local_ids: *std.AutoHashMap([32]u8, u16),
+    uuid_pane_map: *std.AutoHashMap([32]u8, AdoptInfo),
+    used_uuids: *std.AutoHashMap([32]u8, void),
+    remembered_focus_uuid: ?[32]u8,
+    actual_focus_uuid: ?[32]u8,
+) ?u16 {
+    if (local_ids.get(pane_uuid)) |existing| return existing;
+    if (used_uuids.contains(pane_uuid)) return null;
+
+    const info = ensureAdoptInfo(self, pane_uuid, uuid_pane_map) orelse return null;
+    const vt_fd = self.ses_client.getVtFd() orelse return null;
+
+    const pane_id = tab.layout.next_split_id;
+    tab.layout.next_split_id +%= 1;
+    if (tab.layout.next_split_id == 0) tab.layout.next_split_id = 1;
+
+    const pane = self.allocator.create(Pane) catch return null;
+    errdefer self.allocator.destroy(pane);
+
+    pane.initWithPod(self.allocator, pane_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, pane_uuid) catch return null;
+    pane.focused = if (actual_focus_uuid) |focused_uuid| std.mem.eql(u8, &focused_uuid, &pane_uuid) else false;
+    pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
+    hydratePaneMetadata(self, pane, pane_uuid);
+
+    tab.layout.splits.put(pane_id, pane) catch {
+        pane.deinit();
+        self.allocator.destroy(pane);
+        return null;
+    };
+    local_ids.put(pane_uuid, pane_id) catch {};
+    used_uuids.put(pane_uuid, {}) catch {};
+
+    if (remembered_focus_uuid) |focus_uuid| {
+        if (std.mem.eql(u8, &focus_uuid, &pane_uuid)) {
+            tab.layout.focused_split_id = pane_id;
+        }
+    }
+
+    return pane_id;
+}
+
+fn freeRestoredLayoutNode(allocator: std.mem.Allocator, node: *LayoutNode) void {
+    switch (node.*) {
+        .pane => {},
+        .split => |split| {
+            freeRestoredLayoutNode(allocator, split.first);
+            freeRestoredLayoutNode(allocator, split.second);
+        },
+    }
+    allocator.destroy(node);
+}
+
+fn restoreLayoutNode(
+    self: anytype,
+    tab: *Tab,
+    node: *const SessionLayoutNode,
+    local_ids: *std.AutoHashMap([32]u8, u16),
+    uuid_pane_map: *std.AutoHashMap([32]u8, AdoptInfo),
+    used_uuids: *std.AutoHashMap([32]u8, void),
+    remembered_focus_uuid: ?[32]u8,
+    actual_focus_uuid: ?[32]u8,
+) ?*LayoutNode {
+    switch (node.*) {
+        .pane => |pane_uuid| {
+            const pane_id = ensureSplitPaneView(
+                self,
+                tab,
+                pane_uuid,
+                local_ids,
+                uuid_pane_map,
+                used_uuids,
+                remembered_focus_uuid,
+                actual_focus_uuid,
+            ) orelse return null;
+            const restored = self.allocator.create(LayoutNode) catch return null;
+            restored.* = .{ .pane = pane_id };
+            return restored;
+        },
+        .split => |split| {
+            const first = restoreLayoutNode(self, tab, split.first, local_ids, uuid_pane_map, used_uuids, remembered_focus_uuid, actual_focus_uuid);
+            const second = restoreLayoutNode(self, tab, split.second, local_ids, uuid_pane_map, used_uuids, remembered_focus_uuid, actual_focus_uuid);
+
+            if (first == null and second == null) return null;
+            if (first == null) return second;
+            if (second == null) return first;
+
+            const restored = self.allocator.create(LayoutNode) catch {
+                if (first) |f| {
+                    freeRestoredLayoutNode(self.allocator, f);
+                }
+                if (second) |s| {
+                    freeRestoredLayoutNode(self.allocator, s);
+                }
+                return null;
+            };
+            restored.* = .{
+                .split = .{
+                    .dir = if (split.dir == .horizontal) .horizontal else .vertical,
+                    .ratio = split.ratio,
+                    .first = first.?,
+                    .second = second.?,
+                },
+            };
+            return restored;
+        },
+    }
+}
+
+fn restoreFloatPane(
+    self: anytype,
+    float_state: SessionFloat,
+    uuid_pane_map: *std.AutoHashMap([32]u8, AdoptInfo),
+    used_uuids: *std.AutoHashMap([32]u8, void),
+    actual_focus_uuid: ?[32]u8,
+) ?*Pane {
+    if (used_uuids.contains(float_state.pane_uuid)) return null;
+    const info = ensureAdoptInfo(self, float_state.pane_uuid, uuid_pane_map) orelse return null;
+    const vt_fd = self.ses_client.getVtFd() orelse return null;
+
+    const pane = self.allocator.create(Pane) catch return null;
+    errdefer self.allocator.destroy(pane);
+
+    const local_id: u16 = @intCast(100 + self.floats.items.len);
+    pane.initWithPod(self.allocator, local_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, float_state.pane_uuid) catch return null;
+    hydratePaneMetadata(self, pane, float_state.pane_uuid);
+
+    pane.floating = true;
+    pane.focused = if (actual_focus_uuid) |focused_uuid| std.mem.eql(u8, &focused_uuid, &float_state.pane_uuid) else false;
+    pane.visible = float_state.visible;
+    pane.tab_visible = float_state.tab_visible;
+    pane.float_key = float_state.float_key;
+    pane.float_width_pct = float_state.width_pct;
+    pane.float_height_pct = float_state.height_pct;
+    pane.float_pos_x_pct = float_state.pos_x_pct;
+    pane.float_pos_y_pct = float_state.pos_y_pct;
+    pane.float_pad_x = float_state.pad_x;
+    pane.float_pad_y = float_state.pad_y;
+    pane.is_pwd = float_state.is_pwd;
+    pane.sticky = float_state.sticky;
+    pane.parent_tab = float_state.parent_tab;
+    pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
+
+    if (pane.float_key != 0) {
+        if (self.getLayoutFloatByKey(pane.float_key)) |float_def| {
+            const style = if (float_def.style) |*s| s else if (self.config.float_style_default) |*s| s else null;
+            if (style) |s| pane.float_style = s;
+            pane.border_color = float_def.color orelse self.config.float_color;
+        }
+    }
+
+    if (self.ses_client.isConnected()) {
+        if (self.ses_client.getPaneName(float_state.pane_uuid)) |name| {
+            pane.float_title = name;
+        }
+    }
+
+    used_uuids.put(float_state.pane_uuid, {}) catch {};
+    return pane;
+}
+
 /// Reattach to a detached session, restoring full state.
 pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     mux.debugLog("reattachSession: starting with prefix={s}", .{session_id_prefix});
@@ -172,58 +405,17 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     }
 
     const reattach_result = result.?;
-    mux.debugLog("reattachSession: got result with {d} panes, state_json_len={d}", .{ reattach_result.pane_uuids.len, reattach_result.mux_state_json.len });
+    mux.debugLog("reattachSession: got result with {d} panes, state_json_len={d}", .{ reattach_result.pane_uuids.len, reattach_result.session_state_json.len });
     defer {
-        self.allocator.free(reattach_result.mux_state_json);
+        self.allocator.free(reattach_result.session_state_json);
         self.allocator.free(reattach_result.pane_uuids);
     }
 
-    // Parse the mux state JSON.
-    const parsed = std.json.parseFromSlice(std.json.Value, self.allocator, reattach_result.mux_state_json, .{}) catch |e| {
-        mux.debugLog("reattachSession: JSON parse failed: {s}", .{@errorName(e)});
+    var snapshot = SessionSnapshot.fromJson(self.allocator, reattach_result.session_state_json) catch |e| {
+        mux.debugLog("reattachSession: snapshot parse failed: {s}", .{@errorName(e)});
         return false;
     };
-    defer parsed.deinit();
-
-    // Validate JSON schema before attempting to use it
-    if (!validateMuxStateJson(&parsed.value)) {
-        mux.debugLog("reattachSession: JSON schema validation failed", .{});
-        return false;
-    }
-
-    // Validate serialization version and checksum for integrity
-    if (parsed.value.object.get("version")) |ver_val| {
-        if (ver_val == .integer and ver_val.integer >= 0) {
-            const version: u32 = @intCast(ver_val.integer);
-            if (version > 1) {
-                mux.debugLog("reattachSession: unsupported version {d}, current is 1", .{version});
-                self.notifications.showFor("Warning: Session data from newer version, may be incompatible", 5000);
-            }
-        }
-    }
-
-    // Verify checksum if present
-    if (parsed.value.object.get("_checksum")) |checksum_val| {
-        if (checksum_val == .integer and checksum_val.integer >= 0) {
-            const stored_checksum: u64 = @intCast(checksum_val.integer);
-            // Recalculate checksum on content before the checksum field
-            // Find where ",\"_checksum\":" starts in the JSON
-            const json_str = reattach_result.mux_state_json;
-            if (std.mem.lastIndexOf(u8, json_str, ",\"_checksum\":")) |checksum_pos| {
-                const content_only = json_str[0..checksum_pos];
-                var hasher = std.hash.Wyhash.init(0);
-                hasher.update(content_only);
-                hasher.update("}"); // Add the closing brace that was part of original
-                const calculated_checksum = hasher.final();
-
-                if (calculated_checksum != stored_checksum) {
-                    mux.debugLog("reattachSession: checksum mismatch! stored={d} calculated={d}", .{ stored_checksum, calculated_checksum });
-                    self.notifications.showFor("Warning: Session data integrity check failed (corrupted?)", 5000);
-                    // Continue anyway but user is warned
-                }
-            }
-        }
-    }
+    defer snapshot.deinit();
 
     // Check timeout after JSON parsing
     {
@@ -244,133 +436,25 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         }
     }
 
-    const root = parsed.value.object;
+    clearStateForRestore(self);
+    self.uuid = snapshot.uuid;
 
-    // Clear current UI state before restoring.
-    //
-    // If we leave the previous session's tabs/panes around and then append the
-    // restored tabs, focus and routing can point at panes that were never
-    // adopted (blank/frozen) or double-adopted.
-    // This is especially important for `hexe mux attach` because the mux starts
-    // by creating a fresh tab, then reattaches.
-    {
-        // Deinit existing tab state.
-        while (self.tabs.items.len > 0) {
-            const tab_opt = self.tabs.pop();
-            if (tab_opt) |tab_const| {
-                var tab = tab_const;
-                tab.deinit();
-            }
-        }
+    const restored_name = normalizeRestoredSessionName(snapshot.session_name);
+    if (self.session_name_owned) |old| self.allocator.free(old);
+    const duped_name = self.allocator.dupe(u8, restored_name) catch return false;
+    self.session_name = duped_name;
+    self.session_name_owned = duped_name;
 
-        // Deinit any existing floats.
-        while (self.floats.items.len > 0) {
-            const p_opt = self.floats.pop();
-            if (p_opt) |p| {
-                p.deinit();
-                self.allocator.destroy(p);
-            }
-        }
+    self.tab_counter = if (snapshot.tab_counter > 1000) 0 else snapshot.tab_counter;
+    const wanted_active_tab = snapshot.active_tab;
 
-        self.active_tab = 0;
-        self.active_floating = null;
-        self.tab_last_floating_uuid.clearRetainingCapacity();
-        self.tab_last_focus_kind.clearRetainingCapacity();
-    }
-
-    // Restore mux UUID (persistent identity).
-    if (root.get("uuid")) |uuid_val| {
-        const uuid_str = uuid_val.string;
-        if (uuid_str.len == 32) {
-            @memcpy(&self.uuid, uuid_str[0..32]);
-        }
-    }
-
-    // Restore session name (must dupe since parsed JSON will be freed).
-    if (root.get("session_name")) |name_val| {
-        var restored_name = name_val.string;
-
-        // VALIDATION: Detect and fix corrupted session_name.
-        // Session names should be Greek letters (alpha, beta, ...) optionally with
-        // collision suffix "-2", "-3", etc. They should NEVER be tab names like "alpha-1".
-        // Tab names have format "session-N" where N starts at 1.
-        //
-        // If the restored name looks like a tab name (ends with "-1", "-2", etc.),
-        // strip the suffix to recover the actual session name.
-        //
-        // Heuristic: If name ends with "-N" where N is a single digit >= 1,
-        // it's likely a corrupted tab name. Strip the suffix.
-        if (restored_name.len >= 3) {
-            const last_char = restored_name[restored_name.len - 1];
-            if (last_char >= '1' and last_char <= '9') {
-                // Check if there's a dash before the digit.
-                if (restored_name[restored_name.len - 2] == '-') {
-                    // This looks like "alpha-1" format (tab name).
-                    // Strip the "-N" suffix to recover session name.
-                    restored_name = restored_name[0 .. restored_name.len - 2];
-                    mux.debugLog("VALIDATION: stripped corrupted tab-format suffix from session_name, recovered: {s}", .{restored_name});
-                    mux.debugLog("reattachSession: session_name recovered from tab-format corruption: {s}", .{restored_name});
-                }
-            }
-        }
-
-        // Free previous owned name if any.
-        if (self.session_name_owned) |old| {
-            self.allocator.free(old);
-        }
-        // Dupe the validated name from JSON.
-        const duped = self.allocator.dupe(u8, restored_name) catch return false;
-        self.session_name = duped;
-        self.session_name_owned = duped;
-    }
-
-    // Restore tab counter (for session-N tab naming).
-    if (root.get("tab_counter")) |tc_val| {
-        if (tc_val == .integer and tc_val.integer >= 0) {
-            const restored_counter: usize = @intCast(tc_val.integer);
-            // Validate tab_counter is reasonable (not absurdly large).
-            // A counter > 1000 suggests corruption or overflow.
-            if (restored_counter > 1000) {
-                mux.debugLog("VALIDATION: tab_counter suspiciously large ({d}), resetting to 0", .{restored_counter});
-                self.tab_counter = 0;
-            } else {
-                self.tab_counter = restored_counter;
-            }
-        } else {
-            mux.debugLog("VALIDATION: tab_counter is not an integer type, defaulting to 0", .{});
-            self.tab_counter = 0;
-        }
-    }
-
-    // Remember active tab/floating from the stored state.
-    // We apply these after restoring tabs/floats so indices are valid.
-    const wanted_active_tab: usize = if (root.get("active_tab")) |at| blk: {
-        if (at != .integer or at.integer < 0) {
-            mux.debugLog("reattachSession: active_tab is not an integer, defaulting to 0", .{});
-            break :blk 0;
-        }
-        break :blk @intCast(at.integer);
-    } else 0;
-    const wanted_active_floating: ?usize = if (root.get("active_floating")) |af| blk: {
-        if (af == .null) break :blk null;
-        if (af != .integer or af.integer < 0) {
-            mux.debugLog("reattachSession: active_floating is not an integer, defaulting to null", .{});
-            break :blk null;
-        }
-        break :blk @intCast(af.integer);
-    } else null;
-
-    // Build a map of UUID -> pane_id for adopted panes.
-    const AdoptInfo = struct { pane_id: u16 };
     var uuid_pane_map = std.AutoHashMap([32]u8, AdoptInfo).init(self.allocator);
     defer uuid_pane_map.deinit();
 
-    // Track which UUIDs have been used during restoration to detect duplicates in JSON.
     var used_uuids = std.AutoHashMap([32]u8, void).init(self.allocator);
     defer used_uuids.deinit();
 
     mux.debugLog("reattachSession: adopting {d} panes", .{reattach_result.pane_uuids.len});
-    // Track adoption failures for user notification
     var failed_adoptions: usize = 0;
     const total_panes = reattach_result.pane_uuids.len;
 
@@ -390,10 +474,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             continue;
         };
         mux.debugLogUuid(&uuid, "reattachSession: adoptPane ok pane_id={d} vt_fd={?d}", .{ adopt_result.pane_id, self.ses_client.vt_fd });
-        uuid_pane_map.put(uuid, .{ .pane_id = adopt_result.pane_id }) catch {
-            failed_adoptions += 1;
-            continue;
-        };
+        uuid_pane_map.put(uuid, .{ .pane_id = adopt_result.pane_id }) catch {};
     }
     mux.debugLog("reattachSession: adopted {d} panes into uuid_pane_map", .{uuid_pane_map.count()});
 
@@ -428,140 +509,54 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         }
     }
 
-    // Restore tabs.
-    if (root.get("tabs")) |tabs_arr| {
-        for (tabs_arr.array.items) |tab_val| {
-            const tab_obj = tab_val.object;
-            const name_json = switch (tab_obj.get("name") orelse continue) {
-                .string => |s| s,
-                else => continue,
-            };
-            const focused_split_id = intFieldCast(u16, tab_obj, "focused_split_id") orelse continue;
-            const next_split_id = intFieldCast(u16, tab_obj, "next_split_id") orelse continue;
+    for (snapshot.tabs.items) |snapshot_tab| {
+        const name_owned = self.allocator.dupe(u8, snapshot_tab.name) catch continue;
+        var tab = Tab.initOwned(self.allocator, self.layout_width, self.layout_height, name_owned, self.pop_config.carrier.notification);
+        tab.uuid = snapshot_tab.uuid;
 
-            // Dupe the name since parsed JSON will be freed.
-            const name_owned = self.allocator.dupe(u8, name_json) catch continue;
-            var tab = Tab.initOwned(self.allocator, self.layout_width, self.layout_height, name_owned, self.pop_config.carrier.notification);
+        if (self.ses_client.isConnected()) {
+            tab.layout.setSesClient(&self.ses_client);
+        }
+        tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 
-            // Restore tab UUID if present.
-            if (tab_obj.get("uuid")) |uuid_val| {
-                const uuid_str = uuid_val.string;
-                if (uuid_str.len == 32) {
-                    @memcpy(&tab.uuid, uuid_str[0..32]);
-                }
+        var local_ids = std.AutoHashMap([32]u8, u16).init(self.allocator);
+        defer local_ids.deinit();
+
+        if (snapshot_tab.root) |root| {
+            tab.layout.root = restoreLayoutNode(
+                self,
+                &tab,
+                root,
+                &local_ids,
+                &uuid_pane_map,
+                &used_uuids,
+                snapshot_tab.focused_pane_uuid,
+                snapshot.focused_pane_uuid,
+            );
+        }
+
+        if (!tab.layout.splits.contains(tab.layout.focused_split_id)) {
+            var split_it = tab.layout.splits.iterator();
+            if (split_it.next()) |entry| {
+                tab.layout.focused_split_id = entry.key_ptr.*;
             }
+        }
 
-            if (self.ses_client.isConnected()) {
-                tab.layout.setSesClient(&self.ses_client);
-            }
-            tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
-            tab.layout.focused_split_id = focused_split_id;
-            tab.layout.next_split_id = next_split_id;
-
-            // Restore splits.
-            if (tab_obj.get("splits")) |splits_arr| {
-                for (splits_arr.array.items) |pane_val| {
-                    const pane_obj = pane_val.object;
-                    const pane_id = intFieldCast(u16, pane_obj, "id") orelse continue;
-                    const uuid_str = switch (pane_obj.get("uuid") orelse continue) {
-                        .string => |s| s,
-                        else => continue,
-                    };
-                    if (uuid_str.len != 32) continue;
-
-                    // Convert to [32]u8 for lookup.
-                    var uuid_arr: [32]u8 = undefined;
-                    @memcpy(&uuid_arr, uuid_str[0..32]);
-
-                    // Check for duplicate UUID - if already used, skip this pane.
-                    if (used_uuids.contains(uuid_arr)) {
-                        mux.debugLog("reattachSession: duplicate UUID in splits: {s}, skipping", .{uuid_arr[0..8]});
-                        continue;
-                    }
-
-                    // Try adopting from pre-collected pane_uuids first,
-                    // then try adopting directly from SES by UUID.
-                    var adopt_info: ?AdoptInfo = uuid_pane_map.get(uuid_arr);
-                    if (adopt_info == null) {
-                        // pane_uuids was empty - try adopting directly from SES.
-                        if (self.ses_client.adoptPane(uuid_arr)) |adopt_res| {
-                            adopt_info = .{ .pane_id = adopt_res.pane_id };
-                        } else |_| {}
-                    }
-
-                    const info = adopt_info orelse continue;
-
-                    // Mark this UUID as used.
-                    used_uuids.put(uuid_arr, {}) catch {};
-                    const pane = self.allocator.create(Pane) catch continue;
-                    const vt_fd = self.ses_client.getVtFd() orelse {
-                        self.allocator.destroy(pane);
-                        continue;
-                    };
-
-                    pane.initWithPod(self.allocator, pane_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, uuid_arr) catch {
-                        self.allocator.destroy(pane);
-                        continue;
-                    };
-
-                    if (self.ses_client.getPaneInfoSnapshot(uuid_arr)) |snap| {
-                        defer if (snap.fg_name) |s| self.allocator.free(s);
-                        if (snap.name) |name| {
-                            if (self.pane_names.get(uuid_arr)) |old_name| self.allocator.free(old_name);
-                            self.pane_names.put(uuid_arr, name) catch self.allocator.free(name);
-                        }
-                        pane.setSesCwd(snap.cwd);
-                        self.setPaneProc(uuid_arr, snap.fg_name, snap.fg_pid);
-                    } else {
-                        self.ses_client.requestPaneProcess(uuid_arr);
-                        self.ses_client.requestPaneCwd(uuid_arr);
-                    }
-
-                    // Restore pane properties.
-                    pane.focused = if (pane_obj.get("focused")) |f| (f == .bool and f.bool) else false;
-
-                    tab.layout.splits.put(pane_id, pane) catch {
-                        pane.deinit();
-                        self.allocator.destroy(pane);
-                        continue;
-                    };
-                }
-            }
-
-            // Restore layout tree.
-            if (tab_obj.get("tree")) |tree_val| {
-                if (tree_val != .null) {
-                    tab.layout.root = self.deserializeLayoutNode(tree_val.object) catch null;
-                }
-            }
-
-            // Ensure focused split points to an existing pane.
-            if (!tab.layout.splits.contains(tab.layout.focused_split_id)) {
-                var split_it = tab.layout.splits.iterator();
-                if (split_it.next()) |entry| {
-                    tab.layout.focused_split_id = entry.key_ptr.*;
-                }
-            }
-
-            // Ensure there is a root node for rendering if tree restore failed.
-            if (tab.layout.root == null) {
-                const node = self.allocator.create(LayoutNode) catch {
-                    tab.deinit();
-                    continue;
-                };
-                node.* = .{ .pane = tab.layout.focused_split_id };
-                tab.layout.root = node;
-            }
-
-            self.tabs.append(self.allocator, tab) catch {
-                // Clean up tab and all its panes on append failure
+        if (tab.layout.root == null and tab.layout.splits.count() > 0) {
+            const node = self.allocator.create(LayoutNode) catch {
                 tab.deinit();
                 continue;
             };
+            node.* = .{ .pane = tab.layout.focused_split_id };
+            tab.layout.root = node;
         }
+
+        self.tabs.append(self.allocator, tab) catch {
+            tab.deinit();
+            continue;
+        };
     }
 
-    // Reset per-tab float focus tracking to match restored tabs.
     self.tab_last_floating_uuid.clearRetainingCapacity();
     for (0..self.tabs.items.len) |_| {
         self.tab_last_floating_uuid.append(self.allocator, null) catch return false;
@@ -572,113 +567,13 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         self.tab_last_focus_kind.append(self.allocator, .split) catch return false;
     }
 
-    // Restore floats.
-    if (root.get("floats")) |floats_arr| {
-        for (floats_arr.array.items) |pane_val| {
-            const pane_obj = pane_val.object;
-            const uuid_str = (pane_obj.get("uuid") orelse continue).string;
-            if (uuid_str.len != 32) continue;
-
-            var uuid_arr: [32]u8 = undefined;
-            @memcpy(&uuid_arr, uuid_str[0..32]);
-
-            // Check for duplicate UUID - if already used, skip this float.
-            if (used_uuids.contains(uuid_arr)) {
-                mux.debugLog("reattachSession: duplicate UUID in floats: {s}, skipping", .{uuid_arr[0..8]});
-                continue;
-            }
-
-            {
-                // Try adopting from pre-collected pane_uuids first,
-                // then try adopting directly from SES by UUID.
-                var adopt_info: ?AdoptInfo = uuid_pane_map.get(uuid_arr);
-                if (adopt_info == null) {
-                    if (self.ses_client.adoptPane(uuid_arr)) |adopt_res| {
-                        adopt_info = .{ .pane_id = adopt_res.pane_id };
-                    } else |_| {}
-                }
-
-                const info = adopt_info orelse continue;
-
-                // Mark this UUID as used.
-                used_uuids.put(uuid_arr, {}) catch {};
-                const pane = self.allocator.create(Pane) catch continue;
-                const vt_fd = self.ses_client.getVtFd() orelse {
-                    self.allocator.destroy(pane);
-                    continue;
-                };
-
-                pane.initWithPod(self.allocator, 0, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, uuid_arr) catch {
-                    self.allocator.destroy(pane);
-                    continue;
-                };
-
-                // Request pane info to populate pane name
-                if (self.ses_client.ctl_fd) |ctl_fd| {
-                    const msg = core.wire.PaneUuid{ .uuid = uuid_arr };
-                    core.wire.writeControl(ctl_fd, .pane_info, std.mem.asBytes(&msg)) catch {};
-                }
-
-                // Restore float properties.
-                pane.floating = true;
-                pane.visible = if (pane_obj.get("visible")) |v| (v != .bool or v.bool) else true;
-                pane.tab_visible = intFieldCast(u64, pane_obj, "tab_visible") orelse 0;
-                pane.float_key = intFieldCast(u8, pane_obj, "float_key") orelse 0;
-                pane.float_width_pct = intFieldCast(u8, pane_obj, "float_width_pct") orelse 60;
-                pane.float_height_pct = intFieldCast(u8, pane_obj, "float_height_pct") orelse 60;
-                pane.float_pos_x_pct = intFieldCast(u8, pane_obj, "float_pos_x_pct") orelse 50;
-                pane.float_pos_y_pct = intFieldCast(u8, pane_obj, "float_pos_y_pct") orelse 50;
-                pane.float_pad_x = intFieldCast(u8, pane_obj, "float_pad_x") orelse 1;
-                pane.float_pad_y = intFieldCast(u8, pane_obj, "float_pad_y") orelse 0;
-                pane.is_pwd = if (pane_obj.get("is_pwd")) |ip| (ip == .bool and ip.bool) else false;
-                pane.sticky = if (pane_obj.get("sticky")) |s| (s == .bool and s.bool) else false;
-                pane.parent_tab = if (pane_obj.get("parent_tab")) |pt| blk: {
-                    if (pt != .integer or pt.integer < 0) {
-                        mux.debugLog("reattachSession: parent_tab is not an integer for float pane", .{});
-                        break :blk null;
-                    }
-                    const parent_idx: usize = @intCast(pt.integer);
-                    // Validate against tabs count (will be validated again after all tabs restored)
-                    break :blk parent_idx;
-                } else null;
-
-                // Re-apply float style and border color from config definition.
-                // These are config pointers that can't be serialized, so we look
-                // up the FloatDef by the restored float_key.
-                if (pane.float_key != 0) {
-                    if (self.getLayoutFloatByKey(pane.float_key)) |float_def| {
-                        const style = if (float_def.style) |*s| s else if (self.config.float_style_default) |*s| s else null;
-                        if (style) |s| {
-                            pane.float_style = s;
-                        }
-                        pane.border_color = float_def.color orelse self.config.float_color;
-                    }
-                }
-
-                // Restore pwd_dir for per_cwd floats.
-                if (pane_obj.get("pwd_dir")) |pwd_val| {
-                    if (pwd_val == .string) {
-                        pane.pwd_dir = self.allocator.dupe(u8, pwd_val.string) catch null;
-                    }
-                }
-
-                // Configure pane notifications.
-                pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
-
-                // Restore float title from ses memory (best-effort).
-                if (self.ses_client.isConnected()) {
-                    if (self.ses_client.getPaneName(uuid_arr)) |name| {
-                        pane.float_title = name;
-                    }
-                }
-
-                self.floats.append(self.allocator, pane) catch {
-                    pane.deinit();
-                    self.allocator.destroy(pane);
-                    continue;
-                };
-            }
-        }
+    for (snapshot.floats.items) |float_state| {
+        const pane = restoreFloatPane(self, float_state, &uuid_pane_map, &used_uuids, snapshot.focused_pane_uuid) orelse continue;
+        self.floats.append(self.allocator, pane) catch {
+            pane.deinit();
+            self.allocator.destroy(pane);
+            continue;
+        };
     }
 
     // Prune dead pane nodes from layout trees. Pods that died during detach
@@ -772,10 +667,23 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     } else {
         self.active_tab = 0;
     }
-    self.active_floating = if (wanted_active_floating) |idx|
-        if (idx < self.floats.items.len) idx else null
-    else
-        null;
+    self.active_floating = null;
+    if (snapshot.active_float_uuid) |active_float_uuid| {
+        for (self.floats.items, 0..) |pane, idx| {
+            if (std.mem.eql(u8, &pane.uuid, &active_float_uuid)) {
+                self.active_floating = idx;
+                break;
+            }
+        }
+    }
+    if (self.active_floating) |idx| {
+        if (self.active_tab < self.tab_last_floating_uuid.items.len) {
+            self.tab_last_floating_uuid.items[self.active_tab] = self.floats.items[idx].uuid;
+        }
+        if (self.active_tab < self.tab_last_focus_kind.items.len) {
+            self.tab_last_focus_kind.items[self.active_tab] = .float;
+        }
+    }
 
     self.renderer.invalidate();
     self.force_full_render = true;

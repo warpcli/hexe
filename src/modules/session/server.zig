@@ -1791,16 +1791,20 @@ pub const Server = struct {
             return;
         }
         const reattach_result = result.?;
-        // Data is borrowed from detached_sessions — don't free here.
-        // It will be freed when removeDetachedSession is called on successful re-register.
+        const session_json = reattach_result.session_snapshot.toJson(self.allocator) catch {
+            self.ses_state.releaseSessionLock(session_id);
+            self.sendBinaryError(fd, "reattach_snapshot_failed");
+            return;
+        };
+        defer self.allocator.free(session_json);
 
         // Send SessionReattached: header + mux_state bytes + pane_count * 32 UUID bytes.
         var resp = wire.SessionReattached{
-            .state_len = @intCast(reattach_result.mux_state_json.len),
+            .state_len = @intCast(session_json.len),
             .pane_count = @intCast(reattach_result.pane_uuids.len),
         };
         const uuid_data_len = reattach_result.pane_uuids.len * 32;
-        const total_payload = @sizeOf(wire.SessionReattached) + reattach_result.mux_state_json.len + uuid_data_len;
+        const total_payload = @sizeOf(wire.SessionReattached) + session_json.len + uuid_data_len;
 
         var ctrl_hdr: wire.ControlHeader = .{
             .msg_type = @intFromEnum(wire.MsgType.session_reattached),
@@ -1808,7 +1812,7 @@ pub const Server = struct {
         };
         wire.writeAll(fd, std.mem.asBytes(&ctrl_hdr)) catch return;
         wire.writeAll(fd, std.mem.asBytes(&resp)) catch return;
-        wire.writeAll(fd, reattach_result.mux_state_json) catch return;
+        wire.writeAll(fd, session_json) catch return;
         for (reattach_result.pane_uuids) |uuid| {
             wire.writeAll(fd, &uuid) catch return;
         }
@@ -2916,8 +2920,13 @@ pub const Server = struct {
             return;
         };
 
-        // Send the legacy mux_state_json back as session_state response.
-        wire.writeControl(fd, .session_state, detached_state.legacy_mux_state_json) catch {};
+        const session_json = detached_state.session_snapshot.toJson(self.allocator) catch {
+            self.sendBinaryError(fd, "session_snapshot_failed");
+            return;
+        };
+        defer self.allocator.free(session_json);
+
+        wire.writeControl(fd, .session_state, session_json) catch {};
     }
 
     /// Handle apply_layout CLI request — forward layout tree to MUX.

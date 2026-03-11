@@ -1,5 +1,6 @@
 const std = @import("std");
 const testing = std.testing;
+const core = @import("core");
 const state = @import("state.zig");
 const txlog = @import("txlog.zig");
 
@@ -652,6 +653,75 @@ test "SessionSnapshot.fromMuxJson: parses canonical session structure" {
     try testing.expectEqual([_]u8{'2'} ** 32, snapshot.tabs.items[0].focused_pane_uuid.?);
     try testing.expectEqual([_]u8{'3'} ** 32, snapshot.active_float_uuid.?);
     try testing.expectEqual([_]u8{'3'} ** 32, snapshot.focused_pane_uuid.?);
+}
+
+test "SessionSnapshot.toJson/fromJson: round trips canonical snapshot" {
+    var snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'a'} ** 32, "alpha");
+    defer snapshot.deinit();
+
+    const root = try testing.allocator.create(core.session_model.SessionLayoutNode);
+    const first = try testing.allocator.create(core.session_model.SessionLayoutNode);
+    const second = try testing.allocator.create(core.session_model.SessionLayoutNode);
+    first.* = .{ .pane = [_]u8{'1'} ** 32 };
+    second.* = .{ .pane = [_]u8{'2'} ** 32 };
+    root.* = .{
+        .split = .{
+            .dir = .horizontal,
+            .ratio = 0.5,
+            .first = first,
+            .second = second,
+        },
+    };
+
+    try snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'b'} ** 32,
+        .name = try testing.allocator.dupe(u8, "alpha-1"),
+        .root = root,
+        .focused_pane_uuid = [_]u8{'2'} ** 32,
+        .allocator = testing.allocator,
+    });
+    snapshot.tab_counter = 2;
+    snapshot.active_tab = 0;
+    snapshot.active_float_uuid = [_]u8{'3'} ** 32;
+    snapshot.focused_pane_uuid = [_]u8{'3'} ** 32;
+    try snapshot.panes.put([_]u8{'1'} ** 32, .{ .uuid = [_]u8{'1'} ** 32, .kind = .split, .parent_tab = 0 });
+    try snapshot.panes.put([_]u8{'2'} ** 32, .{ .uuid = [_]u8{'2'} ** 32, .kind = .split, .parent_tab = 0 });
+    try snapshot.panes.put([_]u8{'3'} ** 32, .{
+        .uuid = [_]u8{'3'} ** 32,
+        .kind = .float,
+        .parent_tab = 0,
+        .sticky = true,
+        .is_pwd = true,
+        .float_key = 102,
+    });
+    try snapshot.floats.append(testing.allocator, .{
+        .pane_uuid = [_]u8{'3'} ** 32,
+        .parent_tab = 0,
+        .visible = true,
+        .tab_visible = 1,
+        .sticky = true,
+        .is_pwd = true,
+        .float_key = 102,
+        .width_pct = 60,
+        .height_pct = 50,
+        .pos_x_pct = 40,
+        .pos_y_pct = 30,
+        .pad_x = 1,
+        .pad_y = 0,
+    });
+
+    const json = try snapshot.toJson(testing.allocator);
+    defer testing.allocator.free(json);
+
+    var reparsed = try state.SessionSnapshot.fromJson(testing.allocator, json);
+    defer reparsed.deinit();
+
+    try testing.expectEqualStrings("alpha", reparsed.session_name);
+    try testing.expectEqual(@as(usize, 1), reparsed.tabs.items.len);
+    try testing.expectEqual(@as(usize, 1), reparsed.floats.items.len);
+    try testing.expectEqual([_]u8{'3'} ** 32, reparsed.active_float_uuid.?);
+    try testing.expectEqual([_]u8{'2'} ** 32, reparsed.tabs.items[0].focused_pane_uuid.?);
+    try testing.expect(reparsed.tabs.items[0].root != null);
 }
 
 // ============================================================================

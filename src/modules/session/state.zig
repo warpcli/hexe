@@ -4,7 +4,7 @@ const core = @import("core");
 const ipc = core.ipc;
 const wire = core.wire;
 const ses = @import("main.zig");
-const session_model = @import("session_model.zig");
+const session_model = core.session_model;
 const txlog = @import("txlog.zig");
 
 pub const SessionSnapshot = session_model.SessionSnapshot;
@@ -1137,7 +1137,7 @@ pub const SesState = struct {
 
     /// Result of reattaching a session
     pub const ReattachResult = struct {
-        mux_state_json: []const u8, // Temporary legacy restore payload
+        session_snapshot: *const session_model.SessionSnapshot,
         pane_uuids: [][32]u8, // UUIDs of panes to adopt
     };
 
@@ -1152,7 +1152,7 @@ pub const SesState = struct {
 
         // Return the stored state (caller borrows — session stays in map as safety net).
         return .{
-            .mux_state_json = detached_state.legacy_mux_state_json,
+            .session_snapshot = &detached_state.session_snapshot,
             .pane_uuids = detached_state.pane_uuids,
         };
     }

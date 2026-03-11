@@ -782,7 +782,7 @@ pub const SesClient = struct {
 
     /// Result of reattaching a session.
     pub const ReattachResult = struct {
-        mux_state_json: []const u8, // Owned — caller must free
+        session_state_json: []const u8, // Owned — caller must free
         pane_uuids: [][32]u8, // Owned — caller must free
     };
 
@@ -848,14 +848,14 @@ pub const SesClient = struct {
         };
         mux.debugLog("reattachSession: got SessionReattached state_len={d} pane_count={d}", .{ resp.state_len, resp.pane_count });
 
-        // Read mux_state_json.
-        const mux_state = self.allocator.alloc(u8, resp.state_len) catch return error.OutOfMemory;
-        errdefer self.allocator.free(mux_state);
-        wire.readExact(fd, mux_state) catch |e| {
-            mux.debugLog("reattachSession: failed to read mux_state_json: {s}", .{@errorName(e)});
+        // Read canonical session snapshot JSON.
+        const session_state = self.allocator.alloc(u8, resp.state_len) catch return error.OutOfMemory;
+        errdefer self.allocator.free(session_state);
+        wire.readExact(fd, session_state) catch |e| {
+            mux.debugLog("reattachSession: failed to read session_state_json: {s}", .{@errorName(e)});
             return e;
         };
-        mux.debugLog("reattachSession: read mux_state_json ({d} bytes)", .{mux_state.len});
+        mux.debugLog("reattachSession: read session_state_json ({d} bytes)", .{session_state.len});
 
         // Read pane UUIDs (each 32 bytes).
         var pane_uuids = self.allocator.alloc([32]u8, resp.pane_count) catch return error.OutOfMemory;
@@ -869,7 +869,7 @@ pub const SesClient = struct {
         mux.debugLog("reattachSession: read {d} pane UUIDs, success!", .{resp.pane_count});
 
         return .{
-            .mux_state_json = mux_state,
+            .session_state_json = session_state,
             .pane_uuids = pane_uuids,
         };
     }
