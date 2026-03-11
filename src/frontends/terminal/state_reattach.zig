@@ -763,10 +763,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     }
 
     clearStateForRestore(self);
-    self.clearTabMeta();
     const restored_name = normalizeRestoredSessionName(snapshot.session_name);
-    if (!self.setSessionIdentity(snapshot.uuid, restored_name)) return false;
-    self.setSessionTabCounter(if (snapshot.tab_counter > 1000) 0 else snapshot.tab_counter);
     const wanted_active_tab = snapshot.active_tab;
 
     var uuid_pane_map = std.AutoHashMap([32]u8, AdoptInfo).init(self.allocator);
@@ -876,10 +873,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             tab.deinit();
             continue;
         };
-        if (!self.appendTabMeta(snapshot_tab.uuid, snapshot_tab.name)) return false;
     }
-
-    if (!self.resetTabFocusMemory()) return false;
 
     for (snapshot.floats.items) |float_state| {
         const pane = restoreFloatPane(self, float_state, &uuid_pane_map, null, false, &used_uuids, snapshot.focused_pane_uuid) orelse continue;
@@ -908,7 +902,6 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
                     mux.debugLog("reattachSession: removing empty tab at index {d}", .{i});
                     var dead_tab = self.view.tabs.orderedRemove(i);
                     dead_tab.deinit();
-                    self.removeTabMeta(i);
                     removed_tabs += 1;
                     // Don't increment i, next tab shifted into this position
                 } else {
@@ -1075,10 +1068,6 @@ pub fn applySessionSnapshot(self: anytype, snapshot: *const SessionSnapshot) boo
     }
     captureExistingPaneViews(self, &existing_views);
     clearStatePreservingPanes(self);
-    self.clearTabMeta();
-
-    if (!self.setSessionIdentity(snapshot.uuid, snapshot.session_name)) return false;
-    self.setSessionTabCounter(if (snapshot.tab_counter > 1000) 0 else snapshot.tab_counter);
 
     const wanted_active_tab = snapshot.active_tab;
 
@@ -1134,10 +1123,7 @@ pub fn applySessionSnapshot(self: anytype, snapshot: *const SessionSnapshot) boo
             tab.deinit();
             continue;
         };
-        if (!self.appendTabMeta(snapshot_tab.uuid, snapshot_tab.name)) return false;
     }
-
-    if (!self.resetTabFocusMemory()) return false;
 
     for (snapshot.floats.items) |float_state| {
         const pane = restoreFloatPane(self, float_state, &uuid_pane_map, &existing_views, true, &used_uuids, snapshot.focused_pane_uuid) orelse continue;
