@@ -689,7 +689,7 @@ fn applySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) b
 
     self.resizeFloatingPanes();
 
-    if (!self.replaceAttachedSessionSnapshot(snapshot.clone(self.allocator) catch return false)) return false;
+    if (!self.replaceAttachedSessionSnapshot(snapshot)) return false;
 
     if (self.view.tabs.items.len > 0) {
         self.setActiveTabIndex(@min(snapshot.active_tab, self.view.tabs.items.len - 1));
@@ -716,8 +716,8 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     mux.debugLog("reattachSession: starting with prefix={s}", .{session_id_prefix});
 
     // Set flag to prevent SIGHUP from interrupting reattach
-    self.attach_state.beginReattach();
-    defer self.attach_state.endReattach();
+    self.runtime.beginReattach();
+    defer self.runtime.endReattach();
 
     // Track reattach start time for timeout detection
     const reattach_start = std.time.milliTimestamp();
@@ -745,7 +745,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         self.allocator.free(reattach_result.pane_uuids);
     }
 
-    var snapshot = SessionSnapshot.fromJson(self.allocator, reattach_result.session_state_json) catch |e| {
+    var snapshot = self.runtime.parseSessionSnapshotJson(reattach_result.session_state_json) catch |e| {
         mux.debugLog("reattachSession: snapshot parse failed: {s}", .{@errorName(e)});
         return false;
     };
@@ -1002,7 +1002,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         self.rememberFloatingFocus(self.view.floats.items[idx]);
     }
 
-    if (!self.replaceAttachedSessionSnapshot(snapshot.clone(self.allocator) catch return false)) return false;
+    if (!self.replaceAttachedSessionSnapshot(&snapshot)) return false;
     if (!self.setSessionIdentity(snapshot.uuid, restored_name)) return false;
 
     self.renderer.invalidate();
@@ -1071,7 +1071,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 }
 
 pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool {
-    var snapshot = SessionSnapshot.fromJson(self.allocator, session_state_json) catch |e| {
+    var snapshot = self.runtime.parseSessionSnapshotJson(session_state_json) catch |e| {
         mux.debugLog("applySessionSnapshot: snapshot parse failed: {s}", .{@errorName(e)});
         return false;
     };
@@ -1196,7 +1196,7 @@ pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool 
         self.rememberFloatingFocus(self.view.floats.items[idx]);
     }
 
-    if (!self.replaceAttachedSessionSnapshot(snapshot.clone(self.allocator) catch return false)) return false;
+    if (!self.replaceAttachedSessionSnapshot(&snapshot)) return false;
     self.renderer.invalidate();
     self.force_full_render = true;
     self.needs_render = true;

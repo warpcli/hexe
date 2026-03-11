@@ -3,6 +3,7 @@ const frontend_attach = @import("frontend_attach.zig");
 const FrontendAttachState = @import("frontend_attach_state.zig").FrontendAttachState;
 const FrontendClient = @import("frontend_client.zig").SesClient;
 const Transport = @import("frontend_client.zig").Transport;
+const session_model = @import("session_model.zig");
 const SessionProjection = @import("session_projection.zig").SessionProjection;
 const wire = @import("wire.zig");
 
@@ -85,5 +86,28 @@ pub const FrontendRuntime = struct {
 
     pub fn markSessionStolen(self: *FrontendRuntime) void {
         frontend_attach.markSessionStolen(&self.attach_state);
+    }
+
+    pub fn beginReattach(self: *FrontendRuntime) void {
+        self.attach_state.beginReattach();
+    }
+
+    pub fn endReattach(self: *FrontendRuntime) void {
+        self.attach_state.endReattach();
+    }
+
+    pub fn parseSessionSnapshotJson(self: *FrontendRuntime, session_state_json: []const u8) !session_model.SessionSnapshot {
+        return session_model.SessionSnapshot.fromJson(self.allocator, session_state_json);
+    }
+
+    pub fn replaceProjectionFromSnapshot(
+        self: *FrontendRuntime,
+        snapshot: *const session_model.SessionSnapshot,
+        live_tab_count: usize,
+    ) !void {
+        try self.projection.replaceAttachedSnapshotOwned(try snapshot.clone(self.allocator));
+        self.client.session_id = self.projection.sessionUuid();
+        self.client.session_name = self.projection.sessionName();
+        self.projection.setActiveTab(self.projection.activeTab(live_tab_count));
     }
 };

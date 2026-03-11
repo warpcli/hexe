@@ -635,10 +635,8 @@ pub const State = struct {
         return self.projection.takeNextTabCounter();
     }
 
-    pub fn replaceAttachedSessionSnapshot(self: *State, snapshot: core.session_model.SessionSnapshot) bool {
-        self.projection.replaceAttachedSnapshotOwned(snapshot) catch return false;
-        self.frontend_client.session_id = self.projection.sessionUuid();
-        self.frontend_client.session_name = self.projection.sessionName();
+    pub fn replaceAttachedSessionSnapshot(self: *State, snapshot: *const core.session_model.SessionSnapshot) bool {
+        self.runtime.replaceProjectionFromSnapshot(snapshot, self.view.tabs.items.len) catch return false;
         self.setActiveTabIndex(self.projection.activeTab(self.view.tabs.items.len));
         self.setActiveFloatingUuid(self.projection.activeFloatUuid());
         return true;
