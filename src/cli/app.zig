@@ -1058,10 +1058,10 @@ fn askUseLocalLayout() bool {
 }
 
 fn buildMuxTransport(socket_path: []const u8, no_autostart_ses: bool) core.FrontendTransport {
-    return .{ .local_ipc = .{
-        .autostart_ses = !no_autostart_ses,
-        .socket_path = if (socket_path.len > 0) socket_path else null,
-    } };
+    return core.FrontendTransportHelpers.localIpcTransport(
+        if (socket_path.len > 0) socket_path else null,
+        !no_autostart_ses,
+    );
 }
 
 fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {

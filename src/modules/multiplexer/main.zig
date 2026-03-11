@@ -87,7 +87,7 @@ pub fn run(mux_args: MuxArgs) !void {
 
     // Handle --notify: send to parent mux and exit.
     if (mux_args.notify_message) |msg| {
-        sendNotifyToParentMux(allocator, msg);
+        sendNotifyToParentMux(allocator, mux_args.transport, msg);
         return;
     }
 
@@ -399,20 +399,8 @@ fn redirectStderr(log_file: ?[]const u8) void {
     devnull.close();
 }
 
-fn sendNotifyToParentMux(allocator: std.mem.Allocator, message: []const u8) void {
-    const wire = core.wire;
-
-    const ses_path = core.ipc.getSesSocketPath(allocator) catch return;
-    defer allocator.free(ses_path);
-
-    var client = core.ipc.Client.connect(ses_path) catch return;
-    defer client.close();
-    const fd = client.fd;
-
-    // CLI handshake + notify message.
-    _ = posix.write(fd, &.{wire.SES_HANDSHAKE_CLI}) catch return;
-    const notify = wire.Notify{ .msg_len = @intCast(message.len) };
-    wire.writeControlWithTrail(fd, .notify, std.mem.asBytes(&notify), message) catch |err| {
+fn sendNotifyToParentMux(allocator: std.mem.Allocator, transport: FrontendTransport, message: []const u8) void {
+    core.FrontendTransportHelpers.sendNotify(allocator, transport, message) catch |err| {
         core.logging.logError("mux", "failed to send notify message to parent", err);
     };
 }

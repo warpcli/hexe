@@ -292,24 +292,23 @@ fn printUsage() !void {
 fn sendNotify(allocator: std.mem.Allocator, message: []const u8, target_uuid: ?[]const u8) !void {
     const wire = core.wire;
 
-    const socket_path = try ipc.getSesSocketPath(allocator);
-    defer allocator.free(socket_path);
-
-    var client = ipc.Client.connect(socket_path) catch |err| {
-        if (err == error.ConnectionRefused or err == error.FileNotFound) {
-            print("ses daemon is not running\n", .{});
-            return;
-        }
-        return err;
-    };
-    defer client.close();
-    const fd = client.fd;
-
-    // CLI handshake
-    const handshake: [1]u8 = .{wire.SES_HANDSHAKE_CLI};
-    wire.writeAll(fd, &handshake) catch return;
-
     if (target_uuid) |uuid| {
+        const socket_path = try ipc.getSesSocketPath(allocator);
+        defer allocator.free(socket_path);
+
+        var client = ipc.Client.connect(socket_path) catch |err| {
+            if (err == error.ConnectionRefused or err == error.FileNotFound) {
+                print("ses daemon is not running\n", .{});
+                return;
+            }
+            return err;
+        };
+        defer client.close();
+        const fd = client.fd;
+
+        const handshake: [1]u8 = .{wire.SES_HANDSHAKE_CLI};
+        wire.writeAll(fd, &handshake) catch return;
+
         if (uuid.len >= 32) {
             var tn: wire.TargetedNotify = .{
                 .uuid = undefined,
@@ -320,8 +319,13 @@ fn sendNotify(allocator: std.mem.Allocator, message: []const u8, target_uuid: ?[
             wire.writeControlWithTrail(fd, .targeted_notify, std.mem.asBytes(&tn), message) catch return;
         }
     } else {
-        const notify = wire.Notify{ .msg_len = @intCast(message.len) };
-        wire.writeControlWithTrail(fd, .notify, std.mem.asBytes(&notify), message) catch return;
+        core.FrontendTransportHelpers.sendNotify(allocator, .{ .local_ipc = .{} }, message) catch |err| {
+            if (err == error.ConnectionRefused or err == error.FileNotFound) {
+                print("ses daemon is not running\n", .{});
+                return;
+            }
+            return err;
+        };
     }
     print("Notification sent\n", .{});
 }
