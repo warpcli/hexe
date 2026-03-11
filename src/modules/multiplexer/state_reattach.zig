@@ -565,6 +565,158 @@ fn restoreFloatPane(
     return pane;
 }
 
+fn countSessionLayoutPanes(node: ?*const SessionLayoutNode) usize {
+    const root = node orelse return 0;
+    return switch (root.*) {
+        .pane => 1,
+        .split => |split| countSessionLayoutPanes(split.first) + countSessionLayoutPanes(split.second),
+    };
+}
+
+fn layoutMatchesSnapshot(layout: *const layout_mod.Layout, node: ?*const LayoutNode, snapshot_node: ?*const SessionLayoutNode) bool {
+    const live = node orelse return snapshot_node == null;
+    const expected = snapshot_node orelse return false;
+
+    return switch (live.*) {
+        .pane => |pane_id| switch (expected.*) {
+            .pane => |pane_uuid| blk: {
+                const pane = layout.splits.get(pane_id) orelse break :blk false;
+                break :blk std.mem.eql(u8, &pane.uuid, &pane_uuid);
+            },
+            .split => false,
+        },
+        .split => |split| switch (expected.*) {
+            .pane => false,
+            .split => |expected_split|
+                split.dir == @as(layout_mod.SplitDir, if (expected_split.dir == .horizontal) .horizontal else .vertical) and
+                std.math.approxEqAbs(f32, split.ratio, expected_split.ratio, 0.0001) and
+                layoutMatchesSnapshot(layout, split.first, expected_split.first) and
+                layoutMatchesSnapshot(layout, split.second, expected_split.second),
+        },
+    };
+}
+
+fn canApplySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) bool {
+    if (self.tabs.items.len != snapshot.tabs.items.len) return false;
+    if (self.floats.items.len != snapshot.floats.items.len) return false;
+
+    for (snapshot.tabs.items, 0..) |snapshot_tab, idx| {
+        if (!std.mem.eql(u8, &snapshot_tab.uuid, &(self.tabUuid(idx) orelse return false))) return false;
+        if (!std.mem.eql(u8, snapshot_tab.name, self.tabName(idx))) return false;
+
+        const live_tab = &self.tabs.items[idx];
+        if (live_tab.layout.splits.count() != countSessionLayoutPanes(snapshot_tab.root)) return false;
+        if (!layoutMatchesSnapshot(&live_tab.layout, live_tab.layout.root, snapshot_tab.root)) return false;
+    }
+
+    for (snapshot.floats.items, 0..) |float_state, idx| {
+        if (!std.mem.eql(u8, &self.floats.items[idx].uuid, &float_state.pane_uuid)) return false;
+    }
+
+    return true;
+}
+
+fn applyTabSnapshotFocus(tab: *Tab, remembered_focus_uuid: ?[32]u8, actual_focus_uuid: ?[32]u8) void {
+    const target_focus_uuid = remembered_focus_uuid orelse actual_focus_uuid;
+
+    var found_focus = false;
+    var it = tab.layout.splits.iterator();
+    while (it.next()) |entry| {
+        const pane = entry.value_ptr.*;
+        const matches_actual = if (actual_focus_uuid) |focused_uuid|
+            std.mem.eql(u8, &pane.uuid, &focused_uuid)
+        else
+            false;
+        pane.focused = matches_actual;
+
+        if (target_focus_uuid) |focused_uuid| {
+            if (std.mem.eql(u8, &pane.uuid, &focused_uuid)) {
+                tab.layout.focused_split_id = entry.key_ptr.*;
+                found_focus = true;
+            }
+        }
+    }
+
+    if (!found_focus) {
+        var first = tab.layout.splits.iterator();
+        if (first.next()) |entry| {
+            tab.layout.focused_split_id = entry.key_ptr.*;
+        }
+    }
+}
+
+fn updateFloatPresentation(self: anytype, pane: *Pane, float_state: SessionFloat, actual_focus_uuid: ?[32]u8) void {
+    pane.floating = true;
+    pane.focused = if (actual_focus_uuid) |focused_uuid|
+        std.mem.eql(u8, &focused_uuid, &float_state.pane_uuid)
+    else
+        false;
+    pane.visible = float_state.visible;
+    pane.tab_visible = float_state.tab_visible;
+    pane.float_key = float_state.float_key;
+    pane.float_width_pct = float_state.width_pct;
+    pane.float_height_pct = float_state.height_pct;
+    pane.float_pos_x_pct = float_state.pos_x_pct;
+    pane.float_pos_y_pct = float_state.pos_y_pct;
+    pane.float_pad_x = float_state.pad_x;
+    pane.float_pad_y = float_state.pad_y;
+    pane.parent_tab = float_state.parent_tab;
+    pane.sticky = float_state.sticky;
+    pane.is_pwd = float_state.is_pwd;
+
+    if (!pane.is_pwd and pane.pwd_dir != null) {
+        self.allocator.free(pane.pwd_dir.?);
+        pane.pwd_dir = null;
+    }
+
+    pane.float_style = null;
+    if (pane.float_key != 0) {
+        if (self.getLayoutFloatByKey(pane.float_key)) |float_def| {
+            if (float_def.style) |*style| {
+                pane.float_style = style;
+            } else if (self.config.float_style_default) |*style| {
+                pane.float_style = style;
+            }
+            pane.border_color = float_def.color orelse self.config.float_color;
+        }
+    }
+}
+
+fn applySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) bool {
+    if (!canApplySnapshotIncrementally(self, snapshot)) return false;
+
+    for (snapshot.tabs.items, 0..) |snapshot_tab, idx| {
+        applyTabSnapshotFocus(&self.tabs.items[idx], snapshot_tab.focused_pane_uuid, snapshot.focused_pane_uuid);
+    }
+
+    for (snapshot.floats.items, 0..) |float_state, idx| {
+        updateFloatPresentation(self, self.floats.items[idx], float_state, snapshot.focused_pane_uuid);
+    }
+
+    self.resizeFloatingPanes();
+
+    if (!self.replaceAttachedSessionSnapshot(snapshot.clone(self.allocator) catch return false)) return false;
+
+    if (self.tabs.items.len > 0) {
+        self.setActiveTabIndex(@min(snapshot.active_tab, self.tabs.items.len - 1));
+    } else {
+        self.setActiveTabIndex(0);
+    }
+    self.setActiveFloatingUuid(snapshot.active_float_uuid);
+    self.setFocusedPaneUuid(snapshot.focused_pane_uuid);
+
+    if (self.activeFloatingIndex()) |idx| {
+        self.rememberFloatingFocus(self.floats.items[idx]);
+    } else if (self.tabs.items.len > 0) {
+        self.rememberSplitFocus();
+    }
+
+    self.renderer.invalidate();
+    self.force_full_render = true;
+    self.needs_render = true;
+    return true;
+}
+
 /// Reattach to a detached session, restoring full state.
 pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     mux.debugLog("reattachSession: starting with prefix={s}", .{session_id_prefix});
@@ -931,6 +1083,11 @@ pub fn applySessionSnapshot(self: anytype, session_state_json: []const u8) bool 
         return false;
     };
     defer snapshot.deinit();
+
+    if (applySnapshotIncrementally(self, &snapshot)) {
+        mux.debugLog("applySessionSnapshot: incrementally applied tabs={d} floats={d}", .{ self.tabs.items.len, self.floats.items.len });
+        return true;
+    }
 
     var existing_views = ExistingPaneViews.init(self.allocator);
     defer {
