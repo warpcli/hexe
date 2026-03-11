@@ -10,7 +10,7 @@ const SplitDir = layout_mod.SplitDir;
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
-const SesClient = @import("ses_client.zig").SesClient;
+const SesClient = core.FrontendClient;
 
 const helpers = @import("helpers.zig");
 const float_completion = @import("float_completion.zig");

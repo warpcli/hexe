@@ -10,8 +10,7 @@ const layout_mod = @import("layout.zig");
 const LayoutNode = layout_mod.LayoutNode;
 
 const Pane = @import("pane.zig").Pane;
-const ses_client = @import("ses_client.zig");
-const OrphanedPaneInfo = ses_client.OrphanedPaneInfo;
+const OrphanedPaneInfo = core.FrontendOrphanedPaneInfo;
 
 const SessionSnapshot = session_model.SessionSnapshot;
 const SessionLayoutNode = session_model.SessionLayoutNode;

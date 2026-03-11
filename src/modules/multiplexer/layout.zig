@@ -3,7 +3,7 @@ const posix = std.posix;
 const core = @import("core");
 const pop = @import("pop");
 const Pane = @import("pane.zig").Pane;
-const SesClient = @import("ses_client.zig").SesClient;
+const SesClient = core.FrontendClient;
 
 /// Cursor position for directional navigation
 pub const CursorPos = struct { x: u16, y: u16 };

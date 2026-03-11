@@ -7,8 +7,9 @@ const c = @cImport({
     @cInclude("stdlib.h");
 });
 
-const ses_client = @import("ses_client.zig");
-const SesClient = ses_client.SesClient;
+const SesClient = core.FrontendClient;
+const DetachedSessionInfo = core.FrontendDetachedSessionInfo;
+const OrphanedPaneInfo = core.FrontendOrphanedPaneInfo;
 
 const State = @import("state.zig").State;
 const loop_core = @import("loop_core.zig");
@@ -79,7 +80,7 @@ pub fn run(mux_args: MuxArgs) !void {
     if (mux_args.list) {
         const tmp_uuid = core.ipc.generateUuid();
         const tmp_name = core.ipc.generateSessionName();
-        var ses = SesClient.init(allocator, tmp_uuid, tmp_name, false, false, null); // keepalive=false for temp connection
+        var ses = SesClient.initLocalIpc(allocator, tmp_uuid, tmp_name, false, false, null, .terminal); // keepalive=false for temp connection
         defer ses.deinit();
         ses.connect() catch {
             std.debug.print("Could not connect to ses daemon\n", .{});
@@ -87,7 +88,7 @@ pub fn run(mux_args: MuxArgs) !void {
         };
 
         // List detached sessions.
-        var sessions: [16]ses_client.DetachedSessionInfo = undefined;
+        var sessions: [16]DetachedSessionInfo = undefined;
         const sess_count = ses.listSessions(&sessions) catch 0;
         if (sess_count > 0) {
             std.debug.print("Detached sessions (attach by name or UUID prefix):\n", .{});
@@ -111,7 +112,7 @@ pub fn run(mux_args: MuxArgs) !void {
         }
 
         // List orphaned panes.
-        var tabs: [32]ses_client.OrphanedPaneInfo = undefined;
+        var tabs: [32]OrphanedPaneInfo = undefined;
         const count = ses.listOrphanedPanes(&tabs) catch 0;
         if (count > 0) {
             std.debug.print("Orphaned panes (disowned):\n", .{});

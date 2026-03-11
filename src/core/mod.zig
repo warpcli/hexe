@@ -22,11 +22,18 @@ pub const resource_limits = @import("resource_limits.zig");
 pub const isolation_voidbox = @import("isolation_voidbox.zig");
 pub const session_config = @import("session_config.zig");
 pub const session_model = @import("session_model.zig");
+pub const frontend_client = @import("frontend_client.zig");
 pub const recording = @import("recording/mod.zig");
 
 pub const LuaRuntime = lua_runtime.LuaRuntime;
 pub const SessionConfig = session_config.SessionConfig;
 pub const ConfigStatus = lua_runtime.ConfigStatus;
+pub const FrontendClient = frontend_client.SesClient;
+pub const FrontendTransport = frontend_client.Transport;
+pub const FrontendDetachedSessionInfo = frontend_client.DetachedSessionInfo;
+pub const FrontendOrphanedPaneInfo = frontend_client.OrphanedPaneInfo;
+pub const FrontendKind = wire.FrontendKind;
+pub const FrontendTransportKind = wire.FrontendTransportKind;
 
 pub const Pty = pty.Pty;
 pub const VT = vt.VT;

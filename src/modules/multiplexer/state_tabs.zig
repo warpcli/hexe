@@ -10,8 +10,7 @@ const Layout = layout_mod.Layout;
 const LayoutNode = layout_mod.LayoutNode;
 
 const Pane = @import("pane.zig").Pane;
-const ses_client = @import("ses_client.zig");
-const OrphanedPaneInfo = ses_client.OrphanedPaneInfo;
+const OrphanedPaneInfo = core.FrontendOrphanedPaneInfo;
 const state_reattach = @import("state_reattach.zig");
 const tab_switch = @import("tab_switch.zig");
 const lua_events = @import("lua_events.zig");

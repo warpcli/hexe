@@ -5,7 +5,7 @@ const vaxis = @import("vaxis");
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
-const SesClient = @import("ses_client.zig").SesClient;
+const SesClient = core.FrontendClient;
 
 const input = @import("input.zig");
 

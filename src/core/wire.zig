@@ -33,10 +33,14 @@ pub fn isProtocolVersionDeprecated(version: u8) bool {
 // Second byte is always PROTOCOL_VERSION.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Sent by MUX to SES to open the control channel (①).
-pub const SES_HANDSHAKE_MUX_CTL: u8 = 0x01;
-/// Sent by MUX to SES to open the VT data channel (②).
-pub const SES_HANDSHAKE_MUX_VT: u8 = 0x02;
+/// Sent by a frontend to SES to open the control channel (①).
+pub const SES_HANDSHAKE_FRONTEND_CTL: u8 = 0x01;
+/// Sent by a frontend to SES to open the VT data channel (②).
+pub const SES_HANDSHAKE_FRONTEND_VT: u8 = 0x02;
+/// Legacy alias kept while terminal mux call sites are being rewritten.
+pub const SES_HANDSHAKE_MUX_CTL: u8 = SES_HANDSHAKE_FRONTEND_CTL;
+/// Legacy alias kept while terminal mux call sites are being rewritten.
+pub const SES_HANDSHAKE_MUX_VT: u8 = SES_HANDSHAKE_FRONTEND_VT;
 /// Sent by POD to SES to open the pod control uplink (④).
 /// Followed by 16 raw bytes of UUID (binary, not hex).
 pub const SES_HANDSHAKE_POD_CTL: u8 = 0x03;
@@ -58,7 +62,7 @@ pub const POD_HANDSHAKE_AUX_OBSERVER: u8 = 0x04;
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub const MsgType = enum(u16) {
-    // Channel ① — MUX ↔ SES control
+    // Channel ① — frontend ↔ SES control
     register = 0x0100,
     registered = 0x0101,
     create_pane = 0x0102,
@@ -156,22 +160,38 @@ pub const MuxVtHeader = extern struct {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Channel ① payloads — MUX ↔ SES control
+// Channel ① payloads — frontend ↔ SES control
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Register: session_id[32] + keepalive(u8) + name_len(u16)
+pub const FrontendKind = enum(u8) {
+    terminal = 1,
+    web = 2,
+    desktop = 3,
+};
+
+pub const FrontendTransportKind = enum(u8) {
+    local_ipc = 1,
+    liblink = 2,
+};
+
+/// Register: session_id[32] + keepalive(u8) + frontend_kind(u8) +
+/// transport_kind(u8) + name_len(u16)
 /// Followed by: name bytes (name_len).
-pub const Register = extern struct {
+pub const FrontendRegister = extern struct {
     session_id: [32]u8 align(1),
     keepalive: u8 align(1),
+    frontend_kind: u8 align(1),
+    transport_kind: u8 align(1),
     name_len: u16 align(1),
 };
+pub const Register = FrontendRegister;
 
 /// Registered (response to Register).
 /// Trailing data: resolved session_name (may differ from requested if collision).
-pub const Registered = extern struct {
+pub const FrontendRegistered = extern struct {
     name_len: u16 align(1) = 0,
 };
+pub const Registered = FrontendRegistered;
 
 /// CreatePane: lengths of variable fields.
 /// Followed by: shell bytes, cwd bytes, sticky_pwd bytes, isolation_profile bytes,

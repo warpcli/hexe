@@ -8,7 +8,7 @@ const xev = @import("xev").Dynamic;
 const terminal = @import("terminal.zig");
 
 const State = @import("state.zig").State;
-const SesClient = @import("ses_client.zig").SesClient;
+const SesClient = core.FrontendClient;
 const helpers = @import("helpers.zig");
 
 const mux = @import("main.zig");

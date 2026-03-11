@@ -1,8 +1,16 @@
 const std = @import("std");
 const posix = std.posix;
-const core = @import("core");
-const wire = core.wire;
-const mux = @import("main.zig");
+const ipc = @import("ipc.zig");
+const wire = @import("wire.zig");
+
+pub const LocalIpcTransport = struct {
+    autostart_ses: bool = true,
+    socket_path: ?[]const u8 = null,
+};
+
+pub const Transport = union(enum) {
+    local_ipc: LocalIpcTransport,
+};
 
 /// Static buffer for synchronous CWD fetch (getPaneCwdSync).
 var sync_cwd_buf: [4096]u8 = undefined;
@@ -18,6 +26,8 @@ pub const SesClient = struct {
     just_started_daemon: bool,
     debug: bool,
     log_file: ?[]const u8,
+    frontend_kind: wire.FrontendKind,
+    transport: Transport,
 
     // Registration info
     session_id: [32]u8, // mux UUID as hex string
@@ -34,6 +44,33 @@ pub const SesClient = struct {
     pending_session_state: ?[]u8 = null,
 
     pub fn init(allocator: std.mem.Allocator, session_id: [32]u8, session_name: []const u8, keepalive: bool, debug: bool, log_file: ?[]const u8) SesClient {
+        return initLocalIpc(allocator, session_id, session_name, keepalive, debug, log_file, .terminal);
+    }
+
+    pub fn initLocalIpc(
+        allocator: std.mem.Allocator,
+        session_id: [32]u8,
+        session_name: []const u8,
+        keepalive: bool,
+        debug: bool,
+        log_file: ?[]const u8,
+        frontend_kind: wire.FrontendKind,
+    ) SesClient {
+        return initWithTransport(allocator, session_id, session_name, keepalive, debug, log_file, frontend_kind, .{
+            .local_ipc = .{},
+        });
+    }
+
+    pub fn initWithTransport(
+        allocator: std.mem.Allocator,
+        session_id: [32]u8,
+        session_name: []const u8,
+        keepalive: bool,
+        debug: bool,
+        log_file: ?[]const u8,
+        frontend_kind: wire.FrontendKind,
+        transport: Transport,
+    ) SesClient {
         return .{
             .allocator = allocator,
             .ctl_fd = null,
@@ -41,6 +78,8 @@ pub const SesClient = struct {
             .just_started_daemon = false,
             .debug = debug,
             .log_file = log_file,
+            .frontend_kind = frontend_kind,
+            .transport = transport,
             .session_id = session_id,
             .session_name = session_name,
             .keepalive = keepalive,
@@ -58,6 +97,29 @@ pub const SesClient = struct {
         self.vt_fd = null;
         self.resolved_name = null;
         self.pending_session_state = null;
+    }
+
+    fn debugLog(self: *const SesClient, comptime fmt: []const u8, args: anytype) void {
+        if (!self.debug) return;
+        const ms = std.time.milliTimestamp();
+        const secs = @divTrunc(ms, 1000);
+        const frac = @mod(ms, 1000);
+        std.debug.print("{d}.{d:0>3} [frontend-client] " ++ fmt ++ "\n", .{ secs, frac } ++ args);
+    }
+
+    fn debugLogUuid(self: *const SesClient, uuid: []const u8, comptime fmt: []const u8, args: anytype) void {
+        if (!self.debug) return;
+        const short_uuid = if (uuid.len >= 8) uuid[0..8] else uuid;
+        const ms = std.time.milliTimestamp();
+        const secs = @divTrunc(ms, 1000);
+        const frac = @mod(ms, 1000);
+        std.debug.print("{d}.{d:0>3} [frontend-client][{s}] " ++ fmt ++ "\n", .{ secs, frac, short_uuid } ++ args);
+    }
+
+    fn transportKind(self: *const SesClient) wire.FrontendTransportKind {
+        return switch (self.transport) {
+            .local_ipc => .local_ipc,
+        };
     }
 
     fn queuePendingPaneExit(self: *SesClient, uuid: [32]u8) void {
@@ -89,17 +151,33 @@ pub const SesClient = struct {
     /// Connect to the ses daemon, starting it if necessary.
     /// Opens CTL channel, registers, then opens VT channel.
     pub fn connect(self: *SesClient) !void {
-        const socket_path = try core.ipc.getSesSocketPath(self.allocator);
-        defer self.allocator.free(socket_path);
-        mux.debugLog("ses connect: socket_path={s}", .{socket_path});
+        switch (self.transport) {
+            .local_ipc => |transport| try self.connectLocalIpc(transport),
+        }
+    }
+
+    fn connectLocalIpc(self: *SesClient, transport: LocalIpcTransport) !void {
+        var owned_socket_path: ?[]const u8 = null;
+        defer if (owned_socket_path) |path| self.allocator.free(path);
+        const socket_path = if (transport.socket_path) |path|
+            path
+        else blk: {
+            owned_socket_path = try ipc.getSesSocketPath(self.allocator);
+            break :blk owned_socket_path.?;
+        };
+        self.debugLog("ses connect: transport=local_ipc socket_path={s}", .{socket_path});
 
         // Try to connect to existing daemon first
         if (self.connectCtl(socket_path)) {
-            mux.debugLog("ses connect: connected to existing daemon", .{});
+            self.debugLog("ses connect: connected to existing daemon", .{});
             self.just_started_daemon = false;
         } else {
+            if (!transport.autostart_ses) {
+                self.debugLog("ses connect: local_ipc autostart disabled", .{});
+                return error.ConnectionRefused;
+            }
             // Daemon not running, start it
-            mux.debugLog("ses connect: daemon not running, starting...", .{});
+            self.debugLog("ses connect: daemon not running, starting...", .{});
             try self.startSes();
             self.just_started_daemon = true;
 
@@ -108,31 +186,31 @@ pub const SesClient = struct {
 
             // Retry connection
             if (!self.connectCtl(socket_path)) {
-                mux.debugLog("ses connect: retry connection failed", .{});
+                self.debugLog("ses connect: retry connection failed", .{});
                 return error.ConnectionRefused;
             }
-            mux.debugLog("ses connect: retry succeeded", .{});
+            self.debugLog("ses connect: retry succeeded", .{});
         }
 
         // Register on CTL channel first, so SES knows our session_id.
-        mux.debugLog("ses connect: registering session_id={s}", .{&self.session_id});
+        self.debugLog("ses connect: registering session_id={s}", .{&self.session_id});
         try self.register();
-        mux.debugLog("ses connect: registration complete", .{});
+        self.debugLog("ses connect: registration complete", .{});
 
         // Switch to non-blocking mode after successful registration.
         self.setCtlNonBlocking();
 
         // Now open VT channel — SES can match our session_id.
         if (!self.connectVt(socket_path)) {
-            mux.debugLog("ses connect: VT channel connection failed", .{});
+            self.debugLog("ses connect: VT channel connection failed", .{});
             return error.ConnectionRefused;
         }
-        mux.debugLog("ses connect: VT channel connected, fully connected!", .{});
+        self.debugLog("ses connect: VT channel connected, fully connected!", .{});
     }
 
     /// Open the control channel to SES.
     fn connectCtl(self: *SesClient, socket_path: []const u8) bool {
-        const ctl_client = core.ipc.Client.connect(socket_path) catch return false;
+        const ctl_client = ipc.Client.connect(socket_path) catch return false;
         const ctl_fd = ctl_client.fd;
 
         // Set socket timeouts for initial registration (prevents hanging on dead daemon).
@@ -141,12 +219,12 @@ pub const SesClient = struct {
         posix.setsockopt(ctl_fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
         posix.setsockopt(ctl_fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
 
-        wire.sendHandshake(ctl_fd, wire.SES_HANDSHAKE_MUX_CTL) catch {
+        wire.sendHandshake(ctl_fd, wire.SES_HANDSHAKE_FRONTEND_CTL) catch {
             posix.close(ctl_fd);
             return false;
         };
         self.ctl_fd = ctl_fd;
-        mux.debugLog("ses ctl connected: fd={d}", .{ctl_fd});
+        self.debugLog("ses ctl connected: fd={d}", .{ctl_fd});
         return true;
     }
 
@@ -165,7 +243,7 @@ pub const SesClient = struct {
 
     /// Open the VT data channel to SES.
     fn connectVt(self: *SesClient, socket_path: []const u8) bool {
-        const vt_client = core.ipc.Client.connect(socket_path) catch return false;
+        const vt_client = ipc.Client.connect(socket_path) catch return false;
         const vt_fd = vt_client.fd;
 
         // Set non-blocking — the VT fd is polled in the event loop, must not block.
@@ -179,7 +257,7 @@ pub const SesClient = struct {
             return false;
         };
 
-        wire.sendHandshake(vt_fd, wire.SES_HANDSHAKE_MUX_VT) catch {
+        wire.sendHandshake(vt_fd, wire.SES_HANDSHAKE_FRONTEND_VT) catch {
             posix.close(vt_fd);
             return false;
         };
@@ -189,7 +267,7 @@ pub const SesClient = struct {
             return false;
         };
         self.vt_fd = vt_fd;
-        mux.debugLog("ses vt connected: fd={d}", .{vt_fd});
+        self.debugLog("ses vt connected: fd={d}", .{vt_fd});
         return true;
     }
 
@@ -197,11 +275,17 @@ pub const SesClient = struct {
     /// Server may return a different name if collision detected - stored in resolved_name.
     fn register(self: *SesClient) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
-        mux.debugLog("registering session={s} name={s}", .{ self.session_id[0..8], self.session_name });
+        self.debugLog("registering frontend={s} session={s} name={s}", .{
+            @tagName(self.frontend_kind),
+            self.session_id[0..8],
+            self.session_name,
+        });
 
-        var reg: wire.Register = .{
+        var reg: wire.FrontendRegister = .{
             .session_id = self.session_id,
             .keepalive = if (self.keepalive) 1 else 0,
+            .frontend_kind = @intFromEnum(self.frontend_kind),
+            .transport_kind = @intFromEnum(self.transportKind()),
             .name_len = @intCast(self.session_name.len),
         };
         try wire.writeControlWithTrail(fd, .register, std.mem.asBytes(&reg), self.session_name);
@@ -219,9 +303,9 @@ pub const SesClient = struct {
         }
 
         // Read the Registered response with resolved name
-        if (hdr.payload_len >= @sizeOf(wire.Registered)) {
-            const resp = try wire.readStruct(wire.Registered, fd);
-            const remaining = hdr.payload_len - @sizeOf(wire.Registered);
+        if (hdr.payload_len >= @sizeOf(wire.FrontendRegistered)) {
+            const resp = try wire.readStruct(wire.FrontendRegistered, fd);
+            const remaining = hdr.payload_len - @sizeOf(wire.FrontendRegistered);
 
             // Read resolved name if present
             if (resp.name_len > 0 and resp.name_len <= remaining) {
@@ -240,7 +324,7 @@ pub const SesClient = struct {
                     return;
                 };
                 self.resolved_name = name_buf;
-                mux.debugLog("register: server resolved name to '{s}'", .{name_buf});
+                self.debugLog("register: server resolved name to '{s}'", .{name_buf});
 
                 // Skip any remaining payload
                 if (remaining > resp.name_len) {
@@ -410,7 +494,7 @@ pub const SesClient = struct {
             .inherit_env_parent_uuid_len = @intCast(parent_uuid_bytes.len),
         };
         const trails: []const []const u8 = &.{ shell_bytes, cwd_bytes, sticky_pwd_bytes, isolation_profile_bytes, parent_uuid_bytes };
-        mux.debugLog("createPane: shell={s} cwd={s} isolation={s}", .{ shell_bytes, cwd_bytes, isolation_profile_bytes });
+        self.debugLog("createPane: shell={s} cwd={s} isolation={s}", .{ shell_bytes, cwd_bytes, isolation_profile_bytes });
         try wire.writeControlMsg(fd, .create_pane, std.mem.asBytes(&msg), trails);
 
         // Read response.
@@ -432,7 +516,7 @@ pub const SesClient = struct {
             wire.readExact(fd, skip_buf[0..resp.socket_path_len]) catch {};
         }
 
-        mux.debugLog("pane created: uuid={s} pane_id={d} pid={d}", .{ resp.uuid[0..8], resp.pane_id, resp.pid });
+        self.debugLog("pane created: uuid={s} pane_id={d} pid={d}", .{ resp.uuid[0..8], resp.pane_id, resp.pid });
         return .{
             .uuid = resp.uuid,
             .pane_id = resp.pane_id,
@@ -492,10 +576,10 @@ pub const SesClient = struct {
     /// Kill a pane.
     pub fn killPane(self: *SesClient, uuid: [32]u8) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
-        mux.debugLogUuid(&uuid, "killPane: sending to SES ctl_fd={d} vt_fd={?d}", .{ fd, self.vt_fd });
+        self.debugLogUuid(&uuid, "killPane: sending to SES ctl_fd={d} vt_fd={?d}", .{ fd, self.vt_fd });
         var msg: wire.PaneUuid = .{ .uuid = uuid };
         try wire.writeControl(fd, .kill_pane, std.mem.asBytes(&msg));
-        mux.debugLogUuid(&uuid, "killPane: sent ok", .{});
+        self.debugLogUuid(&uuid, "killPane: sent ok", .{});
     }
 
     /// Request pane CWD from ses (fire-and-forget; response handled in handleSesMessage).
@@ -901,17 +985,17 @@ pub const SesClient = struct {
     /// Reattach to a detached session.
     pub fn reattachSession(self: *SesClient, session_id: []const u8) !?ReattachResult {
         const fd = self.ctl_fd orelse {
-            mux.debugLog("reattachSession: not connected (ctl_fd is null)", .{});
+            self.debugLog("reattachSession: not connected (ctl_fd is null)", .{});
             return error.NotConnected;
         };
 
-        mux.debugLog("reattachSession: sending reattach request for id={s} len={d}", .{ session_id, session_id.len });
+        self.debugLog("reattachSession: sending reattach request for id={s} len={d}", .{ session_id, session_id.len });
 
         var msg: wire.Reattach = .{
             .id_len = @intCast(session_id.len),
         };
         wire.writeControlWithTrail(fd, .reattach, std.mem.asBytes(&msg), session_id) catch |e| {
-            mux.debugLog("reattachSession: writeControlWithTrail failed: {s}", .{@errorName(e)});
+            self.debugLog("reattachSession: writeControlWithTrail failed: {s}", .{@errorName(e)});
             return e;
         };
 
@@ -921,15 +1005,15 @@ pub const SesClient = struct {
         // up, we risk a read deadlock (user-visible as a frozen shell).
         //
         // We explicitly skip `.ok`/`.get_pane_cwd`/async `.pane_info` here.
-        mux.debugLog("reattachSession: waiting for response...", .{});
+        self.debugLog("reattachSession: waiting for response...", .{});
         const hdr = blk: {
             while (true) {
                 const h = self.readSyncResponse(fd) catch |e| {
-                    mux.debugLog("reattachSession: readSyncResponse failed: {s}", .{@errorName(e)});
+                    self.debugLog("reattachSession: readSyncResponse failed: {s}", .{@errorName(e)});
                     return e;
                 };
                 const mt: wire.MsgType = @enumFromInt(h.msg_type);
-                mux.debugLog("reattachSession: got msg_type={d} payload_len={d}", .{ h.msg_type, h.payload_len });
+                self.debugLog("reattachSession: got msg_type={d} payload_len={d}", .{ h.msg_type, h.payload_len });
                 if (mt == .ok or mt == .get_pane_cwd) {
                     self.skipPayload(fd, h.payload_len);
                     continue;
@@ -942,43 +1026,43 @@ pub const SesClient = struct {
             }
         };
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-        mux.debugLog("reattachSession: final response type={d}", .{hdr.msg_type});
+        self.debugLog("reattachSession: final response type={d}", .{hdr.msg_type});
         if (resp_type == .@"error") {
-            mux.debugLog("reattachSession: server returned error", .{});
+            self.debugLog("reattachSession: server returned error", .{});
             self.skipPayload(fd, hdr.payload_len);
             return null;
         }
         if (resp_type != .session_reattached) {
-            mux.debugLog("reattachSession: unexpected response type {d}, expected session_reattached", .{hdr.msg_type});
+            self.debugLog("reattachSession: unexpected response type {d}, expected session_reattached", .{hdr.msg_type});
             self.skipPayload(fd, hdr.payload_len);
             return error.UnexpectedResponse;
         }
 
         const resp = wire.readStruct(wire.SessionReattached, fd) catch |e| {
-            mux.debugLog("reattachSession: failed to read SessionReattached struct: {s}", .{@errorName(e)});
+            self.debugLog("reattachSession: failed to read SessionReattached struct: {s}", .{@errorName(e)});
             return e;
         };
-        mux.debugLog("reattachSession: got SessionReattached state_len={d} pane_count={d}", .{ resp.state_len, resp.pane_count });
+        self.debugLog("reattachSession: got SessionReattached state_len={d} pane_count={d}", .{ resp.state_len, resp.pane_count });
 
         // Read canonical session snapshot JSON.
         const session_state = self.allocator.alloc(u8, resp.state_len) catch return error.OutOfMemory;
         errdefer self.allocator.free(session_state);
         wire.readExact(fd, session_state) catch |e| {
-            mux.debugLog("reattachSession: failed to read session_state_json: {s}", .{@errorName(e)});
+            self.debugLog("reattachSession: failed to read session_state_json: {s}", .{@errorName(e)});
             return e;
         };
-        mux.debugLog("reattachSession: read session_state_json ({d} bytes)", .{session_state.len});
+        self.debugLog("reattachSession: read session_state_json ({d} bytes)", .{session_state.len});
 
         // Read pane UUIDs (each 32 bytes).
         var pane_uuids = self.allocator.alloc([32]u8, resp.pane_count) catch return error.OutOfMemory;
         errdefer self.allocator.free(pane_uuids);
         for (0..resp.pane_count) |i| {
             wire.readExact(fd, &pane_uuids[i]) catch |e| {
-                mux.debugLog("reattachSession: failed to read pane uuid {d}: {s}", .{ i, @errorName(e) });
+                self.debugLog("reattachSession: failed to read pane uuid {d}: {s}", .{ i, @errorName(e) });
                 return e;
             };
         }
-        mux.debugLog("reattachSession: read {d} pane UUIDs, success!", .{resp.pane_count});
+        self.debugLog("reattachSession: read {d} pane UUIDs, success!", .{resp.pane_count});
 
         return .{
             .session_state_json = session_state,
@@ -1062,7 +1146,7 @@ pub const SesClient = struct {
 
         var child = std.process.Child.init(args_list.items, std.heap.page_allocator);
         child.spawn() catch |err| {
-            mux.debugLog("failed to start ses daemon: {s}", .{@errorName(err)});
+            self.debugLog("failed to start ses daemon: {s}", .{@errorName(err)});
             return err;
         };
         _ = child.wait() catch {};
@@ -1087,7 +1171,7 @@ pub const SesClient = struct {
     /// Returns true if CTL is available, false otherwise.
     pub fn ensureCtlConnected(self: *SesClient) bool {
         if (self.ctl_fd == null) {
-            mux.debugLog("CTL channel not available (disconnected)", .{});
+            self.debugLog("CTL channel not available (disconnected)", .{});
             return false;
         }
         return true;
@@ -1241,7 +1325,7 @@ pub const SesClient = struct {
     /// Called after reattachSession completes and MUX is ready to receive data.
     pub fn requestBacklogReplay(self: *SesClient) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
-        mux.debugLog("requestBacklogReplay: sending replay_backlogs", .{});
+        self.debugLog("requestBacklogReplay: sending replay_backlogs", .{});
         try wire.writeControl(fd, .replay_backlogs, &.{});
 
         // Fire-and-forget: Don't wait for .ok response.
@@ -1249,7 +1333,7 @@ pub const SesClient = struct {
         // Since the ctl_fd is non-blocking and no event loop is running yet,
         // any blocking read would busy-spin forever. The .ok from SES will
         // arrive later and be handled normally by the event loop.
-        mux.debugLog("requestBacklogReplay: sent (fire-and-forget)", .{});
+        self.debugLog("requestBacklogReplay: sent (fire-and-forget)", .{});
     }
 };
 

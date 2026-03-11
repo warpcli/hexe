@@ -2,7 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const core = @import("core");
 
-const SesClient = @import("ses_client.zig").SesClient;
+const SesClient = core.FrontendClient;
 const Pane = @import("pane.zig").Pane;
 const helpers = @import("helpers.zig");
 const layout_mod = @import("layout.zig");

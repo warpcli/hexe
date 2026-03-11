@@ -555,7 +555,7 @@ pub const Server = struct {
                 wire.PROTOCOL_VERSION,
             });
             // Send error message if this is a CTL channel (can receive error responses)
-            if (handshake[0] == wire.SES_HANDSHAKE_MUX_CTL or handshake[0] == wire.SES_HANDSHAKE_POD_CTL) {
+            if (handshake[0] == wire.SES_HANDSHAKE_FRONTEND_CTL or handshake[0] == wire.SES_HANDSHAKE_POD_CTL) {
                 // Send version mismatch error with version range
                 const err_msg = std.fmt.allocPrint(
                     self.allocator,
@@ -579,7 +579,7 @@ pub const Server = struct {
                 wire.PROTOCOL_VERSION,
             });
             // Send deprecation notice if this is a CTL channel
-            if (handshake[0] == wire.SES_HANDSHAKE_MUX_CTL) {
+            if (handshake[0] == wire.SES_HANDSHAKE_FRONTEND_CTL) {
                 const warn_msg = std.fmt.allocPrint(
                     self.allocator,
                     "Protocol version {d} is deprecated. Please update to version {d}.",
@@ -595,15 +595,15 @@ pub const Server = struct {
         }
 
         switch (handshake[0]) {
-            wire.SES_HANDSHAKE_MUX_CTL => {
-                // MUX binary control channel.
-                ses.debugLog("accept: MUX ctl channel fd={d}", .{conn.fd});
+            wire.SES_HANDSHAKE_FRONTEND_CTL => {
+                // Frontend binary control channel.
+                ses.debugLog("accept: frontend ctl channel fd={d}", .{conn.fd});
                 self.binary_ctl_fds.put(conn.fd, {}) catch {};
                 self.armCtlWatcher(conn.fd);
             },
-            wire.SES_HANDSHAKE_MUX_VT => {
-                // MUX VT data channel — read 32-byte session_id to identify client.
-                ses.debugLog("accept: MUX VT channel fd={d}", .{conn.fd});
+            wire.SES_HANDSHAKE_FRONTEND_VT => {
+                // Frontend VT data channel — read 32-byte session_id to identify client.
+                ses.debugLog("accept: frontend VT channel fd={d}", .{conn.fd});
                 var sid: [32]u8 = undefined;
                 wire.readExact(conn.fd, &sid) catch {
                     var tmp = conn;
@@ -626,14 +626,14 @@ pub const Server = struct {
                                 self.queueVtClose(old, null);
                             }
                             client.mux_vt_fd = conn.fd;
-                            ses.debugLog("MUX VT: assigned fd={d} to client_id={d}", .{ conn.fd, client.id });
+                            ses.debugLog("frontend VT: assigned fd={d} to client_id={d}", .{ conn.fd, client.id });
                             found = true;
                             break;
                         }
                     }
                 }
                 if (!found) {
-                    ses.debugLog("MUX VT: no client for session {s}", .{sid});
+                    ses.debugLog("frontend VT: no client for session {s}", .{sid});
                     var tmp = conn;
                     tmp.close();
                     return;
@@ -1035,7 +1035,7 @@ pub const Server = struct {
             self.sendBinaryError(fd, "register: payload too small");
             return;
         }
-        const reg = wire.readStruct(wire.Register, fd) catch {
+        const reg = wire.readStruct(wire.FrontendRegister, fd) catch {
             self.sendBinaryError(fd, "register: read failed");
             return;
         };
@@ -1094,7 +1094,7 @@ pub const Server = struct {
             client.session_name = if (resolved_name) |rn| client.allocator.dupe(u8, rn) catch null else null;
         }
 
-        // If this session_id matches a detached session, the MUX has successfully
+        // If this session_id matches a detached session, the frontend has successfully
         // restored it — remove the detached entry now.
         self.ses_state.removeDetachedSession(session_id);
 
@@ -1109,7 +1109,7 @@ pub const Server = struct {
         ses.debugLog("registered: session={s} name={s} (requested={s}) client_id={d}", .{ reg.session_id[0..8], final_name, name_slice, client_id });
 
         // Send Registered response with resolved name
-        const resp = wire.Registered{ .name_len = @intCast(final_name.len) };
+        const resp = wire.FrontendRegistered{ .name_len = @intCast(final_name.len) };
         wire.writeControlWithTrail(fd, .registered, std.mem.asBytes(&resp), final_name) catch {};
     }
 
