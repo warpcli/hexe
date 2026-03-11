@@ -18,9 +18,9 @@ const Renderer = @import("render_core.zig").Renderer;
 
 const FrontendRuntime = core.FrontendRuntime;
 const FrontendAttachState = core.FrontendAttachState;
-const FrontendSessionCache = core.FrontendSessionCache;
-const PaneShellInfo = core.FrontendPaneShellInfo;
-const PaneProcInfo = core.FrontendPaneProcInfo;
+const SessionProjection = core.SessionProjection;
+const PaneShellInfo = core.SessionProjectionPaneShellInfo;
+const PaneProcInfo = core.SessionProjectionPaneProcInfo;
 const FrontendClient = core.FrontendClient;
 
 const NotificationManager = pop.notification.NotificationManager;
@@ -41,7 +41,7 @@ const state_sync = @import("state_sync.zig");
 const state_session = @import("state_session.zig");
 const mouse_selection = @import("mouse_selection.zig");
 
-pub const TabFocusKind = core.FrontendTabFocusKind;
+pub const TabFocusKind = core.SessionProjectionTabFocusKind;
 
 const max_pending_mux_vt_bytes: usize = 8 * 1024 * 1024;
 
@@ -100,7 +100,7 @@ pub const State = struct {
     pop_config: pop.PopConfig,
     ses_config: core.SesConfig,
     runtime: *FrontendRuntime,
-    session_cache: *FrontendSessionCache,
+    projection: *SessionProjection,
     active_layout_floats: []const core.LayoutFloatDef,
     view: TerminalViewState,
     running: bool,
@@ -262,7 +262,7 @@ pub const State = struct {
             .pop_config = pop_cfg,
             .ses_config = ses_cfg,
             .runtime = runtime,
-            .session_cache = &runtime.session_cache,
+            .projection = &runtime.projection,
             .active_layout_floats = layout_floats,
             .view = TerminalViewState.init(),
             .running = true,
@@ -576,15 +576,15 @@ pub const State = struct {
     }
 
     pub fn sessionUuid(self: *const State) [32]u8 {
-        return self.session_cache.sessionUuid();
+        return self.projection.sessionUuid();
     }
 
     pub fn sessionName(self: *const State) []const u8 {
-        return self.session_cache.sessionName();
+        return self.projection.sessionName();
     }
 
     pub fn sessionTabCounter(self: *const State) usize {
-        return self.session_cache.tab_counter;
+        return self.projection.tab_counter;
     }
 
     pub fn isDetachMode(self: *const State) bool {
@@ -600,26 +600,26 @@ pub const State = struct {
     }
 
     pub fn activeTabIndex(self: *const State) usize {
-        return self.session_cache.activeTab(self.view.tabs.items.len);
+        return self.projection.activeTab(self.view.tabs.items.len);
     }
 
     pub fn setActiveTabIndex(self: *State, idx: usize) void {
         const clamped = if (self.view.tabs.items.len == 0) 0 else @min(idx, self.view.tabs.items.len - 1);
-        self.session_cache.setActiveTab(clamped);
+        self.projection.setActiveTab(clamped);
     }
 
     pub fn focusedPaneUuid(self: *const State) ?[32]u8 {
-        return self.session_cache.focusedPaneUuid();
+        return self.projection.focusedPaneUuid();
     }
 
     pub fn setFocusedPaneUuid(self: *State, uuid: ?[32]u8) void {
-        self.session_cache.setFocusedPaneUuid(uuid);
+        self.projection.setFocusedPaneUuid(uuid);
     }
 
     pub fn setSessionIdentity(self: *State, uuid: [32]u8, session_name: []const u8) bool {
-        self.session_cache.setSessionIdentity(uuid, session_name) catch return false;
-        self.frontend_client.session_id = self.session_cache.sessionUuid();
-        self.frontend_client.session_name = self.session_cache.sessionName();
+        self.projection.setSessionIdentity(uuid, session_name) catch return false;
+        self.frontend_client.session_id = self.projection.sessionUuid();
+        self.frontend_client.session_name = self.projection.sessionName();
         return true;
     }
 
@@ -628,98 +628,98 @@ pub const State = struct {
     }
 
     pub fn setSessionTabCounter(self: *State, tab_counter: usize) void {
-        self.session_cache.setTabCounter(tab_counter);
+        self.projection.setTabCounter(tab_counter);
     }
 
     pub fn takeNextTabCounter(self: *State) usize {
-        return self.session_cache.takeNextTabCounter();
+        return self.projection.takeNextTabCounter();
     }
 
     pub fn replaceAttachedSessionSnapshot(self: *State, snapshot: core.session_model.SessionSnapshot) bool {
-        self.session_cache.replaceAttachedSnapshotOwned(snapshot) catch return false;
-        self.frontend_client.session_id = self.session_cache.sessionUuid();
-        self.frontend_client.session_name = self.session_cache.sessionName();
-        self.setActiveTabIndex(self.session_cache.activeTab(self.view.tabs.items.len));
-        self.setActiveFloatingUuid(self.session_cache.activeFloatUuid());
+        self.projection.replaceAttachedSnapshotOwned(snapshot) catch return false;
+        self.frontend_client.session_id = self.projection.sessionUuid();
+        self.frontend_client.session_name = self.projection.sessionName();
+        self.setActiveTabIndex(self.projection.activeTab(self.view.tabs.items.len));
+        self.setActiveFloatingUuid(self.projection.activeFloatUuid());
         return true;
     }
 
     pub fn resetTabFocusMemory(self: *State) bool {
-        self.session_cache.resetTabFocusMemory(self.view.tabs.items.len) catch return false;
+        self.projection.resetTabFocusMemory(self.view.tabs.items.len) catch return false;
         return true;
     }
 
     pub fn clearTabFocusMemory(self: *State) void {
-        self.session_cache.clearTabFocusMemory();
+        self.projection.clearTabFocusMemory();
     }
 
     pub fn clearTabMeta(self: *State) void {
-        self.session_cache.clearTabMeta();
+        self.projection.clearTabMeta();
     }
 
     pub fn appendTabMeta(self: *State, uuid: [32]u8, name: []const u8) bool {
-        self.session_cache.appendTab(uuid, name) catch return false;
+        self.projection.appendTab(uuid, name) catch return false;
         return true;
     }
 
     pub fn removeTabMeta(self: *State, idx: usize) void {
-        self.session_cache.removeTab(idx);
+        self.projection.removeTab(idx);
     }
 
     pub fn tabUuid(self: *const State, idx: usize) ?[32]u8 {
-        return self.session_cache.tabUuid(idx);
+        return self.projection.tabUuid(idx);
     }
 
     pub fn tabName(self: *const State, idx: usize) []const u8 {
-        return self.session_cache.tabName(idx) orelse "tab";
+        return self.projection.tabName(idx) orelse "tab";
     }
 
     pub fn activeFloatingIndex(self: *State) ?usize {
-        const uuid = self.session_cache.activeFloatUuid() orelse return null;
+        const uuid = self.projection.activeFloatUuid() orelse return null;
         for (self.view.floats.items, 0..) |pane, idx| {
             if (std.mem.eql(u8, &pane.uuid, &uuid)) return idx;
         }
-        self.session_cache.setActiveFloatUuid(null);
+        self.projection.setActiveFloatUuid(null);
         return null;
     }
 
     pub fn setActiveFloatingIndex(self: *State, idx: ?usize) void {
         if (idx) |value| {
             if (value < self.view.floats.items.len) {
-                self.session_cache.setActiveFloatUuid(self.view.floats.items[value].uuid);
+                self.projection.setActiveFloatUuid(self.view.floats.items[value].uuid);
                 return;
             }
         }
-        self.session_cache.setActiveFloatUuid(null);
+        self.projection.setActiveFloatUuid(null);
     }
 
     pub fn setActiveFloatingUuid(self: *State, uuid: ?[32]u8) void {
-        self.session_cache.setActiveFloatUuid(uuid);
+        self.projection.setActiveFloatUuid(uuid);
     }
 
     pub fn appendTabFocusMemory(self: *State) bool {
-        self.session_cache.appendTabFocusMemory() catch return false;
+        self.projection.appendTabFocusMemory() catch return false;
         return true;
     }
 
     pub fn removeTabFocusMemory(self: *State, idx: usize) void {
-        self.session_cache.removeTabFocusMemory(idx);
+        self.projection.removeTabFocusMemory(idx);
     }
 
     pub fn rememberFloatingFocus(self: *State, pane: *Pane) void {
-        self.session_cache.rememberFloatingFocus(self.activeTabIndex(), pane.uuid);
+        self.projection.rememberFloatingFocus(self.activeTabIndex(), pane.uuid);
     }
 
     pub fn rememberSplitFocus(self: *State) void {
-        self.session_cache.rememberSplitFocus(self.activeTabIndex());
+        self.projection.rememberSplitFocus(self.activeTabIndex());
     }
 
     pub fn lastFocusKindForTab(self: *const State, idx: usize) ?TabFocusKind {
-        return self.session_cache.lastFocusKind(idx);
+        return self.projection.lastFocusKind(idx);
     }
 
     pub fn lastFloatingUuidForTab(self: *const State, idx: usize) ?[32]u8 {
-        return self.session_cache.lastFloatingUuid(idx);
+        return self.projection.lastFloatingUuid(idx);
     }
 
     pub fn findPaneByUuid(self: *State, uuid: [32]u8) ?*Pane {
@@ -885,46 +885,46 @@ pub const State = struct {
     }
 
     pub fn setPaneShell(self: *State, uuid: [32]u8, cmd: ?[]const u8, cwd: ?[]const u8, status: ?i32, duration_ms: ?u64, jobs: ?u16) void {
-        self.session_cache.setPaneShell(uuid, cmd, cwd, status, duration_ms, jobs);
+        self.projection.setPaneShell(uuid, cmd, cwd, status, duration_ms, jobs);
     }
 
     pub fn setPaneShellRunning(self: *State, uuid: [32]u8, running: bool, started_at_ms: ?u64, cmd: ?[]const u8, cwd: ?[]const u8, jobs: ?u16) void {
-        self.session_cache.setPaneShellRunning(uuid, running, started_at_ms, cmd, cwd, jobs);
+        self.projection.setPaneShellRunning(uuid, running, started_at_ms, cmd, cwd, jobs);
     }
 
     pub fn clearPaneShellStartedAt(self: *State, uuid: [32]u8) void {
-        self.session_cache.clearPaneShellStartedAt(uuid);
+        self.projection.clearPaneShellStartedAt(uuid);
     }
 
     pub fn setPaneProc(self: *State, uuid: [32]u8, name: ?[]const u8, pid: ?i32) void {
-        self.session_cache.setPaneProc(uuid, name, pid);
+        self.projection.setPaneProc(uuid, name, pid);
     }
 
     pub fn getPaneShell(self: *const State, uuid: [32]u8) ?PaneShellInfo {
-        return self.session_cache.getPaneShell(uuid);
+        return self.projection.getPaneShell(uuid);
     }
 
     pub fn getPaneProc(self: *const State, uuid: [32]u8) ?PaneProcInfo {
-        return self.session_cache.getPaneProc(uuid);
+        return self.projection.getPaneProc(uuid);
     }
 
     pub fn setPaneNameOwned(self: *State, uuid: [32]u8, name_owned: []u8) void {
-        self.session_cache.setPaneNameOwned(uuid, name_owned);
+        self.projection.setPaneNameOwned(uuid, name_owned);
     }
 
     pub fn paneName(self: *const State, uuid: [32]u8) ?[]const u8 {
-        return self.session_cache.paneName(uuid);
+        return self.projection.paneName(uuid);
     }
 
     pub fn hasPaneName(self: *const State, uuid: [32]u8) bool {
-        return self.session_cache.hasPaneName(uuid);
+        return self.projection.hasPaneName(uuid);
     }
 
     pub fn removePaneProcMetadata(self: *State, uuid: [32]u8) void {
-        self.session_cache.removePaneProc(uuid);
+        self.projection.removePaneProc(uuid);
     }
 
     pub fn removePaneName(self: *State, uuid: [32]u8) void {
-        self.session_cache.removePaneName(uuid);
+        self.projection.removePaneName(uuid);
     }
 };

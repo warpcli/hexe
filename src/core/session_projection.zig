@@ -41,7 +41,7 @@ pub const PaneProcInfo = struct {
     }
 };
 
-pub const FrontendSessionCache = struct {
+pub const SessionProjection = struct {
     allocator: std.mem.Allocator,
     session_uuid: [32]u8,
     session_name_owned: []u8,
@@ -61,7 +61,7 @@ pub const FrontendSessionCache = struct {
         allocator: std.mem.Allocator,
         session_uuid: [32]u8,
         session_name: []const u8,
-    ) !FrontendSessionCache {
+    ) !SessionProjection {
         return .{
             .allocator = allocator,
             .session_uuid = session_uuid,
@@ -75,7 +75,7 @@ pub const FrontendSessionCache = struct {
         };
     }
 
-    pub fn deinit(self: *FrontendSessionCache) void {
+    pub fn deinit(self: *SessionProjection) void {
         if (self.attached_snapshot) |*snapshot| snapshot.deinit();
         for (self.tabs.items) |*tab| tab.deinit(self.allocator);
         self.tabs.deinit(self.allocator);
@@ -106,16 +106,16 @@ pub const FrontendSessionCache = struct {
         self.* = undefined;
     }
 
-    pub fn sessionName(self: *const FrontendSessionCache) []const u8 {
+    pub fn sessionName(self: *const SessionProjection) []const u8 {
         return self.session_name_owned;
     }
 
-    pub fn sessionUuid(self: *const FrontendSessionCache) [32]u8 {
+    pub fn sessionUuid(self: *const SessionProjection) [32]u8 {
         return self.session_uuid;
     }
 
     pub fn setSessionIdentity(
-        self: *FrontendSessionCache,
+        self: *SessionProjection,
         session_uuid: [32]u8,
         session_name: []const u8,
     ) !void {
@@ -131,14 +131,14 @@ pub const FrontendSessionCache = struct {
         }
     }
 
-    pub fn setTabCounter(self: *FrontendSessionCache, tab_counter: usize) void {
+    pub fn setTabCounter(self: *SessionProjection, tab_counter: usize) void {
         self.tab_counter = tab_counter;
         if (self.attached_snapshot) |*snapshot| {
             snapshot.tab_counter = tab_counter;
         }
     }
 
-    pub fn takeNextTabCounter(self: *FrontendSessionCache) usize {
+    pub fn takeNextTabCounter(self: *SessionProjection) usize {
         const current = self.tab_counter;
         self.tab_counter = if (current < 999) current + 1 else 0;
         if (self.attached_snapshot) |*snapshot| {
@@ -147,34 +147,34 @@ pub const FrontendSessionCache = struct {
         return current;
     }
 
-    pub fn activeTab(self: *const FrontendSessionCache, tab_count: usize) usize {
+    pub fn activeTab(self: *const SessionProjection, tab_count: usize) usize {
         if (tab_count == 0) return 0;
         return @min(self.active_tab, tab_count - 1);
     }
 
-    pub fn setActiveTab(self: *FrontendSessionCache, active_tab: usize) void {
+    pub fn setActiveTab(self: *SessionProjection, active_tab: usize) void {
         self.active_tab = active_tab;
         if (self.attached_snapshot) |*snapshot| {
             snapshot.active_tab = active_tab;
         }
     }
 
-    pub fn activeFloatUuid(self: *const FrontendSessionCache) ?[32]u8 {
+    pub fn activeFloatUuid(self: *const SessionProjection) ?[32]u8 {
         return self.active_float_uuid;
     }
 
-    pub fn setActiveFloatUuid(self: *FrontendSessionCache, uuid: ?[32]u8) void {
+    pub fn setActiveFloatUuid(self: *SessionProjection, uuid: ?[32]u8) void {
         self.active_float_uuid = uuid;
         if (self.attached_snapshot) |*snapshot| {
             snapshot.active_float_uuid = uuid;
         }
     }
 
-    pub fn focusedPaneUuid(self: *const FrontendSessionCache) ?[32]u8 {
+    pub fn focusedPaneUuid(self: *const SessionProjection) ?[32]u8 {
         return self.focused_pane_uuid;
     }
 
-    pub fn setFocusedPaneUuid(self: *FrontendSessionCache, uuid: ?[32]u8) void {
+    pub fn setFocusedPaneUuid(self: *SessionProjection, uuid: ?[32]u8) void {
         self.focused_pane_uuid = uuid;
         if (self.attached_snapshot) |*snapshot| {
             snapshot.focused_pane_uuid = uuid;
@@ -182,7 +182,7 @@ pub const FrontendSessionCache = struct {
     }
 
     pub fn replaceAttachedSnapshotOwned(
-        self: *FrontendSessionCache,
+        self: *SessionProjection,
         snapshot: session_model.SessionSnapshot,
     ) !void {
         if (self.attached_snapshot) |*old| old.deinit();
@@ -196,18 +196,18 @@ pub const FrontendSessionCache = struct {
         try self.resetTabFocusMemory(snapshot.tabs.items.len);
     }
 
-    pub fn clearAttachedSnapshot(self: *FrontendSessionCache) void {
+    pub fn clearAttachedSnapshot(self: *SessionProjection) void {
         if (self.attached_snapshot) |*snapshot| snapshot.deinit();
         self.attached_snapshot = null;
     }
 
-    pub fn clearTabMeta(self: *FrontendSessionCache) void {
+    pub fn clearTabMeta(self: *SessionProjection) void {
         for (self.tabs.items) |*tab| tab.deinit(self.allocator);
         self.tabs.clearRetainingCapacity();
     }
 
     pub fn replaceTabMetaFromSnapshot(
-        self: *FrontendSessionCache,
+        self: *SessionProjection,
         tabs: []const session_model.SessionTab,
     ) !void {
         self.clearTabMeta();
@@ -217,7 +217,7 @@ pub const FrontendSessionCache = struct {
     }
 
     pub fn appendTab(
-        self: *FrontendSessionCache,
+        self: *SessionProjection,
         uuid: [32]u8,
         name: []const u8,
     ) !void {
@@ -227,24 +227,24 @@ pub const FrontendSessionCache = struct {
         });
     }
 
-    pub fn removeTab(self: *FrontendSessionCache, index: usize) void {
+    pub fn removeTab(self: *SessionProjection, index: usize) void {
         if (index >= self.tabs.items.len) return;
         var removed = self.tabs.orderedRemove(index);
         removed.deinit(self.allocator);
     }
 
-    pub fn tabUuid(self: *const FrontendSessionCache, index: usize) ?[32]u8 {
+    pub fn tabUuid(self: *const SessionProjection, index: usize) ?[32]u8 {
         if (index >= self.tabs.items.len) return null;
         return self.tabs.items[index].uuid;
     }
 
-    pub fn tabName(self: *const FrontendSessionCache, index: usize) ?[]const u8 {
+    pub fn tabName(self: *const SessionProjection, index: usize) ?[]const u8 {
         if (index >= self.tabs.items.len) return null;
         return self.tabs.items[index].name_owned;
     }
 
     pub fn setPaneShell(
-        self: *FrontendSessionCache,
+        self: *SessionProjection,
         uuid: [32]u8,
         cmd: ?[]const u8,
         cwd: ?[]const u8,
@@ -273,7 +273,7 @@ pub const FrontendSessionCache = struct {
     }
 
     pub fn setPaneShellRunning(
-        self: *FrontendSessionCache,
+        self: *SessionProjection,
         uuid: [32]u8,
         running: bool,
         started_at_ms: ?u64,
@@ -301,17 +301,17 @@ pub const FrontendSessionCache = struct {
         }
     }
 
-    pub fn clearPaneShellStartedAt(self: *FrontendSessionCache, uuid: [32]u8) void {
+    pub fn clearPaneShellStartedAt(self: *SessionProjection, uuid: [32]u8) void {
         if (self.pane_shell.getPtr(uuid)) |info| {
             info.started_at_ms = null;
         }
     }
 
-    pub fn getPaneShell(self: *const FrontendSessionCache, uuid: [32]u8) ?PaneShellInfo {
+    pub fn getPaneShell(self: *const SessionProjection, uuid: [32]u8) ?PaneShellInfo {
         return self.pane_shell.get(uuid);
     }
 
-    pub fn setPaneProc(self: *FrontendSessionCache, uuid: [32]u8, name: ?[]const u8, pid: ?i32) void {
+    pub fn setPaneProc(self: *SessionProjection, uuid: [32]u8, name: ?[]const u8, pid: ?i32) void {
         var entry = self.pane_proc.getPtr(uuid);
         if (entry == null) {
             self.pane_proc.put(uuid, .{}) catch return;
@@ -326,39 +326,39 @@ pub const FrontendSessionCache = struct {
         }
     }
 
-    pub fn getPaneProc(self: *const FrontendSessionCache, uuid: [32]u8) ?PaneProcInfo {
+    pub fn getPaneProc(self: *const SessionProjection, uuid: [32]u8) ?PaneProcInfo {
         return self.pane_proc.get(uuid);
     }
 
-    pub fn removePaneProc(self: *FrontendSessionCache, uuid: [32]u8) void {
+    pub fn removePaneProc(self: *SessionProjection, uuid: [32]u8) void {
         if (self.pane_proc.fetchRemove(uuid)) |kv| {
             var info = kv.value;
             info.deinit(self.allocator);
         }
     }
 
-    pub fn setPaneNameOwned(self: *FrontendSessionCache, uuid: [32]u8, name_owned: []u8) void {
+    pub fn setPaneNameOwned(self: *SessionProjection, uuid: [32]u8, name_owned: []u8) void {
         if (self.pane_names.get(uuid)) |old_name| {
             self.allocator.free(old_name);
         }
         self.pane_names.put(uuid, name_owned) catch self.allocator.free(name_owned);
     }
 
-    pub fn paneName(self: *const FrontendSessionCache, uuid: [32]u8) ?[]const u8 {
+    pub fn paneName(self: *const SessionProjection, uuid: [32]u8) ?[]const u8 {
         return self.pane_names.get(uuid);
     }
 
-    pub fn hasPaneName(self: *const FrontendSessionCache, uuid: [32]u8) bool {
+    pub fn hasPaneName(self: *const SessionProjection, uuid: [32]u8) bool {
         return self.pane_names.contains(uuid);
     }
 
-    pub fn removePaneName(self: *FrontendSessionCache, uuid: [32]u8) void {
+    pub fn removePaneName(self: *SessionProjection, uuid: [32]u8) void {
         if (self.pane_names.fetchRemove(uuid)) |kv| {
             self.allocator.free(kv.value);
         }
     }
 
-    pub fn resetTabFocusMemory(self: *FrontendSessionCache, tab_count: usize) !void {
+    pub fn resetTabFocusMemory(self: *SessionProjection, tab_count: usize) !void {
         self.tab_last_floating_uuid.clearRetainingCapacity();
         self.tab_last_focus_kind.clearRetainingCapacity();
         for (0..tab_count) |_| {
@@ -367,12 +367,12 @@ pub const FrontendSessionCache = struct {
         }
     }
 
-    pub fn appendTabFocusMemory(self: *FrontendSessionCache) !void {
+    pub fn appendTabFocusMemory(self: *SessionProjection) !void {
         try self.tab_last_floating_uuid.append(self.allocator, null);
         try self.tab_last_focus_kind.append(self.allocator, .split);
     }
 
-    pub fn removeTabFocusMemory(self: *FrontendSessionCache, index: usize) void {
+    pub fn removeTabFocusMemory(self: *SessionProjection, index: usize) void {
         if (index < self.tab_last_floating_uuid.items.len) {
             _ = self.tab_last_floating_uuid.orderedRemove(index);
         }
@@ -381,13 +381,13 @@ pub const FrontendSessionCache = struct {
         }
     }
 
-    pub fn clearTabFocusMemory(self: *FrontendSessionCache) void {
+    pub fn clearTabFocusMemory(self: *SessionProjection) void {
         self.tab_last_floating_uuid.clearRetainingCapacity();
         self.tab_last_focus_kind.clearRetainingCapacity();
     }
 
     pub fn rememberFloatingFocus(
-        self: *FrontendSessionCache,
+        self: *SessionProjection,
         active_tab: usize,
         pane_uuid: [32]u8,
     ) void {
@@ -398,14 +398,14 @@ pub const FrontendSessionCache = struct {
         }
     }
 
-    pub fn rememberSplitFocus(self: *FrontendSessionCache, active_tab: usize) void {
+    pub fn rememberSplitFocus(self: *SessionProjection, active_tab: usize) void {
         if (active_tab < self.tab_last_focus_kind.items.len) {
             self.tab_last_focus_kind.items[active_tab] = .split;
         }
     }
 
     pub fn lastFocusKind(
-        self: *const FrontendSessionCache,
+        self: *const SessionProjection,
         active_tab: usize,
     ) ?TabFocusKind {
         if (active_tab >= self.tab_last_focus_kind.items.len) return null;
@@ -413,7 +413,7 @@ pub const FrontendSessionCache = struct {
     }
 
     pub fn lastFloatingUuid(
-        self: *const FrontendSessionCache,
+        self: *const SessionProjection,
         active_tab: usize,
     ) ?[32]u8 {
         if (active_tab >= self.tab_last_floating_uuid.items.len) return null;

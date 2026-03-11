@@ -3,13 +3,13 @@ const frontend_attach = @import("frontend_attach.zig");
 const FrontendAttachState = @import("frontend_attach_state.zig").FrontendAttachState;
 const FrontendClient = @import("frontend_client.zig").SesClient;
 const Transport = @import("frontend_client.zig").Transport;
-const FrontendSessionCache = @import("frontend_session_cache.zig").FrontendSessionCache;
+const SessionProjection = @import("session_projection.zig").SessionProjection;
 const wire = @import("wire.zig");
 
 pub const FrontendRuntime = struct {
     allocator: std.mem.Allocator,
     client: FrontendClient,
-    session_cache: FrontendSessionCache,
+    projection: SessionProjection,
     attach_state: FrontendAttachState,
 
     pub fn create(
@@ -38,7 +38,7 @@ pub const FrontendRuntime = struct {
         );
         errdefer runtime.client.deinit();
 
-        runtime.session_cache = try FrontendSessionCache.init(allocator, session_id, session_name);
+        runtime.projection = try SessionProjection.init(allocator, session_id, session_name);
         runtime.attach_state = .{};
         return runtime;
     }
@@ -65,22 +65,22 @@ pub const FrontendRuntime = struct {
 
     pub fn destroy(self: *FrontendRuntime) void {
         const allocator = self.allocator;
-        self.session_cache.deinit();
+        self.projection.deinit();
         self.client.deinit();
         self.* = undefined;
         allocator.destroy(self);
     }
 
     pub fn reconcileResolvedName(self: *FrontendRuntime) !?frontend_attach.SessionNameChange {
-        return frontend_attach.reconcileResolvedName(self.allocator, &self.client, &self.session_cache);
+        return frontend_attach.reconcileResolvedName(self.allocator, &self.client, &self.projection);
     }
 
     pub fn syncSessionIdentity(self: *FrontendRuntime) !?frontend_attach.SessionNameChange {
-        return frontend_attach.syncSessionIdentity(self.allocator, &self.client, &self.session_cache);
+        return frontend_attach.syncSessionIdentity(self.allocator, &self.client, &self.projection);
     }
 
     pub fn completeReattach(self: *FrontendRuntime) !?frontend_attach.SessionNameChange {
-        return frontend_attach.completeReattach(self.allocator, &self.client, &self.session_cache);
+        return frontend_attach.completeReattach(self.allocator, &self.client, &self.projection);
     }
 
     pub fn markSessionStolen(self: *FrontendRuntime) void {

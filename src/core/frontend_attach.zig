@@ -1,7 +1,7 @@
 const std = @import("std");
 const FrontendAttachState = @import("frontend_attach_state.zig").FrontendAttachState;
 const FrontendClient = @import("frontend_client.zig").SesClient;
-const FrontendSessionCache = @import("frontend_session_cache.zig").FrontendSessionCache;
+const SessionProjection = @import("session_projection.zig").SessionProjection;
 
 pub const SessionNameChange = struct {
     previous_name: []u8,
@@ -17,24 +17,24 @@ pub const SessionNameChange = struct {
 pub fn reconcileResolvedName(
     allocator: std.mem.Allocator,
     client: *FrontendClient,
-    cache: *FrontendSessionCache,
+    projection: *SessionProjection,
 ) !?SessionNameChange {
     const resolved_name = client.takeResolvedNameOwned() orelse return null;
     errdefer allocator.free(resolved_name);
 
-    if (std.mem.eql(u8, resolved_name, cache.sessionName())) {
+    if (std.mem.eql(u8, resolved_name, projection.sessionName())) {
         allocator.free(resolved_name);
-        client.session_id = cache.sessionUuid();
-        client.session_name = cache.sessionName();
+        client.session_id = projection.sessionUuid();
+        client.session_name = projection.sessionName();
         return null;
     }
 
-    const previous_name = try allocator.dupe(u8, cache.sessionName());
+    const previous_name = try allocator.dupe(u8, projection.sessionName());
     errdefer allocator.free(previous_name);
 
-    try cache.setSessionIdentity(cache.sessionUuid(), resolved_name);
-    client.session_id = cache.sessionUuid();
-    client.session_name = cache.sessionName();
+    try projection.setSessionIdentity(projection.sessionUuid(), resolved_name);
+    client.session_id = projection.sessionUuid();
+    client.session_name = projection.sessionName();
 
     return .{
         .previous_name = previous_name,
@@ -45,18 +45,18 @@ pub fn reconcileResolvedName(
 pub fn syncSessionIdentity(
     allocator: std.mem.Allocator,
     client: *FrontendClient,
-    cache: *FrontendSessionCache,
+    projection: *SessionProjection,
 ) !?SessionNameChange {
-    try client.updateSession(cache.sessionUuid(), cache.sessionName());
-    return try reconcileResolvedName(allocator, client, cache);
+    try client.updateSession(projection.sessionUuid(), projection.sessionName());
+    return try reconcileResolvedName(allocator, client, projection);
 }
 
 pub fn completeReattach(
     allocator: std.mem.Allocator,
     client: *FrontendClient,
-    cache: *FrontendSessionCache,
+    projection: *SessionProjection,
 ) !?SessionNameChange {
-    const change = try syncSessionIdentity(allocator, client, cache);
+    const change = try syncSessionIdentity(allocator, client, projection);
     errdefer if (change) |value| {
         var owned_value = value;
         owned_value.deinit(allocator);
