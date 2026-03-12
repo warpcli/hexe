@@ -581,16 +581,6 @@ pub const FrontendRuntime = struct {
         self.projection.removeFloatState(pane_uuid);
     }
 
-    pub fn sessionSyncTabLayout(
-        self: *FrontendRuntime,
-        tab_uuid: [32]u8,
-        active_tab: usize,
-        focused_pane_uuid: ?[32]u8,
-        root_json: []const u8,
-    ) !void {
-        try self.client.sessionSyncTabLayout(tab_uuid, active_tab, focused_pane_uuid, root_json);
-    }
-
     pub fn sessionSplitPane(
         self: *FrontendRuntime,
         tab_uuid: [32]u8,

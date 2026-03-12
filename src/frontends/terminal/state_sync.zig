@@ -8,44 +8,6 @@ const helpers = @import("helpers.zig");
 const layout_mod = @import("layout.zig");
 const lua_events = @import("lua_events.zig");
 
-fn buildSessionLayoutNode(
-    allocator: std.mem.Allocator,
-    layout: *layout_mod.Layout,
-    node: *layout_mod.LayoutNode,
-) !*core.session_model.SessionLayoutNode {
-    const out = try allocator.create(core.session_model.SessionLayoutNode);
-    errdefer allocator.destroy(out);
-
-    switch (node.*) {
-        .pane => |id| {
-            const pane = layout.splits.get(id) orelse return error.InvalidLayout;
-            out.* = .{ .pane = pane.uuid };
-        },
-        .split => |split| {
-            const first = try buildSessionLayoutNode(allocator, layout, split.first);
-            errdefer {
-                first.deinit(allocator);
-                allocator.destroy(first);
-            }
-            const second = try buildSessionLayoutNode(allocator, layout, split.second);
-            errdefer {
-                second.deinit(allocator);
-                allocator.destroy(second);
-            }
-            out.* = .{
-                .split = .{
-                    .dir = if (split.dir == .horizontal) .horizontal else .vertical,
-                    .ratio = split.ratio,
-                    .first = first,
-                    .second = second,
-                },
-            };
-        },
-    }
-
-    return out;
-}
-
 fn setLayoutFocusedSplitId(self: anytype, pane: *Pane) void {
     if (self.paneIsFloating(pane)) return;
 
@@ -117,34 +79,6 @@ pub fn syncSessionFloatRemoved(self: anytype, pane_uuid: [32]u8) void {
     if (pane_uuid[0] == 0) return;
     self.runtime.sessionRemoveFloat(pane_uuid) catch |err| {
         core.logging.logError("terminal", "failed sessionRemoveFloat IPC", err);
-    };
-}
-
-pub fn syncActiveTabLayout(self: anytype) void {
-    if (!self.runtime.isConnected()) return;
-    if (self.view.tabs.items.len == 0 or self.activeTabIndex() >= self.view.tabs.items.len) return;
-
-    const tab = &self.view.tabs.items[self.activeTabIndex()];
-    const tab_uuid = self.tabUuid(self.activeTabIndex()) orelse return;
-    const session_root = if (tab.layout.root) |root|
-        buildSessionLayoutNode(self.allocator, &tab.layout, root) catch return
-    else
-        null;
-    defer if (session_root) |root| {
-        root.deinit(self.allocator);
-        self.allocator.destroy(root);
-    };
-
-    const root_json = core.session_model.layoutNodeToJson(self.allocator, session_root) catch return;
-    defer self.allocator.free(root_json);
-
-    self.runtime.sessionSyncTabLayout(
-        tab_uuid,
-        self.activeTabIndex(),
-        if (tab.layout.getFocusedPane()) |pane| pane.uuid else null,
-        root_json,
-    ) catch |err| {
-        core.logging.logError("terminal", "failed sessionSyncTabLayout IPC", err);
     };
 }
 

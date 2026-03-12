@@ -760,10 +760,6 @@ pub const State = struct {
         return state_sync.syncSessionFloatRemoved(self, pane_uuid);
     }
 
-    pub fn syncActiveTabLayout(self: *State) void {
-        return state_sync.syncActiveTabLayout(self);
-    }
-
     pub fn syncSessionSplitPane(
         self: *State,
         source_pane_uuid: [32]u8,

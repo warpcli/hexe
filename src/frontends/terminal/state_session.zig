@@ -128,7 +128,31 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     const created_tab = &self.view.tabs.items[self.activeTabIndex()];
     const focused = created_tab.layout.getFocusedPane() orelse return error.InvalidLayout;
     self.syncSessionTabAdded(tab_uuid, self.tabName(self.activeTabIndex()), focused.uuid);
-    self.syncActiveTabLayout();
+    if (created_tab.layout.root) |root| {
+        syncConfigSplitTree(self, &created_tab.layout, root, focused.uuid);
+    }
+}
+
+fn leftmostPaneUuid(layout: *Layout, node: *const LayoutNode) ?[32]u8 {
+    return switch (node.*) {
+        .pane => |id| if (layout.splits.get(id)) |pane| pane.uuid else null,
+        .split => |split| leftmostPaneUuid(layout, split.first) orelse leftmostPaneUuid(layout, split.second),
+    };
+}
+
+fn syncConfigSplitTree(self: anytype, layout: *Layout, node: *const LayoutNode, focused_pane_uuid: [32]u8) void {
+    switch (node.*) {
+        .pane => {},
+        .split => |split| {
+            const source_pane_uuid = leftmostPaneUuid(layout, split.first) orelse return;
+            const new_pane_uuid = leftmostPaneUuid(layout, split.second) orelse return;
+
+            self.syncSessionSplitPane(source_pane_uuid, new_pane_uuid, split.dir, focused_pane_uuid);
+            syncConfigSplitTree(self, layout, split.first, focused_pane_uuid);
+            syncConfigSplitTree(self, layout, split.second, focused_pane_uuid);
+            self.syncSessionSplitRatio(source_pane_uuid, new_pane_uuid, split.ratio);
+        },
+    }
 }
 
 fn buildSplitTree(self: anytype, layout: *Layout, split_config: SplitConfig) !void {
