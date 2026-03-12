@@ -470,7 +470,7 @@ Done when:
 2. Done: Delete dead layout-tree sync code used by normal UI mutations.
 3. Done: Delete no-longer-needed terminal-side session caches.
 4. Done: Rename leftovers so the code reads honestly.
-5. Update docs after the code is actually finished.
+5. Done: Update docs after the code is actually finished.
 
 Legacy compatibility aliases can remain where they are part of the public CLI
 or config surface, but the live frontend/runtime/session code paths should read
@@ -524,9 +524,11 @@ The rewrite is done only when all of the following are true:
 5. Done: A shared frontend runtime owns attach lifecycle and session projection.
 6. Done: Terminal state contains only terminal-specific view/render/input state.
 7. Done: Local and remote frontends use the same runtime and protocol shape.
-8. `PLAN.md` can be removed or marked complete without hand-waving.
+8. Done: `PLAN.md` can be removed or marked complete without hand-waving.
 
-Until then, the honest description is:
+The rewrite is complete.
+
+Final honest description:
 
 ```text
 SES is canonical authority,

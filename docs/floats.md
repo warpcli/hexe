@@ -165,9 +165,9 @@ hx.mux.float.set_defaults({
 Spawn a one-off float from the command line:
 
 ```sh
-hexe mux float --command "btop" --title "monitor" --size "80,70,0,0"
-hexe mux float --command "zsh" --isolation sandbox
-hexe mux float --command "bash /tmp/script.sh" --result-file /tmp/result
+hexe terminal float --command "btop" --title "monitor" --size "80,70,0,0"
+hexe terminal float --command "zsh" --isolation sandbox
+hexe terminal float --command "bash /tmp/script.sh" --result-file /tmp/result
 ```
 
 Options:
