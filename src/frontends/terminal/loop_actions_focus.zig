@@ -255,8 +255,8 @@ fn swapFloatPositions(state: *State, a: *Pane, b: *Pane) void {
 
 fn restoreFocusInTab(state: *State, old_uuid: ?[32]u8) void {
     const active_tab = state.activeTabIndex();
-    if (state.lastFocusKindForTab(active_tab) == .float) {
-        if (state.lastFloatingUuidForTab(active_tab)) |uuid| {
+    if (state.runtime.lastFocusKind(active_tab) == .float) {
+        if (state.runtime.lastFloatingUuid(active_tab)) |uuid| {
             for (state.view.floats.items, 0..) |pane, fi| {
                 if (!std.mem.eql(u8, &pane.uuid, &uuid)) continue;
                 if (!state.paneVisibleOnTab(pane, active_tab)) continue;

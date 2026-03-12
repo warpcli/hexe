@@ -90,7 +90,7 @@ pub fn syncSessionSplitPane(
     focused_pane_uuid: ?[32]u8,
 ) void {
     if (!self.runtime.isConnected()) return;
-    const tab_uuid = self.tabUuid(self.activeTabIndex()) orelse return;
+    const tab_uuid = self.runtime.tabUuid(self.activeTabIndex()) orelse return;
     self.runtime.sessionSplitPane(
         tab_uuid,
         source_pane_uuid,
@@ -112,7 +112,7 @@ pub fn syncSessionCloseSplitPane(
     focused_pane_uuid: ?[32]u8,
 ) void {
     if (!self.runtime.isConnected()) return;
-    const tab_uuid = self.tabUuid(self.activeTabIndex()) orelse return;
+    const tab_uuid = self.runtime.tabUuid(self.activeTabIndex()) orelse return;
     self.runtime.sessionCloseSplitPane(
         tab_uuid,
         pane_uuid,
@@ -130,7 +130,7 @@ pub fn syncSessionReplaceSplitPane(
     focused_pane_uuid: ?[32]u8,
 ) void {
     if (!self.runtime.isConnected()) return;
-    const tab_uuid = self.tabUuid(self.activeTabIndex()) orelse return;
+    const tab_uuid = self.runtime.tabUuid(self.activeTabIndex()) orelse return;
     self.runtime.sessionReplaceSplitPane(
         tab_uuid,
         old_pane_uuid,
@@ -149,7 +149,7 @@ pub fn syncSessionSplitRatio(
     ratio: f32,
 ) void {
     if (!self.runtime.isConnected()) return;
-    const tab_uuid = self.tabUuid(self.activeTabIndex()) orelse return;
+    const tab_uuid = self.runtime.tabUuid(self.activeTabIndex()) orelse return;
     self.runtime.sessionSetSplitRatio(
         tab_uuid,
         self.activeTabIndex(),

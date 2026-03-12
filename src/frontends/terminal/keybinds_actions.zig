@@ -119,7 +119,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             var writer = stdout.writer(&io_buf);
 
             const body = if (state.view.tabs.items.len > 0 and state.activeTabIndex() < state.view.tabs.items.len)
-                state.tabName(state.activeTabIndex())
+                (state.runtime.tabName(state.activeTabIndex()) orelse "tab")
             else
                 "hexe";
 

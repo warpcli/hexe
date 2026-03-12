@@ -83,7 +83,7 @@ pub fn createTab(self: anytype) !void {
     }
 
     // Generate tab name in format "session-N" (e.g., "alpha-1", "beta-2")
-    const tab_counter = self.takeNextTabCounter();
+    const tab_counter = self.runtime.takeNextTabCounter();
     if (tab_counter == 999) {
         terminal_main.debugLog("VALIDATION: tab_counter reached limit, wrapping to 0", .{});
     }
@@ -102,14 +102,14 @@ pub fn createTab(self: anytype) !void {
         var failed_tab = self.view.tabs.pop().?;
         failed_tab.deinit();
     }
-    if (!self.appendTabMeta(tab_uuid, name_owned)) return error.OutOfMemory;
-    errdefer self.removeTabMeta(self.view.tabs.items.len - 1);
+    if (!self.runtime.appendTabMeta(tab_uuid, name_owned)) return error.OutOfMemory;
+    errdefer self.runtime.removeTabMeta(self.view.tabs.items.len - 1);
     self.allocator.free(name_owned);
-    if (!self.appendTabFocusMemory()) return error.OutOfMemory;
-    errdefer self.removeTabFocusMemory(self.view.tabs.items.len - 1);
+    if (!self.runtime.appendTabFocusMemory()) return error.OutOfMemory;
+    errdefer self.runtime.removeTabFocusMemory(self.view.tabs.items.len - 1);
     self.setActiveTabIndex(self.view.tabs.items.len - 1);
     self.syncPaneAux(first_pane, parent_uuid);
-    self.syncSessionTabAdded(tab_uuid, self.tabName(self.activeTabIndex()), first_pane.uuid);
+    self.syncSessionTabAdded(tab_uuid, self.runtime.tabName(self.activeTabIndex()) orelse "tab", first_pane.uuid);
     self.renderer.invalidate();
     self.force_full_render = true;
 }
@@ -118,7 +118,7 @@ pub fn createTab(self: anytype) !void {
 pub fn closeCurrentTab(self: anytype) bool {
     if (self.view.tabs.items.len <= 1) return false;
     const closing_tab = self.activeTabIndex();
-    const closing_uuid = self.tabUuid(closing_tab) orelse return false;
+    const closing_uuid = self.runtime.tabUuid(closing_tab) orelse return false;
 
     // Handle tab-bound floats belonging to this tab.
     var i: usize = 0;
@@ -152,8 +152,8 @@ pub fn closeCurrentTab(self: anytype) bool {
 
     var tab = self.view.tabs.orderedRemove(self.activeTabIndex());
     tab.deinit();
-    self.removeTabMeta(self.activeTabIndex());
-    self.removeTabFocusMemory(self.activeTabIndex());
+    self.runtime.removeTabMeta(self.activeTabIndex());
+    self.runtime.removeTabFocusMemory(self.activeTabIndex());
     if (self.activeTabIndex() >= self.view.tabs.items.len) {
         self.setActiveTabIndex(self.view.tabs.items.len - 1);
     } else {

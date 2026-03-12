@@ -38,8 +38,6 @@ const state_sync = @import("state_sync.zig");
 const state_session = @import("state_session.zig");
 const mouse_selection = @import("mouse_selection.zig");
 
-pub const TabFocusKind = core.SessionProjectionTabFocusKind;
-
 const max_pending_mux_vt_bytes: usize = 8 * 1024 * 1024;
 
 pub const PaneBounds = struct {
@@ -622,44 +620,6 @@ pub const State = struct {
         return self.setSessionIdentity(self.sessionUuid(), session_name);
     }
 
-    pub fn setSessionTabCounter(self: *State, tab_counter: usize) void {
-        self.runtime.projection.setTabCounter(tab_counter);
-    }
-
-    pub fn takeNextTabCounter(self: *State) usize {
-        return self.runtime.projection.takeNextTabCounter();
-    }
-
-    pub fn resetTabFocusMemory(self: *State) bool {
-        self.runtime.projection.resetTabFocusMemory(self.view.tabs.items.len) catch return false;
-        return true;
-    }
-
-    pub fn clearTabFocusMemory(self: *State) void {
-        self.runtime.projection.clearTabFocusMemory();
-    }
-
-    pub fn clearTabMeta(self: *State) void {
-        self.runtime.projection.clearTabMeta();
-    }
-
-    pub fn appendTabMeta(self: *State, uuid: [32]u8, name: []const u8) bool {
-        self.runtime.projection.appendTab(uuid, name) catch return false;
-        return true;
-    }
-
-    pub fn removeTabMeta(self: *State, idx: usize) void {
-        self.runtime.projection.removeTab(idx);
-    }
-
-    pub fn tabUuid(self: *const State, idx: usize) ?[32]u8 {
-        return self.runtime.projection.tabUuid(idx);
-    }
-
-    pub fn tabName(self: *const State, idx: usize) []const u8 {
-        return self.runtime.projection.tabName(idx) orelse "tab";
-    }
-
     pub fn activeFloatingIndex(self: *State) ?usize {
         const uuid = self.runtime.projection.activeFloatUuid() orelse return null;
         for (self.view.floats.items, 0..) |pane, idx| {
@@ -683,29 +643,12 @@ pub const State = struct {
         self.runtime.projection.setActiveFloatUuid(uuid);
     }
 
-    pub fn appendTabFocusMemory(self: *State) bool {
-        self.runtime.projection.appendTabFocusMemory() catch return false;
-        return true;
-    }
-
-    pub fn removeTabFocusMemory(self: *State, idx: usize) void {
-        self.runtime.projection.removeTabFocusMemory(idx);
-    }
-
     pub fn rememberFloatingFocus(self: *State, pane: *Pane) void {
         self.runtime.projection.rememberFloatingFocus(self.activeTabIndex(), pane.uuid);
     }
 
     pub fn rememberSplitFocus(self: *State) void {
         self.runtime.projection.rememberSplitFocus(self.activeTabIndex());
-    }
-
-    pub fn lastFocusKindForTab(self: *const State, idx: usize) ?TabFocusKind {
-        return self.runtime.projection.lastFocusKind(idx);
-    }
-
-    pub fn lastFloatingUuidForTab(self: *const State, idx: usize) ?[32]u8 {
-        return self.runtime.projection.lastFloatingUuid(idx);
     }
 
     pub fn findPaneByUuid(self: *State, uuid: [32]u8) ?*Pane {

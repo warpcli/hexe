@@ -10,6 +10,7 @@ const Transport = @import("frontend_client.zig").Transport;
 const ConnectOptions = @import("frontend_transport_helpers.zig").ConnectOptions;
 const transport_helpers = @import("frontend_transport_helpers.zig");
 const session_model = @import("session_model.zig");
+const TabFocusKind = @import("session_projection.zig").TabFocusKind;
 const SessionProjection = @import("session_projection.zig").SessionProjection;
 const wire = @import("wire.zig");
 
@@ -521,6 +522,61 @@ pub const FrontendRuntime = struct {
         self.client.session_id = self.projection.sessionUuid();
         self.client.session_name = self.projection.sessionName();
         self.projection.setActiveTab(self.projection.activeTab(live_tab_count));
+    }
+
+    pub fn clearTabMeta(self: *FrontendRuntime) void {
+        self.projection.clearTabMeta();
+    }
+
+    pub fn appendTabMeta(self: *FrontendRuntime, uuid: [32]u8, name: []const u8) bool {
+        self.projection.appendTab(uuid, name) catch return false;
+        return true;
+    }
+
+    pub fn removeTabMeta(self: *FrontendRuntime, idx: usize) void {
+        self.projection.removeTab(idx);
+    }
+
+    pub fn tabUuid(self: *const FrontendRuntime, idx: usize) ?[32]u8 {
+        return self.projection.tabUuid(idx);
+    }
+
+    pub fn tabName(self: *const FrontendRuntime, idx: usize) ?[]const u8 {
+        return self.projection.tabName(idx);
+    }
+
+    pub fn setTabCounter(self: *FrontendRuntime, tab_counter: usize) void {
+        self.projection.setTabCounter(tab_counter);
+    }
+
+    pub fn takeNextTabCounter(self: *FrontendRuntime) usize {
+        return self.projection.takeNextTabCounter();
+    }
+
+    pub fn resetTabFocusMemory(self: *FrontendRuntime, tab_count: usize) bool {
+        self.projection.resetTabFocusMemory(tab_count) catch return false;
+        return true;
+    }
+
+    pub fn clearTabFocusMemory(self: *FrontendRuntime) void {
+        self.projection.clearTabFocusMemory();
+    }
+
+    pub fn appendTabFocusMemory(self: *FrontendRuntime) bool {
+        self.projection.appendTabFocusMemory() catch return false;
+        return true;
+    }
+
+    pub fn removeTabFocusMemory(self: *FrontendRuntime, idx: usize) void {
+        self.projection.removeTabFocusMemory(idx);
+    }
+
+    pub fn lastFocusKind(self: *const FrontendRuntime, idx: usize) ?TabFocusKind {
+        return self.projection.lastFocusKind(idx);
+    }
+
+    pub fn lastFloatingUuid(self: *const FrontendRuntime, idx: usize) ?[32]u8 {
+        return self.projection.lastFloatingUuid(idx);
     }
 
     pub fn sessionAddTab(

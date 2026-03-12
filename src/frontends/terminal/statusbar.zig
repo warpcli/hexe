@@ -118,7 +118,7 @@ fn tabTitleForDisplay(state: *State, tab_idx: usize, tab: anytype, use_basename:
             }
         }
     }
-    return state.tabName(tab_idx);
+    return state.runtime.tabName(tab_idx) orelse "tab";
 }
 
 pub fn beginExternalCallbackEval(state: *State, lua_rt: ?*LuaRuntime) void {

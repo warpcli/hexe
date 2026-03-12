@@ -155,7 +155,7 @@ fn handleTargetedNotify(state: *State, fd: posix.fd_t, payload_len: u32, buffer:
 
     // Try to find tab with this UUID prefix.
     for (state.view.tabs.items, 0..) |*tab, tab_idx| {
-        const tab_uuid = state.tabUuid(tab_idx) orelse continue;
+        const tab_uuid = state.runtime.tabUuid(tab_idx) orelse continue;
         if (std.mem.startsWith(u8, &tab_uuid, &notify.uuid)) {
             const dur = if (duration > 0) duration else tab.notifications.default_duration_ms;
             tab.notifications.showWithOptions(msg_copy, .{
@@ -270,7 +270,7 @@ fn resolvePopupTarget(state: *State, uuid: [32]u8) PopupTarget {
             return .{ .manager = &pane.popups, .scope = .pane, .pane = pane };
         }
         for (state.view.tabs.items, 0..) |*tab, tab_idx| {
-            const tab_uuid = state.tabUuid(tab_idx) orelse continue;
+            const tab_uuid = state.runtime.tabUuid(tab_idx) orelse continue;
             if (std.mem.startsWith(u8, &tab_uuid, &uuid)) {
                 return .{ .manager = &tab.popups, .scope = .tab, .tab_idx = tab_idx };
             }

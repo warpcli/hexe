@@ -408,7 +408,7 @@ Done when:
    `TerminalViewState`.
 2. Done: Replace `Tab.layout` as session truth with terminal view objects derived from
    `SessionProjection`.
-3. Keep only terminal-specific widget/layout caches in terminal state.
+3. Done: Keep only terminal-specific widget/layout caches in terminal state.
 4. Done: Make terminal view reconciliation derive from projection state instead of
    being the owner of tabs/floats/layout truth.
 

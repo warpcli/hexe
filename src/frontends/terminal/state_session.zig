@@ -81,8 +81,8 @@ pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter
         tab.deinit();
     }
     self.view.tabs.clearRetainingCapacity();
-    self.clearTabMeta();
-    self.clearTabFocusMemory();
+    self.runtime.clearTabMeta();
+    self.runtime.clearTabFocusMemory();
     self.setActiveTabIndex(0);
     self.setFocusedPaneUuid(null);
 
@@ -92,7 +92,7 @@ pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter
 fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     // Generate tab name
     const name_owned = self.allocator.dupe(u8, tab_config.name) catch blk: {
-        const tab_counter = self.takeNextTabCounter();
+        const tab_counter = self.runtime.takeNextTabCounter();
         break :blk try core.ipc.generateTabName(self.allocator, self.sessionName(), tab_counter);
     };
 
@@ -119,16 +119,16 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
         var failed_tab = self.view.tabs.pop().?;
         failed_tab.deinit();
     }
-    if (!self.appendTabMeta(tab_uuid, name_owned)) return error.OutOfMemory;
-    errdefer self.removeTabMeta(self.view.tabs.items.len - 1);
+    if (!self.runtime.appendTabMeta(tab_uuid, name_owned)) return error.OutOfMemory;
+    errdefer self.runtime.removeTabMeta(self.view.tabs.items.len - 1);
     self.allocator.free(name_owned);
-    if (!self.appendTabFocusMemory()) return error.OutOfMemory;
-    errdefer self.removeTabFocusMemory(self.view.tabs.items.len - 1);
+    if (!self.runtime.appendTabFocusMemory()) return error.OutOfMemory;
+    errdefer self.runtime.removeTabFocusMemory(self.view.tabs.items.len - 1);
 
     self.setActiveTabIndex(self.view.tabs.items.len - 1);
     const created_tab = &self.view.tabs.items[self.activeTabIndex()];
     const focused = created_tab.layout.getFocusedPane() orelse return error.InvalidLayout;
-    self.syncSessionTabAdded(tab_uuid, self.tabName(self.activeTabIndex()), focused.uuid);
+    self.syncSessionTabAdded(tab_uuid, self.runtime.tabName(self.activeTabIndex()) orelse "tab", focused.uuid);
     if (created_tab.layout.root) |root| {
         syncConfigSplitTree(self, &created_tab.layout, root, focused.uuid);
     }

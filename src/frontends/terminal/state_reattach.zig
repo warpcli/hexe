@@ -80,7 +80,7 @@ fn clearStateForRestore(self: anytype) void {
     self.setActiveTabIndex(0);
     self.setActiveFloatingIndex(null);
     self.setFocusedPaneUuid(null);
-    self.clearTabFocusMemory();
+    self.runtime.clearTabFocusMemory();
 }
 
 fn deinitTabPreservingPanes(tab: *Tab) void {
@@ -118,7 +118,7 @@ fn clearStatePreservingPanes(self: anytype) void {
     self.setActiveTabIndex(0);
     self.setActiveFloatingIndex(null);
     self.setFocusedPaneUuid(null);
-    self.clearTabFocusMemory();
+    self.runtime.clearTabFocusMemory();
 }
 
 fn clearPaneAuxCaches(self: anytype, uuid: [32]u8) void {
@@ -447,8 +447,8 @@ fn canApplySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot
     if (self.view.floats.items.len != snapshot.floats.items.len) return false;
 
     for (snapshot.tabs.items, 0..) |snapshot_tab, idx| {
-        if (!std.mem.eql(u8, &snapshot_tab.uuid, &(self.tabUuid(idx) orelse return false))) return false;
-        if (!std.mem.eql(u8, snapshot_tab.name, self.tabName(idx))) return false;
+        if (!std.mem.eql(u8, &snapshot_tab.uuid, &(self.runtime.tabUuid(idx) orelse return false))) return false;
+        if (!std.mem.eql(u8, snapshot_tab.name, self.runtime.tabName(idx) orelse "tab")) return false;
 
         const live_tab = &self.view.tabs.items[idx];
         if (live_tab.layout.splits.count() != countSessionLayoutPanes(snapshot_tab.root)) return false;
@@ -1083,19 +1083,19 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             self.view.tabs.append(self.allocator, tab) catch return false;
             // Tab is now owned by tabs array, no longer needs cleanup
             tab_needs_cleanup = false;
-            if (!self.appendTabMeta(tab_uuid, "attached")) {
+            if (!self.runtime.appendTabMeta(tab_uuid, "attached")) {
                 var failed_tab = self.view.tabs.pop().?;
                 failed_tab.deinit();
                 return false;
             }
-            if (!self.appendTabFocusMemory()) {
-                self.removeTabMeta(self.view.tabs.items.len - 1);
+            if (!self.runtime.appendTabFocusMemory()) {
+                self.runtime.removeTabMeta(self.view.tabs.items.len - 1);
                 var failed_tab = self.view.tabs.pop().?;
                 failed_tab.deinit();
                 return false;
             }
             self.setActiveTabIndex(self.view.tabs.items.len - 1);
-            self.syncSessionTabAdded(tab_uuid, self.tabName(self.activeTabIndex()), pane.uuid);
+            self.syncSessionTabAdded(tab_uuid, self.runtime.tabName(self.activeTabIndex()) orelse "tab", pane.uuid);
             self.renderer.invalidate();
             self.force_full_render = true;
             return true;
