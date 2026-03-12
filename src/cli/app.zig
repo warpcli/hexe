@@ -1058,11 +1058,11 @@ fn askUseLocalLayout() bool {
     return false;
 }
 
-fn buildTerminalTransport(socket_path: []const u8, no_autostart_ses: bool) core.FrontendTransport {
-    return core.FrontendTransportHelpers.localIpcTransport(
-        if (socket_path.len > 0) socket_path else null,
-        !no_autostart_ses,
-    );
+fn buildTerminalConnectOptions(socket_path: []const u8, no_autostart_ses: bool) core.FrontendConnectOptions {
+    return .{
+        .socket_path = if (socket_path.len > 0) socket_path else null,
+        .autostart_ses = !no_autostart_ses,
+    };
 }
 
 fn runTerminalNew(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
@@ -1078,7 +1078,7 @@ fn runTerminalNew(name: []const u8, debug: bool, log_file: []const u8, socket_pa
         .name = if (name.len > 0) name else null,
         .debug = debug,
         .log_file = if (log_file.len > 0) log_file else null,
-        .transport = buildTerminalTransport(socket_path, no_autostart_ses),
+        .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses),
     });
 }
 
@@ -1088,7 +1088,7 @@ fn runTerminalAttach(name: []const u8, debug: bool, log_file: []const u8, socket
             .attach = name,
             .debug = debug,
             .log_file = if (log_file.len > 0) log_file else null,
-            .transport = buildTerminalTransport(socket_path, no_autostart_ses),
+            .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses),
         });
     } else {
         print("Error: session name required\n", .{});

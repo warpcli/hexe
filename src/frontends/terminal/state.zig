@@ -203,7 +203,7 @@ pub const State = struct {
         height: u16,
         debug: bool,
         log_file: ?[]const u8,
-        transport: core.FrontendTransport,
+        connect_options: core.FrontendConnectOptions,
     ) !State {
         const cfg = core.Config.load(allocator);
         const pop_cfg = pop.PopConfig.load(allocator);
@@ -248,7 +248,7 @@ pub const State = struct {
 
         const uuid = core.ipc.generateUuid();
         const session_name = core.ipc.generateSessionName();
-        const runtime = try FrontendRuntime.createTerminal(allocator, uuid, session_name, debug, log_file, transport);
+        const runtime = try FrontendRuntime.createTerminal(allocator, uuid, session_name, debug, log_file, connect_options);
         errdefer runtime.destroy();
 
         return .{

@@ -455,7 +455,7 @@ Done when:
 
 1. Done: Extend `FrontendClient.Transport` beyond `local_ipc`.
 2. Add `liblink` transport.
-3. Make transport selection a runtime concern, not a terminal concern.
+3. Done: Make transport selection a runtime concern, not a terminal concern.
 4. Reuse the exact same attach/session/VT path for remote frontends.
 
 Done when:

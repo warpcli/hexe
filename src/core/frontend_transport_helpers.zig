@@ -3,11 +3,20 @@ const ipc = @import("ipc.zig");
 const wire = @import("wire.zig");
 const frontend_client = @import("frontend_client.zig");
 
+pub const ConnectOptions = struct {
+    socket_path: ?[]const u8 = null,
+    autostart_ses: bool = true,
+};
+
 pub fn localIpcTransport(socket_path: ?[]const u8, autostart_ses: bool) frontend_client.Transport {
     return .{ .local_ipc = .{
         .autostart_ses = autostart_ses,
         .socket_path = socket_path,
     } };
+}
+
+pub fn resolveTransport(options: ConnectOptions) frontend_client.Transport {
+    return localIpcTransport(options.socket_path, options.autostart_ses);
 }
 
 pub fn preconnectedTransport(ctl_fd: std.posix.fd_t, vt_fd: std.posix.fd_t) frontend_client.Transport {
@@ -43,4 +52,12 @@ pub fn sendNotify(
         },
         .preconnected => return error.UnsupportedTransport,
     }
+}
+
+pub fn sendNotifyWithConnectOptions(
+    allocator: std.mem.Allocator,
+    options: ConnectOptions,
+    message: []const u8,
+) !void {
+    try sendNotify(allocator, resolveTransport(options), message);
 }

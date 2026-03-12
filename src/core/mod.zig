@@ -35,6 +35,7 @@ pub const SessionConfig = session_config.SessionConfig;
 pub const ConfigStatus = lua_runtime.ConfigStatus;
 pub const FrontendClient = frontend_client.SesClient;
 pub const FrontendTransport = frontend_client.Transport;
+pub const FrontendConnectOptions = frontend_transport_helpers.ConnectOptions;
 pub const FrontendDetachedSessionInfo = frontend_client.DetachedSessionInfo;
 pub const FrontendOrphanedPaneInfo = frontend_client.OrphanedPaneInfo;
 pub const SessionProjection = session_projection.SessionProjection;

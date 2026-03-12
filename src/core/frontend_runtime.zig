@@ -7,6 +7,8 @@ const FrontendClient = @import("frontend_client.zig").SesClient;
 const DetachedSessionInfo = @import("frontend_client.zig").DetachedSessionInfo;
 const OrphanedPaneInfo = @import("frontend_client.zig").OrphanedPaneInfo;
 const Transport = @import("frontend_client.zig").Transport;
+const ConnectOptions = @import("frontend_transport_helpers.zig").ConnectOptions;
+const transport_helpers = @import("frontend_transport_helpers.zig");
 const session_model = @import("session_model.zig");
 const SessionProjection = @import("session_projection.zig").SessionProjection;
 const wire = @import("wire.zig");
@@ -98,7 +100,7 @@ pub const FrontendRuntime = struct {
         session_name: []const u8,
         debug: bool,
         log_file: ?[]const u8,
-        transport: Transport,
+        connect_options: ConnectOptions,
     ) !*FrontendRuntime {
         return create(
             allocator,
@@ -108,7 +110,7 @@ pub const FrontendRuntime = struct {
             debug,
             log_file,
             .terminal,
-            transport,
+            transport_helpers.resolveTransport(connect_options),
         );
     }
 
@@ -116,7 +118,7 @@ pub const FrontendRuntime = struct {
         allocator: std.mem.Allocator,
         debug: bool,
         log_file: ?[]const u8,
-        transport: Transport,
+        connect_options: ConnectOptions,
     ) !*FrontendRuntime {
         return create(
             allocator,
@@ -126,7 +128,7 @@ pub const FrontendRuntime = struct {
             debug,
             log_file,
             .terminal,
-            transport,
+            transport_helpers.resolveTransport(connect_options),
         );
     }
 

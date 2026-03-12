@@ -9,7 +9,7 @@ const c = @cImport({
 
 const FrontendAttach = core.FrontendAttach;
 const FrontendRuntime = core.FrontendRuntime;
-const FrontendTransport = core.FrontendTransport;
+const FrontendConnectOptions = core.FrontendConnectOptions;
 const DetachedSessionInfo = core.FrontendDetachedSessionInfo;
 const OrphanedPaneInfo = core.FrontendOrphanedPaneInfo;
 
@@ -77,7 +77,7 @@ pub const TerminalArgs = struct {
     log_file: ?[]const u8 = null,
     session_config_path: ?[]const u8 = null,
     session_tab_filter: ?[]const u8 = null,
-    transport: FrontendTransport = .{ .local_ipc = .{} },
+    connect_options: FrontendConnectOptions = .{},
 };
 
 /// Entry point for the terminal frontend - can be called directly from unified CLI.
@@ -86,13 +86,13 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
     // Handle --notify: send to parent terminal frontend and exit.
     if (terminal_args.notify_message) |msg| {
-        sendNotifyToParentTerminal(allocator, terminal_args.transport, msg);
+        sendNotifyToParentTerminal(allocator, terminal_args.connect_options, msg);
         return;
     }
 
     // Handle --list: show detached sessions and orphaned panes.
     if (terminal_args.list) {
-        var runtime = try FrontendRuntime.createTerminalProbe(allocator, false, null, terminal_args.transport);
+        var runtime = try FrontendRuntime.createTerminalProbe(allocator, false, null, terminal_args.connect_options);
         defer runtime.destroy();
         runtime.connect() catch {
             std.debug.print("Could not connect to ses daemon\n", .{});
@@ -193,7 +193,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
     const size = terminal.getTermSize();
 
     // Initialize state.
-    var state = try State.init(allocator, size.cols, size.rows, terminal_args.debug, terminal_args.log_file, terminal_args.transport);
+    var state = try State.init(allocator, size.cols, size.rows, terminal_args.debug, terminal_args.log_file, terminal_args.connect_options);
     defer {
         statusbar.deinitThreadlocals();
         state.deinit();
@@ -351,22 +351,10 @@ pub fn main() !void {
             i += 1;
             terminal_args.log_file = args[i];
         } else if (std.mem.eql(u8, arg, "--no-autostart-ses")) {
-            terminal_args.transport = .{ .local_ipc = .{
-                .autostart_ses = false,
-                .socket_path = switch (terminal_args.transport) {
-                    .local_ipc => |transport| transport.socket_path,
-                    .preconnected => null,
-                },
-            } };
+            terminal_args.connect_options.autostart_ses = false;
         } else if (std.mem.eql(u8, arg, "--ses-socket") and i + 1 < args.len) {
             i += 1;
-            terminal_args.transport = .{ .local_ipc = .{
-                .autostart_ses = switch (terminal_args.transport) {
-                    .local_ipc => |transport| transport.autostart_ses,
-                    .preconnected => true,
-                },
-                .socket_path = args[i],
-            } };
+            terminal_args.connect_options.socket_path = args[i];
         }
     }
 
@@ -397,8 +385,8 @@ fn redirectStderr(log_file: ?[]const u8) void {
     devnull.close();
 }
 
-fn sendNotifyToParentTerminal(allocator: std.mem.Allocator, transport: FrontendTransport, message: []const u8) void {
-    core.FrontendTransportHelpers.sendNotify(allocator, transport, message) catch |err| {
+fn sendNotifyToParentTerminal(allocator: std.mem.Allocator, connect_options: FrontendConnectOptions, message: []const u8) void {
+    core.FrontendTransportHelpers.sendNotifyWithConnectOptions(allocator, connect_options, message) catch |err| {
         core.logging.logError("terminal", "failed to send notify message to parent", err);
     };
 }
