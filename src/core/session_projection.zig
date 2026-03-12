@@ -51,6 +51,7 @@ pub const SessionProjection = struct {
     focused_pane_uuid: ?[32]u8 = null,
     attached_snapshot: ?session_model.SessionSnapshot = null,
     tabs: std.ArrayList(TabMeta),
+    local_floats: std.AutoHashMap([32]u8, session_model.SessionFloat),
     pane_shell: std.AutoHashMap([32]u8, PaneShellInfo),
     pane_proc: std.AutoHashMap([32]u8, PaneProcInfo),
     pane_names: std.AutoHashMap([32]u8, []u8),
@@ -67,6 +68,7 @@ pub const SessionProjection = struct {
             .session_uuid = session_uuid,
             .session_name_owned = try allocator.dupe(u8, session_name),
             .tabs = .empty,
+            .local_floats = std.AutoHashMap([32]u8, session_model.SessionFloat).init(allocator),
             .pane_shell = std.AutoHashMap([32]u8, PaneShellInfo).init(allocator),
             .pane_proc = std.AutoHashMap([32]u8, PaneProcInfo).init(allocator),
             .pane_names = std.AutoHashMap([32]u8, []u8).init(allocator),
@@ -79,6 +81,7 @@ pub const SessionProjection = struct {
         if (self.attached_snapshot) |*snapshot| snapshot.deinit();
         for (self.tabs.items) |*tab| tab.deinit(self.allocator);
         self.tabs.deinit(self.allocator);
+        self.local_floats.deinit();
         {
             var it = self.pane_shell.iterator();
             while (it.next()) |entry| {
@@ -187,6 +190,10 @@ pub const SessionProjection = struct {
     ) !void {
         if (self.attached_snapshot) |*old| old.deinit();
         self.attached_snapshot = snapshot;
+        self.local_floats.clearRetainingCapacity();
+        for (snapshot.floats.items) |float_state| {
+            try self.local_floats.put(float_state.pane_uuid, float_state);
+        }
         try self.setSessionIdentity(snapshot.uuid, snapshot.session_name);
         self.setTabCounter(if (snapshot.tab_counter > 1000) 0 else snapshot.tab_counter);
         self.setActiveTab(snapshot.active_tab);
@@ -199,12 +206,23 @@ pub const SessionProjection = struct {
     pub fn clearAttachedSnapshot(self: *SessionProjection) void {
         if (self.attached_snapshot) |*snapshot| snapshot.deinit();
         self.attached_snapshot = null;
+        self.local_floats.clearRetainingCapacity();
     }
 
     pub fn paneMeta(
         self: *const SessionProjection,
         uuid: [32]u8,
     ) ?session_model.SessionPane {
+        if (self.local_floats.get(uuid)) |float_state| {
+            return .{
+                .uuid = uuid,
+                .kind = .float,
+                .parent_tab = float_state.parent_tab,
+                .sticky = float_state.sticky,
+                .is_pwd = float_state.is_pwd,
+                .float_key = float_state.float_key,
+            };
+        }
         const snapshot = self.attached_snapshot orelse return null;
         return snapshot.panes.get(uuid);
     }
@@ -213,11 +231,7 @@ pub const SessionProjection = struct {
         self: *const SessionProjection,
         uuid: [32]u8,
     ) ?session_model.SessionFloat {
-        const snapshot = self.attached_snapshot orelse return null;
-        for (snapshot.floats.items) |float_state| {
-            if (std.mem.eql(u8, &float_state.pane_uuid, &uuid)) return float_state;
-        }
-        return null;
+        return self.local_floats.get(uuid);
     }
 
     pub fn syncFloatState(
@@ -225,6 +239,7 @@ pub const SessionProjection = struct {
         float_state: session_model.SessionFloat,
         active: bool,
     ) void {
+        self.local_floats.put(float_state.pane_uuid, float_state) catch return;
         if (self.attached_snapshot) |*snapshot| {
             const pane_state = session_model.SessionPane{
                 .uuid = float_state.pane_uuid,
@@ -256,9 +271,18 @@ pub const SessionProjection = struct {
             snapshot.floats.append(self.allocator, float_state) catch return;
             if (active) snapshot.active_float_uuid = float_state.pane_uuid;
         }
+        if (active) {
+            self.active_float_uuid = float_state.pane_uuid;
+            self.focused_pane_uuid = float_state.pane_uuid;
+        } else if (self.active_float_uuid) |uuid| {
+            if (std.mem.eql(u8, &uuid, &float_state.pane_uuid) and !float_state.visible) {
+                self.active_float_uuid = null;
+            }
+        }
     }
 
     pub fn removeFloatState(self: *SessionProjection, pane_uuid: [32]u8) void {
+        _ = self.local_floats.remove(pane_uuid);
         if (self.attached_snapshot) |*snapshot| {
             var idx: usize = 0;
             while (idx < snapshot.floats.items.len) : (idx += 1) {
@@ -274,6 +298,149 @@ pub const SessionProjection = struct {
                 if (std.mem.eql(u8, &uuid, &pane_uuid)) snapshot.focused_pane_uuid = null;
             }
         }
+        if (self.active_float_uuid) |uuid| {
+            if (std.mem.eql(u8, &uuid, &pane_uuid)) self.active_float_uuid = null;
+        }
+        if (self.focused_pane_uuid) |uuid| {
+            if (std.mem.eql(u8, &uuid, &pane_uuid)) self.focused_pane_uuid = null;
+        }
+    }
+
+    pub fn setFloatVisibleOnTab(
+        self: *SessionProjection,
+        uuid: [32]u8,
+        tab: usize,
+        visible: bool,
+    ) void {
+        const entry = self.local_floats.getPtr(uuid) orelse return;
+        if (entry.parent_tab != null) {
+            entry.visible = visible;
+        } else if (tab < 64) {
+            const mask = @as(u64, 1) << @intCast(tab);
+            if (visible) {
+                entry.tab_visible |= mask;
+            } else {
+                entry.tab_visible &= ~mask;
+            }
+        }
+        self.syncFloatState(entry.*, self.active_float_uuid != null and std.mem.eql(u8, &(self.active_float_uuid.?), &uuid));
+    }
+
+    pub fn toggleFloatVisibleOnTab(self: *SessionProjection, uuid: [32]u8, tab: usize) void {
+        const current = self.local_floats.get(uuid) orelse return;
+        if (current.parent_tab != null) {
+            self.setFloatVisibleOnTab(uuid, tab, !current.visible);
+            return;
+        }
+        if (tab >= 64) return;
+        const mask = @as(u64, 1) << @intCast(tab);
+        self.setFloatVisibleOnTab(uuid, tab, (current.tab_visible & mask) == 0);
+    }
+
+    pub fn setFloatGeometry(
+        self: *SessionProjection,
+        uuid: [32]u8,
+        width_pct: u8,
+        height_pct: u8,
+        pos_x_pct: u8,
+        pos_y_pct: u8,
+        pad_x: u8,
+        pad_y: u8,
+    ) void {
+        const entry = self.local_floats.getPtr(uuid) orelse return;
+        entry.width_pct = width_pct;
+        entry.height_pct = height_pct;
+        entry.pos_x_pct = pos_x_pct;
+        entry.pos_y_pct = pos_y_pct;
+        entry.pad_x = pad_x;
+        entry.pad_y = pad_y;
+        self.syncFloatState(entry.*, self.active_float_uuid != null and std.mem.eql(u8, &(self.active_float_uuid.?), &uuid));
+    }
+
+    pub fn swapFloatGeometry(self: *SessionProjection, a_uuid: [32]u8, b_uuid: [32]u8) void {
+        const a = self.local_floats.get(a_uuid) orelse return;
+        const b = self.local_floats.get(b_uuid) orelse return;
+
+        var new_a = a;
+        var new_b = b;
+
+        new_a.width_pct = b.width_pct;
+        new_a.height_pct = b.height_pct;
+        new_a.pos_x_pct = b.pos_x_pct;
+        new_a.pos_y_pct = b.pos_y_pct;
+        new_a.pad_x = b.pad_x;
+        new_a.pad_y = b.pad_y;
+
+        new_b.width_pct = a.width_pct;
+        new_b.height_pct = a.height_pct;
+        new_b.pos_x_pct = a.pos_x_pct;
+        new_b.pos_y_pct = a.pos_y_pct;
+        new_b.pad_x = a.pad_x;
+        new_b.pad_y = a.pad_y;
+
+        self.syncFloatState(new_a, self.active_float_uuid != null and std.mem.eql(u8, &(self.active_float_uuid.?), &a_uuid));
+        self.syncFloatState(new_b, self.active_float_uuid != null and std.mem.eql(u8, &(self.active_float_uuid.?), &b_uuid));
+    }
+
+    pub fn reindexFloatParentTabsAfterRemovedTab(self: *SessionProjection, removed_idx: usize) void {
+        var it = self.local_floats.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.parent_tab) |parent| {
+                if (parent > removed_idx) {
+                    entry.value_ptr.parent_tab = parent - 1;
+                }
+            }
+        }
+        if (self.attached_snapshot) |*snapshot| {
+            for (snapshot.floats.items) |*float_state| {
+                if (float_state.parent_tab) |parent| {
+                    if (parent > removed_idx) {
+                        float_state.parent_tab = parent - 1;
+                    }
+                }
+            }
+            var pane_it = snapshot.panes.iterator();
+            while (pane_it.next()) |entry| {
+                if (entry.value_ptr.kind != .float) continue;
+                if (entry.value_ptr.parent_tab) |parent| {
+                    if (parent > removed_idx) {
+                        entry.value_ptr.parent_tab = parent - 1;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn normalizeFloatParentTabs(self: *SessionProjection, tab_count: usize) usize {
+        var fixed: usize = 0;
+        var it = self.local_floats.iterator();
+        while (it.next()) |entry| {
+            if (entry.value_ptr.parent_tab) |parent| {
+                if (parent >= tab_count) {
+                    entry.value_ptr.parent_tab = null;
+                    fixed += 1;
+                }
+            }
+        }
+        if (self.attached_snapshot) |*snapshot| {
+            for (snapshot.floats.items) |*float_state| {
+                if (float_state.parent_tab) |parent| {
+                    if (parent >= tab_count) {
+                        float_state.parent_tab = null;
+                    }
+                }
+            }
+            var pane_it = snapshot.panes.iterator();
+            while (pane_it.next()) |entry| {
+                if (entry.value_ptr.kind != .float) continue;
+                if (entry.value_ptr.parent_tab) |parent| {
+                    if (parent >= tab_count) {
+                        entry.value_ptr.parent_tab = null;
+                    }
+                }
+            }
+        }
+        return fixed;
     }
 
     pub fn clearTabMeta(self: *SessionProjection) void {

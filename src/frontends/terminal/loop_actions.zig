@@ -24,7 +24,7 @@ pub fn hideOrDestroyFloat(state: *State, pane: *Pane, tab: usize) void {
         destroyBlockingFloat(state, pane);
     } else {
         // Normal float - just hide it.
-        pane.setVisibleOnTab(tab, false);
+        state.setPaneVisibleOnTab(pane, tab, false);
         state.syncSessionFloat(pane, false);
     }
 }
@@ -625,7 +625,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
 
             // Toggle visibility (per-tab for global/per_cwd floats).
             const old_uuid = state.getCurrentFocusedUuid();
-            pane.toggleVisibleOnTab(state.activeTabIndex());
+            state.togglePaneVisibleOnTab(pane, state.activeTabIndex());
             if (state.paneVisibleOnTab(pane, state.activeTabIndex())) {
                 // Unfocus current pane (tiled or another float).
                 if (state.activeFloatingIndex()) |afi| {
@@ -812,10 +812,7 @@ pub fn createAdhocFloatWithSize(
     const vt_fd = state.runtime.getVtFd() orelse return error.SesUnavailable;
     try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
 
-    pane.floating = true;
     pane.focused = true;
-    pane.float_key = 0;
-    pane.visible = true;
 
     if (title) |t| {
         if (t.len > 0) {
@@ -838,8 +835,6 @@ pub fn createAdhocFloatWithSize(
     pane.float_pad_x = @intCast(pad_x_cfg);
     pane.float_pad_y = @intCast(pad_y_cfg);
 
-    pane.parent_tab = state.activeTabIndex();
-    pane.sticky = false;
     pane.dim_background = size.dim_background;
     if (size.exit_key) |ek| {
         pane.exit_key = state.allocator.dupe(u8, ek) catch null;
@@ -853,6 +848,22 @@ pub fn createAdhocFloatWithSize(
 
     try state.view.floats.append(state.allocator, pane);
     state.setActiveFloatingIndex(state.view.floats.items.len - 1);
+    state.setLocalFloatState(
+        pane.uuid,
+        state.activeTabIndex(),
+        true,
+        0,
+        false,
+        false,
+        0,
+        @intCast(width_pct),
+        @intCast(height_pct),
+        @intCast(pos_x_pct),
+        @intCast(pos_y_pct),
+        @intCast(pad_x_cfg),
+        @intCast(pad_y_cfg),
+        true,
+    );
     state.syncPaneAux(pane, null);
     state.syncSessionFloat(pane, true);
 
@@ -932,9 +943,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
         }
     }
 
-    pane.floating = true;
     pane.focused = true;
-    pane.float_key = float_def.key;
 
     // Title text is a pane property (outside style). Style only controls
     // positioning/formatting of the title widget.
@@ -947,11 +956,14 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     // Keep the pod's pane name separate from the float title.
     // For global floats (special or pwd), set per-tab visibility.
     // For tab-bound floats, use simple visible field.
-    if (float_def.attributes.global or float_def.attributes.per_cwd) {
-        pane.setVisibleOnTab(state.activeTabIndex(), true);
-    } else {
-        pane.visible = true;
-    }
+    const parent_tab: ?usize = if (!float_def.attributes.global and !float_def.attributes.per_cwd)
+        state.activeTabIndex()
+    else
+        null;
+    const tab_visible: u64 = if (parent_tab == null and state.activeTabIndex() < 64)
+        (@as(u64, 1) << @intCast(state.activeTabIndex()))
+    else
+        0;
     // Store outer dimensions and style for border rendering.
     pane.border_x = outer_x;
     pane.border_y = outer_y;
@@ -968,19 +980,10 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
 
     // For pwd floats, store the directory and duplicate it.
     if (float_def.attributes.per_cwd) {
-        pane.is_pwd = true;
         if (current_dir) |dir| {
             pane.pwd_dir = state.allocator.dupe(u8, dir) catch null;
         }
     }
-
-    // For tab-bound floats, set parent tab.
-    if (!float_def.attributes.global and !float_def.attributes.per_cwd) {
-        pane.parent_tab = state.activeTabIndex();
-    }
-
-    // For sticky floats, set sticky.
-    pane.sticky = float_def.attributes.sticky;
 
     // For navigatable floats, set navigatable.
     pane.navigatable = float_def.attributes.navigatable;
@@ -995,6 +998,22 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
 
     try state.view.floats.append(state.allocator, pane);
     state.setActiveFloatingIndex(state.view.floats.items.len - 1);
+    state.setLocalFloatState(
+        pane.uuid,
+        parent_tab,
+        true,
+        tab_visible,
+        float_def.attributes.sticky,
+        float_def.attributes.per_cwd,
+        float_def.key,
+        @intCast(width_pct),
+        @intCast(height_pct),
+        @intCast(pos_x_pct),
+        @intCast(pos_y_pct),
+        @intCast(pad_x_cfg),
+        @intCast(pad_y_cfg),
+        true,
+    );
     state.syncPaneAux(pane, parent_uuid);
     state.syncSessionFloat(pane, true);
 }

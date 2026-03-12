@@ -143,11 +143,7 @@ fn destroyUnusedPaneViews(self: anytype, existing_views: *ExistingPaneViews) voi
 fn recyclePaneForSplit(self: anytype, tab: *Tab, pane: *Pane, pane_id: u16, pane_uuid: [32]u8, actual_focus_uuid: ?[32]u8) void {
     pane.id = pane_id;
     pane.uuid = pane_uuid;
-    pane.floating = false;
     pane.focused = if (actual_focus_uuid) |focused_uuid| std.mem.eql(u8, &focused_uuid, &pane_uuid) else false;
-    pane.visible = true;
-    pane.tab_visible = 0;
-    pane.float_key = 0;
     pane.border_x = 0;
     pane.border_y = 0;
     pane.border_w = 0;
@@ -162,8 +158,6 @@ fn recyclePaneForSplit(self: anytype, tab: *Tab, pane: *Pane, pane_id: u16, pane
         self.allocator.free(dir);
         pane.pwd_dir = null;
     }
-    pane.is_pwd = false;
-    pane.sticky = false;
     pane.navigatable = false;
     pane.retained_after_exit = false;
     pane.capture_output = false;
@@ -174,7 +168,6 @@ fn recyclePaneForSplit(self: anytype, tab: *Tab, pane: *Pane, pane_id: u16, pane
         pane.exit_key = null;
     }
     pane.closed_by_exit_key = false;
-    pane.parent_tab = null;
     pane.float_style = null;
     if (pane.float_title) |t| {
         self.allocator.free(t);
@@ -186,21 +179,14 @@ fn recyclePaneForSplit(self: anytype, tab: *Tab, pane: *Pane, pane_id: u16, pane
 
 fn recyclePaneForFloat(self: anytype, pane: *Pane, float_state: SessionFloat, actual_focus_uuid: ?[32]u8) void {
     pane.uuid = float_state.pane_uuid;
-    pane.floating = true;
     pane.focused = if (actual_focus_uuid) |focused_uuid| std.mem.eql(u8, &focused_uuid, &float_state.pane_uuid) else false;
-    pane.visible = float_state.visible;
-    pane.tab_visible = float_state.tab_visible;
-    pane.float_key = float_state.float_key;
     pane.float_width_pct = float_state.width_pct;
     pane.float_height_pct = float_state.height_pct;
     pane.float_pos_x_pct = float_state.pos_x_pct;
     pane.float_pos_y_pct = float_state.pos_y_pct;
     pane.float_pad_x = float_state.pad_x;
     pane.float_pad_y = float_state.pad_y;
-    pane.is_pwd = float_state.is_pwd;
-    pane.sticky = float_state.sticky;
     pane.navigatable = false;
-    pane.parent_tab = float_state.parent_tab;
     pane.retained_after_exit = false;
     pane.capture_output = false;
     pane.captured_output.clearRetainingCapacity();
@@ -216,7 +202,7 @@ fn recyclePaneForFloat(self: anytype, pane: *Pane, float_state: SessionFloat, ac
         pane.float_title = null;
     }
     pane.backend.pod.dead = false;
-    if (!pane.is_pwd and pane.pwd_dir != null) {
+    if (!float_state.is_pwd and pane.pwd_dir != null) {
         self.allocator.free(pane.pwd_dir.?);
         pane.pwd_dir = null;
     }
@@ -453,8 +439,8 @@ fn restoreFloatPane(
     recyclePaneForFloat(self, pane, float_state, actual_focus_uuid);
     hydratePaneMetadata(self, pane, float_state.pane_uuid);
 
-    if (pane.float_key != 0) {
-        if (self.getLayoutFloatByKey(pane.float_key)) |float_def| {
+    if (float_state.float_key != 0) {
+        if (self.getLayoutFloatByKey(float_state.float_key)) |float_def| {
             const style = if (float_def.style) |*s| s else if (self.config.float_style_default) |*s| s else null;
             if (style) |s| pane.float_style = s;
             pane.border_color = float_def.color orelse self.config.float_color;
@@ -552,32 +538,25 @@ fn applyTabSnapshotFocus(tab: *Tab, remembered_focus_uuid: ?[32]u8, actual_focus
 }
 
 fn updateFloatPresentation(self: anytype, pane: *Pane, float_state: SessionFloat, actual_focus_uuid: ?[32]u8) void {
-    pane.floating = true;
     pane.focused = if (actual_focus_uuid) |focused_uuid|
         std.mem.eql(u8, &focused_uuid, &float_state.pane_uuid)
     else
         false;
-    pane.visible = float_state.visible;
-    pane.tab_visible = float_state.tab_visible;
-    pane.float_key = float_state.float_key;
     pane.float_width_pct = float_state.width_pct;
     pane.float_height_pct = float_state.height_pct;
     pane.float_pos_x_pct = float_state.pos_x_pct;
     pane.float_pos_y_pct = float_state.pos_y_pct;
     pane.float_pad_x = float_state.pad_x;
     pane.float_pad_y = float_state.pad_y;
-    pane.parent_tab = float_state.parent_tab;
-    pane.sticky = float_state.sticky;
-    pane.is_pwd = float_state.is_pwd;
 
-    if (!pane.is_pwd and pane.pwd_dir != null) {
+    if (!float_state.is_pwd and pane.pwd_dir != null) {
         self.allocator.free(pane.pwd_dir.?);
         pane.pwd_dir = null;
     }
 
     pane.float_style = null;
-    if (pane.float_key != 0) {
-        if (self.getLayoutFloatByKey(pane.float_key)) |float_def| {
+    if (float_state.float_key != 0) {
+        if (self.getLayoutFloatByKey(float_state.float_key)) |float_def| {
             if (float_def.style) |*style| {
                 pane.float_style = style;
             } else if (self.config.float_style_default) |*style| {
@@ -855,16 +834,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     }
 
     // Validate and fix parent_tab indices for floating panes
-    var invalid_parent_tabs: usize = 0;
-    for (self.view.floats.items) |fp| {
-        if (fp.parent_tab) |parent_idx| {
-            if (parent_idx >= self.view.tabs.items.len) {
-                terminal_main.debugLog("reattachSession: invalid parent_tab {d} (only {d} tabs), setting to null", .{ parent_idx, self.view.tabs.items.len });
-                fp.parent_tab = null;
-                invalid_parent_tabs += 1;
-            }
-        }
-    }
+    const invalid_parent_tabs = self.normalizeFloatParentTabs(self.view.tabs.items.len);
     // Notify user if any parent_tab links were broken
     if (invalid_parent_tabs > 0) {
         const msg = std.fmt.allocPrint(
@@ -1050,15 +1020,7 @@ pub fn applySessionSnapshot(self: anytype, snapshot: *const SessionSnapshot) boo
         tab.layout.resize(self.layout_width, self.layout_height);
     }
 
-    var fi: usize = 0;
-    while (fi < self.view.floats.items.len) : (fi += 1) {
-        const pane = self.view.floats.items[fi];
-        if (pane.parent_tab) |parent_idx| {
-            if (parent_idx >= self.view.tabs.items.len) {
-                pane.parent_tab = null;
-            }
-        }
-    }
+    _ = self.normalizeFloatParentTabs(self.view.tabs.items.len);
     self.resizeFloatingPanes();
 
     if (self.view.tabs.items.len > 0) {

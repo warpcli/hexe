@@ -53,16 +53,6 @@ pub const Pane = struct {
 
     // Is this pane focused?
     focused: bool = false,
-    // Is this a floating pane?
-    floating: bool = false,
-    // Is this pane visible? (for floating panes that can be toggled)
-    // For tab-bound floats, this is the simple visibility state
-    visible: bool = true,
-    // For global floats (parent_tab == null), per-tab visibility bitmask
-    // Bit N = visible on tab N (supports up to 64 tabs)
-    tab_visible: u64 = 0,
-    // Key binding for this float (for matching)
-    float_key: u8 = 0,
     // Outer border dimensions (for floating panes with padding)
     border_x: u16 = 0,
     border_y: u16 = 0,
@@ -79,9 +69,6 @@ pub const Pane = struct {
     float_pad_y: u8 = 0,
     // For pwd floats: the directory this float is bound to
     pwd_dir: ?[]const u8 = null,
-    is_pwd: bool = false,
-    // Sticky float - survives mux exit, can be reattached
-    sticky: bool = false,
     // Navigatable float - directional navigation works like splits
     navigatable: bool = false,
     // Named floats keep their last frame after exit so the same toggle can hide
@@ -98,7 +85,6 @@ pub const Pane = struct {
     closed_by_exit_key: bool = false,
     // For tab-bound floats: which tab owns this float
     // null = global float (special=true or pwd=true)
-    parent_tab: ?usize = null,
     // Border style and optional module
     float_style: ?*const core.FloatStyle = null,
     float_title: ?[]u8 = null,
@@ -138,14 +124,6 @@ pub const Pane = struct {
     pokemon_state: widgets.PokemonState = undefined,
     pokemon_initialized: bool = false,
 
-    pub fn isVisibleOnTab(self: *const Pane, tab: usize) bool {
-        if (self.parent_tab != null) {
-            return self.visible;
-        }
-        if (tab >= 64) return false;
-        return (self.tab_visible & (@as(u64, 1) << @intCast(tab))) != 0;
-    }
-
     pub fn takeOscExpectedResponses(self: *Pane) u16 {
         const v = self.osc_expected_responses;
         self.osc_expected_responses = 0;
@@ -156,24 +134,6 @@ pub const Pane = struct {
         const v = self.csi_expected_responses;
         self.csi_expected_responses = 0;
         return v;
-    }
-
-    pub fn setVisibleOnTab(self: *Pane, tab: usize, vis: bool) void {
-        if (self.parent_tab != null) {
-            self.visible = vis;
-            return;
-        }
-        if (tab >= 64) return;
-        const mask = @as(u64, 1) << @intCast(tab);
-        if (vis) {
-            self.tab_visible |= mask;
-        } else {
-            self.tab_visible &= ~mask;
-        }
-    }
-
-    pub fn toggleVisibleOnTab(self: *Pane, tab: usize) void {
-        self.setVisibleOnTab(tab, !self.isVisibleOnTab(tab));
     }
 
     /// Initialize a pane backed by a per-pane pod process.

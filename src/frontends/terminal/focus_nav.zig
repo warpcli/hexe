@@ -53,7 +53,7 @@ pub fn focusDirectionAny(state: *State, dir: layout_mod.Layout.Direction, cursor
     const nav = struct {
         fn pane_rect(p: *Pane) directions.Rect {
             // For floats, prefer the border rect if present (matches what user sees).
-            if (p.floating and p.border_w > 0 and p.border_h > 0) {
+            if (p.border_w > 0 and p.border_h > 0) {
                 return .{ .x0 = p.border_x, .y0 = p.border_y, .x1 = p.border_x + p.border_w, .y1 = p.border_y + p.border_h };
             }
             return .{ .x0 = p.x, .y0 = p.y, .x1 = p.x + p.width, .y1 = p.y + p.height };

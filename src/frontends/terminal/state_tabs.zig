@@ -124,7 +124,7 @@ pub fn closeCurrentTab(self: anytype) bool {
     var i: usize = 0;
     while (i < self.view.floats.items.len) {
         const fp = self.view.floats.items[i];
-        if (fp.parent_tab) |parent| {
+        if (self.paneParentTab(fp)) |parent| {
             if (parent == closing_tab) {
                 // Kill this tab-bound float.
                 self.runtime.killPane(fp.uuid) catch |e| {
@@ -143,14 +143,11 @@ pub fn closeCurrentTab(self: anytype) bool {
                 }
                 self.syncSessionFloatRemoved(fp.uuid);
                 continue;
-            } else if (parent > closing_tab) {
-                // Adjust index for floats on later tabs.
-                fp.parent_tab = parent - 1;
-                self.syncSessionFloat(fp, false);
             }
         }
         i += 1;
     }
+    self.reindexFloatParentTabsAfterRemovedTab(closing_tab);
 
     var tab = self.view.tabs.orderedRemove(self.activeTabIndex());
     tab.deinit();
@@ -257,17 +254,17 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
         self.runtime.requestPaneCwd(uuid);
     }
 
-    pane.floating = true;
     pane.focused = true;
-    pane.float_key = float_def.key;
-    pane.sticky = float_def.attributes.sticky;
 
     // For global floats (special or pwd), set per-tab visibility.
-    if (float_def.attributes.global or float_def.attributes.per_cwd) {
-        pane.setVisibleOnTab(self.activeTabIndex(), true);
-    } else {
-        pane.visible = true;
-    }
+    const parent_tab: ?usize = if (!float_def.attributes.global and !float_def.attributes.per_cwd)
+        self.activeTabIndex()
+    else
+        null;
+    const tab_visible: u64 = if (parent_tab == null and self.activeTabIndex() < 64)
+        (@as(u64, 1) << @intCast(self.activeTabIndex()))
+    else
+        0;
 
     // Store outer dimensions and style for border rendering.
     pane.border_x = outer_x;
@@ -285,13 +282,7 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
 
     // Store pwd for pwd floats.
     if (float_def.attributes.per_cwd) {
-        pane.is_pwd = true;
         pane.pwd_dir = self.allocator.dupe(u8, cwd) catch null;
-    }
-
-    // For tab-bound floats, set parent tab.
-    if (!float_def.attributes.global and !float_def.attributes.per_cwd) {
-        pane.parent_tab = self.activeTabIndex();
     }
 
     // Store style reference.
@@ -303,6 +294,22 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
     pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
 
     try self.view.floats.append(self.allocator, pane);
+    self.setLocalFloatState(
+        pane.uuid,
+        parent_tab,
+        true,
+        tab_visible,
+        float_def.attributes.sticky,
+        float_def.attributes.per_cwd,
+        float_def.key,
+        @intCast(width_pct),
+        @intCast(height_pct),
+        @intCast(pos_x_pct),
+        @intCast(pos_y_pct),
+        @intCast(pad_x_cfg),
+        @intCast(pad_y_cfg),
+        false,
+    );
     // Don't set active_floating here - let user toggle it manually.
 }
 

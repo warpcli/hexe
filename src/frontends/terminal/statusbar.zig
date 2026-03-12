@@ -1521,12 +1521,12 @@ pub fn draw(
             ctx.alt_screen = state.view.floats.items[idx].vt.inAltScreen();
 
             const fp = state.view.floats.items[idx];
-            ctx.float_key = fp.float_key;
-            ctx.float_sticky = fp.sticky;
-            ctx.float_global = fp.parent_tab == null;
+            ctx.float_key = state.paneFloatKey(fp);
+            ctx.float_sticky = state.paneSticky(fp);
+            ctx.float_global = state.paneParentTab(fp) == null;
 
-            if (fp.float_key != 0) {
-                if (state.getLayoutFloatByKey(fp.float_key)) |fd| {
+            if (ctx.float_key != 0) {
+                if (state.getLayoutFloatByKey(ctx.float_key)) |fd| {
                     ctx.float_destroyable = fd.attributes.destroy;
                     ctx.float_exclusive = fd.attributes.exclusive;
                     ctx.float_per_cwd = fd.attributes.per_cwd;
@@ -1953,11 +1953,11 @@ pub fn hitTestAction(
         if (idx < state.view.floats.items.len) {
             ctx.alt_screen = state.view.floats.items[idx].vt.inAltScreen();
             const fp = state.view.floats.items[idx];
-            ctx.float_key = fp.float_key;
-            ctx.float_sticky = fp.sticky;
-            ctx.float_global = fp.parent_tab == null;
-            if (fp.float_key != 0) {
-                if (state.getLayoutFloatByKey(fp.float_key)) |fd| {
+            ctx.float_key = state.paneFloatKey(fp);
+            ctx.float_sticky = state.paneSticky(fp);
+            ctx.float_global = state.paneParentTab(fp) == null;
+            if (ctx.float_key != 0) {
+                if (state.getLayoutFloatByKey(ctx.float_key)) |fd| {
                     ctx.float_destroyable = fd.attributes.destroy;
                     ctx.float_exclusive = fd.attributes.exclusive;
                     ctx.float_per_cwd = fd.attributes.per_cwd;

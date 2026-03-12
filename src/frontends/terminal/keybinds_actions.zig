@@ -32,7 +32,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 state.currentLayout().getFocusedPane();
 
             if (current_pane) |p| {
-                if (p.sticky) {
+                if (state.paneSticky(p)) {
                     state.notifications.show("Cannot disown sticky float");
                     state.needs_render = true;
                     return true;

@@ -46,8 +46,8 @@ That is better than the old mux-owned model, but it is not full separation.
 - `src/frontends/terminal/state_reattach.zig`
   - still reconstructs terminal session objects from the shared projection.
 - `src/frontends/terminal/pane.zig`
-  - still carries session-shaped fields that should live in the projection or
-    runtime instead of the terminal widget.
+  - no longer carries float/session ownership flags, but still mixes VT widget
+    behavior with float presentation behavior.
 - `src/core/frontend_client.zig`
   - transport is abstracted, but `liblink` is still missing.
 - `src/cli/commands/com.zig` and `src/cli/commands/ses_freeze.zig`
@@ -428,13 +428,13 @@ Done when:
 ### Phase 4: split terminal `Pane` into view vs session/runtime pieces
 
 Progress: pane-local exit status and cached SES CWD have been removed, and
-float/session metadata queries now read through runtime/projection helpers; the
-remaining work is stripping the leftover session-shaped fields from
-`src/frontends/terminal/pane.zig`.
+float/session metadata queries now read through runtime/projection helpers. The
+remaining work is cutting the remaining float presentation behavior out of
+`src/frontends/terminal/pane.zig` so it becomes a pure terminal widget.
 
 1. Done: Audit `src/frontends/terminal/pane.zig`.
-2. Move session-shaped fields out of terminal pane objects into shared runtime
-   records.
+2. Done: Move session-shaped fields out of terminal pane objects into shared
+   runtime records.
 3. Keep terminal pane widgets responsible only for VT/render/input behavior.
 4. Done: Make pane metadata and lifecycle queries go through the
    runtime/projection.

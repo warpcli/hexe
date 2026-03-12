@@ -909,36 +909,16 @@ pub const State = struct {
         if (self.runtime.projection.paneMeta(pane.uuid)) |meta| return meta;
         return .{
             .uuid = pane.uuid,
-            .kind = if (pane.floating) .float else .split,
-            .parent_tab = pane.parent_tab,
-            .sticky = pane.sticky,
-            .is_pwd = pane.is_pwd,
-            .float_key = pane.float_key,
+            .kind = .split,
         };
     }
 
     pub fn paneFloatState(self: *const State, pane: *const Pane) ?core.session_model.SessionFloat {
-        if (self.runtime.projection.floatState(pane.uuid)) |float_state| return float_state;
-        if (!pane.floating) return null;
-        return .{
-            .pane_uuid = pane.uuid,
-            .parent_tab = pane.parent_tab,
-            .visible = pane.visible,
-            .tab_visible = pane.tab_visible,
-            .sticky = pane.sticky,
-            .is_pwd = pane.is_pwd,
-            .float_key = pane.float_key,
-            .width_pct = pane.float_width_pct,
-            .height_pct = pane.float_height_pct,
-            .pos_x_pct = pane.float_pos_x_pct,
-            .pos_y_pct = pane.float_pos_y_pct,
-            .pad_x = pane.float_pad_x,
-            .pad_y = pane.float_pad_y,
-        };
+        return self.runtime.projection.floatState(pane.uuid);
     }
 
     pub fn paneIsFloating(self: *const State, pane: *const Pane) bool {
-        return self.paneSessionMeta(pane).kind == .float;
+        return self.runtime.projection.floatState(pane.uuid) != null;
     }
 
     pub fn paneIsFocused(self: *const State, pane: *const Pane) bool {
@@ -950,7 +930,7 @@ pub const State = struct {
 
     pub fn paneParentTab(self: *const State, pane: *const Pane) ?usize {
         if (self.paneFloatState(pane)) |float_state| return float_state.parent_tab;
-        return self.paneSessionMeta(pane).parent_tab;
+        return null;
     }
 
     pub fn paneVisibleOnTab(self: *const State, pane: *const Pane, tab: usize) bool {
@@ -966,47 +946,122 @@ pub const State = struct {
 
     pub fn paneFloatKey(self: *const State, pane: *const Pane) u8 {
         if (self.paneFloatState(pane)) |float_state| return float_state.float_key;
-        return self.paneSessionMeta(pane).float_key;
+        return 0;
     }
 
     pub fn paneSticky(self: *const State, pane: *const Pane) bool {
         if (self.paneFloatState(pane)) |float_state| return float_state.sticky;
-        return self.paneSessionMeta(pane).sticky;
+        return false;
     }
 
     pub fn paneIsPwd(self: *const State, pane: *const Pane) bool {
         if (self.paneFloatState(pane)) |float_state| return float_state.is_pwd;
-        return self.paneSessionMeta(pane).is_pwd;
+        return false;
     }
 
     pub fn paneFloatWidthPct(self: *const State, pane: *const Pane) u8 {
-        if (self.paneFloatState(pane)) |float_state| return float_state.width_pct;
+        _ = self;
         return pane.float_width_pct;
     }
 
     pub fn paneFloatHeightPct(self: *const State, pane: *const Pane) u8 {
-        if (self.paneFloatState(pane)) |float_state| return float_state.height_pct;
+        _ = self;
         return pane.float_height_pct;
     }
 
     pub fn paneFloatPosXPct(self: *const State, pane: *const Pane) u8 {
-        if (self.paneFloatState(pane)) |float_state| return float_state.pos_x_pct;
+        _ = self;
         return pane.float_pos_x_pct;
     }
 
     pub fn paneFloatPosYPct(self: *const State, pane: *const Pane) u8 {
-        if (self.paneFloatState(pane)) |float_state| return float_state.pos_y_pct;
+        _ = self;
         return pane.float_pos_y_pct;
     }
 
     pub fn paneFloatPadX(self: *const State, pane: *const Pane) u8 {
-        if (self.paneFloatState(pane)) |float_state| return float_state.pad_x;
+        _ = self;
         return pane.float_pad_x;
     }
 
     pub fn paneFloatPadY(self: *const State, pane: *const Pane) u8 {
-        if (self.paneFloatState(pane)) |float_state| return float_state.pad_y;
+        _ = self;
         return pane.float_pad_y;
+    }
+
+    pub fn setLocalFloatState(
+        self: *State,
+        pane_uuid: [32]u8,
+        parent_tab: ?usize,
+        visible: bool,
+        tab_visible: u64,
+        sticky: bool,
+        is_pwd: bool,
+        float_key: u8,
+        width_pct: u8,
+        height_pct: u8,
+        pos_x_pct: u8,
+        pos_y_pct: u8,
+        pad_x: u8,
+        pad_y: u8,
+        active: bool,
+    ) void {
+        self.runtime.projection.syncFloatState(.{
+            .pane_uuid = pane_uuid,
+            .parent_tab = parent_tab,
+            .visible = visible,
+            .tab_visible = tab_visible,
+            .sticky = sticky,
+            .is_pwd = is_pwd,
+            .float_key = float_key,
+            .width_pct = width_pct,
+            .height_pct = height_pct,
+            .pos_x_pct = pos_x_pct,
+            .pos_y_pct = pos_y_pct,
+            .pad_x = pad_x,
+            .pad_y = pad_y,
+        }, active);
+    }
+
+    pub fn setPaneVisibleOnTab(self: *State, pane: *const Pane, tab: usize, visible: bool) void {
+        self.runtime.projection.setFloatVisibleOnTab(pane.uuid, tab, visible);
+    }
+
+    pub fn togglePaneVisibleOnTab(self: *State, pane: *const Pane, tab: usize) void {
+        self.runtime.projection.toggleFloatVisibleOnTab(pane.uuid, tab);
+    }
+
+    pub fn setPaneFloatGeometry(
+        self: *State,
+        pane: *const Pane,
+        width_pct: u8,
+        height_pct: u8,
+        pos_x_pct: u8,
+        pos_y_pct: u8,
+        pad_x: u8,
+        pad_y: u8,
+    ) void {
+        self.runtime.projection.setFloatGeometry(
+            pane.uuid,
+            width_pct,
+            height_pct,
+            pos_x_pct,
+            pos_y_pct,
+            pad_x,
+            pad_y,
+        );
+    }
+
+    pub fn swapPaneFloatGeometry(self: *State, a: *const Pane, b: *const Pane) void {
+        self.runtime.projection.swapFloatGeometry(a.uuid, b.uuid);
+    }
+
+    pub fn reindexFloatParentTabsAfterRemovedTab(self: *State, removed_idx: usize) void {
+        self.runtime.projection.reindexFloatParentTabsAfterRemovedTab(removed_idx);
+    }
+
+    pub fn normalizeFloatParentTabs(self: *State, tab_count: usize) usize {
+        return self.runtime.projection.normalizeFloatParentTabs(tab_count);
     }
 
     pub fn setPaneNameOwned(self: *State, uuid: [32]u8, name_owned: []u8) void {
