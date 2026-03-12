@@ -1,6 +1,6 @@
 const std = @import("std");
 const core = @import("core");
-const mux = @import("main.zig");
+const terminal_main = @import("main.zig");
 
 const state_types = @import("state_types.zig");
 const Tab = state_types.Tab;
@@ -59,7 +59,7 @@ pub fn findPaneByPaneId(self: anytype, pane_id: u16) ?*Pane {
 pub fn createTab(self: anytype) !void {
     const parent_uuid = self.getCurrentFocusedUuid();
 
-    // Get cwd from currently focused pane (float or split), with fallback to mux's cwd.
+    // Get cwd from currently focused pane (float or split), with fallback to the terminal process cwd.
     var cwd: ?[]const u8 = null;
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (self.view.tabs.items.len > 0) {
@@ -73,19 +73,19 @@ pub fn createTab(self: anytype) !void {
             // Use getReliableCwd which tries multiple sources
             cwd = self.getReliableCwd(focused);
         }
-        // If pane CWD is null, fall back to mux's current directory
+        // If pane CWD is null, fall back to the terminal process current directory.
         if (cwd == null) {
             cwd = std.posix.getcwd(&cwd_buf) catch null;
         }
     } else {
-        // First tab - use mux's current directory.
+        // First tab - use the terminal process current directory.
         cwd = std.posix.getcwd(&cwd_buf) catch null;
     }
 
     // Generate tab name in format "session-N" (e.g., "alpha-1", "beta-2")
     const tab_counter = self.takeNextTabCounter();
     if (tab_counter == 999) {
-        mux.debugLog("VALIDATION: tab_counter reached limit, wrapping to 0", .{});
+        terminal_main.debugLog("VALIDATION: tab_counter reached limit, wrapping to 0", .{});
     }
     const name_owned = try core.ipc.generateTabName(self.allocator, self.sessionName(), tab_counter);
     const tab_uuid = core.ipc.generateUuid();
@@ -128,7 +128,7 @@ pub fn closeCurrentTab(self: anytype) bool {
             if (parent == closing_tab) {
                 // Kill this tab-bound float.
                 self.runtime.killPane(fp.uuid) catch |e| {
-                    core.logging.logError("mux", "killPane failed in closeTab", e);
+                    core.logging.logError("terminal", "killPane failed in closeTab", e);
                 };
                 fp.deinit();
                 self.allocator.destroy(fp);

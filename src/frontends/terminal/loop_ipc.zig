@@ -4,7 +4,7 @@ const core = @import("core");
 const wire = core.wire;
 const pop = @import("pop");
 
-const mux = @import("main.zig");
+const terminal_main = @import("main.zig");
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 const CursorSnapshot = @import("state.zig").CursorSnapshot;
@@ -24,7 +24,7 @@ pub fn handleSesMessage(state: *State, buffer: []u8) void {
     while (msgs < 32) : (msgs += 1) {
         const hdr = wire.tryReadControlHeader(fd) catch break;
         const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
-        mux.debugLog("ses msg: type=0x{x:0>4} len={d}", .{ hdr.msg_type, hdr.payload_len });
+        terminal_main.debugLog("ses msg: type=0x{x:0>4} len={d}", .{ hdr.msg_type, hdr.payload_len });
 
         switch (msg_type) {
             .notify => {
@@ -585,7 +585,7 @@ fn handleExitIntent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
     state.pending_action = .exit_intent;
     // Mark that we have a pending exit_intent (no longer an fd, use sentinel).
     state.pending_exit_intent = true;
-    state.popups.showConfirm("Exit mux?", .{}) catch {
+    state.popups.showConfirm("Exit terminal session?", .{}) catch {
         state.pending_action = null;
         state.pending_exit_intent = false;
         sendExitIntentResultPub(state, true);
@@ -696,7 +696,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         }
     }
 
-    // Determine spawn cwd - use explicit cwd if provided, else try focused pane, else mux cwd.
+    // Determine spawn cwd - use explicit cwd if provided, else try focused pane, else the terminal process cwd.
     var spawn_cwd: ?[]const u8 = null;
     var mux_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (cwd_slice.len > 0) {
@@ -709,7 +709,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         if (focused_pane) |pane| {
             spawn_cwd = state.getReliableCwd(pane);
         }
-        // Fallback to mux's CWD
+        // Fallback to the terminal process CWD.
         if (spawn_cwd == null) {
             spawn_cwd = std.posix.getcwd(&mux_cwd_buf) catch null;
         }
@@ -750,7 +750,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
     const use_pod = (!wait_for_exit) or isolated or (isolation_profile != null);
     const title: ?[]const u8 = if (title_slice.len > 0) title_slice else null;
 
-    mux.debugLog("handleFloatRequest: wait_for_exit={} isolation_profile={s} use_pod={}", .{ wait_for_exit, isolation_profile orelse "", use_pod });
+    terminal_main.debugLog("handleFloatRequest: wait_for_exit={} isolation_profile={s} use_pod={}", .{ wait_for_exit, isolation_profile orelse "", use_pod });
 
     const command = state.allocator.dupe(u8, cmd) catch return;
     defer state.allocator.free(command);
@@ -801,7 +801,7 @@ fn handlePaneExited(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
         return;
     }
     const pu = wire.readStruct(wire.PaneUuid, fd) catch return;
-    mux.debugLogUuid(&pu.uuid, "pane_exited received from SES", .{});
+    terminal_main.debugLogUuid(&pu.uuid, "pane_exited received from SES", .{});
 
     // Mark the pane as dead in all tabs and floats.
     for (state.view.tabs.items) |*tab| {

@@ -205,12 +205,12 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
 
         if (instance) |instance_name| {
             if (instance_name.len > 0) {
-                print("    → hexe mux attach --instance {s} {s}\n", .{ instance_name, uuid_prefix });
+                print("    → hexe terminal attach --instance {s} {s}\n", .{ instance_name, uuid_prefix });
             } else {
-                print("    → hexe mux attach {s}\n", .{uuid_prefix});
+                print("    → hexe terminal attach {s}\n", .{uuid_prefix});
             }
         } else {
-            print("    → hexe mux attach {s}\n", .{uuid_prefix});
+            print("    → hexe terminal attach {s}\n", .{uuid_prefix});
         }
 
         if (session_state.len > 0) {
@@ -363,7 +363,7 @@ pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator:
         } else return;
     } else {
         const env_uuid = posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Not inside a hexe mux session (use --uuid to query specific pane)\n", .{});
+            print("Not inside a hexe terminal session (use --uuid to query a specific pane)\n", .{});
             return;
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
@@ -610,7 +610,7 @@ fn resolveRelatedPane(allocator: std.mem.Allocator, want_creator: bool) ?[32]u8 
     const posix = std.posix;
 
     const current_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-        print("Error: --creator/--last requires running inside hexe mux\n", .{});
+        print("Error: --creator/--last requires running inside hexe terminal\n", .{});
         return null;
     };
     const parsed_current = parseUuid32Hex(current_uuid) orelse return null;
@@ -1267,7 +1267,7 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
 
     // Get current pane UUID.
     const uuid_str = posix.getenv("HEXE_PANE_UUID") orelse {
-        print("Error: not inside a hexe mux session (HEXE_PANE_UUID not set)\n", .{});
+        print("Error: not inside a hexe terminal session (HEXE_PANE_UUID not set)\n", .{});
         return;
     };
     const uuid_arr = parseUuid32Hex(uuid_str) orelse {
@@ -1275,7 +1275,7 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
         return;
     };
 
-    // Connect to SES and request mux state.
+    // Connect to SES and request the current layout export.
     const fd = connectSesCliChannel(allocator) orelse return;
     defer posix.close(fd);
 
@@ -1319,20 +1319,20 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
         return;
     }
 
-    // Read raw mux state JSON.
-    const mux_state = allocator.alloc(u8, hdr.payload_len) catch {
+    // Read raw layout export JSON.
+    const layout_export = allocator.alloc(u8, hdr.payload_len) catch {
         print("Error: allocation failed\n", .{});
         return;
     };
-    defer allocator.free(mux_state);
-    wire.readExact(fd, mux_state) catch {
-        print("Error: failed to read mux state\n", .{});
+    defer allocator.free(layout_export);
+    wire.readExact(fd, layout_export) catch {
+        print("Error: failed to read layout export\n", .{});
         return;
     };
 
-    // Parse mux state, find active tab, extract tree + splits for CWD lookup.
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, mux_state, .{}) catch {
-        print("Error: failed to parse mux state\n", .{});
+    // Parse the layout export, find the active tab, and extract tree + splits for CWD lookup.
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, layout_export, .{}) catch {
+        print("Error: failed to parse layout export\n", .{});
         return;
     };
     defer parsed.deinit();
@@ -1340,14 +1340,14 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
     const root_obj = switch (parsed.value) {
         .object => |o| o,
         else => {
-            print("Error: invalid mux state format\n", .{});
+            print("Error: invalid layout export format\n", .{});
             return;
         },
     };
 
     // Find active tab.
     const active_tab_val = root_obj.get("active_tab") orelse {
-        print("Error: no active_tab in mux state\n", .{});
+        print("Error: no active_tab in layout export\n", .{});
         return;
     };
     const active_tab_idx: usize = switch (active_tab_val) {
@@ -1356,7 +1356,7 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
     };
 
     const tabs_val = root_obj.get("tabs") orelse {
-        print("Error: no tabs in mux state\n", .{});
+        print("Error: no tabs in layout export\n", .{});
         return;
     };
     const tabs_arr = switch (tabs_val) {
@@ -1597,7 +1597,7 @@ pub fn runLayoutLoad(allocator: std.mem.Allocator, name: []const u8) !void {
 
     // Get current pane UUID.
     const uuid_str = posix.getenv("HEXE_PANE_UUID") orelse {
-        print("Error: not inside a hexe mux session (HEXE_PANE_UUID not set)\n", .{});
+        print("Error: not inside a hexe terminal session (HEXE_PANE_UUID not set)\n", .{});
         return;
     };
     const uuid_arr = parseUuid32Hex(uuid_str) orelse {

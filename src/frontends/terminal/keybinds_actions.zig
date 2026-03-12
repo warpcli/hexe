@@ -18,7 +18,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         .mux_quit => {
             if (cfg.confirm_on_exit) {
                 state.pending_action = .exit;
-                state.popups.showConfirm("Exit mux?", .{}) catch {};
+                state.popups.showConfirm("Exit terminal session?", .{}) catch {};
                 state.needs_render = true;
             } else {
                 state.running = false;
@@ -184,7 +184,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             if (state.currentLayout().getFocusedPane()) |p| {
                 cwd = state.getReliableCwd(p);
             }
-            // Fallback to mux's CWD if pane CWD unavailable
+            // Fallback to the terminal process CWD if pane CWD is unavailable.
             var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
             if (cwd == null) {
                 cwd = std.posix.getcwd(&cwd_buf) catch null;
@@ -206,7 +206,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             if (state.currentLayout().getFocusedPane()) |p| {
                 cwd = state.getReliableCwd(p);
             }
-            // Fallback to mux's CWD if pane CWD unavailable
+            // Fallback to the terminal process CWD if pane CWD is unavailable.
             var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
             if (cwd == null) {
                 cwd = std.posix.getcwd(&cwd_buf) catch null;
@@ -244,7 +244,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             }
             state.setActiveFloatingIndex(null);
             state.createTab() catch |e| {
-                core.logging.logError("mux", "createTab failed", e);
+                core.logging.logError("terminal", "createTab failed", e);
             };
             state.needs_render = true;
             return true;

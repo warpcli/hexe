@@ -1714,9 +1714,9 @@ pub const SesState = struct {
         pane_uuids: [][32]u8, // UUIDs of panes to adopt
     };
 
-    /// Reattach to a detached session - returns mux state and pane UUIDs.
+    /// Reattach to a detached session - returns the canonical session snapshot and pane UUIDs.
     /// The session is NOT removed from detached_sessions yet — call
-    /// removeDetachedSession() after the MUX confirms successful restore.
+    /// removeDetachedSession() after the terminal frontend confirms successful restore.
     pub fn reattachSession(self: *SesState, session_id: [16]u8, client_id: usize) !?ReattachResult {
         _ = client_id; // Client will adopt panes individually
 

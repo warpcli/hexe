@@ -1,6 +1,6 @@
 const std = @import("std");
 const core = @import("core");
-const mux = @import("main.zig");
+const terminal_main = @import("main.zig");
 
 const state_types = @import("state_types.zig");
 const Tab = state_types.Tab;
@@ -17,10 +17,10 @@ const SplitConfig = core.session_config.SplitConfig;
 const TabConfig = core.session_config.TabConfig;
 const SplitChild = core.session_config.SplitChild;
 
-/// Apply a session config to the mux state.
+/// Apply a session config to the terminal frontend state.
 /// Creates tabs with the specified split trees, panes with commands/cwds.
 pub fn applySessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]const u8) !void {
-    mux.debugLog("applySessionConfig: {d} tabs, {d} global floats", .{ config.tabs.len, config.floats.len });
+    terminal_main.debugLog("applySessionConfig: {d} tabs, {d} global floats", .{ config.tabs.len, config.floats.len });
 
     if (config.tabs.len == 0) {
         // No tabs defined — create a single default tab

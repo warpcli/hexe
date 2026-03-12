@@ -438,12 +438,12 @@ fn listStatus(allocator: std.mem.Allocator, full_mode: bool) !void {
         const instance = posix.getenv("HEXE_INSTANCE");
         if (instance) |inst| {
             if (inst.len > 0) {
-                print("  {s} [{s}] {d} panes - reattach: hexe mux attach --instance {s} {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, inst, name_str });
+                print("  {s} [{s}] {d} panes - reattach: hexe terminal attach --instance {s} {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, inst, name_str });
             } else {
-                print("  {s} [{s}] {d} panes - reattach: hexe mux attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
+                print("  {s} [{s}] {d} panes - reattach: hexe terminal attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
             }
         } else {
-            print("  {s} [{s}] {d} panes - reattach: hexe mux attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
+            print("  {s} [{s}] {d} panes - reattach: hexe terminal attach {s}\n", .{ name_str, de.session_id[0..8], de.pane_count, name_str });
         }
 
         if (session_state.len > 0) {

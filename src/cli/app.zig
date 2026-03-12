@@ -527,7 +527,7 @@ pub fn main() !void {
             }
         }
 
-        try runMuxNew("", false, "", "", false);
+        try runTerminalNew("", false, "", "", false);
         return;
     }
 
@@ -727,7 +727,7 @@ pub fn main() !void {
             } else if (m.containsArg("test-only")) {
                 setGeneratedTestInstance();
             }
-            try runMuxNew(
+            try runTerminalNew(
                 m.getSingleValue("name") orelse "",
                 m.containsArg("debug"),
                 m.getSingleValue("logfile") orelse "",
@@ -739,7 +739,7 @@ pub fn main() !void {
         if (mux_matches.subcommandMatches("attach")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
-            try runMuxAttach(
+            try runTerminalAttach(
                 m.getSingleValue("name") orelse "",
                 m.containsArg("debug"),
                 m.getSingleValue("logfile") orelse "",
@@ -1058,14 +1058,14 @@ fn askUseLocalLayout() bool {
     return false;
 }
 
-fn buildMuxTransport(socket_path: []const u8, no_autostart_ses: bool) core.FrontendTransport {
+fn buildTerminalTransport(socket_path: []const u8, no_autostart_ses: bool) core.FrontendTransport {
     return core.FrontendTransportHelpers.localIpcTransport(
         if (socket_path.len > 0) socket_path else null,
         !no_autostart_ses,
     );
 }
 
-fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
+fn runTerminalNew(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
     if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
         if (pane_uuid.len >= 32) {
             if (!try showNestedMuxConfirmation(pane_uuid)) {
@@ -1078,17 +1078,17 @@ fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8, socket_path: [
         .name = if (name.len > 0) name else null,
         .debug = debug,
         .log_file = if (log_file.len > 0) log_file else null,
-        .transport = buildMuxTransport(socket_path, no_autostart_ses),
+        .transport = buildTerminalTransport(socket_path, no_autostart_ses),
     });
 }
 
-fn runMuxAttach(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
+fn runTerminalAttach(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
     if (name.len > 0) {
         try terminal.run(.{
             .attach = name,
             .debug = debug,
             .log_file = if (log_file.len > 0) log_file else null,
-            .transport = buildMuxTransport(socket_path, no_autostart_ses),
+            .transport = buildTerminalTransport(socket_path, no_autostart_ses),
         });
     } else {
         print("Error: session name required\n", .{});

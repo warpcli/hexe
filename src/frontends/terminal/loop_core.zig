@@ -11,7 +11,7 @@ const State = @import("state.zig").State;
 const FrontendRuntime = core.FrontendRuntime;
 const helpers = @import("helpers.zig");
 
-const mux = @import("main.zig");
+const terminal_main = @import("main.zig");
 const loop_input = @import("loop_input.zig");
 const loop_ipc = @import("loop_ipc.zig");
 const loop_mouse = @import("loop_mouse.zig");
@@ -56,7 +56,7 @@ fn applyPostQueryFeatureModes(state: *State) void {
 
 fn logTerminalCapabilities(state: *State, timed_out: bool) void {
     const caps = state.renderer.vx.caps;
-    mux.debugLog(
+    terminal_main.debugLog(
         "terminal caps: kitty_keyboard={} kitty_graphics={} rgb={} unicode={s} sgr_pixels={} color_updates={} multi_cursor={} explicit_width={} scaled_text={} timeout={}",
         .{
             caps.kitty_keyboard,
@@ -73,7 +73,7 @@ fn logTerminalCapabilities(state: *State, timed_out: bool) void {
     );
 
     if (timed_out) {
-        mux.debugLog("terminal capability query timed out; using best-effort feature set", .{});
+        terminal_main.debugLog("terminal capability query timed out; using best-effort feature set", .{});
     }
 }
 
@@ -278,7 +278,7 @@ fn sesVtCallback(
 
         if (slot.state.findPaneByPaneId(hdr.pane_id)) |pane| {
             if (hdr.frame_type == @intFromEnum(pod_protocol.FrameType.output)) {
-                mux.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} output len={d}", .{ hdr.pane_id, hdr.len });
+                terminal_main.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} output len={d}", .{ hdr.pane_id, hdr.len });
                 pane.feedPodOutput(slot.buffer[0..hdr.len]);
                 const osc_responses = pane.takeOscExpectedResponses();
                 if (osc_responses > 0) {
@@ -297,13 +297,13 @@ fn sesVtCallback(
                 pane.vt.invalidateRenderState();
                 slot.state.needs_render = true;
             } else if (hdr.frame_type == @intFromEnum(pod_protocol.FrameType.backlog_end)) {
-                mux.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} backlog_end", .{hdr.pane_id});
+                terminal_main.debugLogUuid(&pane.uuid, "vt recv: pane_id={d} backlog_end", .{hdr.pane_id});
                 pane.vt.invalidateRenderState();
                 slot.state.needs_render = true;
                 slot.state.force_full_render = true;
             }
         } else {
-            mux.debugLog("vt recv: UNKNOWN pane_id={d} type={d} len={d} — no matching pane!", .{ hdr.pane_id, hdr.frame_type, hdr.len });
+            terminal_main.debugLog("vt recv: UNKNOWN pane_id={d} type={d} len={d} — no matching pane!", .{ hdr.pane_id, hdr.frame_type, hdr.len });
         }
     }
 
@@ -385,7 +385,7 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
         if (pane.retained_after_exit) return;
         pane.retained_after_exit = true;
 
-        mux.debugLog("float pane retained after exit: uuid={s} exit_code={d} focused={}", .{
+        terminal_main.debugLog("float pane retained after exit: uuid={s} exit_code={d} focused={}", .{
             pane.uuid[0..8],
             exit_code,
             was_active,
@@ -417,7 +417,7 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
 
     _ = state.view.floats.orderedRemove(index);
 
-    mux.debugLog("float pane died: uuid={s} exit_code={d} focused={}", .{ pane.uuid[0..8], exit_code, was_active });
+    terminal_main.debugLog("float pane died: uuid={s} exit_code={d} focused={}", .{ pane.uuid[0..8], exit_code, was_active });
 
     if (!was_active and exit_code != 0) {
         const msg = std.fmt.allocPrint(
@@ -690,7 +690,7 @@ pub fn runMainLoop(state: *State) !void {
                     _ = state.currentLayout().closePane(dead_id);
 
                     // Log pane death
-                    mux.debugLog("pane died: id={d} exit_code={d} focused={}", .{ dead_id, exit_code, was_focused });
+                    terminal_main.debugLog("pane died: id={d} exit_code={d} focused={}", .{ dead_id, exit_code, was_focused });
 
                     // Show notification if pane died with non-zero exit or was unfocused (unexpected)
                     if (!was_focused and exit_code != 0) {
@@ -724,7 +724,7 @@ pub fn runMainLoop(state: *State) !void {
                     } else if (state.config.confirm_on_exit and state.pending_action == null) {
                         state.pending_action = .exit;
                         state.exit_from_shell_death = true;
-                        state.popups.showConfirm("Shell exited. Close mux?", .{}) catch {};
+                        state.popups.showConfirm("Shell exited. Close terminal session?", .{}) catch {};
                         state.needs_render = true;
                     } else if (state.pending_action != .exit or !state.exit_from_shell_death) {
                         state.running = false;

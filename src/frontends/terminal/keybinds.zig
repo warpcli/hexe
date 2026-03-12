@@ -157,7 +157,7 @@ fn currentFocusContext(state: *State) FocusContext {
     return if (state.activeFloatingIndex() != null) .float else .split;
 }
 
-/// Build a PaneQuery from the current mux state for condition evaluation.
+/// Build a PaneQuery from the current terminal session state for condition evaluation.
 fn buildPaneQuery(state: *State) PaneQuery {
     const is_float = state.activeFloatingIndex() != null;
     const pane: ?*Pane = if (state.activeFloatingIndex()) |idx| blk: {

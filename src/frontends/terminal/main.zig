@@ -43,7 +43,7 @@ pub fn debugLog(comptime fmt: []const u8, args: anytype) void {
     const ms = std.time.milliTimestamp();
     const secs = @divTrunc(ms, 1000);
     const frac = @mod(ms, 1000);
-    std.debug.print("{d}.{d:0>3} [mux] " ++ fmt ++ "\n", .{ secs, frac } ++ args);
+    std.debug.print("{d}.{d:0>3} [terminal] " ++ fmt ++ "\n", .{ secs, frac } ++ args);
 }
 
 pub fn debugLogUuid(uuid: []const u8, comptime fmt: []const u8, args: anytype) void {
@@ -52,7 +52,7 @@ pub fn debugLogUuid(uuid: []const u8, comptime fmt: []const u8, args: anytype) v
     const ms = std.time.milliTimestamp();
     const secs = @divTrunc(ms, 1000);
     const frac = @mod(ms, 1000);
-    std.debug.print("{d}.{d:0>3} [mux][{s}] " ++ fmt ++ "\n", .{ secs, frac, short_uuid } ++ args);
+    std.debug.print("{d}.{d:0>3} [terminal][{s}] " ++ fmt ++ "\n", .{ secs, frac, short_uuid } ++ args);
 }
 
 fn notifySessionNameChange(state: *State, change: *FrontendAttach.SessionNameChange) void {
@@ -68,7 +68,7 @@ fn notifySessionNameChange(state: *State, change: *FrontendAttach.SessionNameCha
 }
 
 /// Arguments for terminal frontend commands.
-pub const MuxArgs = struct {
+pub const TerminalArgs = struct {
     name: ?[]const u8 = null,
     attach: ?[]const u8 = null,
     notify_message: ?[]const u8 = null,
@@ -81,18 +81,18 @@ pub const MuxArgs = struct {
 };
 
 /// Entry point for the terminal frontend - can be called directly from unified CLI.
-pub fn run(mux_args: MuxArgs) !void {
+pub fn run(terminal_args: TerminalArgs) !void {
     const allocator = std.heap.page_allocator;
 
     // Handle --notify: send to parent terminal frontend and exit.
-    if (mux_args.notify_message) |msg| {
-        sendNotifyToParentMux(allocator, mux_args.transport, msg);
+    if (terminal_args.notify_message) |msg| {
+        sendNotifyToParentTerminal(allocator, terminal_args.transport, msg);
         return;
     }
 
     // Handle --list: show detached sessions and orphaned panes.
-    if (mux_args.list) {
-        var runtime = try FrontendRuntime.createTerminalProbe(allocator, false, null, mux_args.transport);
+    if (terminal_args.list) {
+        var runtime = try FrontendRuntime.createTerminalProbe(allocator, false, null, terminal_args.transport);
         defer runtime.destroy();
         runtime.connect() catch {
             std.debug.print("Could not connect to ses daemon\n", .{});
@@ -140,7 +140,7 @@ pub fn run(mux_args: MuxArgs) !void {
     }
 
     // Handle --attach: attach to detached session by name or UUID prefix.
-    if (mux_args.attach) |uuid_arg| {
+    if (terminal_args.attach) |uuid_arg| {
         if (uuid_arg.len < 3) {
             std.debug.print("Session name/UUID too short (need at least 3 chars)\n", .{});
             return;
@@ -149,7 +149,7 @@ pub fn run(mux_args: MuxArgs) !void {
     }
 
     // Ignore SIGPIPE so writes to disconnected pod sockets return EPIPE
-    // instead of killing the mux process.
+    // instead of killing the terminal frontend process.
     const sigpipe_action = std.os.linux.Sigaction{
         .handler = .{ .handler = std.os.linux.SIG.IGN },
         .mask = std.os.linux.sigemptyset(),
@@ -179,21 +179,21 @@ pub fn run(mux_args: MuxArgs) !void {
     var default_log_path: ?[]const u8 = null;
     defer if (default_log_path) |p| allocator.free(p);
 
-    const effective_log: ?[]const u8 = if (mux_args.log_file) |p|
+    const effective_log: ?[]const u8 = if (terminal_args.log_file) |p|
         (if (p.len > 0) p else null)
-    else if (mux_args.debug) blk: {
+    else if (terminal_args.debug) blk: {
         default_log_path = core.ipc.getLogPath(allocator) catch null;
         break :blk default_log_path;
     } else null;
     redirectStderr(effective_log);
-    debug_enabled = mux_args.debug;
+    debug_enabled = terminal_args.debug;
     debugLog("started", .{});
 
     // Get terminal size.
     const size = terminal.getTermSize();
 
     // Initialize state.
-    var state = try State.init(allocator, size.cols, size.rows, mux_args.debug, mux_args.log_file, mux_args.transport);
+    var state = try State.init(allocator, size.cols, size.rows, terminal_args.debug, terminal_args.log_file, terminal_args.transport);
     defer {
         statusbar.deinitThreadlocals();
         state.deinit();
@@ -223,11 +223,11 @@ pub fn run(mux_args: MuxArgs) !void {
     }
 
     // Set custom session name if provided.
-    if (mux_args.name) |custom_name| {
+    if (terminal_args.name) |custom_name| {
         _ = state.setSessionName(custom_name);
     }
 
-    // Set HEXE_MUX_SOCKET as a flag for shell integrations.
+    // Keep the legacy env var for shell integrations.
     _ = c.setenv("HEXE_MUX_SOCKET", "1", 1);
 
     // Connect to ses daemon FIRST (start it if needed).
@@ -250,7 +250,7 @@ pub fn run(mux_args: MuxArgs) !void {
         state.notifications.showFor("ses daemon started", 2000);
     }
 
-    // Export session ID so child panes can identify their parent mux.
+    // Export session ID so child panes can identify their parent terminal session.
     // Must happen BEFORE createTab/reattach which fork pane shells.
     var session_id_z: [33]u8 = undefined;
     const session_uuid = state.sessionUuid();
@@ -259,7 +259,7 @@ pub fn run(mux_args: MuxArgs) !void {
     _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
 
     // Handle --attach: try session first, then orphaned pane.
-    if (mux_args.attach) |uuid_prefix| {
+    if (terminal_args.attach) |uuid_prefix| {
         debugLog("attach: trying to reattach with prefix={s}", .{uuid_prefix});
         if (state.reattachSession(uuid_prefix)) {
             debugLog("attach: reattachSession succeeded", .{});
@@ -278,7 +278,7 @@ pub fn run(mux_args: MuxArgs) !void {
             std.debug.print("Use 'hexe terminal list' to see available sessions\n", .{});
             return; // Exit without entering main loop
         }
-    } else if (mux_args.session_config_path) |config_path| {
+    } else if (terminal_args.session_config_path) |config_path| {
         // Launch from session config (.hexe.lua)
         debugLog("applying session config from: {s}", .{config_path});
         const session_config = core.session_config;
@@ -306,7 +306,7 @@ pub fn run(mux_args: MuxArgs) !void {
             }
         }
 
-        state.applySessionConfig(config, mux_args.session_tab_filter) catch |err| {
+        state.applySessionConfig(config, terminal_args.session_tab_filter) catch |err| {
             debugLog("applySessionConfig failed: {s}", .{@errorName(err)});
             std.debug.print("Error applying session config: {s}\n", .{@errorName(err)});
             // Fall back to default tab
@@ -330,38 +330,38 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
-    var mux_args = MuxArgs{};
+    var terminal_args = TerminalArgs{};
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if ((std.mem.eql(u8, arg, "--notify") or std.mem.eql(u8, arg, "-n")) and i + 1 < args.len) {
             i += 1;
-            mux_args.notify_message = args[i];
+            terminal_args.notify_message = args[i];
         } else if (std.mem.eql(u8, arg, "--list") or std.mem.eql(u8, arg, "-l")) {
-            mux_args.list = true;
+            terminal_args.list = true;
         } else if ((std.mem.eql(u8, arg, "--attach") or std.mem.eql(u8, arg, "-a")) and i + 1 < args.len) {
             i += 1;
-            mux_args.attach = args[i];
+            terminal_args.attach = args[i];
         } else if ((std.mem.eql(u8, arg, "--name") or std.mem.eql(u8, arg, "-N")) and i + 1 < args.len) {
             i += 1;
-            mux_args.name = args[i];
+            terminal_args.name = args[i];
         } else if (std.mem.eql(u8, arg, "--debug") or std.mem.eql(u8, arg, "-d")) {
-            mux_args.debug = true;
+            terminal_args.debug = true;
         } else if ((std.mem.eql(u8, arg, "--logfile") or std.mem.eql(u8, arg, "-L")) and i + 1 < args.len) {
             i += 1;
-            mux_args.log_file = args[i];
+            terminal_args.log_file = args[i];
         } else if (std.mem.eql(u8, arg, "--no-autostart-ses")) {
-            mux_args.transport = .{ .local_ipc = .{
+            terminal_args.transport = .{ .local_ipc = .{
                 .autostart_ses = false,
-                .socket_path = switch (mux_args.transport) {
+                .socket_path = switch (terminal_args.transport) {
                     .local_ipc => |transport| transport.socket_path,
                     .preconnected => null,
                 },
             } };
         } else if (std.mem.eql(u8, arg, "--ses-socket") and i + 1 < args.len) {
             i += 1;
-            mux_args.transport = .{ .local_ipc = .{
-                .autostart_ses = switch (mux_args.transport) {
+            terminal_args.transport = .{ .local_ipc = .{
+                .autostart_ses = switch (terminal_args.transport) {
                     .local_ipc => |transport| transport.autostart_ses,
                     .preconnected => true,
                 },
@@ -370,7 +370,7 @@ pub fn main() !void {
         }
     }
 
-    try run(mux_args);
+    try run(terminal_args);
 }
 
 fn redirectStderr(log_file: ?[]const u8) void {
@@ -380,7 +380,7 @@ fn redirectStderr(log_file: ?[]const u8) void {
             const logfd = posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch null;
             if (logfd) |fd| {
                 posix.dup2(fd, posix.STDERR_FILENO) catch |err| {
-                    core.logging.logError("mux", "failed to dup2 stderr for logging", err);
+                    core.logging.logError("terminal", "failed to dup2 stderr for logging", err);
                 };
                 if (fd > 2) posix.close(fd);
                 redirected = true;
@@ -392,13 +392,13 @@ fn redirectStderr(log_file: ?[]const u8) void {
 
     const devnull = std.fs.openFileAbsolute("/dev/null", .{ .mode = .write_only }) catch return;
     posix.dup2(devnull.handle, posix.STDERR_FILENO) catch |err| {
-        core.logging.logError("mux", "failed to redirect stderr to /dev/null", err);
+        core.logging.logError("terminal", "failed to redirect stderr to /dev/null", err);
     };
     devnull.close();
 }
 
-fn sendNotifyToParentMux(allocator: std.mem.Allocator, transport: FrontendTransport, message: []const u8) void {
+fn sendNotifyToParentTerminal(allocator: std.mem.Allocator, transport: FrontendTransport, message: []const u8) void {
     core.FrontendTransportHelpers.sendNotify(allocator, transport, message) catch |err| {
-        core.logging.logError("mux", "failed to send notify message to parent", err);
+        core.logging.logError("terminal", "failed to send notify message to parent", err);
     };
 }

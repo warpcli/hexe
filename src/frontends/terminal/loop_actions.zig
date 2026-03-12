@@ -3,7 +3,7 @@ const posix = std.posix;
 const core = @import("core");
 const vaxis = @import("vaxis");
 const wire = core.wire;
-const mux = @import("main.zig");
+const terminal_main = @import("main.zig");
 
 const layout_mod = @import("layout.zig");
 const SplitDir = layout_mod.SplitDir;
@@ -303,7 +303,7 @@ pub fn performDetach(state: *State) void {
     };
     state.runtime.requestExplicitDetachStop();
     // Print session_id (our UUID) so user can reattach.
-    std.debug.print("\nSession detached: {s}\nReattach with: hexe mux attach {s}\n", .{ session_uuid, session_uuid[0..8] });
+    std.debug.print("\nSession detached: {s}\nReattach with: hexe terminal attach {s}\n", .{ session_uuid, session_uuid[0..8] });
 }
 
 /// Perform the actual disown action - orphan pane in ses and spawn new shell in same place.
@@ -383,7 +383,7 @@ pub fn performClose(state: *State) void {
     if (state.activeFloatingIndex()) |idx| {
         const old_uuid = state.getCurrentFocusedUuid();
         const pane = state.view.floats.orderedRemove(idx);
-        mux.debugLogUuid(&pane.uuid, "performClose: float pane_id={?d} vt_fd={?d}", .{
+        terminal_main.debugLogUuid(&pane.uuid, "performClose: float pane_id={?d} vt_fd={?d}", .{
             pane.getPaneId(),
             state.runtime.currentVtFd(),
         });
@@ -391,11 +391,11 @@ pub fn performClose(state: *State) void {
         float_completion.handleBlockingFloatCompletion(state, pane);
         // Kill in ses.
         if (state.runtime.isConnected()) {
-            mux.debugLogUuid(&pane.uuid, "performClose: sending killPane to SES", .{});
+            terminal_main.debugLogUuid(&pane.uuid, "performClose: sending killPane to SES", .{});
             state.runtime.killPane(pane.uuid) catch |e| {
-                mux.debugLogUuid(&pane.uuid, "performClose: killPane error: {s}", .{@errorName(e)});
+                terminal_main.debugLogUuid(&pane.uuid, "performClose: killPane error: {s}", .{@errorName(e)});
             };
-            mux.debugLogUuid(&pane.uuid, "performClose: killPane done", .{});
+            terminal_main.debugLogUuid(&pane.uuid, "performClose: killPane done", .{});
         }
         state.syncSessionFloatRemoved(pane.uuid);
         pane.deinit();
@@ -532,13 +532,13 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
     // Get current directory from ACTUALLY focused pane (float or split).
     // IMPORTANT: Use getCurrentFocusedPane() which checks active_floating first -
     // if user is focused on a float, we want THAT float's CWD for per_cwd floats.
-    // Uses getReliableCwd which tries multiple sources, then falls back to mux CWD.
+    // Uses getReliableCwd which tries multiple sources, then falls back to the terminal process CWD.
     var current_dir: ?[]const u8 = null;
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (getCurrentFocusedPane(state)) |focused| {
         current_dir = state.getReliableCwd(focused);
     }
-    // Fallback to mux's CWD if pane CWD unavailable
+    // Fallback to the terminal process CWD if pane CWD is unavailable.
     if (current_dir == null) {
         current_dir = std.posix.getcwd(&cwd_buf) catch null;
     }

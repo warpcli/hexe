@@ -1,6 +1,6 @@
 const std = @import("std");
 const core = @import("core");
-const mux = @import("main.zig");
+const terminal_main = @import("main.zig");
 const session_model = core.session_model;
 
 const state_types = @import("state_types.zig");
@@ -44,7 +44,7 @@ fn applyDeferredPaneExits(self: anytype) void {
         }
 
         if (marked) {
-            mux.debugLog("reattachSession: applied deferred pane_exited uuid={s}", .{uuid[0..8]});
+            terminal_main.debugLog("reattachSession: applied deferred pane_exited uuid={s}", .{uuid[0..8]});
         }
     }
 }
@@ -625,7 +625,7 @@ fn applySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) b
 
 /// Reattach to a detached session, restoring full state.
 pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
-    mux.debugLog("reattachSession: starting with prefix={s}", .{session_id_prefix});
+    terminal_main.debugLog("reattachSession: starting with prefix={s}", .{session_id_prefix});
 
     // Set flag to prevent SIGHUP from interrupting reattach
     self.runtime.beginReattach();
@@ -635,31 +635,31 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     const reattach_start = std.time.milliTimestamp();
 
     if (!self.runtime.isConnected()) {
-        mux.debugLog("reattachSession: runtime not connected, aborting", .{});
+        terminal_main.debugLog("reattachSession: runtime not connected, aborting", .{});
         return false;
     }
 
     // Try to reattach session (server supports prefix matching).
-    mux.debugLog("reattachSession: calling runtime.reattachSessionProjection", .{});
+    terminal_main.debugLog("reattachSession: calling runtime.reattachSessionProjection", .{});
     const result = self.runtime.reattachSessionProjection(session_id_prefix) catch |e| {
-        mux.debugLog("reattachSession: runtime.reattachSessionProjection failed: {s}", .{@errorName(e)});
+        terminal_main.debugLog("reattachSession: runtime.reattachSessionProjection failed: {s}", .{@errorName(e)});
         return false;
     };
     if (result == null) {
-        mux.debugLog("reattachSession: runtime.reattachSessionProjection returned null (session not found)", .{});
+        terminal_main.debugLog("reattachSession: runtime.reattachSessionProjection returned null (session not found)", .{});
         return false;
     }
 
     var reattach_result = result.?;
     defer reattach_result.deinit();
-    mux.debugLog("reattachSession: got parsed result with {d} panes", .{reattach_result.pane_uuids.len});
+    terminal_main.debugLog("reattachSession: got parsed result with {d} panes", .{reattach_result.pane_uuids.len});
     const snapshot = &reattach_result.snapshot;
 
     // Check timeout after JSON parsing
     {
         const elapsed = std.time.milliTimestamp() - reattach_start;
         if (elapsed > 30000) {
-            mux.debugLog("reattachSession: timeout after JSON parse ({d}ms > 30s), aborting", .{elapsed});
+            terminal_main.debugLog("reattachSession: timeout after JSON parse ({d}ms > 30s), aborting", .{elapsed});
             self.notifications.showFor("Reattach timeout: JSON parsing took too long", 5000);
             return false;
         } else if (elapsed > 10000) {
@@ -670,7 +670,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             ) catch "Warning: reattach taking longer than expected";
             defer if (!std.mem.eql(u8, msg, "Warning: reattach taking longer than expected")) self.allocator.free(msg);
             self.notifications.showFor(msg, 3000);
-            mux.debugLog("reattachSession: slow progress warning after JSON parse ({d}ms)", .{elapsed});
+            terminal_main.debugLog("reattachSession: slow progress warning after JSON parse ({d}ms)", .{elapsed});
         }
     }
 
@@ -684,29 +684,29 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     var used_uuids = std.AutoHashMap([32]u8, void).init(self.allocator);
     defer used_uuids.deinit();
 
-    mux.debugLog("reattachSession: adopting {d} panes", .{reattach_result.pane_uuids.len});
+    terminal_main.debugLog("reattachSession: adopting {d} panes", .{reattach_result.pane_uuids.len});
     var failed_adoptions: usize = 0;
     const total_panes = reattach_result.pane_uuids.len;
 
     for (reattach_result.pane_uuids, 0..) |uuid, i| {
-        mux.debugLog("reattachSession: adopting pane {d}/{d} uuid={s}", .{ i + 1, total_panes, uuid[0..8] });
+        terminal_main.debugLog("reattachSession: adopting pane {d}/{d} uuid={s}", .{ i + 1, total_panes, uuid[0..8] });
 
         // Check for duplicate UUID in the list
         if (uuid_pane_map.contains(uuid)) {
-            mux.debugLog("reattachSession: DUPLICATE UUID detected: {s}, skipping", .{uuid[0..8]});
+            terminal_main.debugLog("reattachSession: DUPLICATE UUID detected: {s}, skipping", .{uuid[0..8]});
             failed_adoptions += 1;
             continue;
         }
 
         const adopt_result = self.runtime.adoptPane(uuid) catch |e| {
-            mux.debugLog("reattachSession: adoptPane failed for uuid={s}: {s}", .{ uuid[0..8], @errorName(e) });
+            terminal_main.debugLog("reattachSession: adoptPane failed for uuid={s}: {s}", .{ uuid[0..8], @errorName(e) });
             failed_adoptions += 1;
             continue;
         };
-        mux.debugLogUuid(&uuid, "reattachSession: adoptPane ok pane_id={d} vt_fd={?d}", .{ adopt_result.pane_id, self.runtime.currentVtFd() });
+        terminal_main.debugLogUuid(&uuid, "reattachSession: adoptPane ok pane_id={d} vt_fd={?d}", .{ adopt_result.pane_id, self.runtime.currentVtFd() });
         uuid_pane_map.put(uuid, .{ .pane_id = adopt_result.pane_id }) catch {};
     }
-    mux.debugLog("reattachSession: adopted {d} panes into uuid_pane_map", .{uuid_pane_map.count()});
+    terminal_main.debugLog("reattachSession: adopted {d} panes into uuid_pane_map", .{uuid_pane_map.count()});
 
     // Notify user if some panes failed to reattach
     if (failed_adoptions > 0) {
@@ -717,14 +717,14 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         ) catch "Warning: Some panes failed to reattach";
         defer if (!std.mem.eql(u8, msg, "Warning: Some panes failed to reattach")) self.allocator.free(msg);
         self.notifications.showFor(msg, 5000);
-        mux.debugLog("reattachSession: notified user about {d} failed adoptions", .{failed_adoptions});
+        terminal_main.debugLog("reattachSession: notified user about {d} failed adoptions", .{failed_adoptions});
     }
 
     // Check timeout after pane adoption
     {
         const elapsed = std.time.milliTimestamp() - reattach_start;
         if (elapsed > 30000) {
-            mux.debugLog("reattachSession: timeout after pane adoption ({d}ms > 30s), aborting", .{elapsed});
+            terminal_main.debugLog("reattachSession: timeout after pane adoption ({d}ms > 30s), aborting", .{elapsed});
             self.notifications.showFor("Reattach timeout: pane adoption took too long", 5000);
             return false;
         } else if (elapsed > 10000) {
@@ -735,7 +735,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             ) catch "Warning: reattach taking longer than expected";
             defer if (!std.mem.eql(u8, msg, "Warning: reattach taking longer than expected")) self.allocator.free(msg);
             self.notifications.showFor(msg, 3000);
-            mux.debugLog("reattachSession: slow progress warning after adoption ({d}ms)", .{elapsed});
+            terminal_main.debugLog("reattachSession: slow progress warning after adoption ({d}ms)", .{elapsed});
         }
     }
 
@@ -811,13 +811,13 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             if (self.view.tabs.items[i].layout.splits.count() == 0) {
                 // Don't remove the LAST tab - keep at least one tab always.
                 if (self.view.tabs.items.len > 1) {
-                    mux.debugLog("reattachSession: removing empty tab at index {d}", .{i});
+                    terminal_main.debugLog("reattachSession: removing empty tab at index {d}", .{i});
                     var dead_tab = self.view.tabs.orderedRemove(i);
                     dead_tab.deinit();
                     removed_tabs += 1;
                     // Don't increment i, next tab shifted into this position
                 } else {
-                    mux.debugLog("reattachSession: keeping last empty tab to prevent zero tabs", .{});
+                    terminal_main.debugLog("reattachSession: keeping last empty tab to prevent zero tabs", .{});
                     i += 1;
                 }
             } else {
@@ -834,16 +834,16 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             ) catch "Warning: Empty tabs were removed";
             defer if (!std.mem.eql(u8, msg, "Warning: Empty tabs were removed")) self.allocator.free(msg);
             self.notifications.showFor(msg, 4000);
-            mux.debugLog("reattachSession: removed {d} empty tabs", .{removed_tabs});
+            terminal_main.debugLog("reattachSession: removed {d} empty tabs", .{removed_tabs});
         }
     }
 
     // Safety check: ensure we have at least one tab.
     // If all tabs were empty and removed, create a new one.
     if (self.view.tabs.items.len == 0) {
-        mux.debugLog("reattachSession: CRITICAL - all tabs removed, creating new tab", .{});
+        terminal_main.debugLog("reattachSession: CRITICAL - all tabs removed, creating new tab", .{});
         self.createTab() catch {
-            mux.debugLog("reattachSession: FAILED to create recovery tab", .{});
+            terminal_main.debugLog("reattachSession: FAILED to create recovery tab", .{});
             return false;
         };
         self.notifications.showFor("Warning: All tabs were empty, created new tab", 5000);
@@ -859,7 +859,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     for (self.view.floats.items) |fp| {
         if (fp.parent_tab) |parent_idx| {
             if (parent_idx >= self.view.tabs.items.len) {
-                mux.debugLog("reattachSession: invalid parent_tab {d} (only {d} tabs), setting to null", .{ parent_idx, self.view.tabs.items.len });
+                terminal_main.debugLog("reattachSession: invalid parent_tab {d} (only {d} tabs), setting to null", .{ parent_idx, self.view.tabs.items.len });
                 fp.parent_tab = null;
                 invalid_parent_tabs += 1;
             }
@@ -874,7 +874,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         ) catch "Warning: Some floats had invalid parent tab references";
         defer if (!std.mem.eql(u8, msg, "Warning: Some floats had invalid parent tab references")) self.allocator.free(msg);
         self.notifications.showFor(msg, 4000);
-        mux.debugLog("reattachSession: corrected {d} invalid parent_tab references", .{invalid_parent_tabs});
+        terminal_main.debugLog("reattachSession: corrected {d} invalid parent_tab references", .{invalid_parent_tabs});
     }
 
     // Recalculate floating pane positions.
@@ -904,13 +904,13 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     self.renderer.invalidate();
     self.force_full_render = true;
 
-    mux.debugLog("reattachSession: tabs restored={d}, floats restored={d}", .{ self.view.tabs.items.len, self.view.floats.items.len });
+    terminal_main.debugLog("reattachSession: tabs restored={d}, floats restored={d}", .{ self.view.tabs.items.len, self.view.floats.items.len });
 
     // Check timeout after layout restoration
     {
         const elapsed = std.time.milliTimestamp() - reattach_start;
         if (elapsed > 30000) {
-            mux.debugLog("reattachSession: timeout after layout restore ({d}ms > 30s), aborting", .{elapsed});
+            terminal_main.debugLog("reattachSession: timeout after layout restore ({d}ms > 30s), aborting", .{elapsed});
             self.notifications.showFor("Reattach timeout: layout restoration took too long", 5000);
             return false;
         } else if (elapsed > 10000) {
@@ -921,29 +921,29 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             ) catch "Warning: reattach taking longer than expected";
             defer if (!std.mem.eql(u8, msg, "Warning: reattach taking longer than expected")) self.allocator.free(msg);
             self.notifications.showFor(msg, 3000);
-            mux.debugLog("reattachSession: slow progress warning after layout restore ({d}ms)", .{elapsed});
+            terminal_main.debugLog("reattachSession: slow progress warning after layout restore ({d}ms)", .{elapsed});
         }
     }
 
     if (self.view.tabs.items.len == 0) {
-        mux.debugLog("reattachSession: no tabs restored, returning false", .{});
+        terminal_main.debugLog("reattachSession: no tabs restored, returning false", .{});
         return false;
     }
 
     // Re-register with restored UUID/name before requesting backlog replay.
     // This releases the attach session lock and stabilizes client identity first.
     const session_uuid = self.sessionUuid();
-    mux.debugLog("reattachSession: finalizing attach uuid={s} name={s}", .{ session_uuid[0..8], self.sessionName() });
+    terminal_main.debugLog("reattachSession: finalizing attach uuid={s} name={s}", .{ session_uuid[0..8], self.sessionName() });
     if (self.runtime.completeReattach()) |change_opt| {
         if (change_opt) |change| {
             var owned_change = change;
             defer owned_change.deinit(self.allocator);
-            mux.debugLog("reattachSession: resolved session name from '{s}' to '{s}'", .{ owned_change.previous_name, owned_change.resolved_name });
+            terminal_main.debugLog("reattachSession: resolved session name from '{s}' to '{s}'", .{ owned_change.previous_name, owned_change.resolved_name });
         }
-        mux.debugLog("reattachSession: requestBacklogReplay done", .{});
+        terminal_main.debugLog("reattachSession: requestBacklogReplay done", .{});
     } else |e| {
-        core.logging.logError("mux", "completeReattach failed in restoreLayout", e);
-        mux.debugLog("reattachSession: completeReattach FAILED: {s}", .{@errorName(e)});
+        core.logging.logError("terminal", "completeReattach failed in restoreLayout", e);
+        terminal_main.debugLog("reattachSession: completeReattach FAILED: {s}", .{@errorName(e)});
     }
 
     // Sync-phase reads can consume async pane_exited messages before the IPC
@@ -954,21 +954,21 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     // Final timeout check after backlog replay
     {
         const elapsed = std.time.milliTimestamp() - reattach_start;
-        mux.debugLog("reattachSession: total elapsed time: {d}ms", .{elapsed});
+        terminal_main.debugLog("reattachSession: total elapsed time: {d}ms", .{elapsed});
         if (elapsed > 30000) {
-            mux.debugLog("reattachSession: timeout after backlog replay ({d}ms > 30s), aborting", .{elapsed});
+            terminal_main.debugLog("reattachSession: timeout after backlog replay ({d}ms > 30s), aborting", .{elapsed});
             self.notifications.showFor("Reattach timeout: session restored but backlog replay incomplete", 5000);
             // Don't return false here - the session is already restored, just warn user
         }
     }
 
-    mux.debugLog("reattachSession: returning true, tabs={d} floats={d}", .{ self.view.tabs.items.len, self.view.floats.items.len });
+    terminal_main.debugLog("reattachSession: returning true, tabs={d} floats={d}", .{ self.view.tabs.items.len, self.view.floats.items.len });
     return true;
 }
 
 pub fn applySessionSnapshot(self: anytype, snapshot: *const SessionSnapshot) bool {
     if (applySnapshotIncrementally(self, snapshot)) {
-        mux.debugLog("applySessionSnapshot: incrementally applied tabs={d} floats={d}", .{ self.view.tabs.items.len, self.view.floats.items.len });
+        terminal_main.debugLog("applySessionSnapshot: incrementally applied tabs={d} floats={d}", .{ self.view.tabs.items.len, self.view.floats.items.len });
         return true;
     }
 
@@ -1083,7 +1083,7 @@ pub fn applySessionSnapshot(self: anytype, snapshot: *const SessionSnapshot) boo
     self.renderer.invalidate();
     self.force_full_render = true;
     self.needs_render = true;
-    mux.debugLog("applySessionSnapshot: tabs={d} floats={d}", .{ self.view.tabs.items.len, self.view.floats.items.len });
+    terminal_main.debugLog("applySessionSnapshot: tabs={d} floats={d}", .{ self.view.tabs.items.len, self.view.floats.items.len });
     return true;
 }
 

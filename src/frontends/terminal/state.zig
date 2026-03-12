@@ -375,7 +375,7 @@ pub const State = struct {
 
     pub fn deinit(self: *State) void {
         self.runtime.prepareFrontendExit(posix.STDIN_FILENO, true) catch |err| {
-            core.logging.logError("mux", "failed to finalize frontend exit with SES", err);
+            core.logging.logError("terminal", "failed to finalize frontend exit with SES", err);
         };
 
         self.key_timers.deinit(self.allocator);

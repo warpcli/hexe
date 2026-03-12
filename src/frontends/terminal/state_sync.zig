@@ -75,7 +75,7 @@ fn rememberSplitFocus(self: anytype, pane: *Pane) void {
 pub fn syncSessionTabAdded(self: anytype, tab_uuid: [32]u8, name: []const u8, pane_uuid: [32]u8) void {
     if (!self.runtime.isConnected()) return;
     self.runtime.sessionAddTab(tab_uuid, pane_uuid, self.activeTabIndex(), name) catch |err| {
-        core.logging.logError("mux", "failed sessionAddTab IPC", err);
+        core.logging.logError("terminal", "failed sessionAddTab IPC", err);
     };
 }
 
@@ -83,7 +83,7 @@ pub fn syncSessionTabRemoved(self: anytype, tab_uuid: [32]u8) void {
     if (!self.runtime.isConnected()) return;
     const active_tab: ?usize = if (self.view.tabs.items.len > 0) self.activeTabIndex() else null;
     self.runtime.sessionRemoveTab(tab_uuid, active_tab) catch |err| {
-        core.logging.logError("mux", "failed sessionRemoveTab IPC", err);
+        core.logging.logError("terminal", "failed sessionRemoveTab IPC", err);
     };
 }
 
@@ -108,7 +108,7 @@ pub fn syncSessionFloat(self: anytype, pane: *Pane, active: bool) void {
         self.paneFloatPadY(pane),
         active,
     ) catch |err| {
-        core.logging.logError("mux", "failed sessionSyncFloat IPC", err);
+        core.logging.logError("terminal", "failed sessionSyncFloat IPC", err);
     };
 }
 
@@ -116,7 +116,7 @@ pub fn syncSessionFloatRemoved(self: anytype, pane_uuid: [32]u8) void {
     if (!self.runtime.isConnected()) return;
     if (pane_uuid[0] == 0) return;
     self.runtime.sessionRemoveFloat(pane_uuid) catch |err| {
-        core.logging.logError("mux", "failed sessionRemoveFloat IPC", err);
+        core.logging.logError("terminal", "failed sessionRemoveFloat IPC", err);
     };
 }
 
@@ -144,7 +144,7 @@ pub fn syncActiveTabLayout(self: anytype) void {
         if (tab.layout.getFocusedPane()) |pane| pane.uuid else null,
         root_json,
     ) catch |err| {
-        core.logging.logError("mux", "failed sessionSyncTabLayout IPC", err);
+        core.logging.logError("terminal", "failed sessionSyncTabLayout IPC", err);
     };
 }
 
@@ -199,7 +199,7 @@ pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
         pane.getFgPid(),
         layout_path,
     ) catch |err| {
-        core.logging.logError("mux", "failed IPC operation in state_sync", err);
+        core.logging.logError("terminal", "failed IPC operation in state_sync", err);
     };
 }
 
@@ -236,7 +236,7 @@ pub fn unfocusAllPanes(self: anytype) void {
                     null,
                     layout_path,
                 ) catch |err| {
-                    core.logging.logError("mux", "failed IPC operation in state_sync", err);
+                    core.logging.logError("terminal", "failed IPC operation in state_sync", err);
                 };
             }
         }
@@ -269,7 +269,7 @@ pub fn unfocusAllPanes(self: anytype) void {
                 null,
                 layout_path,
             ) catch |err| {
-                core.logging.logError("mux", "failed IPC operation in state_sync", err);
+                core.logging.logError("terminal", "failed IPC operation in state_sync", err);
             };
         }
     }
@@ -317,7 +317,7 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
         pane.getFgPid(),
         layout_path,
     ) catch |err| {
-        core.logging.logError("mux", "failed IPC operation in state_sync", err);
+        core.logging.logError("terminal", "failed IPC operation in state_sync", err);
     };
 
     if (self.config._lua_runtime) |rt| {
@@ -382,7 +382,7 @@ pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
         pane.getFgPid(),
         layout_path,
     ) catch |err| {
-        core.logging.logError("mux", "failed IPC operation in state_sync", err);
+        core.logging.logError("terminal", "failed IPC operation in state_sync", err);
     };
 }
 
@@ -481,7 +481,7 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
         if (p.getFgPid()) |pid| pid else null,
         layout_path,
     ) catch |err| {
-        core.logging.logError("mux", "failed IPC operation in state_sync", err);
+        core.logging.logError("terminal", "failed IPC operation in state_sync", err);
     };
 }
 
