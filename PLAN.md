@@ -17,9 +17,12 @@ Right now the architecture is:
 ```text
 terminal frontend
   = UI
-  + local attached-session cache
-  + local attached-session controller
   + local materialized tab/float/layout objects
+
+shared frontend runtime
+  = attached-session projection
+  + attach/controller state
+  + transport client
 
 SES
   = canonical session authority
@@ -32,29 +35,24 @@ That is better than the old mux-owned model, but it is not full separation.
 ### Concrete blockers in the current tree
 
 - `src/frontends/terminal/state.zig`
-  - still owns `session_cache`, `attach_state`, `frontend_client`, and the live
-    terminal view graph.
+  - still owns the live terminal view graph and a large amount of
+    terminal-specific controller glue.
 - `src/frontends/terminal/state_types.zig`
   - `TerminalViewState` still owns `tabs` and `floats`.
   - `Tab` still owns `Layout`.
 - `src/frontends/terminal/state_sync.zig`
-  - still builds canonical `SessionSnapshot` by walking terminal `Layout` and
-    float objects.
+  - still serializes terminal `Layout` into normal-path `session_sync_tab_layout`
+    mutations.
 - `src/frontends/terminal/state_reattach.zig`
-  - still parses SES session state and reconstructs terminal session objects.
-- `src/core/frontend_session_cache.zig`
-  - still owns active tab, active float, focused pane, tab metadata, pane
-    metadata, and the attached snapshot mirror.
-- `src/core/frontend_attach_state.zig`
-  - still owns attach/detach/reattach bookkeeping.
-- `src/core/frontend_attach.zig`
-  - still owns shared attach flow logic.
+  - still reconstructs terminal session objects from the shared projection.
+- `src/frontends/terminal/pane.zig`
+  - still carries session-shaped fields that should live in the projection or
+    runtime instead of the terminal widget.
 - `src/core/frontend_client.zig`
-  - transport is abstracted, but only `local_ipc` exists today.
-- `src/core/wire.zig`
-  - still contains frontend-to-SES state sync and layout-tree sync messages.
-- `src/modules/session/server.zig`
-  - SES is authoritative, but it still accepts frontend-authored state blobs.
+  - transport is abstracted, but `liblink` is still missing.
+- `src/cli/commands/com.zig` and `src/cli/commands/ses_freeze.zig`
+  - still expose older derived "mux state" / layout export surfaces that need
+    cleanup after the frontend/runtime boundary is fully honest.
 
 ## Target Architecture
 
@@ -470,7 +468,7 @@ Done when:
 
 ### Phase 7: delete the leftover coupling
 
-1. Delete dead snapshot sync code.
+1. Done: Delete dead snapshot sync code.
 2. Delete dead layout-tree sync code used by normal UI mutations.
 3. Delete no-longer-needed terminal-side session caches.
 4. Rename leftovers so the code reads honestly.

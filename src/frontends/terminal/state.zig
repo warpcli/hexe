@@ -33,7 +33,6 @@ const BindAction = core.Config.BindAction;
 pub const FocusContext = enum { split, float };
 
 const state_tabs = @import("state_tabs.zig");
-const state_serialize = @import("state_serialize.zig");
 const state_sync = @import("state_sync.zig");
 const state_session = @import("state_session.zig");
 const mouse_selection = @import("mouse_selection.zig");
@@ -741,22 +740,6 @@ pub const State = struct {
 
     pub fn replaceWithSessionConfig(self: *State, config: core.SessionConfig, tab_filter: ?[]const u8) !void {
         return state_session.replaceWithSessionConfig(self, config, tab_filter);
-    }
-
-    pub fn serializeState(self: *State) ![]const u8 {
-        return state_serialize.serializeState(self);
-    }
-
-    pub fn serializeLayoutNode(self: *State, writer: anytype, node: *layout_mod.LayoutNode) !void {
-        return state_serialize.serializeLayoutNode(self, writer, node);
-    }
-
-    pub fn serializePane(self: *State, writer: anytype, pane: *Pane) !void {
-        return state_serialize.serializePane(self, writer, pane);
-    }
-
-    pub fn deserializeLayoutNode(self: *State, obj: std.json.ObjectMap) !*layout_mod.LayoutNode {
-        return state_serialize.deserializeLayoutNode(self, obj);
     }
 
     pub fn syncSessionTabAdded(self: *State, tab_uuid: [32]u8, name: []const u8, pane_uuid: [32]u8) void {
