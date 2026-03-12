@@ -171,6 +171,30 @@ pub const FrontendRuntime = struct {
         self.projection.setFocusedPaneUuid(uuid);
     }
 
+    pub fn activeTab(self: *const FrontendRuntime, tab_count: usize) usize {
+        return self.projection.activeTab(tab_count);
+    }
+
+    pub fn setActiveTab(self: *FrontendRuntime, active_tab: usize) void {
+        self.projection.setActiveTab(active_tab);
+    }
+
+    pub fn activeFloatUuid(self: *const FrontendRuntime) ?[32]u8 {
+        return self.projection.activeFloatUuid();
+    }
+
+    pub fn setActiveFloatUuid(self: *FrontendRuntime, uuid: ?[32]u8) void {
+        self.projection.setActiveFloatUuid(uuid);
+    }
+
+    pub fn rememberFloatingFocus(self: *FrontendRuntime, active_tab: usize, pane_uuid: [32]u8) void {
+        self.projection.rememberFloatingFocus(active_tab, pane_uuid);
+    }
+
+    pub fn rememberSplitFocus(self: *FrontendRuntime, active_tab: usize) void {
+        self.projection.rememberSplitFocus(active_tab);
+    }
+
     pub fn attachFrontend(self: *FrontendRuntime) !StartupAttachResult {
         try self.connect();
         return .{
@@ -499,6 +523,120 @@ pub const FrontendRuntime = struct {
 
     pub fn attachedSnapshot(self: *const FrontendRuntime) ?*const session_model.SessionSnapshot {
         return self.projection.attachedSnapshot();
+    }
+
+    pub fn paneMeta(self: *const FrontendRuntime, uuid: [32]u8) ?session_model.SessionPane {
+        return self.projection.paneMeta(uuid);
+    }
+
+    pub fn floatState(self: *const FrontendRuntime, uuid: [32]u8) ?session_model.SessionFloat {
+        return self.projection.floatState(uuid);
+    }
+
+    pub fn syncFloatState(
+        self: *FrontendRuntime,
+        float_state: session_model.SessionFloat,
+        active: bool,
+    ) void {
+        self.projection.syncFloatState(float_state, active);
+    }
+
+    pub fn setFloatVisibleOnTab(
+        self: *FrontendRuntime,
+        uuid: [32]u8,
+        tab: usize,
+        visible: bool,
+    ) void {
+        self.projection.setFloatVisibleOnTab(uuid, tab, visible);
+    }
+
+    pub fn toggleFloatVisibleOnTab(self: *FrontendRuntime, uuid: [32]u8, tab: usize) void {
+        self.projection.toggleFloatVisibleOnTab(uuid, tab);
+    }
+
+    pub fn setFloatGeometry(
+        self: *FrontendRuntime,
+        uuid: [32]u8,
+        width_pct: u8,
+        height_pct: u8,
+        pos_x_pct: u8,
+        pos_y_pct: u8,
+        pad_x: u8,
+        pad_y: u8,
+    ) void {
+        self.projection.setFloatGeometry(uuid, width_pct, height_pct, pos_x_pct, pos_y_pct, pad_x, pad_y);
+    }
+
+    pub fn swapFloatGeometry(self: *FrontendRuntime, a_uuid: [32]u8, b_uuid: [32]u8) void {
+        self.projection.swapFloatGeometry(a_uuid, b_uuid);
+    }
+
+    pub fn reindexFloatParentTabsAfterRemovedTab(self: *FrontendRuntime, removed_idx: usize) void {
+        self.projection.reindexFloatParentTabsAfterRemovedTab(removed_idx);
+    }
+
+    pub fn normalizeFloatParentTabs(self: *FrontendRuntime, tab_count: usize) usize {
+        return self.projection.normalizeFloatParentTabs(tab_count);
+    }
+
+    pub fn setPaneShell(
+        self: *FrontendRuntime,
+        uuid: [32]u8,
+        cmd: ?[]const u8,
+        cwd: ?[]const u8,
+        status: ?i32,
+        duration_ms: ?u64,
+        jobs: ?u16,
+    ) void {
+        self.projection.setPaneShell(uuid, cmd, cwd, status, duration_ms, jobs);
+    }
+
+    pub fn setPaneShellRunning(
+        self: *FrontendRuntime,
+        uuid: [32]u8,
+        running: bool,
+        started_at_ms: ?u64,
+        cmd: ?[]const u8,
+        cwd: ?[]const u8,
+        jobs: ?u16,
+    ) void {
+        self.projection.setPaneShellRunning(uuid, running, started_at_ms, cmd, cwd, jobs);
+    }
+
+    pub fn clearPaneShellStartedAt(self: *FrontendRuntime, uuid: [32]u8) void {
+        self.projection.clearPaneShellStartedAt(uuid);
+    }
+
+    pub fn setPaneProc(self: *FrontendRuntime, uuid: [32]u8, name: ?[]const u8, pid: ?i32) void {
+        self.projection.setPaneProc(uuid, name, pid);
+    }
+
+    pub fn getPaneShell(self: *const FrontendRuntime, uuid: [32]u8) ?@import("session_projection.zig").PaneShellInfo {
+        return self.projection.getPaneShell(uuid);
+    }
+
+    pub fn getPaneProc(self: *const FrontendRuntime, uuid: [32]u8) ?@import("session_projection.zig").PaneProcInfo {
+        return self.projection.getPaneProc(uuid);
+    }
+
+    pub fn setPaneNameOwned(self: *FrontendRuntime, uuid: [32]u8, name_owned: []u8) void {
+        self.projection.setPaneNameOwned(uuid, name_owned);
+    }
+
+    pub fn paneName(self: *const FrontendRuntime, uuid: [32]u8) ?[]const u8 {
+        return self.projection.paneName(uuid);
+    }
+
+    pub fn hasPaneName(self: *const FrontendRuntime, uuid: [32]u8) bool {
+        return self.projection.hasPaneName(uuid);
+    }
+
+    pub fn removePaneProc(self: *FrontendRuntime, uuid: [32]u8) void {
+        self.projection.removePaneProc(uuid);
+    }
+
+    pub fn removePaneName(self: *FrontendRuntime, uuid: [32]u8) void {
+        self.projection.removePaneName(uuid);
     }
 
     pub fn applySessionStateJson(self: *FrontendRuntime, session_state_json: []const u8) bool {

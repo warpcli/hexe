@@ -516,13 +516,13 @@ This rewrite needs tests at the boundary that actually matters now.
 
 The rewrite is done only when all of the following are true:
 
-1. The terminal frontend does not build `SessionSnapshot`.
-2. The terminal frontend does not parse SES session JSON directly.
-3. The terminal frontend does not send whole-session or whole-layout truth to
+1. Done: The terminal frontend does not build `SessionSnapshot`.
+2. Done: The terminal frontend does not parse SES session JSON directly.
+3. Done: The terminal frontend does not send whole-session or whole-layout truth to
    SES as the normal UI mutation path.
-4. SES is the only author of session structure.
-5. A shared frontend runtime owns attach lifecycle and session projection.
-6. Terminal state contains only terminal-specific view/render/input state.
+4. Done: SES is the only author of session structure.
+5. Done: A shared frontend runtime owns attach lifecycle and session projection.
+6. Done: Terminal state contains only terminal-specific view/render/input state.
 7. Local and remote frontends use the same runtime and protocol shape.
 8. `PLAN.md` can be removed or marked complete without hand-waving.
 

@@ -582,43 +582,43 @@ pub const State = struct {
     }
 
     pub fn activeTabIndex(self: *const State) usize {
-        return self.runtime.projection.activeTab(self.view.tab_views.items.len);
+        return self.runtime.activeTab(self.view.tab_views.items.len);
     }
 
     pub fn setActiveTabIndex(self: *State, idx: usize) void {
         const clamped = if (self.view.tab_views.items.len == 0) 0 else @min(idx, self.view.tab_views.items.len - 1);
-        self.runtime.projection.setActiveTab(clamped);
+        self.runtime.setActiveTab(clamped);
     }
 
     pub fn activeFloatingIndex(self: *State) ?usize {
-        const uuid = self.runtime.projection.activeFloatUuid() orelse return null;
+        const uuid = self.runtime.activeFloatUuid() orelse return null;
         for (self.view.float_views.items, 0..) |pane, idx| {
             if (std.mem.eql(u8, &pane.uuid, &uuid)) return idx;
         }
-        self.runtime.projection.setActiveFloatUuid(null);
+        self.runtime.setActiveFloatUuid(null);
         return null;
     }
 
     pub fn setActiveFloatingIndex(self: *State, idx: ?usize) void {
         if (idx) |value| {
             if (value < self.view.float_views.items.len) {
-                self.runtime.projection.setActiveFloatUuid(self.view.float_views.items[value].uuid);
+                self.runtime.setActiveFloatUuid(self.view.float_views.items[value].uuid);
                 return;
             }
         }
-        self.runtime.projection.setActiveFloatUuid(null);
+        self.runtime.setActiveFloatUuid(null);
     }
 
     pub fn setActiveFloatingUuid(self: *State, uuid: ?[32]u8) void {
-        self.runtime.projection.setActiveFloatUuid(uuid);
+        self.runtime.setActiveFloatUuid(uuid);
     }
 
     pub fn rememberFloatingFocus(self: *State, pane: *Pane) void {
-        self.runtime.projection.rememberFloatingFocus(self.activeTabIndex(), pane.uuid);
+        self.runtime.rememberFloatingFocus(self.activeTabIndex(), pane.uuid);
     }
 
     pub fn rememberSplitFocus(self: *State) void {
-        self.runtime.projection.rememberSplitFocus(self.activeTabIndex());
+        self.runtime.rememberSplitFocus(self.activeTabIndex());
     }
 
     pub fn findPaneByUuid(self: *State, uuid: [32]u8) ?*Pane {
@@ -792,27 +792,27 @@ pub const State = struct {
     }
 
     pub fn setPaneShell(self: *State, uuid: [32]u8, cmd: ?[]const u8, cwd: ?[]const u8, status: ?i32, duration_ms: ?u64, jobs: ?u16) void {
-        self.runtime.projection.setPaneShell(uuid, cmd, cwd, status, duration_ms, jobs);
+        self.runtime.setPaneShell(uuid, cmd, cwd, status, duration_ms, jobs);
     }
 
     pub fn setPaneShellRunning(self: *State, uuid: [32]u8, running: bool, started_at_ms: ?u64, cmd: ?[]const u8, cwd: ?[]const u8, jobs: ?u16) void {
-        self.runtime.projection.setPaneShellRunning(uuid, running, started_at_ms, cmd, cwd, jobs);
+        self.runtime.setPaneShellRunning(uuid, running, started_at_ms, cmd, cwd, jobs);
     }
 
     pub fn clearPaneShellStartedAt(self: *State, uuid: [32]u8) void {
-        self.runtime.projection.clearPaneShellStartedAt(uuid);
+        self.runtime.clearPaneShellStartedAt(uuid);
     }
 
     pub fn setPaneProc(self: *State, uuid: [32]u8, name: ?[]const u8, pid: ?i32) void {
-        self.runtime.projection.setPaneProc(uuid, name, pid);
+        self.runtime.setPaneProc(uuid, name, pid);
     }
 
     pub fn getPaneShell(self: *const State, uuid: [32]u8) ?PaneShellInfo {
-        return self.runtime.projection.getPaneShell(uuid);
+        return self.runtime.getPaneShell(uuid);
     }
 
     pub fn getPaneProc(self: *const State, uuid: [32]u8) ?PaneProcInfo {
-        return self.runtime.projection.getPaneProc(uuid);
+        return self.runtime.getPaneProc(uuid);
     }
 
     pub fn paneExitCode(self: *const State, uuid: [32]u8) u8 {
@@ -835,7 +835,7 @@ pub const State = struct {
     }
 
     pub fn paneSessionMeta(self: *const State, pane: *const Pane) core.session_model.SessionPane {
-        if (self.runtime.projection.paneMeta(pane.uuid)) |meta| return meta;
+        if (self.runtime.paneMeta(pane.uuid)) |meta| return meta;
         return .{
             .uuid = pane.uuid,
             .kind = .split,
@@ -843,11 +843,11 @@ pub const State = struct {
     }
 
     pub fn paneFloatState(self: *const State, pane: *const Pane) ?core.session_model.SessionFloat {
-        return self.runtime.projection.floatState(pane.uuid);
+        return self.runtime.floatState(pane.uuid);
     }
 
     pub fn paneIsFloating(self: *const State, pane: *const Pane) bool {
-        return self.runtime.projection.floatState(pane.uuid) != null;
+        return self.runtime.floatState(pane.uuid) != null;
     }
 
     pub fn paneIsFocused(self: *const State, pane: *const Pane) bool {
@@ -1159,7 +1159,7 @@ pub const State = struct {
         pad_y: u8,
         active: bool,
     ) void {
-        self.runtime.projection.syncFloatState(.{
+        self.runtime.syncFloatState(.{
             .pane_uuid = pane_uuid,
             .parent_tab = parent_tab,
             .visible = visible,
@@ -1177,11 +1177,11 @@ pub const State = struct {
     }
 
     pub fn setPaneVisibleOnTab(self: *State, pane: *const Pane, tab: usize, visible: bool) void {
-        self.runtime.projection.setFloatVisibleOnTab(pane.uuid, tab, visible);
+        self.runtime.setFloatVisibleOnTab(pane.uuid, tab, visible);
     }
 
     pub fn togglePaneVisibleOnTab(self: *State, pane: *const Pane, tab: usize) void {
-        self.runtime.projection.toggleFloatVisibleOnTab(pane.uuid, tab);
+        self.runtime.toggleFloatVisibleOnTab(pane.uuid, tab);
     }
 
     pub fn setPaneFloatGeometry(
@@ -1194,7 +1194,7 @@ pub const State = struct {
         pad_x: u8,
         pad_y: u8,
     ) void {
-        self.runtime.projection.setFloatGeometry(
+        self.runtime.setFloatGeometry(
             pane.uuid,
             width_pct,
             height_pct,
@@ -1206,34 +1206,34 @@ pub const State = struct {
     }
 
     pub fn swapPaneFloatGeometry(self: *State, a: *const Pane, b: *const Pane) void {
-        self.runtime.projection.swapFloatGeometry(a.uuid, b.uuid);
+        self.runtime.swapFloatGeometry(a.uuid, b.uuid);
     }
 
     pub fn reindexFloatParentTabsAfterRemovedTab(self: *State, removed_idx: usize) void {
-        self.runtime.projection.reindexFloatParentTabsAfterRemovedTab(removed_idx);
+        self.runtime.reindexFloatParentTabsAfterRemovedTab(removed_idx);
     }
 
     pub fn normalizeFloatParentTabs(self: *State, tab_count: usize) usize {
-        return self.runtime.projection.normalizeFloatParentTabs(tab_count);
+        return self.runtime.normalizeFloatParentTabs(tab_count);
     }
 
     pub fn setPaneNameOwned(self: *State, uuid: [32]u8, name_owned: []u8) void {
-        self.runtime.projection.setPaneNameOwned(uuid, name_owned);
+        self.runtime.setPaneNameOwned(uuid, name_owned);
     }
 
     pub fn paneName(self: *const State, uuid: [32]u8) ?[]const u8 {
-        return self.runtime.projection.paneName(uuid);
+        return self.runtime.paneName(uuid);
     }
 
     pub fn hasPaneName(self: *const State, uuid: [32]u8) bool {
-        return self.runtime.projection.hasPaneName(uuid);
+        return self.runtime.hasPaneName(uuid);
     }
 
     pub fn removePaneProcMetadata(self: *State, uuid: [32]u8) void {
-        self.runtime.projection.removePaneProc(uuid);
+        self.runtime.removePaneProc(uuid);
     }
 
     pub fn removePaneName(self: *State, uuid: [32]u8) void {
-        self.runtime.projection.removePaneName(uuid);
+        self.runtime.removePaneName(uuid);
     }
 };
