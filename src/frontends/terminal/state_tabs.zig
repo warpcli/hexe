@@ -239,7 +239,7 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
     const id: u16 = @intCast(100 + self.view.floats.items.len);
 
     // Initialize pane with the adopted pod — VT routed through SES.
-    const vt_fd = self.frontend_client.getVtFd() orelse return error.NoVtChannel;
+    const vt_fd = self.runtime.getVtFd() orelse return error.NoVtChannel;
     try pane.initWithPod(self.allocator, id, content_x, content_y, content_w, content_h, pane_id, vt_fd, uuid);
 
     if (self.runtime.getPaneInfoSnapshot(uuid)) |snap| {
@@ -360,7 +360,7 @@ pub fn adoptOrphanedPane(self: anytype) bool {
 
     // Adopt the first one.
     const result = self.runtime.adoptPane(panes[0].uuid) catch return false;
-    const vt_fd = self.frontend_client.getVtFd() orelse return false;
+    const vt_fd = self.runtime.getVtFd() orelse return false;
 
     // Get the current focused pane and replace it.
     if (self.activeFloatingIndex()) |idx| {

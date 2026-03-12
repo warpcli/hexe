@@ -189,7 +189,7 @@ const StdinWatcher = struct {
 
 fn ensureSesVtWatcherArmed(state: *State, watcher: *SesVtWatcher, buffer: []u8) void {
     if (watcher.watched_fd != null) return;
-    const vt_fd = state.frontend_client.getVtFd() orelse return;
+    const vt_fd = state.runtime.getVtFd() orelse return;
 
     watcher.watched_fd = vt_fd;
     watcher.slot = .{ .state = state, .fd = vt_fd, .buffer = buffer, .watched_fd = &watcher.watched_fd };
@@ -200,7 +200,7 @@ fn ensureSesVtWatcherArmed(state: *State, watcher: *SesVtWatcher, buffer: []u8) 
 
 fn ensureSesCtlWatcherArmed(state: *State, watcher: *SesCtlWatcher, buffer: []u8) void {
     if (watcher.watched_fd != null) return;
-    const ctl_fd = state.frontend_client.getCtlFd() orelse return;
+    const ctl_fd = state.runtime.getCtlFd() orelse return;
 
     watcher.watched_fd = ctl_fd;
     watcher.slot = .{ .state = state, .fd = ctl_fd, .buffer = buffer, .watched_fd = &watcher.watched_fd };
@@ -219,17 +219,13 @@ fn sesVtCallback(
     const slot = ctx orelse return .disarm;
     _ = result catch {
         if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
-        if (slot.state.frontend_client.vt_fd) |vt_fd| {
-            if (vt_fd == slot.fd) {
-                posix.close(vt_fd);
-                slot.state.frontend_client.vt_fd = null;
-                slot.state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
-            }
+        if (slot.state.runtime.closeVtFdIf(slot.fd)) {
+            slot.state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
         }
         return .disarm;
     };
 
-    const vt_fd = slot.state.frontend_client.getVtFd() orelse {
+    const vt_fd = slot.state.runtime.getVtFd() orelse {
         if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
         return .disarm;
     };
@@ -244,12 +240,8 @@ fn sesVtCallback(
             error.WouldBlock => break,
             else => {
                 if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
-                if (slot.state.frontend_client.vt_fd) |live_fd| {
-                    if (live_fd == slot.fd) {
-                        posix.close(live_fd);
-                        slot.state.frontend_client.vt_fd = null;
-                        slot.state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
-                    }
+                if (slot.state.runtime.closeVtFdIf(slot.fd)) {
+                    slot.state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
                 }
                 return .disarm;
             },
@@ -266,12 +258,8 @@ fn sesVtCallback(
         if (hdr.len > 0) {
             wire.readExact(vt_fd, slot.buffer[0..hdr.len]) catch {
                 if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
-                if (slot.state.frontend_client.vt_fd) |live_fd| {
-                    if (live_fd == slot.fd) {
-                        posix.close(live_fd);
-                        slot.state.frontend_client.vt_fd = null;
-                        slot.state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
-                    }
+                if (slot.state.runtime.closeVtFdIf(slot.fd)) {
+                    slot.state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
                 }
                 return .disarm;
             };
@@ -321,17 +309,13 @@ fn sesCtlCallback(
     const slot = ctx orelse return .disarm;
     _ = result catch {
         if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
-        if (slot.state.frontend_client.ctl_fd) |ctl_fd| {
-            if (ctl_fd == slot.fd) {
-                posix.close(ctl_fd);
-                slot.state.frontend_client.ctl_fd = null;
-                slot.state.notifications.showFor("Warning: Lost connection to ses daemon (CTL channel)", 5000);
-            }
+        if (slot.state.runtime.closeCtlFdIf(slot.fd)) {
+            slot.state.notifications.showFor("Warning: Lost connection to ses daemon (CTL channel)", 5000);
         }
         return .disarm;
     };
 
-    const ctl_fd = slot.state.frontend_client.getCtlFd() orelse {
+    const ctl_fd = slot.state.runtime.getCtlFd() orelse {
         if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
         return .disarm;
     };
@@ -754,7 +738,7 @@ pub fn runMainLoop(state: *State) !void {
                 };
                 state.runtime.killPane(pane.uuid) catch {};
                 if (state.runtime.createPane(null, cwd, null, null, null, null, null)) |result| {
-                    const vt_fd = state.frontend_client.getVtFd();
+                    const vt_fd = state.runtime.getVtFd();
                     var replaced = true;
                     if (vt_fd) |fd| {
                         pane.replaceWithPod(result.pane_id, fd, result.uuid) catch {

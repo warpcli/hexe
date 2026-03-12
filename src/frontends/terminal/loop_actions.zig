@@ -38,7 +38,7 @@ fn destroyBlockingFloat(state: *State, pane: *Pane) void {
             state.allocator.free(path);
         }
         // Send cancellation result to CLI.
-        const ctl_fd = state.frontend_client.getCtlFd() orelse return;
+        const ctl_fd = state.runtime.getCtlFd() orelse return;
         const result = wire.FloatResult{
             .uuid = pane.uuid,
             .exit_code = 130, // Cancelled (like SIGINT)
@@ -336,7 +336,7 @@ pub fn performDisown(state: *State) void {
 
         // Create a new shell via ses in the same directory and replace the pane's backend.
         if (state.runtime.createPane(null, cwd, null, null, null, null, null)) |result| {
-            const vt_fd = state.frontend_client.getVtFd() orelse {
+            const vt_fd = state.runtime.getVtFd() orelse {
                 state.notifications.show("Disown failed: no VT channel");
                 state.needs_render = true;
                 return;
@@ -389,7 +389,7 @@ pub fn performClose(state: *State) void {
         const pane = state.view.floats.orderedRemove(idx);
         mux.debugLogUuid(&pane.uuid, "performClose: float pane_id={?d} vt_fd={?d}", .{
             pane.getPaneId(),
-            state.frontend_client.vt_fd,
+            state.runtime.currentVtFd(),
         });
         state.syncPaneUnfocus(pane);
         float_completion.handleBlockingFloatCompletion(state, pane);
@@ -496,7 +496,7 @@ pub fn performAdopt(state: *State, orphan_uuid: [32]u8, destroy_current: bool) v
             state.notifications.show("Swapped panes (old pane orphaned)");
         }
 
-        const vt_fd = state.frontend_client.getVtFd() orelse {
+        const vt_fd = state.runtime.getVtFd() orelse {
             state.notifications.show("Failed to replace pane: no VT channel");
             return;
         };
@@ -805,7 +805,7 @@ pub fn createAdhocFloatWithSize(
     const merged_env = mergeEnvLines(state.allocator, env, extra_env) catch null;
     defer if (merged_env) |slice| state.allocator.free(slice);
     const result = try state.runtime.createPane(command, cwd, null, null, merged_env, isolation_profile, null);
-    const vt_fd = state.frontend_client.getVtFd() orelse return error.SesUnavailable;
+    const vt_fd = state.runtime.getVtFd() orelse return error.SesUnavailable;
     try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
 
     pane.floating = true;
@@ -921,7 +921,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     if (!state.runtime.isConnected()) return error.SesUnavailable;
     const env_parent = if (float_def.attributes.inherit_env) parent_uuid else null;
     const result = try state.runtime.createPane(float_def.command, current_dir, sticky_pwd, sticky_key, null, isolation_profile, env_parent);
-    const vt_fd = state.frontend_client.getVtFd() orelse return error.SesUnavailable;
+    const vt_fd = state.runtime.getVtFd() orelse return error.SesUnavailable;
     try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
 
     // Persist sticky affinity metadata for better reclaim preference.

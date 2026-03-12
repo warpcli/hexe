@@ -120,6 +120,51 @@ pub const FrontendRuntime = struct {
         return self.client.getVtFd();
     }
 
+    pub fn getCtlFd(self: *FrontendRuntime) ?posix.fd_t {
+        return self.client.getCtlFd();
+    }
+
+    pub fn currentVtFd(self: *FrontendRuntime) ?posix.fd_t {
+        return self.client.vt_fd;
+    }
+
+    pub fn currentCtlFd(self: *FrontendRuntime) ?posix.fd_t {
+        return self.client.ctl_fd;
+    }
+
+    pub fn closeVtFdIf(self: *FrontendRuntime, fd: posix.fd_t) bool {
+        if (self.client.vt_fd) |live_fd| {
+            if (live_fd == fd) {
+                posix.close(live_fd);
+                self.client.vt_fd = null;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn closeCtlFdIf(self: *FrontendRuntime, fd: posix.fd_t) bool {
+        if (self.client.ctl_fd) |live_fd| {
+            if (live_fd == fd) {
+                posix.close(live_fd);
+                self.client.ctl_fd = null;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    pub fn takePendingCwdUuid(self: *FrontendRuntime) ?[32]u8 {
+        const uuid = self.client.pending_cwd_uuid orelse return null;
+        self.client.pending_cwd_uuid = null;
+        return uuid;
+    }
+
+    pub fn syncClientSessionIdentity(self: *FrontendRuntime) void {
+        self.client.session_id = self.projection.sessionUuid();
+        self.client.session_name = self.projection.sessionName();
+    }
+
     pub fn shutdown(self: *FrontendRuntime, preserve_sticky: bool) !void {
         try self.client.shutdown(preserve_sticky);
     }

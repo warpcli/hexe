@@ -17,7 +17,7 @@ const lua_events = @import("lua_events.zig");
 /// Handle binary control messages from the SES control channel.
 /// Reads all available messages (CTL fd is non-blocking).
 pub fn handleSesMessage(state: *State, buffer: []u8) void {
-    const fd = state.frontend_client.getCtlFd() orelse return;
+    const fd = state.runtime.getCtlFd() orelse return;
 
     // Process all available messages (fire-and-forget responses may accumulate).
     var msgs: usize = 0;
@@ -500,7 +500,7 @@ pub fn sendPopResponse(state: *State) void {
     if (!state.pending_pop_response) return;
     state.pending_pop_response = false;
 
-    const fd = state.frontend_client.getCtlFd() orelse return;
+    const fd = state.runtime.getCtlFd() orelse return;
 
     // Get the correct PopupManager based on scope.
     const popups: *pop.PopupManager = switch (state.pending_pop_scope) {
@@ -598,7 +598,7 @@ fn handleExitIntent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
 }
 
 pub fn sendExitIntentResultPub(state: *State, allow: bool) void {
-    const ctl_fd = state.frontend_client.getCtlFd() orelse return;
+    const ctl_fd = state.runtime.getCtlFd() orelse return;
     const result = wire.ExitIntentResult{ .allow = if (allow) 1 else 0 };
     wire.writeControl(ctl_fd, .exit_intent_result, std.mem.asBytes(&result)) catch {};
 }
@@ -769,7 +769,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
     const new_uuid = actions.createAdhocFloatWithSize(state, command, title, spawn_cwd, env_items, extra_items, use_pod, float_size, isolation_profile) catch {
         // Spawn failed — if wait_for_exit, send error result so CLI doesn't hang.
         if (wait_for_exit) {
-            const ctl_fd = state.frontend_client.getCtlFd() orelse return;
+            const ctl_fd = state.runtime.getCtlFd() orelse return;
             const result = wire.FloatResult{
                 .uuid = .{0} ** 32,
                 .exit_code = 127, // command not found
@@ -830,12 +830,11 @@ fn handleCwdResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []
         return;
     }
     const resp = wire.readStruct(wire.PaneCwd, fd) catch return;
-    const uuid = state.frontend_client.pending_cwd_uuid orelse {
+    const uuid = state.runtime.takePendingCwdUuid() orelse {
         // No pending request — skip trailing data.
         if (resp.cwd_len > 0) skipPayload(fd, resp.cwd_len, buffer);
         return;
     };
-    state.frontend_client.pending_cwd_uuid = null;
 
     if (resp.cwd_len == 0) return;
     if (resp.cwd_len > buffer.len) {

@@ -379,7 +379,7 @@ fn ensureSplitPaneView(
     if (used_uuids.contains(pane_uuid)) return null;
 
     const info = ensureAdoptInfo(self, pane_uuid, uuid_pane_map, existing_views, attached_snapshot) orelse return null;
-    const vt_fd = self.frontend_client.getVtFd() orelse return null;
+    const vt_fd = self.runtime.getVtFd() orelse return null;
 
     const pane_id = tab.layout.next_split_id;
     tab.layout.next_split_id +%= 1;
@@ -511,7 +511,7 @@ fn restoreFloatPane(
 ) ?*Pane {
     if (used_uuids.contains(float_state.pane_uuid)) return null;
     const info = ensureAdoptInfo(self, float_state.pane_uuid, uuid_pane_map, existing_views, attached_snapshot) orelse return null;
-    const vt_fd = self.frontend_client.getVtFd() orelse return null;
+    const vt_fd = self.runtime.getVtFd() orelse return null;
 
     const pane = blk: {
         if (existing_views) |views| {
@@ -791,7 +791,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             failed_adoptions += 1;
             continue;
         };
-        mux.debugLogUuid(&uuid, "reattachSession: adoptPane ok pane_id={d} vt_fd={?d}", .{ adopt_result.pane_id, self.frontend_client.vt_fd });
+        mux.debugLogUuid(&uuid, "reattachSession: adoptPane ok pane_id={d} vt_fd={?d}", .{ adopt_result.pane_id, self.runtime.currentVtFd() });
         uuid_pane_map.put(uuid, .{ .pane_id = adopt_result.pane_id }) catch {};
     }
     mux.debugLog("reattachSession: adopted {d} panes into uuid_pane_map", .{uuid_pane_map.count()});
@@ -1207,7 +1207,7 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             }
             tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 
-            const vt_fd = self.frontend_client.getVtFd() orelse return false;
+            const vt_fd = self.runtime.getVtFd() orelse return false;
 
             const pane = self.allocator.create(Pane) catch return false;
             var pane_needs_cleanup = true;

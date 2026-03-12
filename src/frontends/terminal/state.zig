@@ -495,12 +495,7 @@ pub const State = struct {
 
     fn handleMuxVtWriteFailure(self: *State, fd: posix.fd_t) void {
         self.mux_vt_write_queue.clear();
-        if (self.frontend_client.vt_fd) |live_fd| {
-            if (live_fd == fd) {
-                posix.close(live_fd);
-                self.frontend_client.vt_fd = null;
-            }
-        }
+        _ = self.runtime.closeVtFdIf(fd);
         self.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
         self.needs_render = true;
     }
@@ -513,7 +508,7 @@ pub const State = struct {
     }
 
     pub fn flushPendingMuxVtWrites(self: *State) void {
-        const fd = self.frontend_client.getVtFd() orelse return;
+        const fd = self.runtime.getVtFd() orelse return;
         self.mux_vt_write_queue.flushToFd(fd) catch {
             self.handleMuxVtWriteFailure(fd);
             return;
@@ -618,8 +613,7 @@ pub const State = struct {
 
     pub fn setSessionIdentity(self: *State, uuid: [32]u8, session_name: []const u8) bool {
         self.projection.setSessionIdentity(uuid, session_name) catch return false;
-        self.frontend_client.session_id = self.projection.sessionUuid();
-        self.frontend_client.session_name = self.projection.sessionName();
+        self.runtime.syncClientSessionIdentity();
         return true;
     }
 
