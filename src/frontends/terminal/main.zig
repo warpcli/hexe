@@ -232,23 +232,22 @@ pub fn run(mux_args: MuxArgs) !void {
     _ = c.setenv("HEXE_MUX_SOCKET", "1", 1);
 
     // Connect to ses daemon FIRST (start it if needed).
-    state.runtime.connect() catch |e| {
+    var startup_attach = state.runtime.attachFrontend() catch |e| {
         debugLog("ses connect failed: {s}", .{@errorName(e)});
         std.debug.print("Could not connect to ses daemon: {s}\n", .{@errorName(e)});
         return;
     };
-    debugLog("ses connected (started={})", .{state.runtime.justStartedDaemon()});
+    defer startup_attach.deinit(allocator);
+    debugLog("ses connected (started={})", .{startup_attach.started_daemon});
 
     // If server resolved to a different name (collision avoidance), update state.
-    if (state.runtime.reconcileResolvedName() catch null) |change| {
-        var owned_change = change;
-        defer owned_change.deinit(allocator);
-        debugLog("session name resolved from '{s}' to '{s}'", .{ owned_change.previous_name, owned_change.resolved_name });
-        notifySessionNameChange(&state, &owned_change);
+    if (startup_attach.name_change) |*change| {
+        debugLog("session name resolved from '{s}' to '{s}'", .{ change.previous_name, change.resolved_name });
+        notifySessionNameChange(&state, change);
     }
 
     // Show notification if we just started the daemon.
-    if (state.runtime.justStartedDaemon()) {
+    if (startup_attach.started_daemon) {
         state.notifications.showFor("ses daemon started", 2000);
     }
 

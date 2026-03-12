@@ -42,6 +42,19 @@ pub const FrontendRuntime = struct {
         }
     };
 
+    pub const StartupAttachResult = struct {
+        started_daemon: bool,
+        name_change: ?frontend_attach.SessionNameChange = null,
+
+        pub fn deinit(self: *StartupAttachResult, allocator: std.mem.Allocator) void {
+            if (self.name_change) |value| {
+                var owned_value = value;
+                owned_value.deinit(allocator);
+            }
+            self.* = undefined;
+        }
+    };
+
     allocator: std.mem.Allocator,
     client: FrontendClient,
     projection: SessionProjection,
@@ -126,6 +139,18 @@ pub const FrontendRuntime = struct {
 
     pub fn connect(self: *FrontendRuntime) !void {
         try self.client.connect();
+    }
+
+    pub fn attachFrontend(self: *FrontendRuntime) !StartupAttachResult {
+        try self.connect();
+        return .{
+            .started_daemon = self.justStartedDaemon(),
+            .name_change = try frontend_attach.reconcileResolvedName(
+                self.allocator,
+                &self.client,
+                &self.projection,
+            ),
+        };
     }
 
     pub fn isConnected(self: *const FrontendRuntime) bool {
