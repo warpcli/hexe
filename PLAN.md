@@ -425,6 +425,9 @@ Done when:
 
 ### Phase 4: split terminal `Pane` into view vs session/runtime pieces
 
+Progress: pane-local exit status and cached SES CWD have been removed; the
+remaining work is the rest of the session-shaped pane fields.
+
 1. Done: Audit `src/frontends/terminal/pane.zig`.
 2. Move session-shaped fields out of terminal pane objects into shared runtime
    records.

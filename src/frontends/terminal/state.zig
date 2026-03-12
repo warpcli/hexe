@@ -872,6 +872,18 @@ pub const State = struct {
         return @intCast(@min(status, std.math.maxInt(u8)));
     }
 
+    pub fn paneRealCwd(self: *const State, pane: *Pane) ?[]const u8 {
+        if (pane.getPwd()) |pwd| {
+            return pwd;
+        }
+        if (self.getPaneShell(pane.uuid)) |shell_info| {
+            if (shell_info.cwd) |cwd| {
+                return cwd;
+            }
+        }
+        return null;
+    }
+
     pub fn setPaneNameOwned(self: *State, uuid: [32]u8, name_owned: []u8) void {
         self.runtime.projection.setPaneNameOwned(uuid, name_owned);
     }

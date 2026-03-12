@@ -243,11 +243,14 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
     try pane.initWithPod(self.allocator, id, content_x, content_y, content_w, content_h, pane_id, vt_fd, uuid);
 
     if (self.runtime.getPaneInfoSnapshot(uuid)) |snap| {
+        defer if (snap.cwd) |snap_cwd| self.allocator.free(snap_cwd);
         defer if (snap.fg_name) |s| self.allocator.free(s);
         if (snap.name) |name| {
             self.setPaneNameOwned(uuid, name);
         }
-        pane.setSesCwd(snap.cwd);
+        if (snap.cwd) |snap_cwd| {
+            self.setPaneShell(uuid, null, snap_cwd, null, null, null);
+        }
         self.setPaneProc(uuid, snap.fg_name, snap.fg_pid);
     } else {
         self.runtime.requestPaneProcess(uuid);

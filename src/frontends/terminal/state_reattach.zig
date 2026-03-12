@@ -313,13 +313,16 @@ fn recyclePaneForFloat(self: anytype, pane: *Pane, float_state: SessionFloat, ac
     }
 }
 
-fn hydratePaneMetadata(self: anytype, pane: *Pane, uuid: [32]u8) void {
+fn hydratePaneMetadata(self: anytype, _: *Pane, uuid: [32]u8) void {
     if (self.runtime.getPaneInfoSnapshot(uuid)) |snap| {
+        defer if (snap.cwd) |cwd| self.allocator.free(cwd);
         defer if (snap.fg_name) |s| self.allocator.free(s);
         if (snap.name) |name| {
             self.setPaneNameOwned(uuid, name);
         }
-        pane.setSesCwd(snap.cwd);
+        if (snap.cwd) |cwd| {
+            self.setPaneShell(uuid, null, cwd, null, null, null);
+        }
         self.setPaneProc(uuid, snap.fg_name, snap.fg_pid);
     } else {
         self.runtime.requestPaneProcess(uuid);
@@ -1218,11 +1221,14 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             };
 
             if (self.runtime.getPaneInfoSnapshot(result.uuid)) |snap| {
+                defer if (snap.cwd) |cwd| self.allocator.free(cwd);
                 defer if (snap.fg_name) |s| self.allocator.free(s);
                 if (snap.name) |name| {
                     self.setPaneNameOwned(result.uuid, name);
                 }
-                pane.setSesCwd(snap.cwd);
+                if (snap.cwd) |cwd| {
+                    self.setPaneShell(result.uuid, null, cwd, null, null, null);
+                }
                 self.setPaneProc(result.uuid, snap.fg_name, snap.fg_pid);
             } else {
                 self.runtime.requestPaneProcess(result.uuid);

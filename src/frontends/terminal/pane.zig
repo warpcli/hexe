@@ -84,8 +84,6 @@ pub const Pane = struct {
     sticky: bool = false,
     // Navigatable float - directional navigation works like splits
     navigatable: bool = false,
-    // Cached CWD from ses daemon (for pod panes where /proc access is in ses)
-    ses_cwd: ?[]const u8 = null,
     // Named floats keep their last frame after exit so the same toggle can hide
     // them cleanly and the next toggle can recreate them.
     retained_after_exit: bool = false,
@@ -206,9 +204,6 @@ pub const Pane = struct {
         if (self.pwd_dir) |dir| {
             self.allocator.free(dir);
         }
-        if (self.ses_cwd) |cwd| {
-            self.allocator.free(cwd);
-        }
         if (self.notifications_initialized) {
             self.notifications.deinit();
         }
@@ -226,14 +221,6 @@ pub const Pane = struct {
             self.allocator.free(k);
             self.exit_key = null;
         }
-    }
-
-    /// Set cached CWD from ses daemon (for pod panes)
-    pub fn setSesCwd(self: *Pane, cwd: ?[]u8) void {
-        if (self.ses_cwd) |old| {
-            self.allocator.free(old);
-        }
-        self.ses_cwd = cwd;
     }
 
     /// Replace backend with a pod (used during reattach to adopt panes).
@@ -329,13 +316,6 @@ pub const Pane = struct {
     /// Get current working directory (from OSC 7)
     pub fn getPwd(self: *Pane) ?[]const u8 {
         return self.vt.getPwd();
-    }
-
-    pub fn getRealCwd(self: *Pane) ?[]const u8 {
-        if (self.vt.getPwd()) |pwd| {
-            return pwd;
-        }
-        return self.ses_cwd;
     }
 
     pub fn getFgPid(self: *Pane) ?posix.pid_t {

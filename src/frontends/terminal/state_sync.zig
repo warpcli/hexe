@@ -194,7 +194,7 @@ pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
         cursor_visible,
         alt_screen,
         .{ .cols = pane.width, .rows = pane.height },
-        pane.getRealCwd(),
+        self.paneRealCwd(pane),
         pane.getFgProcess(),
         pane.getFgPid(),
         layout_path,
@@ -312,7 +312,7 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
         cursor_visible,
         alt_screen,
         .{ .cols = pane.width, .rows = pane.height },
-        pane.getRealCwd(),
+        self.paneRealCwd(pane),
         pane.getFgProcess(),
         pane.getFgPid(),
         layout_path,
@@ -377,7 +377,7 @@ pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
         cursor_visible,
         alt_screen,
         .{ .cols = pane.width, .rows = pane.height },
-        pane.getRealCwd(),
+        self.paneRealCwd(pane),
         pane.getFgProcess(),
         pane.getFgPid(),
         layout_path,
@@ -387,14 +387,14 @@ pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
 }
 
 pub fn refreshPaneCwd(self: anytype, pane: *Pane) ?[]const u8 {
-    // Fire-and-forget: response updates pane CWD via handleSesMessage.
+    // Fire-and-forget: response updates projection CWD metadata via handleSesMessage.
     self.runtime.requestPaneCwd(pane.uuid);
-    return pane.getRealCwd();
+    return self.paneRealCwd(pane);
 }
 
-pub fn getSpawnCwd(_: anytype, pane: *Pane) ?[]const u8 {
+pub fn getSpawnCwd(self: anytype, pane: *Pane) ?[]const u8 {
     // Use cached CWD (async requests keep it updated).
-    return pane.getRealCwd();
+    return self.paneRealCwd(pane);
 }
 
 /// Get CWD for spawning a new pane, trying multiple sources.
@@ -406,7 +406,7 @@ pub fn getReliableCwd(self: anytype, pane: *Pane) ?[]const u8 {
         return cwd;
     }
 
-    // 2. Try refreshPaneCwd (VT OSC7 / /proc / ses_cwd cache)
+    // 2. Try refreshPaneCwd (VT OSC7 / /proc / projection shell cwd cache)
     if (self.refreshPaneCwd(pane)) |cwd| {
         return cwd;
     }
@@ -439,7 +439,7 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
     if (!self.hasPaneName(p.uuid)) {
         self.runtime.requestPaneProcess(p.uuid);
     }
-    if (p.getRealCwd() == null) {
+    if (self.paneRealCwd(p) == null) {
         self.runtime.requestPaneCwd(p.uuid);
     }
 
@@ -476,7 +476,7 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
         cursor_visible,
         alt_screen,
         .{ .cols = p.width, .rows = p.height },
-        p.getRealCwd(),
+        self.paneRealCwd(p),
         fg_proc_local,
         if (p.getFgPid()) |pid| pid else null,
         layout_path,

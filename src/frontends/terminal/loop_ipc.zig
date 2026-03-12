@@ -843,11 +843,7 @@ fn handleCwdResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []
     }
     wire.readExact(fd, buffer[0..resp.cwd_len]) catch return;
 
-    // Find the pane and update its CWD.
-    if (state.findPaneByUuid(uuid)) |pane| {
-        const cwd = state.allocator.dupe(u8, buffer[0..resp.cwd_len]) catch return;
-        pane.setSesCwd(cwd);
-    }
+    state.setPaneShell(uuid, null, buffer[0..resp.cwd_len], null, null, null);
 }
 
 /// Handle async pane_info response (updates fg_process cache).

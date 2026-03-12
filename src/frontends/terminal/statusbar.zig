@@ -112,7 +112,7 @@ threadlocal var eval_cache_ready: bool = false;
 fn tabTitleForDisplay(state: *State, tab_idx: usize, tab: anytype, use_basename: bool) []const u8 {
     if (use_basename) {
         if (tab.layout.getFocusedPane()) |pane| {
-            if (pane.getRealCwd()) |p| {
+            if (state.paneRealCwd(pane)) |p| {
                 const base = std.fs.path.basename(p);
                 return if (base.len == 0) "/" else base;
             }
