@@ -371,7 +371,7 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
 
     const pane = state.view.floats.items[index];
     const was_active = if (state.activeFloatingIndex()) |af| af == index else false;
-    const exit_code = pane.getExitCode();
+    const exit_code = state.paneExitCode(pane.uuid);
 
     if (pane.float_key != 0 and !pane.capture_output) {
         if (pane.retained_after_exit) return;
@@ -673,7 +673,7 @@ pub fn runMainLoop(state: *State) !void {
                 if (dead_pane.?.isAlive()) continue;
 
                 const was_focused = if (state.currentLayout().getFocusedPane()) |fp| fp.id == dead_id else false;
-                const exit_code = if (dead_pane) |p| p.getExitCode() else 0;
+                const exit_code = if (dead_pane) |p| state.paneExitCode(p.uuid) else 0;
 
                 if (state.currentLayout().splitCount() > 1) {
                     // Multiple splits in tab - close the specific dead pane.

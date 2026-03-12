@@ -425,7 +425,7 @@ Done when:
 
 ### Phase 4: split terminal `Pane` into view vs session/runtime pieces
 
-1. Audit `src/frontends/terminal/pane.zig`.
+1. Done: Audit `src/frontends/terminal/pane.zig`.
 2. Move session-shaped fields out of terminal pane objects into shared runtime
    records.
 3. Keep terminal pane widgets responsible only for VT/render/input behavior.

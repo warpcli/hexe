@@ -865,6 +865,13 @@ pub const State = struct {
         return self.runtime.projection.getPaneProc(uuid);
     }
 
+    pub fn paneExitCode(self: *const State, uuid: [32]u8) u8 {
+        const shell_info = self.getPaneShell(uuid) orelse return 0;
+        const status = shell_info.status orelse return 0;
+        if (status < 0) return 0;
+        return @intCast(@min(status, std.math.maxInt(u8)));
+    }
+
     pub fn setPaneNameOwned(self: *State, uuid: [32]u8, name_owned: []u8) void {
         self.runtime.projection.setPaneNameOwned(uuid, name_owned);
     }

@@ -86,8 +86,6 @@ pub const Pane = struct {
     navigatable: bool = false,
     // Cached CWD from ses daemon (for pod panes where /proc access is in ses)
     ses_cwd: ?[]const u8 = null,
-    // Exit status for the most recent observed process exit, if available.
-    exit_status: ?u32 = null,
     // Named floats keep their last frame after exit so the same toggle can hide
     // them cleanly and the next toggle can recreate them.
     retained_after_exit: bool = false,
@@ -294,13 +292,6 @@ pub const Pane = struct {
 
     pub fn isAlive(self: *Pane) bool {
         return !self.backend.pod.dead;
-    }
-
-    pub fn getExitCode(self: *Pane) u8 {
-        const status = self.exit_status orelse return 0;
-        if (posix.W.IFEXITED(status)) return posix.W.EXITSTATUS(status);
-        if (posix.W.IFSIGNALED(status)) return @intCast(128 + posix.W.TERMSIG(status));
-        return 0;
     }
 
     pub fn captureOutput(self: *Pane, allocator: std.mem.Allocator) ![]u8 {
