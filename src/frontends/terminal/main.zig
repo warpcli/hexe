@@ -355,6 +355,7 @@ pub fn main() !void {
                 .autostart_ses = false,
                 .socket_path = switch (mux_args.transport) {
                     .local_ipc => |transport| transport.socket_path,
+                    .preconnected => null,
                 },
             } };
         } else if (std.mem.eql(u8, arg, "--ses-socket") and i + 1 < args.len) {
@@ -362,6 +363,7 @@ pub fn main() !void {
             mux_args.transport = .{ .local_ipc = .{
                 .autostart_ses = switch (mux_args.transport) {
                     .local_ipc => |transport| transport.autostart_ses,
+                    .preconnected => true,
                 },
                 .socket_path = args[i],
             } };

@@ -171,6 +171,7 @@ pub const FrontendKind = enum(u8) {
 pub const FrontendTransportKind = enum(u8) {
     local_ipc = 1,
     liblink = 2,
+    preconnected = 3,
 };
 
 /// Register: session_id[32] + keepalive(u8) + frontend_kind(u8) +

@@ -8,8 +8,14 @@ pub const LocalIpcTransport = struct {
     socket_path: ?[]const u8 = null,
 };
 
+pub const PreconnectedTransport = struct {
+    ctl_fd: posix.fd_t,
+    vt_fd: posix.fd_t,
+};
+
 pub const Transport = union(enum) {
     local_ipc: LocalIpcTransport,
+    preconnected: PreconnectedTransport,
 };
 
 /// Static buffer for synchronous CWD fetch (getPaneCwdSync).
@@ -119,6 +125,7 @@ pub const SesClient = struct {
     fn transportKind(self: *const SesClient) wire.FrontendTransportKind {
         return switch (self.transport) {
             .local_ipc => .local_ipc,
+            .preconnected => .preconnected,
         };
     }
 
@@ -159,7 +166,32 @@ pub const SesClient = struct {
     pub fn connect(self: *SesClient) !void {
         switch (self.transport) {
             .local_ipc => |transport| try self.connectLocalIpc(transport),
+            .preconnected => |transport| try self.connectPreconnected(transport),
         }
+    }
+
+    fn connectPreconnected(self: *SesClient, transport: PreconnectedTransport) !void {
+        self.debugLog("ses connect: transport=preconnected ctl_fd={d} vt_fd={d}", .{
+            transport.ctl_fd,
+            transport.vt_fd,
+        });
+
+        self.ctl_fd = transport.ctl_fd;
+        self.vt_fd = transport.vt_fd;
+        self.just_started_daemon = false;
+        errdefer {
+            if (self.ctl_fd) |fd| posix.close(fd);
+            if (self.vt_fd) |fd| posix.close(fd);
+            self.ctl_fd = null;
+            self.vt_fd = null;
+        }
+
+        try self.register();
+        self.setCtlNonBlocking();
+
+        const O_NONBLOCK: usize = 0o4000;
+        const flags = posix.fcntl(transport.vt_fd, posix.F.GETFL, 0) catch return error.ConnectionRefused;
+        _ = posix.fcntl(transport.vt_fd, posix.F.SETFL, flags | O_NONBLOCK) catch return error.ConnectionRefused;
     }
 
     fn connectLocalIpc(self: *SesClient, transport: LocalIpcTransport) !void {

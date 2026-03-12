@@ -10,6 +10,13 @@ pub fn localIpcTransport(socket_path: ?[]const u8, autostart_ses: bool) frontend
     } };
 }
 
+pub fn preconnectedTransport(ctl_fd: std.posix.fd_t, vt_fd: std.posix.fd_t) frontend_client.Transport {
+    return .{ .preconnected = .{
+        .ctl_fd = ctl_fd,
+        .vt_fd = vt_fd,
+    } };
+}
+
 pub fn sendNotify(
     allocator: std.mem.Allocator,
     transport: frontend_client.Transport,
@@ -34,5 +41,6 @@ pub fn sendNotify(
             const notify = wire.Notify{ .msg_len = @intCast(message.len) };
             try wire.writeControlWithTrail(client.fd, .notify, std.mem.asBytes(&notify), message);
         },
+        .preconnected => return error.UnsupportedTransport,
     }
 }

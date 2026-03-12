@@ -458,7 +458,7 @@ Done when:
 
 ### Phase 6: make transport truly frontend-neutral
 
-1. Extend `FrontendClient.Transport` beyond `local_ipc`.
+1. Done: Extend `FrontendClient.Transport` beyond `local_ipc`.
 2. Add `liblink` transport.
 3. Make transport selection a runtime concern, not a terminal concern.
 4. Reuse the exact same attach/session/VT path for remote frontends.
