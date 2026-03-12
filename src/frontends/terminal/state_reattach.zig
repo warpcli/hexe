@@ -723,7 +723,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     const reattach_start = std.time.milliTimestamp();
 
     if (!self.runtime.isConnected()) {
-        mux.debugLog("reattachSession: frontend_client not connected, aborting", .{});
+        mux.debugLog("reattachSession: runtime not connected, aborting", .{});
         return false;
     }
 

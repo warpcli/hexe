@@ -10,7 +10,7 @@ const SplitDir = layout_mod.SplitDir;
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
-const FrontendClient = core.FrontendClient;
+const FrontendRuntime = core.FrontendRuntime;
 
 const helpers = @import("helpers.zig");
 const float_completion = @import("float_completion.zig");
@@ -326,7 +326,7 @@ pub fn performDisown(state: *State) void {
         }
 
         // Get the old pane's auxiliary info (created_from, focused_from) to inherit.
-        const old_aux = state.runtime.getPaneAux(p.uuid) catch FrontendClient.PaneAuxInfo{
+        const old_aux = state.runtime.getPaneAux(p.uuid) catch FrontendRuntime.PaneAuxInfo{
             .created_from = null,
             .focused_from = null,
         };
@@ -348,7 +348,7 @@ pub fn performDisown(state: *State) void {
             };
 
             // Sync inherited auxiliary info to the new pane.
-            const pane_type: FrontendClient.PaneType = if (p.floating) .float else .split;
+            const pane_type: FrontendRuntime.PaneType = if (p.floating) .float else .split;
             const cursor = p.getCursorPos();
             const cursor_style = p.vt.getCursorStyle();
             const cursor_visible = p.vt.isCursorVisible();
@@ -819,10 +819,7 @@ pub fn createAdhocFloatWithSize(
         }
     }
 
-    // Don't update pane name to float title - keep the pod's Pokemon name
-    // if (state.frontend_client.isConnected()) {
-    //     state.frontend_client.updatePaneName(pane.uuid, pane.float_title) catch {};
-    // }
+    // Keep the pod's pane name separate from the float title.
 
     pane.border_x = outer_x;
     pane.border_y = outer_y;
@@ -943,10 +940,7 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
         }
     }
 
-    // Don't update pane name to float title - keep the pod's Pokemon name
-    // if (state.frontend_client.isConnected()) {
-    //     state.frontend_client.updatePaneName(pane.uuid, pane.float_title) catch {};
-    // }
+    // Keep the pod's pane name separate from the float title.
     // For global floats (special or pwd), set per-tab visibility.
     // For tab-bound floats, use simple visible field.
     if (float_def.attributes.global or float_def.attributes.per_cwd) {

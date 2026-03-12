@@ -21,7 +21,6 @@ const FrontendAttachState = core.FrontendAttachState;
 const SessionProjection = core.SessionProjection;
 const PaneShellInfo = core.SessionProjectionPaneShellInfo;
 const PaneProcInfo = core.SessionProjectionPaneProcInfo;
-const FrontendClient = core.FrontendClient;
 
 const NotificationManager = pop.notification.NotificationManager;
 
@@ -116,7 +115,6 @@ pub const State = struct {
     layout_width: u16,
     layout_height: u16,
     renderer: Renderer,
-    frontend_client: *FrontendClient,
     notifications: NotificationManager,
     overlays: OverlayManager,
     popups: pop.PopupManager,
@@ -276,7 +274,6 @@ pub const State = struct {
             .layout_width = width,
             .layout_height = layout_h,
             .renderer = try Renderer.init(allocator, width, height),
-            .frontend_client = &runtime.client,
             .notifications = NotificationManager.initWithConfig(allocator, pop_cfg.carrier.notification),
             .overlays = OverlayManager.initWithConfig(allocator, pop_cfg.widgets.keycast),
             .popups = pop.PopupManager.init(allocator),
@@ -375,11 +372,7 @@ pub const State = struct {
             pane.float_title = self.allocator.dupe(u8, new_title) catch null;
         }
 
-        // Don't update pane name to float title - keep the pod's Pokemon name
-        // Best-effort: store title in ses memory for reattach.
-        // if (self.frontend_client.isConnected()) {
-        //     self.frontend_client.updatePaneName(pane.uuid, pane.float_title) catch {};
-        // }
+        // Keep the pod's pane name separate from the float title.
 
         self.clearFloatRename();
         self.renderer.invalidate();

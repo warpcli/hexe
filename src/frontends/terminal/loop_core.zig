@@ -8,7 +8,7 @@ const xev = @import("xev").Dynamic;
 const terminal = @import("terminal.zig");
 
 const State = @import("state.zig").State;
-const FrontendClient = core.FrontendClient;
+const FrontendRuntime = core.FrontendRuntime;
 const helpers = @import("helpers.zig");
 
 const mux = @import("main.zig");
@@ -732,7 +732,7 @@ pub fn runMainLoop(state: *State) !void {
                 if (cwd == null) {
                     cwd = std.posix.getcwd(&cwd_buf) catch null;
                 }
-                const old_aux = state.runtime.getPaneAux(pane.uuid) catch FrontendClient.PaneAuxInfo{
+                const old_aux = state.runtime.getPaneAux(pane.uuid) catch FrontendRuntime.PaneAuxInfo{
                     .created_from = null,
                     .focused_from = null,
                 };
@@ -746,7 +746,7 @@ pub fn runMainLoop(state: *State) !void {
                         };
                     } else replaced = false;
                     if (replaced) {
-                        const pane_type: FrontendClient.PaneType = if (pane.floating) .float else .split;
+                        const pane_type: FrontendRuntime.PaneType = if (pane.floating) .float else .split;
                         const cursor = pane.getCursorPos();
                         const cursor_style = pane.vt.getCursorStyle();
                         const cursor_visible = pane.vt.isCursorVisible();

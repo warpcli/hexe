@@ -2,7 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const core = @import("core");
 
-const FrontendClient = core.FrontendClient;
+const FrontendRuntime = core.FrontendRuntime;
 const Pane = @import("pane.zig").Pane;
 const helpers = @import("helpers.zig");
 const layout_mod = @import("layout.zig");
@@ -173,7 +173,7 @@ pub fn syncPaneAux(self: anytype, pane: *Pane, created_from: ?[32]u8) void {
         pane.focused = true;
     }
 
-    const pane_type: FrontendClient.PaneType = if (pane.floating) .float else .split;
+    const pane_type: FrontendRuntime.PaneType = if (pane.floating) .float else .split;
     const cursor = pane.getCursorPos();
     const cursor_style = pane.vt.getCursorStyle();
     const cursor_visible = pane.vt.isCursorVisible();
@@ -211,7 +211,7 @@ pub fn unfocusAllPanes(self: anytype) void {
         while (pane_it.next()) |p| {
             if (p.*.uuid[0] != 0) {
                 p.*.focused = false;
-                const pane_type: FrontendClient.PaneType = if (p.*.floating) .float else .split;
+                const pane_type: FrontendRuntime.PaneType = if (p.*.floating) .float else .split;
                 const cursor = p.*.getCursorPos();
                 const cursor_style = p.*.vt.getCursorStyle();
                 const cursor_visible = p.*.vt.isCursorVisible();
@@ -292,7 +292,7 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
     self.unfocusAllPanes();
 
     pane.focused = true;
-    const pane_type: FrontendClient.PaneType = if (pane.floating) .float else .split;
+    const pane_type: FrontendRuntime.PaneType = if (pane.floating) .float else .split;
     const cursor = pane.getCursorPos();
     const cursor_style = pane.vt.getCursorStyle();
     const cursor_visible = pane.vt.isCursorVisible();
@@ -357,7 +357,7 @@ pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
     if (!self.runtime.isConnected()) return;
     if (pane.uuid[0] == 0) return;
 
-    const pane_type: FrontendClient.PaneType = if (pane.floating) .float else .split;
+    const pane_type: FrontendRuntime.PaneType = if (pane.floating) .float else .split;
     const cursor = pane.getCursorPos();
     const cursor_style = pane.vt.getCursorStyle();
     const cursor_visible = pane.vt.isCursorVisible();
@@ -456,7 +456,7 @@ pub fn syncFocusedPaneInfo(self: anytype) void {
         self.runtime.requestPaneProcess(p.uuid);
     }
 
-    const pane_type: FrontendClient.PaneType = if (p.floating) .float else .split;
+    const pane_type: FrontendRuntime.PaneType = if (p.floating) .float else .split;
     const cursor = p.getCursorPos();
     const cursor_style = p.vt.getCursorStyle();
     const cursor_visible = p.vt.isCursorVisible();
