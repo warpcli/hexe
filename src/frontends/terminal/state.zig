@@ -375,23 +375,9 @@ pub const State = struct {
     }
 
     pub fn deinit(self: *State) void {
-        // If the terminal is gone (window closed, SSH dropped), auto-detach to
-        // preserve sessions even when SIGTERM arrived instead of SIGHUP.
-        // tcgetattr returns EIO on a dead PTY slave.
-        if (!self.runtime.isDetachMode()) {
-            _ = posix.tcgetattr(posix.STDIN_FILENO) catch {
-                self.runtime.setDetachMode(true);
-            };
-        }
-
-        // When exiting normally (not detach), tell SES to kill regular panes but
-        // preserve sticky panes/floats.
-        // When detaching, panes stay alive for later reattach.
-        if (!self.runtime.isDetachMode() and self.runtime.isConnected()) {
-            self.runtime.shutdown(true) catch |err| {
-                core.logging.logError("mux", "failed to send shutdown to SES", err);
-            };
-        }
+        self.runtime.prepareFrontendExit(posix.STDIN_FILENO, true) catch |err| {
+            core.logging.logError("mux", "failed to finalize frontend exit with SES", err);
+        };
 
         self.key_timers.deinit(self.allocator);
 

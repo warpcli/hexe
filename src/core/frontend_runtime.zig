@@ -218,6 +218,23 @@ pub const FrontendRuntime = struct {
         try self.client.detachSession(session_id);
     }
 
+    pub fn detachCurrentSession(self: *FrontendRuntime) !void {
+        self.setDetachMode(true);
+        try self.detachSession(self.projection.sessionUuid());
+    }
+
+    pub fn prepareFrontendExit(self: *FrontendRuntime, stdin_fd: posix.fd_t, preserve_sticky: bool) !void {
+        if (!self.isDetachMode()) {
+            _ = posix.tcgetattr(stdin_fd) catch {
+                self.setDetachMode(true);
+            };
+        }
+
+        if (!self.isDetachMode() and self.isConnected()) {
+            try self.shutdown(preserve_sticky);
+        }
+    }
+
     pub fn drainPendingPaneExits(self: *FrontendRuntime, out: *std.ArrayList([32]u8)) void {
         self.client.drainPendingPaneExits(out);
     }

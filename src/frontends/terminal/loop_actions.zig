@@ -295,12 +295,8 @@ fn getCurrentFocusedPane(state: *State) ?*Pane {
 
 /// Perform the actual detach action.
 pub fn performDetach(state: *State) void {
-    // Always set detach_mode to prevent killing panes on exit.
-    state.setDetachMode(true);
-
-    // Detach session with our UUID. SES uses its canonical session snapshot.
     const session_uuid = state.sessionUuid();
-    state.runtime.detachSession(session_uuid) catch {
+    state.runtime.detachCurrentSession() catch {
         std.debug.print("\nDetach failed - panes orphaned\n", .{});
         state.running = false;
         return;
