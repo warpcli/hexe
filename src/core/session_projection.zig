@@ -209,6 +209,11 @@ pub const SessionProjection = struct {
         self.local_floats.clearRetainingCapacity();
     }
 
+    pub fn attachedSnapshot(self: *const SessionProjection) ?*const session_model.SessionSnapshot {
+        if (self.attached_snapshot) |*snapshot| return snapshot;
+        return null;
+    }
+
     pub fn paneMeta(
         self: *const SessionProjection,
         uuid: [32]u8,

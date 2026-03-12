@@ -470,10 +470,21 @@ pub const FrontendRuntime = struct {
         return session_model.SessionSnapshot.fromJson(self.allocator, session_state_json);
     }
 
-    pub fn drainPendingSessionSnapshot(self: *FrontendRuntime) ?session_model.SessionSnapshot {
-        const session_json = self.client.drainPendingSessionState() orelse return null;
+    pub fn attachedSnapshot(self: *const FrontendRuntime) ?*const session_model.SessionSnapshot {
+        return self.projection.attachedSnapshot();
+    }
+
+    pub fn applySessionStateJson(self: *FrontendRuntime, session_state_json: []const u8) bool {
+        var snapshot = self.parseSessionSnapshotJson(session_state_json) catch return false;
+        defer snapshot.deinit();
+        self.replaceProjectionFromSnapshot(&snapshot, snapshot.tabs.items.len) catch return false;
+        return true;
+    }
+
+    pub fn applyPendingSessionSnapshot(self: *FrontendRuntime) bool {
+        const session_json = self.client.drainPendingSessionState() orelse return false;
         defer self.allocator.free(session_json);
-        return self.parseSessionSnapshotJson(session_json) catch null;
+        return self.applySessionStateJson(session_json);
     }
 
     pub fn reattachSessionSnapshot(self: *FrontendRuntime, session_id_prefix: []const u8) !?ReattachSnapshotResult {

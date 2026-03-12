@@ -547,8 +547,6 @@ fn applySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) b
 
     self.resizeFloatingPanes();
 
-    if (!self.replaceAttachedSessionSnapshot(snapshot)) return false;
-
     if (self.view.tabs.items.len > 0) {
         self.setActiveTabIndex(@min(snapshot.active_tab, self.view.tabs.items.len - 1));
     } else {
@@ -599,7 +597,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     var reattach_result = result.?;
     defer reattach_result.deinit();
     terminal_main.debugLog("reattachSession: got parsed result with {d} panes", .{reattach_result.pane_uuids.len});
-    const snapshot = &reattach_result.snapshot;
+    const snapshot = self.runtime.attachedSnapshot() orelse return false;
 
     // Check timeout after JSON parsing
     {
@@ -899,7 +897,9 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     return true;
 }
 
-pub fn applySessionSnapshot(self: anytype, snapshot: *const SessionSnapshot) bool {
+pub fn applySessionSnapshot(self: anytype) bool {
+    const snapshot = self.runtime.attachedSnapshot() orelse return false;
+
     if (applySnapshotIncrementally(self, snapshot)) {
         terminal_main.debugLog("applySessionSnapshot: incrementally applied tabs={d} floats={d}", .{ self.view.tabs.items.len, self.view.floats.items.len });
         return true;
@@ -1000,7 +1000,6 @@ pub fn applySessionSnapshot(self: anytype, snapshot: *const SessionSnapshot) boo
         self.rememberFloatingFocus(self.view.floats.items[idx]);
     }
 
-    if (!self.replaceAttachedSessionSnapshot(snapshot)) return false;
     self.renderer.invalidate();
     self.force_full_render = true;
     self.needs_render = true;

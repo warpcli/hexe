@@ -92,9 +92,8 @@ fn applyDeferredPaneExits(state: *State) void {
 }
 
 fn applyDeferredSessionSnapshots(state: *State) void {
-    var snapshot = state.runtime.drainPendingSessionSnapshot() orelse return;
-    defer snapshot.deinit();
-    _ = state.applySessionSnapshot(&snapshot);
+    if (!state.runtime.applyPendingSessionSnapshot()) return;
+    _ = state.applySessionSnapshot();
 }
 
 fn applyRuntimeStopRequest(state: *State) bool {

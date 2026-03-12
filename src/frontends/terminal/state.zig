@@ -630,13 +630,6 @@ pub const State = struct {
         return self.runtime.projection.takeNextTabCounter();
     }
 
-    pub fn replaceAttachedSessionSnapshot(self: *State, snapshot: *const core.session_model.SessionSnapshot) bool {
-        self.runtime.replaceProjectionFromSnapshot(snapshot, self.view.tabs.items.len) catch return false;
-        self.setActiveTabIndex(self.runtime.projection.activeTab(self.view.tabs.items.len));
-        self.setActiveFloatingUuid(self.runtime.projection.activeFloatUuid());
-        return true;
-    }
-
     pub fn resetTabFocusMemory(self: *State) bool {
         self.runtime.projection.resetTabFocusMemory(self.view.tabs.items.len) catch return false;
         return true;
@@ -755,8 +748,8 @@ pub const State = struct {
         return state_tabs.reattachSession(self, session_id_prefix);
     }
 
-    pub fn applySessionSnapshot(self: *State, snapshot: *const core.session_model.SessionSnapshot) bool {
-        return state_tabs.applySessionSnapshot(self, snapshot);
+    pub fn applySessionSnapshot(self: *State) bool {
+        return state_tabs.applySessionSnapshot(self);
     }
 
     pub fn attachOrphanedPane(self: *State, uuid_prefix: []const u8) bool {
