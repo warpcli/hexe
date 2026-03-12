@@ -731,13 +731,13 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     }
 
     // Try to reattach session (server supports prefix matching).
-    mux.debugLog("reattachSession: calling runtime.reattachSessionSnapshot", .{});
-    const result = self.runtime.reattachSessionSnapshot(session_id_prefix) catch |e| {
-        mux.debugLog("reattachSession: runtime.reattachSessionSnapshot failed: {s}", .{@errorName(e)});
+    mux.debugLog("reattachSession: calling runtime.reattachSessionProjection", .{});
+    const result = self.runtime.reattachSessionProjection(session_id_prefix) catch |e| {
+        mux.debugLog("reattachSession: runtime.reattachSessionProjection failed: {s}", .{@errorName(e)});
         return false;
     };
     if (result == null) {
-        mux.debugLog("reattachSession: runtime.reattachSessionSnapshot returned null (session not found)", .{});
+        mux.debugLog("reattachSession: runtime.reattachSessionProjection returned null (session not found)", .{});
         return false;
     }
 
@@ -990,7 +990,6 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         self.rememberFloatingFocus(self.view.floats.items[idx]);
     }
 
-    if (!self.replaceAttachedSessionSnapshot(snapshot)) return false;
     if (!self.setSessionIdentity(snapshot.uuid, restored_name)) return false;
 
     self.renderer.invalidate();

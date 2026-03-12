@@ -445,7 +445,8 @@ Done when:
 ### Phase 5: make attach/detach/reattach fully runtime-driven
 
 1. Done: Terminal startup should just create the runtime and attach.
-2. Reattach should rebuild the projection in shared core, not in terminal code.
+2. Done: Reattach should rebuild the projection in shared core, not in
+   terminal code.
 3. Done: Backlog replay coordination should live in the runtime.
 4. Session stolen / reconnect / detach flows should live in the runtime.
 

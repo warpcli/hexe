@@ -479,6 +479,13 @@ pub const FrontendRuntime = struct {
         };
     }
 
+    pub fn reattachSessionProjection(self: *FrontendRuntime, session_id_prefix: []const u8) !?ReattachSnapshotResult {
+        var result = try self.reattachSessionSnapshot(session_id_prefix) orelse return null;
+        errdefer result.deinit();
+        try self.replaceProjectionFromSnapshot(&result.snapshot, result.snapshot.tabs.items.len);
+        return result;
+    }
+
     pub fn replaceProjectionFromSnapshot(
         self: *FrontendRuntime,
         snapshot: *const session_model.SessionSnapshot,
