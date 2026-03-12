@@ -400,8 +400,8 @@ pub const State = struct {
         // When exiting normally (not detach), tell SES to kill regular panes but
         // preserve sticky panes/floats.
         // When detaching, panes stay alive for later reattach.
-        if (!self.attach_state.detach_mode and self.frontend_client.isConnected()) {
-            self.frontend_client.shutdown(true) catch |err| {
+        if (!self.attach_state.detach_mode and self.runtime.isConnected()) {
+            self.runtime.shutdown(true) catch |err| {
                 core.logging.logError("mux", "failed to send shutdown to SES", err);
             };
         }

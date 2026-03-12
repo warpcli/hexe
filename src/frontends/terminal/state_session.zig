@@ -98,7 +98,7 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     const tab_uuid = core.ipc.generateUuid();
     var tab = Tab.init(self.allocator, self.layout_width, self.layout_height, self.pop_config.carrier.notification);
 
-    if (self.frontend_client.isConnected()) {
+    if (self.runtime.isConnected()) {
         tab.layout.setFrontendClient(self.frontend_client);
     }
     tab.layout.setPanePopConfig(&self.pop_config.pane.notification);

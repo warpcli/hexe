@@ -80,7 +80,7 @@ fn logTerminalCapabilities(state: *State, timed_out: bool) void {
 fn applyDeferredPaneExits(state: *State) void {
     var pending: std.ArrayList([32]u8) = .empty;
     defer pending.deinit(state.allocator);
-    state.frontend_client.drainPendingPaneExits(&pending);
+    state.runtime.drainPendingPaneExits(&pending);
     if (pending.items.len == 0) return;
 
     for (pending.items) |uuid| {
@@ -139,7 +139,7 @@ fn loopTimerCallback(
     }
     if (now - timer_ctx.last_heartbeat >= timer_ctx.heartbeat_interval) {
         timer_ctx.last_heartbeat = now;
-        _ = timer_ctx.state.frontend_client.sendPing();
+        _ = timer_ctx.state.runtime.sendPing();
     }
 
     // Re-arm with fresh absolute timestamp (workaround for xev io_uring timer re-arm bug)
@@ -748,12 +748,12 @@ pub fn runMainLoop(state: *State) !void {
                 if (cwd == null) {
                     cwd = std.posix.getcwd(&cwd_buf) catch null;
                 }
-                const old_aux = state.frontend_client.getPaneAux(pane.uuid) catch FrontendClient.PaneAuxInfo{
+                const old_aux = state.runtime.getPaneAux(pane.uuid) catch FrontendClient.PaneAuxInfo{
                     .created_from = null,
                     .focused_from = null,
                 };
-                state.frontend_client.killPane(pane.uuid) catch {};
-                if (state.frontend_client.createPane(null, cwd, null, null, null, null, null)) |result| {
+                state.runtime.killPane(pane.uuid) catch {};
+                if (state.runtime.createPane(null, cwd, null, null, null, null, null)) |result| {
                     const vt_fd = state.frontend_client.getVtFd();
                     var replaced = true;
                     if (vt_fd) |fd| {
@@ -769,7 +769,7 @@ pub fn runMainLoop(state: *State) !void {
                         const alt_screen = pane.vt.inAltScreen();
                         const layout_path = helpers.getLayoutPath(state, pane) catch null;
                         defer if (layout_path) |path| state.allocator.free(path);
-                        state.frontend_client.updatePaneAux(
+                        state.runtime.updatePaneAux(
                             pane.uuid,
                             state.activeTabIndex(),
                             pane.floating,

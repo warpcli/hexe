@@ -1,13 +1,33 @@
 const std = @import("std");
+const posix = std.posix;
 const frontend_attach = @import("frontend_attach.zig");
 const FrontendAttachState = @import("frontend_attach_state.zig").FrontendAttachState;
 const FrontendClient = @import("frontend_client.zig").SesClient;
+const OrphanedPaneInfo = @import("frontend_client.zig").OrphanedPaneInfo;
 const Transport = @import("frontend_client.zig").Transport;
 const session_model = @import("session_model.zig");
 const SessionProjection = @import("session_projection.zig").SessionProjection;
 const wire = @import("wire.zig");
 
 pub const FrontendRuntime = struct {
+    pub const PaneType = FrontendClient.PaneType;
+    pub const PaneAuxInfo = FrontendClient.PaneAuxInfo;
+    pub const PaneInfoSnapshot = FrontendClient.PaneInfoSnapshot;
+    pub const PaneProcessInfo = FrontendClient.PaneProcessInfo;
+    pub const PaneAttachResult = struct {
+        uuid: [32]u8,
+        pane_id: u16,
+        pid: posix.pid_t,
+    };
+    pub const CursorPos = struct {
+        x: u16,
+        y: u16,
+    };
+    pub const PaneSize = struct {
+        cols: u16,
+        rows: u16,
+    };
+
     pub const ReattachSnapshotResult = struct {
         snapshot: session_model.SessionSnapshot,
         pane_uuids: [][32]u8,
@@ -82,6 +102,167 @@ pub const FrontendRuntime = struct {
         self.client.deinit();
         self.* = undefined;
         allocator.destroy(self);
+    }
+
+    pub fn connect(self: *FrontendRuntime) !void {
+        try self.client.connect();
+    }
+
+    pub fn isConnected(self: *const FrontendRuntime) bool {
+        return self.client.ctl_fd != null;
+    }
+
+    pub fn justStartedDaemon(self: *const FrontendRuntime) bool {
+        return self.client.just_started_daemon;
+    }
+
+    pub fn shutdown(self: *FrontendRuntime, preserve_sticky: bool) !void {
+        try self.client.shutdown(preserve_sticky);
+    }
+
+    pub fn detachSession(self: *FrontendRuntime, session_id: [32]u8) !void {
+        try self.client.detachSession(session_id);
+    }
+
+    pub fn drainPendingPaneExits(self: *FrontendRuntime, out: *std.ArrayList([32]u8)) void {
+        self.client.drainPendingPaneExits(out);
+    }
+
+    pub fn sendPing(self: *FrontendRuntime) bool {
+        return self.client.sendPing();
+    }
+
+    pub fn createPane(
+        self: *FrontendRuntime,
+        shell: ?[]const u8,
+        cwd: ?[]const u8,
+        sticky_pwd: ?[]const u8,
+        sticky_key: ?u8,
+        env: ?[]const []const u8,
+        isolation_profile: ?[]const u8,
+        inherit_env_parent_uuid: ?[32]u8,
+    ) !PaneAttachResult {
+        const result = try self.client.createPane(
+            shell,
+            cwd,
+            sticky_pwd,
+            sticky_key,
+            env,
+            isolation_profile,
+            inherit_env_parent_uuid,
+        );
+        return .{
+            .uuid = result.uuid,
+            .pane_id = result.pane_id,
+            .pid = result.pid,
+        };
+    }
+
+    pub fn findStickyPane(
+        self: *FrontendRuntime,
+        pwd: []const u8,
+        key: u8,
+    ) !?PaneAttachResult {
+        const result = try self.client.findStickyPane(pwd, key);
+        if (result) |found| {
+            return .{
+                .uuid = found.uuid,
+                .pane_id = found.pane_id,
+                .pid = found.pid,
+            };
+        }
+        return null;
+    }
+
+    pub fn orphanPane(self: *FrontendRuntime, uuid: [32]u8) !void {
+        try self.client.orphanPane(uuid);
+    }
+
+    pub fn setSticky(self: *FrontendRuntime, uuid: [32]u8, pwd: []const u8, key: u8) !void {
+        try self.client.setSticky(uuid, pwd, key);
+    }
+
+    pub fn killPane(self: *FrontendRuntime, uuid: [32]u8) !void {
+        try self.client.killPane(uuid);
+    }
+
+    pub fn requestPaneCwd(self: *FrontendRuntime, uuid: [32]u8) void {
+        self.client.requestPaneCwd(uuid);
+    }
+
+    pub fn getPaneCwdSync(self: *FrontendRuntime, uuid: [32]u8) ?[]const u8 {
+        return self.client.getPaneCwdSync(uuid);
+    }
+
+    pub fn requestPaneProcess(self: *FrontendRuntime, uuid: [32]u8) void {
+        self.client.requestPaneProcess(uuid);
+    }
+
+    pub fn getPaneName(self: *FrontendRuntime, uuid: [32]u8) ?[]u8 {
+        return self.client.getPaneName(uuid);
+    }
+
+    pub fn getPaneInfoSnapshot(self: *FrontendRuntime, uuid: [32]u8) ?PaneInfoSnapshot {
+        return self.client.getPaneInfoSnapshot(uuid);
+    }
+
+    pub fn updatePaneAux(
+        self: *FrontendRuntime,
+        uuid: [32]u8,
+        active_tab: ?usize,
+        is_floating: bool,
+        is_focused: bool,
+        pane_type: PaneType,
+        created_from: ?[32]u8,
+        focused_from: ?[32]u8,
+        cursor: ?CursorPos,
+        cursor_style: ?u8,
+        cursor_visible: ?bool,
+        alt_screen: ?bool,
+        size: ?PaneSize,
+        cwd: ?[]const u8,
+        fg_process: ?[]const u8,
+        fg_pid: ?posix.pid_t,
+        layout_path: ?[]const u8,
+    ) !void {
+        try self.client.updatePaneAux(
+            uuid,
+            active_tab,
+            is_floating,
+            is_focused,
+            pane_type,
+            created_from,
+            focused_from,
+            if (cursor) |value| .{ .x = value.x, .y = value.y } else null,
+            cursor_style,
+            cursor_visible,
+            alt_screen,
+            if (size) |value| .{ .cols = value.cols, .rows = value.rows } else null,
+            cwd,
+            fg_process,
+            fg_pid,
+            layout_path,
+        );
+    }
+
+    pub fn getPaneAux(self: *FrontendRuntime, uuid: [32]u8) !PaneAuxInfo {
+        return try self.client.getPaneAux(uuid);
+    }
+
+    pub fn adoptPane(
+        self: *FrontendRuntime,
+        uuid: [32]u8,
+    ) !PaneAttachResult {
+        const result = try self.client.adoptPane(uuid);
+        return .{
+            .uuid = result.uuid,
+            .pane_id = result.pane_id,
+            .pid = result.pid,
+        };
+    }
+
+    pub fn listOrphanedPanes(self: *FrontendRuntime, out_buf: []OrphanedPaneInfo) !usize {
+        return try self.client.listOrphanedPanes(out_buf);
     }
 
     pub fn reconcileResolvedName(self: *FrontendRuntime) !?frontend_attach.SessionNameChange {

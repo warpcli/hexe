@@ -234,12 +234,12 @@ pub fn run(mux_args: MuxArgs) !void {
     _ = c.setenv("HEXE_MUX_SOCKET", "1", 1);
 
     // Connect to ses daemon FIRST (start it if needed).
-    state.frontend_client.connect() catch |e| {
+    state.runtime.connect() catch |e| {
         debugLog("ses connect failed: {s}", .{@errorName(e)});
         std.debug.print("Could not connect to ses daemon: {s}\n", .{@errorName(e)});
         return;
     };
-    debugLog("ses connected (started={})", .{state.frontend_client.just_started_daemon});
+    debugLog("ses connected (started={})", .{state.runtime.justStartedDaemon()});
 
     // If server resolved to a different name (collision avoidance), update state.
     if (state.runtime.reconcileResolvedName() catch null) |change| {
@@ -250,7 +250,7 @@ pub fn run(mux_args: MuxArgs) !void {
     }
 
     // Show notification if we just started the daemon.
-    if (state.frontend_client.just_started_daemon) {
+    if (state.runtime.justStartedDaemon()) {
         state.notifications.showFor("ses daemon started", 2000);
     }
 

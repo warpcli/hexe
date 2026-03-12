@@ -51,8 +51,8 @@ fn destroyBlockingFloat(state: *State, pane: *Pane) void {
     for (state.view.floats.items, 0..) |p, i| {
         if (p == pane) {
             _ = state.view.floats.orderedRemove(i);
-            if (state.frontend_client.isConnected()) {
-                state.frontend_client.killPane(pane.uuid) catch {};
+            if (state.runtime.isConnected()) {
+                state.runtime.killPane(pane.uuid) catch {};
             }
             state.syncSessionFloatRemoved(pane.uuid);
             pane.deinit();
@@ -218,7 +218,7 @@ fn readProcEnvironByPid(allocator: std.mem.Allocator, pid: i32) !?[]const []cons
 
 fn syncEnvIntoExistingFloat(state: *State, pane: *Pane, parent_uuid: [32]u8) void {
     var parent_env: ?[]const []const u8 = null;
-    if (state.frontend_client.getPaneInfoSnapshot(parent_uuid)) |info| {
+    if (state.runtime.getPaneInfoSnapshot(parent_uuid)) |info| {
         defer {
             if (info.name) |s| state.allocator.free(s);
             if (info.cwd) |s| state.allocator.free(s);
@@ -252,8 +252,8 @@ fn syncEnvIntoExistingFloat(state: *State, pane: *Pane, parent_uuid: [32]u8) voi
 }
 
 fn paneExistsInSes(state: *State, uuid: [32]u8) bool {
-    if (!state.frontend_client.isConnected()) return true;
-    if (state.frontend_client.getPaneInfoSnapshot(uuid)) |info| {
+    if (!state.runtime.isConnected()) return true;
+    if (state.runtime.getPaneInfoSnapshot(uuid)) |info| {
         defer {
             if (info.name) |s| state.allocator.free(s);
             if (info.cwd) |s| state.allocator.free(s);
@@ -300,7 +300,7 @@ pub fn performDetach(state: *State) void {
 
     // Detach session with our UUID. SES uses its canonical session snapshot.
     const session_uuid = state.sessionUuid();
-    state.frontend_client.detachSession(session_uuid) catch {
+    state.runtime.detachSession(session_uuid) catch {
         std.debug.print("\nDetach failed - panes orphaned\n", .{});
         state.running = false;
         return;
@@ -326,16 +326,16 @@ pub fn performDisown(state: *State) void {
         }
 
         // Get the old pane's auxiliary info (created_from, focused_from) to inherit.
-        const old_aux = state.frontend_client.getPaneAux(p.uuid) catch FrontendClient.PaneAuxInfo{
+        const old_aux = state.runtime.getPaneAux(p.uuid) catch FrontendClient.PaneAuxInfo{
             .created_from = null,
             .focused_from = null,
         };
 
         // Orphan the current pane in ses (keeps process alive).
-        state.frontend_client.orphanPane(p.uuid) catch {};
+        state.runtime.orphanPane(p.uuid) catch {};
 
         // Create a new shell via ses in the same directory and replace the pane's backend.
-        if (state.frontend_client.createPane(null, cwd, null, null, null, null, null)) |result| {
+        if (state.runtime.createPane(null, cwd, null, null, null, null, null)) |result| {
             const vt_fd = state.frontend_client.getVtFd() orelse {
                 state.notifications.show("Disown failed: no VT channel");
                 state.needs_render = true;
@@ -355,7 +355,7 @@ pub fn performDisown(state: *State) void {
             const alt_screen = p.vt.inAltScreen();
             const layout_path = helpers.getLayoutPath(state, p) catch null;
             defer if (layout_path) |path| state.allocator.free(path);
-            state.frontend_client.updatePaneAux(
+            state.runtime.updatePaneAux(
                 p.uuid,
                 state.activeTabIndex(),
                 p.floating,
@@ -394,9 +394,9 @@ pub fn performClose(state: *State) void {
         state.syncPaneUnfocus(pane);
         float_completion.handleBlockingFloatCompletion(state, pane);
         // Kill in ses.
-        if (state.frontend_client.isConnected()) {
+        if (state.runtime.isConnected()) {
             mux.debugLogUuid(&pane.uuid, "performClose: sending killPane to SES", .{});
-            state.frontend_client.killPane(pane.uuid) catch |e| {
+            state.runtime.killPane(pane.uuid) catch |e| {
                 mux.debugLogUuid(&pane.uuid, "performClose: killPane error: {s}", .{@errorName(e)});
             };
             mux.debugLogUuid(&pane.uuid, "performClose: killPane done", .{});
@@ -428,13 +428,13 @@ pub fn performClose(state: *State) void {
 
 /// Start the adopt orphaned pane flow.
 pub fn startAdoptFlow(state: *State) void {
-    if (!state.frontend_client.isConnected()) {
+    if (!state.runtime.isConnected()) {
         state.notifications.show("Not connected to ses");
         return;
     }
 
     // Get list of orphaned panes.
-    const count = state.frontend_client.listOrphanedPanes(&state.attach_state.adopt_orphans) catch {
+    const count = state.runtime.listOrphanedPanes(&state.attach_state.adopt_orphans) catch {
         state.notifications.show("Failed to list orphaned panes");
         return;
     };
@@ -475,7 +475,7 @@ pub fn startAdoptFlow(state: *State) void {
 /// If destroy_current is true, kills the current pane; otherwise orphans it (swap).
 pub fn performAdopt(state: *State, orphan_uuid: [32]u8, destroy_current: bool) void {
     // Adopt the selected orphan from ses.
-    const result = state.frontend_client.adoptPane(orphan_uuid) catch {
+    const result = state.runtime.adoptPane(orphan_uuid) catch {
         state.notifications.show("Failed to adopt pane");
         return;
     };
@@ -489,10 +489,10 @@ pub fn performAdopt(state: *State, orphan_uuid: [32]u8, destroy_current: bool) v
     if (current_pane) |pane| {
         if (destroy_current) {
             // Kill current pane in ses, then replace with adopted.
-            state.frontend_client.killPane(pane.uuid) catch {};
+            state.runtime.killPane(pane.uuid) catch {};
         } else {
             // Orphan current pane (swap mode).
-            state.frontend_client.orphanPane(pane.uuid) catch {};
+            state.runtime.orphanPane(pane.uuid) catch {};
             state.notifications.show("Swapped panes (old pane orphaned)");
         }
 
@@ -801,10 +801,10 @@ pub fn createAdhocFloatWithSize(
     const content_h = outer_h -| (pad_y * 2);
 
     const id: u16 = @intCast(100 + state.view.floats.items.len);
-    if (!state.frontend_client.isConnected()) return error.SesUnavailable;
+    if (!state.runtime.isConnected()) return error.SesUnavailable;
     const merged_env = mergeEnvLines(state.allocator, env, extra_env) catch null;
     defer if (merged_env) |slice| state.allocator.free(slice);
-    const result = try state.frontend_client.createPane(command, cwd, null, null, merged_env, isolation_profile, null);
+    const result = try state.runtime.createPane(command, cwd, null, null, merged_env, isolation_profile, null);
     const vt_fd = state.frontend_client.getVtFd() orelse return error.SesUnavailable;
     try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
 
@@ -918,16 +918,16 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     else
         null;
 
-    if (!state.frontend_client.isConnected()) return error.SesUnavailable;
+    if (!state.runtime.isConnected()) return error.SesUnavailable;
     const env_parent = if (float_def.attributes.inherit_env) parent_uuid else null;
-    const result = try state.frontend_client.createPane(float_def.command, current_dir, sticky_pwd, sticky_key, null, isolation_profile, env_parent);
+    const result = try state.runtime.createPane(float_def.command, current_dir, sticky_pwd, sticky_key, null, isolation_profile, env_parent);
     const vt_fd = state.frontend_client.getVtFd() orelse return error.SesUnavailable;
     try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
 
     // Persist sticky affinity metadata for better reclaim preference.
     if (sticky_pwd) |pwd| {
         if (sticky_key) |key| {
-            state.frontend_client.setSticky(result.uuid, pwd, key) catch {};
+            state.runtime.setSticky(result.uuid, pwd, key) catch {};
         }
     }
 
