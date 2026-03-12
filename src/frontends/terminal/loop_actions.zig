@@ -434,7 +434,7 @@ pub fn startAdoptFlow(state: *State) void {
     }
 
     // Get list of orphaned panes.
-    const count = state.runtime.listOrphanedPanes(&state.attach_state.adopt_orphans) catch {
+    const count = state.runtime.refreshOrphanedPanes() catch {
         state.notifications.show("Failed to list orphaned panes");
         return;
     };
@@ -444,11 +444,13 @@ pub fn startAdoptFlow(state: *State) void {
         return;
     }
 
-    state.attach_state.adopt_orphan_count = count;
-
     if (count == 1) {
         // Only one orphan - skip picker, go directly to confirm.
-        state.attach_state.adopt_selected_uuid = state.attach_state.adopt_orphans[0].uuid;
+        const orphan = state.runtime.orphanedPaneInfo(0) orelse {
+            state.notifications.show("Failed to read orphaned pane");
+            return;
+        };
+        state.runtime.setSelectedOrphanedPaneUuid(orphan.uuid);
         state.pending_action = .adopt_confirm;
         state.popups.showConfirm("Destroy current pane?", .{}) catch {};
     } else {
@@ -457,7 +459,11 @@ pub fn startAdoptFlow(state: *State) void {
         var items_list: std.ArrayList([]const u8) = .empty;
         defer items_list.deinit(state.allocator);
         for (0..count) |i| {
-            items_list.append(state.allocator, state.attach_state.adopt_orphans[i].uuid[0..]) catch {
+            const orphan = state.runtime.orphanedPaneInfo(i) orelse {
+                state.notifications.show("Failed to read orphaned pane");
+                return;
+            };
+            items_list.append(state.allocator, orphan.uuid[0..]) catch {
                 state.notifications.show("Failed to show picker");
                 return;
             };

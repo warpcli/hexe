@@ -17,7 +17,6 @@ const Layout = layout_mod.Layout;
 const Renderer = @import("render_core.zig").Renderer;
 
 const FrontendRuntime = core.FrontendRuntime;
-const FrontendAttachState = core.FrontendAttachState;
 const PaneShellInfo = core.SessionProjectionPaneShellInfo;
 const PaneProcInfo = core.SessionProjectionPaneProcInfo;
 
@@ -123,7 +122,6 @@ pub const State = struct {
     exit_intent_deadline_ms: i64,
     /// If true, respawn the focused pane after handling input
     needs_respawn: bool,
-    attach_state: *FrontendAttachState,
     skip_dead_check: bool,
     pending_pop_response: bool,
     pending_pop_scope: pop.Scope,
@@ -279,7 +277,6 @@ pub const State = struct {
             .pending_exit_intent = false,
             .exit_intent_deadline_ms = 0,
             .needs_respawn = false,
-            .attach_state = &runtime.attach_state,
             .skip_dead_check = false,
             .pending_pop_response = false,
             .pending_pop_scope = .mux,
@@ -381,16 +378,16 @@ pub const State = struct {
         // If the terminal is gone (window closed, SSH dropped), auto-detach to
         // preserve sessions even when SIGTERM arrived instead of SIGHUP.
         // tcgetattr returns EIO on a dead PTY slave.
-        if (!self.attach_state.detach_mode) {
+        if (!self.runtime.isDetachMode()) {
             _ = posix.tcgetattr(posix.STDIN_FILENO) catch {
-                self.attach_state.detach_mode = true;
+                self.runtime.setDetachMode(true);
             };
         }
 
         // When exiting normally (not detach), tell SES to kill regular panes but
         // preserve sticky panes/floats.
         // When detaching, panes stay alive for later reattach.
-        if (!self.attach_state.detach_mode and self.runtime.isConnected()) {
+        if (!self.runtime.isDetachMode() and self.runtime.isConnected()) {
             self.runtime.shutdown(true) catch |err| {
                 core.logging.logError("mux", "failed to send shutdown to SES", err);
             };
@@ -573,15 +570,15 @@ pub const State = struct {
     }
 
     pub fn isDetachMode(self: *const State) bool {
-        return self.attach_state.detach_mode;
+        return self.runtime.isDetachMode();
     }
 
     pub fn setDetachMode(self: *State, enabled: bool) void {
-        self.attach_state.setDetachMode(enabled);
+        self.runtime.setDetachMode(enabled);
     }
 
     pub fn nextStateVersion(self: *State) u32 {
-        return self.attach_state.nextStateVersion();
+        return self.runtime.nextStateVersion();
     }
 
     pub fn activeTabIndex(self: *const State) usize {

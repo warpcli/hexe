@@ -375,12 +375,14 @@ This is the actual remaining rewrite, in order.
 
 ### Phase 1: build the shared runtime and move session parsing there
 
-1. Introduce `FrontendRuntime` and `SessionProjection`.
-2. Move `frontend_session_cache.zig` functionality into the runtime/projection.
-3. Move `frontend_attach_state.zig` and `frontend_attach.zig` into the runtime.
-4. Move session JSON parsing and snapshot application out of
+Status: complete
+
+1. Done: Introduce `FrontendRuntime` and `SessionProjection`.
+2. Done: Move `frontend_session_cache.zig` functionality into the runtime/projection.
+3. Done: Move `frontend_attach_state.zig` and `frontend_attach.zig` into the runtime.
+4. Done: Move session JSON parsing and snapshot application out of
    `src/frontends/terminal/state_reattach.zig`.
-5. Make the terminal frontend consume projection state from the runtime.
+5. Done: Make the terminal frontend consume projection state from the runtime.
 
 Done when:
 

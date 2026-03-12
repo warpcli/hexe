@@ -330,12 +330,59 @@ pub const FrontendRuntime = struct {
         frontend_attach.markSessionStolen(&self.attach_state);
     }
 
+    pub fn isDetachMode(self: *const FrontendRuntime) bool {
+        return self.attach_state.detach_mode;
+    }
+
+    pub fn setDetachMode(self: *FrontendRuntime, enabled: bool) void {
+        self.attach_state.setDetachMode(enabled);
+    }
+
+    pub fn nextStateVersion(self: *FrontendRuntime) u32 {
+        return self.attach_state.nextStateVersion();
+    }
+
     pub fn beginReattach(self: *FrontendRuntime) void {
         self.attach_state.beginReattach();
     }
 
     pub fn endReattach(self: *FrontendRuntime) void {
         self.attach_state.endReattach();
+    }
+
+    pub fn refreshOrphanedPanes(self: *FrontendRuntime) !usize {
+        const count = try self.client.listOrphanedPanes(&self.attach_state.adopt_orphans);
+        self.attach_state.adopt_orphan_count = count;
+        if (count == 0) {
+            self.attach_state.adopt_selected_uuid = null;
+        } else if (self.attach_state.adopt_selected_uuid) |selected| {
+            var found = false;
+            for (self.attach_state.adopt_orphans[0..count]) |info| {
+                if (std.mem.eql(u8, &info.uuid, &selected)) {
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) self.attach_state.adopt_selected_uuid = null;
+        }
+        return count;
+    }
+
+    pub fn orphanedPaneCount(self: *const FrontendRuntime) usize {
+        return self.attach_state.adopt_orphan_count;
+    }
+
+    pub fn orphanedPaneInfo(self: *const FrontendRuntime, idx: usize) ?OrphanedPaneInfo {
+        if (idx >= self.attach_state.adopt_orphan_count) return null;
+        return self.attach_state.adopt_orphans[idx];
+    }
+
+    pub fn selectedOrphanedPaneUuid(self: *const FrontendRuntime) ?[32]u8 {
+        return self.attach_state.adopt_selected_uuid;
+    }
+
+    pub fn setSelectedOrphanedPaneUuid(self: *FrontendRuntime, uuid: ?[32]u8) void {
+        self.attach_state.adopt_selected_uuid = uuid;
     }
 
     pub fn parseSessionSnapshotJson(self: *FrontendRuntime, session_state_json: []const u8) !session_model.SessionSnapshot {
