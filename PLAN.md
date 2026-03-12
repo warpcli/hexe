@@ -455,9 +455,9 @@ Done when:
 ### Phase 6: make transport truly frontend-neutral
 
 1. Done: Extend `FrontendClient.Transport` beyond `local_ipc`.
-2. Add `liblink` transport.
+2. Done: Add `liblink` transport.
 3. Done: Make transport selection a runtime concern, not a terminal concern.
-4. Reuse the exact same attach/session/VT path for remote frontends.
+4. Done: Reuse the exact same attach/session/VT path for remote frontends.
 
 Done when:
 
@@ -523,12 +523,13 @@ The rewrite is done only when all of the following are true:
 4. Done: SES is the only author of session structure.
 5. Done: A shared frontend runtime owns attach lifecycle and session projection.
 6. Done: Terminal state contains only terminal-specific view/render/input state.
-7. Local and remote frontends use the same runtime and protocol shape.
+7. Done: Local and remote frontends use the same runtime and protocol shape.
 8. `PLAN.md` can be removed or marked complete without hand-waving.
 
 Until then, the honest description is:
 
 ```text
 SES is canonical authority,
-but the terminal frontend still contains a local attached-session layer.
+and the only remaining work is final documentation/cleanup around the new
+frontend runtime and remote transport path.
 ```

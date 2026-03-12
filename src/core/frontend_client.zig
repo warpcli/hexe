@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const ipc = @import("ipc.zig");
+const liblink_transport = @import("frontend_liblink_transport.zig");
 const session_model = @import("session_model.zig");
 const wire = @import("wire.zig");
 
@@ -14,8 +15,11 @@ pub const PreconnectedTransport = struct {
     vt_fd: posix.fd_t,
 };
 
+pub const LiblinkTransport = liblink_transport.Config;
+
 pub const Transport = union(enum) {
     local_ipc: LocalIpcTransport,
+    liblink: LiblinkTransport,
     preconnected: PreconnectedTransport,
 };
 
@@ -35,6 +39,7 @@ pub const SesClient = struct {
     log_file: ?[]const u8,
     frontend_kind: wire.FrontendKind,
     transport: Transport,
+    bridge: ?*liblink_transport.Bridge = null,
 
     // Registration info
     session_id: [32]u8, // mux UUID as hex string
@@ -97,11 +102,13 @@ pub const SesClient = struct {
     pub fn deinit(self: *SesClient) void {
         if (self.ctl_fd) |fd| posix.close(fd);
         if (self.vt_fd) |fd| posix.close(fd);
+        if (self.bridge) |bridge| bridge.deinit();
         if (self.resolved_name) |rn| self.allocator.free(rn);
         self.pending_pane_exits.deinit(self.allocator);
         if (self.pending_session_state) |json| self.allocator.free(json);
         self.ctl_fd = null;
         self.vt_fd = null;
+        self.bridge = null;
         self.resolved_name = null;
         self.pending_session_state = null;
     }
@@ -126,6 +133,7 @@ pub const SesClient = struct {
     fn transportKind(self: *const SesClient) wire.FrontendTransportKind {
         return switch (self.transport) {
             .local_ipc => .local_ipc,
+            .liblink => .liblink,
             .preconnected => .preconnected,
         };
     }
@@ -167,8 +175,26 @@ pub const SesClient = struct {
     pub fn connect(self: *SesClient) !void {
         switch (self.transport) {
             .local_ipc => |transport| try self.connectLocalIpc(transport),
+            .liblink => |transport| try self.connectLiblink(transport),
             .preconnected => |transport| try self.connectPreconnected(transport),
         }
+    }
+
+    fn connectLiblink(self: *SesClient, transport: LiblinkTransport) !void {
+        self.debugLog("ses connect: transport=liblink host={s}:{d} user={s}", .{
+            transport.host,
+            transport.port,
+            transport.user,
+        });
+
+        const result = try liblink_transport.connect(self.allocator, transport);
+        errdefer result.bridge.deinit();
+
+        try self.connectPreconnected(.{
+            .ctl_fd = result.ctl_fd,
+            .vt_fd = result.vt_fd,
+        });
+        self.bridge = result.bridge;
     }
 
     fn connectPreconnected(self: *SesClient, transport: PreconnectedTransport) !void {

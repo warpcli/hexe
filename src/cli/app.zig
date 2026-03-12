@@ -10,6 +10,7 @@ const pop_handlers = @import("pop_handlers.zig");
 const cli_cmds = @import("commands/com.zig");
 const config_validate = @import("commands/config_validate.zig");
 const ses_export = @import("commands/ses_export.zig");
+const ses_pipe = @import("commands/ses_pipe.zig");
 const ses_stats = @import("commands/ses_stats.zig");
 
 const c = @cImport({
@@ -119,7 +120,7 @@ fn printHelpRoot() void {
 fn printHelpCommand(command: []const u8) void {
     if (std.mem.eql(u8, command, "session")) {
         print("{s}{s}session{s} {s}(alias: ses){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-        print("Subcommands: daemon, status, list, kill, clear, export, stats\n", .{});
+        print("Subcommands: daemon, status, list, kill, clear, export, stats, pipe\n", .{});
         return;
     }
     if (std.mem.eql(u8, command, "layout")) {
@@ -226,6 +227,9 @@ pub fn main() !void {
     var ses_stats_cmd = app.createCommand("stats", "Show resource usage statistics");
     try ses_stats_cmd.addArg(Arg.singleValueOption("instance", 'I', null));
 
+    var ses_pipe_cmd = app.createCommand("pipe", "Internal SES byte-stream bridge");
+    try ses_pipe_cmd.addArg(Arg.singleValueOption("ses-socket", null, null));
+
     try ses_cmd.addSubcommands(&[_]yazap.Command{
         ses_daemon,
         ses_status_cmd,
@@ -234,6 +238,7 @@ pub fn main() !void {
         ses_clear,
         ses_export_cmd,
         ses_stats_cmd,
+        ses_pipe_cmd,
     });
 
     var layout_list = app.createCommand("list", "List saved session layouts");
@@ -579,6 +584,10 @@ pub fn main() !void {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
             try ses_stats.run(allocator);
+            return;
+        }
+        if (ses_matches.subcommandMatches("pipe")) |m| {
+            try ses_pipe.run(allocator, m.getSingleValue("ses-socket") orelse "");
             return;
         }
     } else if (matches.subcommandMatches("layout")) |layout_matches| {

@@ -26,6 +26,10 @@ pub fn preconnectedTransport(ctl_fd: std.posix.fd_t, vt_fd: std.posix.fd_t) fron
     } };
 }
 
+pub fn liblinkTransport(config: frontend_client.LiblinkTransport) frontend_client.Transport {
+    return .{ .liblink = config };
+}
+
 pub fn sendNotify(
     allocator: std.mem.Allocator,
     transport: frontend_client.Transport,
@@ -50,6 +54,7 @@ pub fn sendNotify(
             const notify = wire.Notify{ .msg_len = @intCast(message.len) };
             try wire.writeControlWithTrail(client.fd, .notify, std.mem.asBytes(&notify), message);
         },
+        .liblink => return error.UnsupportedTransport,
         .preconnected => return error.UnsupportedTransport,
     }
 }
