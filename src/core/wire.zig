@@ -218,11 +218,9 @@ pub const PaneUuid = extern struct {
     uuid: [32]u8 align(1),
 };
 
-/// Detach: session_id + length of canonical session snapshot JSON.
-/// Followed by: session snapshot bytes (state_len).
+/// Detach: session_id only. SES detaches using its own canonical session snapshot.
 pub const Detach = extern struct {
     session_id: [32]u8 align(1),
-    state_len: u32 align(1),
 };
 
 /// Reattach: prefix of session_id to match.

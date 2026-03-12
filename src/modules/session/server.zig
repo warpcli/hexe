@@ -1617,20 +1617,12 @@ pub const Server = struct {
             return;
         }
         const det = wire.readStruct(wire.Detach, fd) catch return;
-        if (det.state_len > wire.MAX_PAYLOAD_LEN) {
-            self.skipBinaryPayload(fd, det.state_len, buf);
-            self.sendBinaryError(fd, "detach: state too large (exceeds MAX_PAYLOAD_LEN)");
+        const extra_len = payload_len - @sizeOf(wire.Detach);
+        if (extra_len > 0) {
+            self.skipBinaryPayload(fd, extra_len, buf);
+            self.sendBinaryError(fd, "detach: legacy state payload is no longer accepted");
             return;
         }
-
-        // Read mux state.
-        const state_data = self.allocator.alloc(u8, det.state_len) catch {
-            self.skipBinaryPayload(fd, det.state_len, buf);
-            self.sendBinaryError(fd, "detach: memory allocation failed for state data");
-            return;
-        };
-        defer self.allocator.free(state_data);
-        wire.readExact(fd, state_data) catch return;
 
         // Convert session_id hex to binary.
         const session_id = core.uuid.hexToBin(det.session_id) orelse {
@@ -1655,7 +1647,7 @@ pub const Server = struct {
         };
         // Lock will be released after detach completes
 
-        if (self.ses_state.detachSession(client_id, session_id, session_name, state_data)) {
+        if (self.ses_state.detachSession(client_id, session_id, session_name)) {
             self.ses_state.markDirty();
             // Release lock after successful detach
             self.ses_state.releaseSessionLock(session_id);

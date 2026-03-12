@@ -46,70 +46,6 @@ fn buildSessionLayoutNode(
     return out;
 }
 
-pub fn buildSessionSnapshot(self: anytype) !core.session_model.SessionSnapshot {
-    var snapshot = try core.session_model.SessionSnapshot.initMinimal(self.allocator, self.sessionUuid(), self.sessionName());
-    errdefer snapshot.deinit();
-
-    snapshot.tab_counter = self.sessionTabCounter();
-    if (self.view.tabs.items.len > 0) {
-        snapshot.active_tab = self.activeTabIndex();
-    } else {
-        snapshot.active_tab = 0;
-    }
-    snapshot.active_float_uuid = if (self.activeFloatingIndex()) |idx| self.view.floats.items[idx].uuid else null;
-    snapshot.focused_pane_uuid = self.focusedPaneUuid() orelse getCurrentFocusedUuid(self);
-
-    for (self.view.tabs.items, 0..) |*tab, tab_idx| {
-        const tab_uuid = self.tabUuid(tab_idx) orelse continue;
-        var session_tab = core.session_model.SessionTab{
-            .uuid = tab_uuid,
-            .name = try self.allocator.dupe(u8, self.tabName(tab_idx)),
-            .root = if (tab.layout.root) |root| try buildSessionLayoutNode(self.allocator, &tab.layout, root) else null,
-            .focused_pane_uuid = if (tab.layout.getFocusedPane()) |pane| pane.uuid else null,
-            .allocator = self.allocator,
-        };
-        errdefer session_tab.deinit();
-        try snapshot.tabs.append(self.allocator, session_tab);
-
-        var pane_it = tab.layout.splits.valueIterator();
-        while (pane_it.next()) |pane_ptr| {
-            try snapshot.panes.put(pane_ptr.*.uuid, .{
-                .uuid = pane_ptr.*.uuid,
-                .kind = .split,
-                .parent_tab = tab_idx,
-            });
-        }
-    }
-
-    for (self.view.floats.items) |pane| {
-        try snapshot.floats.append(self.allocator, .{
-            .pane_uuid = pane.uuid,
-            .parent_tab = pane.parent_tab,
-            .visible = pane.visible,
-            .tab_visible = pane.tab_visible,
-            .sticky = pane.sticky,
-            .is_pwd = pane.is_pwd,
-            .float_key = pane.float_key,
-            .width_pct = pane.float_width_pct,
-            .height_pct = pane.float_height_pct,
-            .pos_x_pct = pane.float_pos_x_pct,
-            .pos_y_pct = pane.float_pos_y_pct,
-            .pad_x = pane.float_pad_x,
-            .pad_y = pane.float_pad_y,
-        });
-        try snapshot.panes.put(pane.uuid, .{
-            .uuid = pane.uuid,
-            .kind = .float,
-            .parent_tab = pane.parent_tab,
-            .sticky = pane.sticky,
-            .is_pwd = pane.is_pwd,
-            .float_key = pane.float_key,
-        });
-    }
-
-    return snapshot;
-}
-
 fn setLayoutFocusedSplitId(self: anytype, pane: *Pane) void {
     if (pane.floating) return;
 
@@ -138,7 +74,7 @@ fn rememberSplitFocus(self: anytype, pane: *Pane) void {
 
 pub fn syncSessionTabAdded(self: anytype, tab_uuid: [32]u8, name: []const u8, pane_uuid: [32]u8) void {
     if (!self.frontend_client.isConnected()) return;
-    self.frontend_client.sessionAddTab(tab_uuid, pane_uuid, self.activeTabIndex(), name) catch |err| {
+    self.runtime.sessionAddTab(tab_uuid, pane_uuid, self.activeTabIndex(), name) catch |err| {
         core.logging.logError("mux", "failed sessionAddTab IPC", err);
     };
 }
@@ -146,7 +82,7 @@ pub fn syncSessionTabAdded(self: anytype, tab_uuid: [32]u8, name: []const u8, pa
 pub fn syncSessionTabRemoved(self: anytype, tab_uuid: [32]u8) void {
     if (!self.frontend_client.isConnected()) return;
     const active_tab: ?usize = if (self.view.tabs.items.len > 0) self.activeTabIndex() else null;
-    self.frontend_client.sessionRemoveTab(tab_uuid, active_tab) catch |err| {
+    self.runtime.sessionRemoveTab(tab_uuid, active_tab) catch |err| {
         core.logging.logError("mux", "failed sessionRemoveTab IPC", err);
     };
 }
@@ -155,7 +91,7 @@ pub fn syncSessionFloat(self: anytype, pane: *Pane, active: bool) void {
     if (!self.frontend_client.isConnected()) return;
     if (pane.uuid[0] == 0) return;
 
-    self.frontend_client.sessionSyncFloat(
+    self.runtime.sessionSyncFloat(
         pane.uuid,
         self.activeTabIndex(),
         pane.parent_tab,
@@ -179,7 +115,7 @@ pub fn syncSessionFloat(self: anytype, pane: *Pane, active: bool) void {
 pub fn syncSessionFloatRemoved(self: anytype, pane_uuid: [32]u8) void {
     if (!self.frontend_client.isConnected()) return;
     if (pane_uuid[0] == 0) return;
-    self.frontend_client.sessionRemoveFloat(pane_uuid) catch |err| {
+    self.runtime.sessionRemoveFloat(pane_uuid) catch |err| {
         core.logging.logError("mux", "failed sessionRemoveFloat IPC", err);
     };
 }
@@ -202,7 +138,7 @@ pub fn syncActiveTabLayout(self: anytype) void {
     const root_json = core.session_model.layoutNodeToJson(self.allocator, session_root) catch return;
     defer self.allocator.free(root_json);
 
-    self.frontend_client.sessionSyncTabLayout(
+    self.runtime.sessionSyncTabLayout(
         tab_uuid,
         self.activeTabIndex(),
         if (tab.layout.getFocusedPane()) |pane| pane.uuid else null,

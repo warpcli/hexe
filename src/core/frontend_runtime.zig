@@ -146,4 +146,69 @@ pub const FrontendRuntime = struct {
         self.client.session_name = self.projection.sessionName();
         self.projection.setActiveTab(self.projection.activeTab(live_tab_count));
     }
+
+    pub fn sessionAddTab(
+        self: *FrontendRuntime,
+        tab_uuid: [32]u8,
+        pane_uuid: [32]u8,
+        tab_index: usize,
+        name: []const u8,
+    ) !void {
+        try self.client.sessionAddTab(tab_uuid, pane_uuid, tab_index, name);
+    }
+
+    pub fn sessionRemoveTab(self: *FrontendRuntime, tab_uuid: [32]u8, active_tab: ?usize) !void {
+        try self.client.sessionRemoveTab(tab_uuid, active_tab);
+    }
+
+    pub fn sessionSyncFloat(
+        self: *FrontendRuntime,
+        pane_uuid: [32]u8,
+        active_tab: ?usize,
+        parent_tab: ?usize,
+        visible: bool,
+        tab_visible: u64,
+        sticky: bool,
+        is_pwd: bool,
+        float_key: u8,
+        width_pct: u8,
+        height_pct: u8,
+        pos_x_pct: u8,
+        pos_y_pct: u8,
+        pad_x: u8,
+        pad_y: u8,
+        active: bool,
+    ) !void {
+        try self.client.sessionSyncFloat(
+            pane_uuid,
+            active_tab,
+            parent_tab,
+            visible,
+            tab_visible,
+            sticky,
+            is_pwd,
+            float_key,
+            width_pct,
+            height_pct,
+            pos_x_pct,
+            pos_y_pct,
+            pad_x,
+            pad_y,
+            active,
+        );
+    }
+
+    pub fn sessionRemoveFloat(self: *FrontendRuntime, pane_uuid: [32]u8) !void {
+        try self.client.sessionRemoveFloat(pane_uuid);
+    }
+
+    pub fn sessionSyncTabLayout(
+        self: *FrontendRuntime,
+        tab_uuid: [32]u8,
+        active_tab: usize,
+        focused_pane_uuid: ?[32]u8,
+        root_json: []const u8,
+    ) !void {
+        try self.client.sessionSyncTabLayout(tab_uuid, active_tab, focused_pane_uuid, root_json);
+    }
 };

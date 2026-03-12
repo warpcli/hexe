@@ -298,22 +298,9 @@ pub fn performDetach(state: *State) void {
     // Always set detach_mode to prevent killing panes on exit.
     state.setDetachMode(true);
 
-    var snapshot = state.buildSessionSnapshot() catch {
-        state.notifications.showFor("Failed to build session snapshot", 2000);
-        state.running = false;
-        return;
-    };
-    defer snapshot.deinit();
-    const session_state_json = snapshot.toJson(state.allocator) catch {
-        state.notifications.showFor("Failed to serialize session snapshot", 2000);
-        state.running = false;
-        return;
-    };
-    defer state.allocator.free(session_state_json);
-
-    // Detach session with our UUID - panes stay grouped with full state.
+    // Detach session with our UUID. SES uses its canonical session snapshot.
     const session_uuid = state.sessionUuid();
-    state.frontend_client.detachSession(session_uuid, session_state_json) catch {
+    state.frontend_client.detachSession(session_uuid) catch {
         std.debug.print("\nDetach failed - panes orphaned\n", .{});
         state.running = false;
         return;

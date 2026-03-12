@@ -537,16 +537,9 @@ pub const SesState = struct {
         self: *SesState,
         client: *const Client,
         session_id: [16]u8,
-        session_state_json: []const u8,
     ) !session_model.SessionSnapshot {
         if (client.session_snapshot) |snapshot| {
             return snapshot.clone(self.allocator);
-        }
-
-        if (session_state_json.len > 0) {
-            if (session_model.SessionSnapshot.fromJson(self.allocator, session_state_json)) |snapshot| {
-                return snapshot;
-            } else |_| {}
         }
 
         const session_name = client.session_name orelse "unknown";
@@ -1408,7 +1401,7 @@ pub const SesState = struct {
                     // Auto-detach: preserve session with last known state
                     if (client.session_id) |session_id| {
                         // Use detachSessionDirect to avoid removing client twice
-                        self.detachSessionDirect(client, session_id, "");
+                        self.detachSessionDirect(client, session_id);
                     } else {
                         ses.debugLog("removeClient: no session_id, killing panes", .{});
                         // No session_id yet, just kill panes
@@ -1501,7 +1494,7 @@ pub const SesState = struct {
     }
 
     /// Internal: detach session without removing client (used by removeClient)
-    fn detachSessionDirect(self: *SesState, client: *Client, session_id: [16]u8, session_state_json: []const u8) void {
+    fn detachSessionDirect(self: *SesState, client: *Client, session_id: [16]u8) void {
         const hex_id: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
         ses.debugLog("detachSessionDirect: session={s} name={s}", .{ hex_id[0..8], client.session_name orelse "null" });
 
@@ -1539,7 +1532,7 @@ pub const SesState = struct {
             ses.debugLog("detachSessionDirect: replaced existing detached session", .{});
         }
 
-        const session_snapshot = self.buildDetachedSessionSnapshot(client, session_id, session_state_json) catch {
+        const session_snapshot = self.buildDetachedSessionSnapshot(client, session_id) catch {
             ses.debugLog("detachSessionDirect: failed to build session_snapshot", .{});
             pane_uuids_list.deinit(self.allocator);
             return;
@@ -1576,11 +1569,11 @@ pub const SesState = struct {
         self.txlog.write(.detach_commit, session_id, &hex_id) catch {};
     }
 
-    /// Detach a client's session with a specific session ID (mux's UUID)
-    /// Stores the full mux state for later restoration
+    /// Detach a client's session with a specific session ID (frontend UUID)
+    /// Stores the canonical SES session snapshot for later restoration
     /// If the session already exists (re-detach), it updates the existing state
     /// Returns true on success, false if client not found
-    pub fn detachSession(self: *SesState, client_id: usize, session_id: [16]u8, session_name: []const u8, session_state_json: []const u8) bool {
+    pub fn detachSession(self: *SesState, client_id: usize, session_id: [16]u8, session_name: []const u8) bool {
         // Find client
         var client_index: ?usize = null;
         var pane_uuids_list: std.ArrayList([32]u8) = .empty;
@@ -1600,7 +1593,7 @@ pub const SesState = struct {
 
         for (self.clients.items, 0..) |*client, i| {
             if (client.id == client_id) {
-                detached_snapshot = self.buildDetachedSessionSnapshot(client, session_id, session_state_json) catch {
+                detached_snapshot = self.buildDetachedSessionSnapshot(client, session_id) catch {
                     ses.debugLog("detachSession: failed to build session_snapshot", .{});
                     return false;
                 };
@@ -1760,7 +1753,7 @@ pub const SesState = struct {
         }
 
         // Move all panes/session metadata into detached storage.
-        self.detachSessionDirect(owner, session_id, "");
+        self.detachSessionDirect(owner, session_id);
 
         // Close owner channels and remove the owner client.
         posix.close(owner.fd);

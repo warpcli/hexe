@@ -953,15 +953,13 @@ pub const SesClient = struct {
     }
 
     /// Detach session — keeps panes grouped for later reattach.
-    pub fn detachSession(self: *SesClient, session_id: [32]u8, session_state_json: []const u8) !void {
+    pub fn detachSession(self: *SesClient, session_id: [32]u8) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
 
-        // Convert 32-char hex session_id to 16 binary bytes for the struct.
-        var msg: wire.Detach = .{
+        const msg: wire.Detach = .{
             .session_id = session_id,
-            .state_len = @intCast(session_state_json.len),
         };
-        try wire.writeControlWithTrail(fd, .detach, std.mem.asBytes(&msg), session_state_json);
+        try wire.writeControl(fd, .detach, std.mem.asBytes(&msg));
 
         const hdr = try self.readSyncResponse(fd);
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
