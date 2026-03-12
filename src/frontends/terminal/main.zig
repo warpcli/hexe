@@ -7,8 +7,8 @@ const c = @cImport({
     @cInclude("stdlib.h");
 });
 
-const FrontendClient = core.FrontendClient;
 const FrontendAttach = core.FrontendAttach;
+const FrontendRuntime = core.FrontendRuntime;
 const FrontendTransport = core.FrontendTransport;
 const DetachedSessionInfo = core.FrontendDetachedSessionInfo;
 const OrphanedPaneInfo = core.FrontendOrphanedPaneInfo;
@@ -93,18 +93,16 @@ pub fn run(mux_args: MuxArgs) !void {
 
     // Handle --list: show detached sessions and orphaned panes.
     if (mux_args.list) {
-        const tmp_uuid = core.ipc.generateUuid();
-        const tmp_name = core.ipc.generateSessionName();
-        var frontend = FrontendClient.initWithTransport(allocator, tmp_uuid, tmp_name, false, false, null, .terminal, mux_args.transport); // keepalive=false for temp connection
-        defer frontend.deinit();
-        frontend.connect() catch {
+        var runtime = try FrontendRuntime.createTerminalProbe(allocator, false, null, mux_args.transport);
+        defer runtime.destroy();
+        runtime.connect() catch {
             std.debug.print("Could not connect to ses daemon\n", .{});
             return;
         };
 
         // List detached sessions.
         var sessions: [16]DetachedSessionInfo = undefined;
-        const sess_count = frontend.listSessions(&sessions) catch 0;
+        const sess_count = runtime.listSessions(&sessions) catch 0;
         if (sess_count > 0) {
             std.debug.print("Detached sessions (attach by name or UUID prefix):\n", .{});
             const instance = std.posix.getenv("HEXE_INSTANCE");
@@ -128,7 +126,7 @@ pub fn run(mux_args: MuxArgs) !void {
 
         // List orphaned panes.
         var tabs: [32]OrphanedPaneInfo = undefined;
-        const count = frontend.listOrphanedPanes(&tabs) catch 0;
+        const count = runtime.listOrphanedPanes(&tabs) catch 0;
         if (count > 0) {
             std.debug.print("Orphaned panes (disowned):\n", .{});
             for (tabs[0..count]) |p| {

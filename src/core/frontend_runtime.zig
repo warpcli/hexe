@@ -1,8 +1,10 @@
 const std = @import("std");
 const posix = std.posix;
+const ipc = @import("ipc.zig");
 const frontend_attach = @import("frontend_attach.zig");
 const FrontendAttachState = @import("frontend_attach_state.zig").FrontendAttachState;
 const FrontendClient = @import("frontend_client.zig").SesClient;
+const DetachedSessionInfo = @import("frontend_client.zig").DetachedSessionInfo;
 const OrphanedPaneInfo = @import("frontend_client.zig").OrphanedPaneInfo;
 const Transport = @import("frontend_client.zig").Transport;
 const session_model = @import("session_model.zig");
@@ -89,6 +91,24 @@ pub const FrontendRuntime = struct {
             session_id,
             session_name,
             true,
+            debug,
+            log_file,
+            .terminal,
+            transport,
+        );
+    }
+
+    pub fn createTerminalProbe(
+        allocator: std.mem.Allocator,
+        debug: bool,
+        log_file: ?[]const u8,
+        transport: Transport,
+    ) !*FrontendRuntime {
+        return create(
+            allocator,
+            ipc.generateUuid(),
+            ipc.generateSessionName(),
+            false,
             debug,
             log_file,
             .terminal,
@@ -312,6 +332,10 @@ pub const FrontendRuntime = struct {
 
     pub fn listOrphanedPanes(self: *FrontendRuntime, out_buf: []OrphanedPaneInfo) !usize {
         return try self.client.listOrphanedPanes(out_buf);
+    }
+
+    pub fn listSessions(self: *FrontendRuntime, out_buf: []DetachedSessionInfo) !usize {
+        return try self.client.listSessions(out_buf);
     }
 
     pub fn reconcileResolvedName(self: *FrontendRuntime) !?frontend_attach.SessionNameChange {

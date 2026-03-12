@@ -392,8 +392,8 @@ Done when:
 
 ### Phase 2: stop frontend-authored state sync
 
-1. Delete `buildSessionSnapshot()` from the terminal frontend.
-2. Remove `syncStateToSes()` as a source of truth.
+1. Done: Delete `buildSessionSnapshot()` from the terminal frontend.
+2. Done: Remove `syncStateToSes()` as a source of truth.
 3. Remove terminal-authored normal-path layout/tree sync.
 4. Add missing semantic commands for every session mutation the terminal UI can
    trigger.
