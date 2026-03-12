@@ -2,12 +2,7 @@ const std = @import("std");
 
 const pane_mod = @import("pane.zig");
 const Pane = pane_mod.Pane;
-const pane_capture = @import("pane_capture.zig");
-
 pub fn processOutput(self: *Pane, data: []const u8) void {
-    if (self.capture_output) {
-        pane_capture.appendCapturedOutput(self, data);
-    }
     handleCsiQueries(self, data);
     handleDcsQueries(self, data);
     forwardOsc(self, data);

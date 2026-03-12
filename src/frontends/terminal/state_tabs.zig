@@ -130,6 +130,7 @@ pub fn closeCurrentTab(self: anytype) bool {
                 self.runtime.killPane(fp.uuid) catch |e| {
                     core.logging.logError("terminal", "killPane failed in closeTab", e);
                 };
+                self.clearFloatUi(fp.uuid);
                 fp.deinit();
                 self.allocator.destroy(fp);
                 _ = self.view.floats.orderedRemove(i);
@@ -266,29 +267,21 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
     else
         0;
 
-    // Store outer dimensions and style for border rendering.
-    pane.border_x = outer_x;
-    pane.border_y = outer_y;
-    pane.border_w = outer_w;
-    pane.border_h = outer_h;
-    pane.border_color = border_color;
-    // Store percentages for resize recalculation.
-    pane.float_width_pct = @intCast(width_pct);
-    pane.float_height_pct = @intCast(height_pct);
-    pane.float_pos_x_pct = @intCast(pos_x_pct);
-    pane.float_pos_y_pct = @intCast(pos_y_pct);
-    pane.float_pad_x = @intCast(pad_x_cfg);
-    pane.float_pad_y = @intCast(pad_y_cfg);
-
-    // Store pwd for pwd floats.
-    if (float_def.attributes.per_cwd) {
-        pane.pwd_dir = self.allocator.dupe(u8, cwd) catch null;
-    }
-
-    // Store style reference.
-    if (float_def.style) |*style| {
-        pane.float_style = style;
-    }
+    _ = self.setPaneFloatUi(uuid, .{
+        .border_x = outer_x,
+        .border_y = outer_y,
+        .border_w = outer_w,
+        .border_h = outer_h,
+        .border_color = border_color,
+        .width_pct = @intCast(width_pct),
+        .height_pct = @intCast(height_pct),
+        .pos_x_pct = @intCast(pos_x_pct),
+        .pos_y_pct = @intCast(pos_y_pct),
+        .pad_x = @intCast(pad_x_cfg),
+        .pad_y = @intCast(pad_y_cfg),
+        .pwd_dir = if (float_def.attributes.per_cwd) cwd else null,
+        .float_style = if (float_def.style) |*style| style else null,
+    });
 
     // Configure pane notifications.
     pane.configureNotificationsFromPop(&self.pop_config.pane.notification);

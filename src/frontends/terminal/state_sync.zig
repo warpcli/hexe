@@ -511,7 +511,7 @@ pub fn resizeFloatingPanes(self: anytype) void {
     const avail_h = self.term_height - self.status_height;
 
     for (self.view.floats.items) |pane| {
-        const shadow_enabled = if (pane.float_style) |s| s.shadow_color != null else false;
+        const shadow_enabled = self.paneFloatHasShadow(pane);
         const usable_w: u16 = if (shadow_enabled) (self.term_width -| 1) else self.term_width;
         const usable_h: u16 = if (shadow_enabled and self.status_height == 0) (avail_h -| 1) else avail_h;
 
@@ -532,9 +532,6 @@ pub fn resizeFloatingPanes(self: anytype) void {
 
         pane.resize(content_x, content_y, content_w, content_h) catch {};
 
-        pane.border_x = outer_x;
-        pane.border_y = outer_y;
-        pane.border_w = outer_w;
-        pane.border_h = outer_h;
+        self.setPaneBorderFrame(pane.uuid, outer_x, outer_y, outer_w, outer_h, self.paneBorderColor(pane));
     }
 }

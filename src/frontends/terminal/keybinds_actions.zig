@@ -432,7 +432,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
 fn nudgeFloat(state: *State, pane: *Pane, dir: layout_mod.Layout.Direction, step_cells: u16) void {
     const avail_h: u16 = state.term_height - state.status_height;
 
-    const shadow_enabled = if (pane.float_style) |s| s.shadow_color != null else false;
+    const shadow_enabled = state.paneFloatHasShadow(pane);
     const usable_w: u16 = if (shadow_enabled) (state.term_width -| 1) else state.term_width;
     const usable_h: u16 = if (shadow_enabled and state.status_height == 0) (avail_h -| 1) else avail_h;
 
@@ -442,8 +442,8 @@ fn nudgeFloat(state: *State, pane: *Pane, dir: layout_mod.Layout.Direction, step
     const max_x: u16 = usable_w -| outer_w;
     const max_y: u16 = usable_h -| outer_h;
 
-    var outer_x: i32 = @intCast(pane.border_x);
-    var outer_y: i32 = @intCast(pane.border_y);
+    var outer_x: i32 = @intCast(state.paneBorderX(pane));
+    var outer_y: i32 = @intCast(state.paneBorderY(pane));
     const dx: i32 = switch (dir) {
         .left => -@as(i32, @intCast(step_cells)),
         .right => @as(i32, @intCast(step_cells)),
@@ -464,14 +464,23 @@ fn nudgeFloat(state: *State, pane: *Pane, dir: layout_mod.Layout.Direction, step
     if (outer_y > @as(i32, @intCast(max_y))) outer_y = @as(i32, @intCast(max_y));
 
     // Convert back to percentage (stable across resizes).
-    if (max_x > 0) {
-        const xp: u32 = (@as(u32, @intCast(outer_x)) * 100) / @as(u32, max_x);
-        pane.float_pos_x_pct = @intCast(@min(100, xp));
-    }
-    if (max_y > 0) {
-        const yp: u32 = (@as(u32, @intCast(outer_y)) * 100) / @as(u32, max_y);
-        pane.float_pos_y_pct = @intCast(@min(100, yp));
-    }
+    const pos_x_pct: u8 = if (max_x > 0)
+        @intCast(@min(100, (@as(u32, @intCast(outer_x)) * 100) / @as(u32, max_x)))
+    else
+        0;
+    const pos_y_pct: u8 = if (max_y > 0)
+        @intCast(@min(100, (@as(u32, @intCast(outer_y)) * 100) / @as(u32, max_y)))
+    else
+        0;
+    state.setPaneFloatGeometryUi(
+        pane.uuid,
+        state.paneFloatWidthPct(pane),
+        state.paneFloatHeightPct(pane),
+        pos_x_pct,
+        pos_y_pct,
+        state.paneFloatPadX(pane),
+        state.paneFloatPadY(pane),
+    );
 
     state.resizeFloatingPanes();
 }

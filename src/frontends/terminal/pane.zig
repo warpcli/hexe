@@ -5,7 +5,6 @@ const ghostty = @import("ghostty-vt");
 const pod_protocol = core.pod_protocol;
 const wire = core.wire;
 
-const pane_capture = @import("pane_capture.zig");
 const pane_output = @import("pane_output.zig");
 const widgets = pop.widgets;
 
@@ -53,42 +52,6 @@ pub const Pane = struct {
 
     // Is this pane focused?
     focused: bool = false,
-    // Outer border dimensions (for floating panes with padding)
-    border_x: u16 = 0,
-    border_y: u16 = 0,
-    border_w: u16 = 0,
-    border_h: u16 = 0,
-    // Per-float style settings
-    border_color: core.BorderColor = .{},
-    // Float layout percentages (for resize recalculation)
-    float_width_pct: u8 = 60,
-    float_height_pct: u8 = 60,
-    float_pos_x_pct: u8 = 50,
-    float_pos_y_pct: u8 = 50,
-    float_pad_x: u8 = 1,
-    float_pad_y: u8 = 0,
-    // For pwd floats: the directory this float is bound to
-    pwd_dir: ?[]const u8 = null,
-    // Navigatable float - directional navigation works like splits
-    navigatable: bool = false,
-    // Named floats keep their last frame after exit so the same toggle can hide
-    // them cleanly and the next toggle can recreate them.
-    retained_after_exit: bool = false,
-    // Capture raw output for blocking floats
-    capture_output: bool = false,
-    captured_output: std.ArrayList(u8) = .empty,
-    // Dim background when this float is visible (focus mode)
-    dim_background: bool = false,
-    // Exit key for adhoc floats (close float when this key is pressed)
-    exit_key: ?[]const u8 = null,
-    // Set when float is closed via exit key (to return error exit code)
-    closed_by_exit_key: bool = false,
-    // For tab-bound floats: which tab owns this float
-    // null = global float (special=true or pwd=true)
-    // Border style and optional module
-    float_style: ?*const core.FloatStyle = null,
-    float_title: ?[]u8 = null,
-
     // Tracks whether we saw a clear-screen sequence in the last output.
     did_clear: bool = false,
     // Keep last bytes so we can detect escape sequences across boundaries.
@@ -160,10 +123,6 @@ pub const Pane = struct {
     pub fn deinit(self: *Pane) void {
         self.vt.deinit();
         self.osc_buf.deinit(self.allocator);
-        self.captured_output.deinit(self.allocator);
-        if (self.pwd_dir) |dir| {
-            self.allocator.free(dir);
-        }
         if (self.notifications_initialized) {
             self.notifications.deinit();
         }
@@ -172,14 +131,6 @@ pub const Pane = struct {
         }
         if (self.pokemon_initialized) {
             self.pokemon_state.deinit();
-        }
-        if (self.float_title) |t| {
-            self.allocator.free(t);
-            self.float_title = null;
-        }
-        if (self.exit_key) |k| {
-            self.allocator.free(k);
-            self.exit_key = null;
         }
     }
 
@@ -239,14 +190,6 @@ pub const Pane = struct {
 
     pub fn isAlive(self: *Pane) bool {
         return !self.backend.pod.dead;
-    }
-
-    pub fn captureOutput(self: *Pane, allocator: std.mem.Allocator) ![]u8 {
-        return pane_capture.captureOutput(self, allocator);
-    }
-
-    fn appendCapturedOutput(self: *Pane, data: []const u8) void {
-        pane_capture.appendCapturedOutput(self, data);
     }
 
     pub fn getTerminal(self: *Pane) *ghostty.Terminal {

@@ -420,15 +420,16 @@ Done when:
 
 ### Phase 4: split terminal `Pane` into view vs session/runtime pieces
 
-Progress: pane-local exit status and cached SES CWD have been removed, and
-float/session metadata queries now read through runtime/projection helpers. The
-remaining work is cutting the remaining float presentation behavior out of
-`src/frontends/terminal/pane.zig` so it becomes a pure terminal widget.
+Progress: pane-local exit status and cached SES CWD have been removed,
+float/session metadata queries now read through runtime/projection helpers, and
+the remaining float presentation behavior has been moved out of
+`src/frontends/terminal/pane.zig` so it is back to being a terminal widget.
 
 1. Done: Audit `src/frontends/terminal/pane.zig`.
 2. Done: Move session-shaped fields out of terminal pane objects into shared
    runtime records.
-3. Keep terminal pane widgets responsible only for VT/render/input behavior.
+3. Done: Keep terminal pane widgets responsible only for VT/render/input
+   behavior.
 4. Done: Make pane metadata and lifecycle queries go through the
    runtime/projection.
 

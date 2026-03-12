@@ -67,10 +67,6 @@ pub const Sizes = struct {
     /// Used in: src/frontends/terminal/clipboard.zig
     pub const max_clipboard_bytes: usize = 128 * 1024;
 
-    /// Maximum captured output for pane capture (1MB)
-    /// Used in: src/frontends/terminal/pane_capture.zig
-    pub const max_captured_output: usize = 1024 * 1024;
-
     /// Maximum reasonable terminal rows (sanity check)
     /// Used in: src/core/vt.zig, src/frontends/terminal/render_state_blit.zig
     pub const max_reasonable_rows: usize = 10000;

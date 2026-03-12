@@ -51,10 +51,14 @@ pub fn focusDirectionAny(state: *State, dir: layout_mod.Layout.Direction, cursor
     };
 
     const nav = struct {
-        fn pane_rect(p: *Pane) directions.Rect {
+        fn pane_rect(owner: *State, p: *Pane) directions.Rect {
             // For floats, prefer the border rect if present (matches what user sees).
-            if (p.border_w > 0 and p.border_h > 0) {
-                return .{ .x0 = p.border_x, .y0 = p.border_y, .x1 = p.border_x + p.border_w, .y1 = p.border_y + p.border_h };
+            const border_w = owner.paneBorderW(p);
+            const border_h = owner.paneBorderH(p);
+            if (border_w > 0 and border_h > 0) {
+                const border_x = owner.paneBorderX(p);
+                const border_y = owner.paneBorderY(p);
+                return .{ .x0 = border_x, .y0 = border_y, .x1 = border_x + border_w, .y1 = border_y + border_h };
             }
             return .{ .x0 = p.x, .y0 = p.y, .x1 = p.x + p.width, .y1 = p.y + p.height };
         }
@@ -74,7 +78,7 @@ pub fn focusDirectionAny(state: *State, dir: layout_mod.Layout.Direction, cursor
         }
     };
 
-    const cur_rect = nav.pane_rect(current);
+    const cur_rect = nav.pane_rect(state, current);
 
     // Splits only — floats have dedicated toggle keys so directional
     // navigation skips them.
@@ -82,7 +86,7 @@ pub fn focusDirectionAny(state: *State, dir: layout_mod.Layout.Direction, cursor
     while (it.next()) |sp| {
         const p = sp.*;
         if (p == current) continue;
-        const r = nav.pane_rect(p);
+        const r = nav.pane_rect(state, p);
         const s = nav.score(dir, origin.x, origin.y, cur_rect, r) orelse continue;
         if (s < best_score) {
             best_score = s;

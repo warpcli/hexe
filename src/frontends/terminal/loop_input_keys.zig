@@ -110,7 +110,7 @@ pub fn checkExitKeyEvent(state: *State, mods: u8, key: core.Config.BindKey, when
 
     if (state.activeFloatingIndex()) |idx| {
         if (idx < state.view.floats.items.len) {
-            state.view.floats.items[idx].closed_by_exit_key = true;
+            state.setPaneClosedByExitKey(state.view.floats.items[idx].uuid, true);
         }
     }
     actions.performClose(state);
@@ -131,7 +131,7 @@ fn getFocusedFloatExitKey(state: *State) ?[]const u8 {
     const idx = state.activeFloatingIndex() orelse return null;
     if (idx >= state.view.floats.items.len) return null;
     const pane = state.view.floats.items[idx];
-    return pane.exit_key;
+    return state.paneExitKey(pane);
 }
 
 fn parseExitKeySpec(exit_key: []const u8) ParsedExitKey {

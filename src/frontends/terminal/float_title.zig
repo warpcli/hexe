@@ -5,6 +5,7 @@ const vaxis = @import("vaxis");
 
 const core = @import("core");
 
+const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 const Renderer = @import("render_core.zig").Renderer;
 const Color = core.style.Color;
@@ -39,18 +40,18 @@ pub const TitleRect = struct {
     w: u16,
 };
 
-pub fn getTitleRect(pane: *const Pane) ?TitleRect {
-    const title = pane.float_title orelse return null;
+pub fn getTitleRect(state: *const State, pane: *const Pane) ?TitleRect {
+    const title = state.paneFloatTitle(pane) orelse return null;
     if (title.len == 0) return null;
 
-    const style = pane.float_style orelse return null;
+    const style = state.paneFloatStyle(pane) orelse return null;
     const module = style.module orelse return null;
     const pos = style.position orelse return null;
 
-    const outer_x = pane.border_x;
-    const outer_y = pane.border_y;
-    const outer_w = pane.border_w;
-    const outer_h = pane.border_h;
+    const outer_x = state.paneBorderX(pane);
+    const outer_y = state.paneBorderY(pane);
+    const outer_w = state.paneBorderW(pane);
+    const outer_h = state.paneBorderH(pane);
     if (outer_w < 3 or outer_h < 3) return null;
 
     const inner_w = borders.floatTitleInnerWidth(outer_w);
@@ -65,8 +66,8 @@ pub fn getTitleRect(pane: *const Pane) ?TitleRect {
     return .{ .x = place.x, .y = place.y, .w = total_len };
 }
 
-pub fn hitTestTitle(pane: *const Pane, x: u16, y: u16) bool {
-    const r = getTitleRect(pane) orelse return false;
+pub fn hitTestTitle(state: *const State, pane: *const Pane, x: u16, y: u16) bool {
+    const r = getTitleRect(state, pane) orelse return false;
     if (y != r.y) return false;
     return x >= r.x and x < r.x + r.w;
 }
@@ -75,14 +76,14 @@ pub fn hitTestTitle(pane: *const Pane, x: u16, y: u16) bool {
 ///
 /// This draws a 1-line highlighted box at the same border position as the float
 /// title widget. The box width follows the current buffer length.
-pub fn drawTitleEditor(renderer: *Renderer, pane: *const Pane, buf: []const u8) void {
-    const style = pane.float_style orelse return;
+pub fn drawTitleEditor(state: *const State, renderer: *Renderer, pane: *const Pane, buf: []const u8) void {
+    const style = state.paneFloatStyle(pane) orelse return;
     const pos = style.position orelse return;
 
-    const outer_x = pane.border_x;
-    const outer_y = pane.border_y;
-    const outer_w = pane.border_w;
-    const outer_h = pane.border_h;
+    const outer_x = state.paneBorderX(pane);
+    const outer_y = state.paneBorderY(pane);
+    const outer_w = state.paneBorderW(pane);
+    const outer_h = state.paneBorderH(pane);
     if (outer_w < 3 or outer_h < 3) return;
 
     // Cap edit box to fit inside the border.
@@ -93,9 +94,10 @@ pub fn drawTitleEditor(renderer: *Renderer, pane: *const Pane, buf: []const u8) 
 
     const place = borders.floatTitlePlacement(outer_x, outer_y, outer_w, outer_h, pos, want_w);
 
-    const bg: Color = .{ .palette = pane.border_color.active };
+    const border_color = state.paneBorderColor(pane);
+    const bg: Color = .{ .palette = border_color.active };
     const fg: Color = .{ .palette = 0 };
-    const text_style = shp.Style{ .fg = .{ .palette = 0 }, .bg = .{ .palette = pane.border_color.active }, .bold = true };
+    const text_style = shp.Style{ .fg = .{ .palette = 0 }, .bg = .{ .palette = border_color.active }, .bold = true };
 
     // Background box.
     var i: u16 = 0;

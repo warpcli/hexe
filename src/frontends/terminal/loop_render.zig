@@ -120,7 +120,7 @@ fn sanitizeLabelUtf8(raw: []const u8, out: *[128]u8) []const u8 {
 
 fn composeFloatBorderLabel(state: *State, pane: *const Pane, out: *[256]u8) []const u8 {
     const title = blk: {
-        if (pane.float_title) |t| break :blk t;
+        if (state.paneFloatTitle(pane)) |t| break :blk t;
         const float_key = state.paneFloatKey(pane);
         if (float_key != 0) {
             if (state.getLayoutFloatByKey(float_key)) |fd| {
@@ -250,10 +250,10 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         defer float_ctx.deinit();
         populateFloatTitleContext(state, pane, &float_ctx, now_ms);
         const float_query: core.PaneQuery = statusbar.queryFromContext(&float_ctx);
-        borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, false, float_label, pane.border_color, pane.float_style, &float_ctx, &float_query);
+        borders.drawFloatingBorder(renderer, state.paneBorderX(pane), state.paneBorderY(pane), state.paneBorderW(pane), state.paneBorderH(pane), false, float_label, state.paneBorderColor(pane), state.paneFloatStyle(pane), &float_ctx, &float_query);
         if (state.float_rename_uuid) |uuid| {
             if (std.mem.eql(u8, &uuid, &pane.uuid)) {
-                float_title.drawTitleEditor(renderer, pane, state.float_rename_buf.items);
+                float_title.drawTitleEditor(state, renderer, pane, state.float_rename_buf.items);
             }
         }
 
@@ -298,10 +298,10 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             defer float_ctx.deinit();
             populateFloatTitleContext(state, pane, &float_ctx, now_ms);
             const float_query: core.PaneQuery = statusbar.queryFromContext(&float_ctx);
-            borders.drawFloatingBorder(renderer, pane.border_x, pane.border_y, pane.border_w, pane.border_h, true, active_float_label, pane.border_color, pane.float_style, &float_ctx, &float_query);
+            borders.drawFloatingBorder(renderer, state.paneBorderX(pane), state.paneBorderY(pane), state.paneBorderW(pane), state.paneBorderH(pane), true, active_float_label, state.paneBorderColor(pane), state.paneFloatStyle(pane), &float_ctx, &float_query);
             if (state.float_rename_uuid) |uuid| {
                 if (std.mem.eql(u8, &uuid, &pane.uuid)) {
-                    float_title.drawTitleEditor(renderer, pane, state.float_rename_buf.items);
+                    float_title.drawTitleEditor(state, renderer, pane, state.float_rename_buf.items);
                 }
             }
 
@@ -338,7 +338,7 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
 
     // Check if active float has dim_background set (focus mode)
     const float_dim = if (state.activeFloatingIndex()) |idx| blk: {
-        if (idx < state.view.floats.items.len) break :blk state.view.floats.items[idx].dim_background;
+        if (idx < state.view.floats.items.len) break :blk state.paneDimBackground(state.view.floats.items[idx]);
         break :blk false;
     } else false;
 
@@ -350,13 +350,13 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             if (state.activeFloatingIndex()) |idx| {
                 if (idx < state.view.floats.items.len) {
                     const fp = state.view.floats.items[idx];
-                    const has_shadow = if (fp.float_style) |s| s.shadow_color != null else false;
+                    const has_shadow = state.paneFloatHasShadow(fp);
                     const shadow_offset: u16 = if (has_shadow) 1 else 0;
                     break :blk .{
-                        .x = fp.border_x,
-                        .y = fp.border_y,
-                        .w = fp.border_w + shadow_offset,
-                        .h = fp.border_h + shadow_offset,
+                        .x = state.paneBorderX(fp),
+                        .y = state.paneBorderY(fp),
+                        .w = state.paneBorderW(fp) + shadow_offset,
+                        .h = state.paneBorderH(fp) + shadow_offset,
                     };
                 }
             }

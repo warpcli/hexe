@@ -71,6 +71,7 @@ fn clearStateForRestore(self: anytype) void {
     while (self.view.floats.items.len > 0) {
         const p_opt = self.view.floats.pop();
         if (p_opt) |p| {
+            self.clearFloatUi(p.uuid);
             p.deinit();
             self.allocator.destroy(p);
         }
@@ -123,6 +124,7 @@ fn clearStatePreservingPanes(self: anytype) void {
 fn clearPaneAuxCaches(self: anytype, uuid: [32]u8) void {
     self.removePaneProcMetadata(uuid);
     self.removePaneName(uuid);
+    self.clearFloatUi(uuid);
     if (self.float_rename_uuid) |rename_uuid| {
         if (std.mem.eql(u8, &rename_uuid, &uuid)) {
             self.float_rename_uuid = null;
@@ -141,71 +143,27 @@ fn destroyUnusedPaneViews(self: anytype, existing_views: *ExistingPaneViews) voi
 }
 
 fn recyclePaneForSplit(self: anytype, tab: *Tab, pane: *Pane, pane_id: u16, pane_uuid: [32]u8, actual_focus_uuid: ?[32]u8) void {
+    self.clearFloatUi(pane.uuid);
     pane.id = pane_id;
     pane.uuid = pane_uuid;
     pane.focused = if (actual_focus_uuid) |focused_uuid| std.mem.eql(u8, &focused_uuid, &pane_uuid) else false;
-    pane.border_x = 0;
-    pane.border_y = 0;
-    pane.border_w = 0;
-    pane.border_h = 0;
-    pane.float_width_pct = 60;
-    pane.float_height_pct = 60;
-    pane.float_pos_x_pct = 50;
-    pane.float_pos_y_pct = 50;
-    pane.float_pad_x = 1;
-    pane.float_pad_y = 0;
-    if (pane.pwd_dir) |dir| {
-        self.allocator.free(dir);
-        pane.pwd_dir = null;
-    }
-    pane.navigatable = false;
-    pane.retained_after_exit = false;
-    pane.capture_output = false;
-    pane.captured_output.clearRetainingCapacity();
-    pane.dim_background = false;
-    if (pane.exit_key) |k| {
-        self.allocator.free(k);
-        pane.exit_key = null;
-    }
-    pane.closed_by_exit_key = false;
-    pane.float_style = null;
-    if (pane.float_title) |t| {
-        self.allocator.free(t);
-        pane.float_title = null;
-    }
     pane.backend.pod.dead = false;
     tab.layout.configurePaneNotifications(pane);
 }
 
 fn recyclePaneForFloat(self: anytype, pane: *Pane, float_state: SessionFloat, actual_focus_uuid: ?[32]u8) void {
+    self.clearFloatUi(pane.uuid);
     pane.uuid = float_state.pane_uuid;
     pane.focused = if (actual_focus_uuid) |focused_uuid| std.mem.eql(u8, &focused_uuid, &float_state.pane_uuid) else false;
-    pane.float_width_pct = float_state.width_pct;
-    pane.float_height_pct = float_state.height_pct;
-    pane.float_pos_x_pct = float_state.pos_x_pct;
-    pane.float_pos_y_pct = float_state.pos_y_pct;
-    pane.float_pad_x = float_state.pad_x;
-    pane.float_pad_y = float_state.pad_y;
-    pane.navigatable = false;
-    pane.retained_after_exit = false;
-    pane.capture_output = false;
-    pane.captured_output.clearRetainingCapacity();
-    pane.dim_background = false;
-    if (pane.exit_key) |k| {
-        self.allocator.free(k);
-        pane.exit_key = null;
-    }
-    pane.closed_by_exit_key = false;
-    pane.float_style = null;
-    if (pane.float_title) |t| {
-        self.allocator.free(t);
-        pane.float_title = null;
-    }
+    _ = self.setPaneFloatUi(float_state.pane_uuid, .{
+        .width_pct = float_state.width_pct,
+        .height_pct = float_state.height_pct,
+        .pos_x_pct = float_state.pos_x_pct,
+        .pos_y_pct = float_state.pos_y_pct,
+        .pad_x = float_state.pad_x,
+        .pad_y = float_state.pad_y,
+    });
     pane.backend.pod.dead = false;
-    if (!float_state.is_pwd and pane.pwd_dir != null) {
-        self.allocator.free(pane.pwd_dir.?);
-        pane.pwd_dir = null;
-    }
 }
 
 fn hydratePaneMetadata(self: anytype, _: *Pane, uuid: [32]u8) void {
@@ -442,14 +400,17 @@ fn restoreFloatPane(
     if (float_state.float_key != 0) {
         if (self.getLayoutFloatByKey(float_state.float_key)) |float_def| {
             const style = if (float_def.style) |*s| s else if (self.config.float_style_default) |*s| s else null;
-            if (style) |s| pane.float_style = s;
-            pane.border_color = float_def.color orelse self.config.float_color;
+            self.setPaneBorderFrame(pane.uuid, self.paneBorderX(pane), self.paneBorderY(pane), self.paneBorderW(pane), self.paneBorderH(pane), float_def.color orelse self.config.float_color);
+            if (self.floatUi(pane)) |ui| {
+                ui.float_style = style;
+            }
         }
     }
 
     if (self.runtime.isConnected()) {
         if (self.runtime.getPaneName(float_state.pane_uuid)) |name| {
-            pane.float_title = name;
+            _ = self.setPaneFloatTitle(pane.uuid, name);
+            self.allocator.free(name);
         }
     }
 
@@ -542,27 +503,40 @@ fn updateFloatPresentation(self: anytype, pane: *Pane, float_state: SessionFloat
         std.mem.eql(u8, &focused_uuid, &float_state.pane_uuid)
     else
         false;
-    pane.float_width_pct = float_state.width_pct;
-    pane.float_height_pct = float_state.height_pct;
-    pane.float_pos_x_pct = float_state.pos_x_pct;
-    pane.float_pos_y_pct = float_state.pos_y_pct;
-    pane.float_pad_x = float_state.pad_x;
-    pane.float_pad_y = float_state.pad_y;
+    self.setPaneFloatGeometryUi(
+        pane.uuid,
+        float_state.width_pct,
+        float_state.height_pct,
+        float_state.pos_x_pct,
+        float_state.pos_y_pct,
+        float_state.pad_x,
+        float_state.pad_y,
+    );
 
-    if (!float_state.is_pwd and pane.pwd_dir != null) {
-        self.allocator.free(pane.pwd_dir.?);
-        pane.pwd_dir = null;
+    if (self.floatUi(pane)) |ui| {
+        if (!float_state.is_pwd and ui.pwd_dir != null) {
+            self.allocator.free(ui.pwd_dir.?);
+            ui.pwd_dir = null;
+        }
+        ui.float_style = null;
     }
-
-    pane.float_style = null;
     if (float_state.float_key != 0) {
         if (self.getLayoutFloatByKey(float_state.float_key)) |float_def| {
-            if (float_def.style) |*style| {
-                pane.float_style = style;
-            } else if (self.config.float_style_default) |*style| {
-                pane.float_style = style;
+            if (self.floatUi(pane)) |ui| {
+                if (float_def.style) |*style| {
+                    ui.float_style = style;
+                } else if (self.config.float_style_default) |*style| {
+                    ui.float_style = style;
+                }
             }
-            pane.border_color = float_def.color orelse self.config.float_color;
+            self.setPaneBorderFrame(
+                pane.uuid,
+                self.paneBorderX(pane),
+                self.paneBorderY(pane),
+                self.paneBorderW(pane),
+                self.paneBorderH(pane),
+                float_def.color orelse self.config.float_color,
+            );
         }
     }
 }

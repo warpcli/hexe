@@ -244,7 +244,7 @@ fn swapPanePositions(state: *State, pane_a: *Pane, pane_b: *Pane) void {
 
         layout.recalculateLayout();
     } else if (a_float and b_float) {
-        swapFloatPositions(pane_a, pane_b);
+        swapFloatPositions(state, pane_a, pane_b);
     } else {
         state.notifications.show("Cannot swap split with float");
         return;
@@ -255,7 +255,7 @@ fn swapPanePositions(state: *State, pane_a: *Pane, pane_b: *Pane) void {
     state.needs_render = true;
 }
 
-fn swapFloatPositions(a: *Pane, b: *Pane) void {
+fn swapFloatPositions(state: *State, a: *Pane, b: *Pane) void {
     const ax = a.x;
     const ay = a.y;
     const aw = a.width;
@@ -269,37 +269,7 @@ fn swapFloatPositions(a: *Pane, b: *Pane) void {
     b.width = aw;
     b.height = ah;
 
-    const abx = a.border_x;
-    const aby = a.border_y;
-    const abw = a.border_w;
-    const abh = a.border_h;
-    a.border_x = b.border_x;
-    a.border_y = b.border_y;
-    a.border_w = b.border_w;
-    a.border_h = b.border_h;
-    b.border_x = abx;
-    b.border_y = aby;
-    b.border_w = abw;
-    b.border_h = abh;
-
-    const awp = a.float_width_pct;
-    const ahp = a.float_height_pct;
-    const axp = a.float_pos_x_pct;
-    const ayp = a.float_pos_y_pct;
-    const apx = a.float_pad_x;
-    const apy = a.float_pad_y;
-    a.float_width_pct = b.float_width_pct;
-    a.float_height_pct = b.float_height_pct;
-    a.float_pos_x_pct = b.float_pos_x_pct;
-    a.float_pos_y_pct = b.float_pos_y_pct;
-    a.float_pad_x = b.float_pad_x;
-    a.float_pad_y = b.float_pad_y;
-    b.float_width_pct = awp;
-    b.float_height_pct = ahp;
-    b.float_pos_x_pct = axp;
-    b.float_pos_y_pct = ayp;
-    b.float_pad_x = apx;
-    b.float_pad_y = apy;
+    state.swapPaneFloatUi(a.uuid, b.uuid);
 
     a.vt.resize(a.width, a.height) catch {};
     b.vt.resize(b.width, b.height) catch {};

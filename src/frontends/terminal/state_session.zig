@@ -68,6 +68,7 @@ pub fn applySessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]c
 pub fn replaceWithSessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]const u8) !void {
     // Remove floating panes.
     for (self.view.floats.items) |pane| {
+        self.clearFloatUi(pane.uuid);
         pane.deinit();
         self.allocator.destroy(pane);
     }

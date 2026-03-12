@@ -15,7 +15,7 @@ pub fn handleBlockingFloatCompletion(state: *State, pane: *Pane) void {
     }
 
     // If closed via exit key, return error exit code (130 = terminated by signal)
-    const exit_code: i32 = if (pane.closed_by_exit_key) 130 else state.paneExitCode(pane.uuid);
+    const exit_code: i32 = if (state.paneClosedByExitKey(pane.uuid)) 130 else state.paneExitCode(pane.uuid);
     var stdout: ?[]u8 = null;
     defer if (stdout) |out| state.allocator.free(out);
 

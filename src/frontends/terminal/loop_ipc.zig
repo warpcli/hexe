@@ -785,7 +785,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
 
     if (wait_for_exit) {
         if (state.view.floats.items.len > 0) {
-            state.view.floats.items[state.view.floats.items.len - 1].capture_output = true;
+            state.setPaneCaptureOutput(state.view.floats.items[state.view.floats.items.len - 1].uuid, true);
         }
         const stored_path = if (result_path_slice.len > 0) state.allocator.dupe(u8, result_path_slice) catch null else null;
         state.pending_float_requests.put(new_uuid, .{

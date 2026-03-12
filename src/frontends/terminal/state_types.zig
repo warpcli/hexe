@@ -82,3 +82,39 @@ pub const CursorSnapshot = struct {
     style: u8,
     visible: bool,
 };
+
+pub const FloatUiState = struct {
+    border_x: u16 = 0,
+    border_y: u16 = 0,
+    border_w: u16 = 0,
+    border_h: u16 = 0,
+    border_color: core.BorderColor = .{},
+    width_pct: u8 = 60,
+    height_pct: u8 = 60,
+    pos_x_pct: u8 = 50,
+    pos_y_pct: u8 = 50,
+    pad_x: u8 = 1,
+    pad_y: u8 = 0,
+    pwd_dir: ?[]u8 = null,
+    navigatable: bool = false,
+    retained_after_exit: bool = false,
+    capture_output: bool = false,
+    dim_background: bool = false,
+    exit_key: ?[]u8 = null,
+    closed_by_exit_key: bool = false,
+    float_style: ?*const core.FloatStyle = null,
+    float_title: ?[]u8 = null,
+
+    pub fn deinit(self: *FloatUiState, allocator: std.mem.Allocator) void {
+        if (self.pwd_dir) |dir| {
+            allocator.free(dir);
+        }
+        if (self.exit_key) |key| {
+            allocator.free(key);
+        }
+        if (self.float_title) |title| {
+            allocator.free(title);
+        }
+        self.* = .{};
+    }
+};

@@ -148,7 +148,7 @@ fn findFocusableAt(state: *State, x: u16, y: u16) ?FocusTarget {
         if (afi < state.view.floats.items.len) {
             const fp = state.view.floats.items[afi];
             if (isFloatRenderableOnTab(state, fp, state.activeTabIndex())) {
-                if (x >= fp.border_x and x < fp.border_x + fp.border_w and y >= fp.border_y and y < fp.border_y + fp.border_h) {
+                if (x >= state.paneBorderX(fp) and x < state.paneBorderX(fp) + state.paneBorderW(fp) and y >= state.paneBorderY(fp) and y < state.paneBorderY(fp) + state.paneBorderH(fp)) {
                     return .{ .kind = .float, .pane = fp, .float_index = afi };
                 }
             }
@@ -160,7 +160,7 @@ fn findFocusableAt(state: *State, x: u16, y: u16) ?FocusTarget {
         fi -= 1;
         const fp = state.view.floats.items[fi];
         if (!isFloatRenderableOnTab(state, fp, state.activeTabIndex())) continue;
-        if (x >= fp.border_x and x < fp.border_x + fp.border_w and y >= fp.border_y and y < fp.border_y + fp.border_h) {
+        if (x >= state.paneBorderX(fp) and x < state.paneBorderX(fp) + state.paneBorderW(fp) and y >= state.paneBorderY(fp) and y < state.paneBorderY(fp) + state.paneBorderH(fp)) {
             return .{ .kind = .float, .pane = fp, .float_index = fi };
         }
     }
@@ -302,14 +302,14 @@ fn hitTestDivider(layout: *layout_mod.Layout, x: u16, y: u16) ?DividerHit {
 
 fn beginFloatMove(state: *State, pane: *Pane, start_x: u16, start_y: u16) void {
     // Only movable if it has a title widget.
-    if (float_title.getTitleRect(pane) == null) return;
-    state.mouse_drag = .{ .float_move = .{ .uuid = pane.uuid, .start_x = start_x, .start_y = start_y, .orig_x = pane.border_x, .orig_y = pane.border_y } };
+    if (float_title.getTitleRect(state, pane) == null) return;
+    state.mouse_drag = .{ .float_move = .{ .uuid = pane.uuid, .start_x = start_x, .start_y = start_y, .orig_x = state.paneBorderX(pane), .orig_y = state.paneBorderY(pane) } };
 }
 
 fn beginFloatResize(state: *State, pane: *Pane, edge_mask: u8, start_x: u16, start_y: u16) void {
-    state.mouse_drag = .{ .float_resize = .{ .uuid = pane.uuid, .edge_mask = edge_mask, .start_x = start_x, .start_y = start_y, .orig_x = pane.border_x, .orig_y = pane.border_y, .orig_w = pane.border_w, .orig_h = pane.border_h } };
+    state.mouse_drag = .{ .float_resize = .{ .uuid = pane.uuid, .edge_mask = edge_mask, .start_x = start_x, .start_y = start_y, .orig_x = state.paneBorderX(pane), .orig_y = state.paneBorderY(pane), .orig_w = state.paneBorderW(pane), .orig_h = state.paneBorderH(pane) } };
     // Show resize info overlay
-    state.overlays.showResizeInfo(pane.uuid, pane.width, pane.height, pane.border_x, pane.border_y);
+    state.overlays.showResizeInfo(pane.uuid, pane.width, pane.height, state.paneBorderX(pane), state.paneBorderY(pane));
 }
 
 fn updateFloatMove(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const State.MouseDragFloatMove) void {
@@ -317,7 +317,7 @@ fn updateFloatMove(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const St
     const dy: i32 = @as(i32, @intCast(my)) - @as(i32, @intCast(drag.start_y));
 
     const avail_h: u16 = state.term_height - state.status_height;
-    const shadow_enabled = if (pane.float_style) |s| s.shadow_color != null else false;
+    const shadow_enabled = state.paneFloatHasShadow(pane);
     const usable_w: u16 = if (shadow_enabled) (state.term_width -| 1) else state.term_width;
     const usable_h: u16 = if (shadow_enabled and state.status_height == 0) (avail_h -| 1) else avail_h;
 
@@ -336,18 +336,24 @@ fn updateFloatMove(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const St
     if (outer_x > @as(i32, @intCast(max_x))) outer_x = @as(i32, @intCast(max_x));
     if (outer_y > @as(i32, @intCast(max_y))) outer_y = @as(i32, @intCast(max_y));
 
-    if (max_x > 0) {
-        const xp: u32 = (@as(u32, @intCast(outer_x)) * 100) / @as(u32, max_x);
-        pane.float_pos_x_pct = @intCast(@min(100, xp));
-    } else {
-        pane.float_pos_x_pct = 0;
-    }
-    if (max_y > 0) {
-        const yp: u32 = (@as(u32, @intCast(outer_y)) * 100) / @as(u32, max_y);
-        pane.float_pos_y_pct = @intCast(@min(100, yp));
-    } else {
-        pane.float_pos_y_pct = 0;
-    }
+    const pos_x_pct: u8 = if (max_x > 0)
+        @intCast(@min(100, (@as(u32, @intCast(outer_x)) * 100) / @as(u32, max_x)))
+    else
+        0;
+    const pos_y_pct: u8 = if (max_y > 0)
+        @intCast(@min(100, (@as(u32, @intCast(outer_y)) * 100) / @as(u32, max_y)))
+    else
+        0;
+
+    state.setPaneFloatGeometryUi(
+        pane.uuid,
+        state.paneFloatWidthPct(pane),
+        state.paneFloatHeightPct(pane),
+        pos_x_pct,
+        pos_y_pct,
+        state.paneFloatPadX(pane),
+        state.paneFloatPadY(pane),
+    );
 
     state.resizeFloatingPanes();
     state.renderer.invalidate();
@@ -381,7 +387,7 @@ fn updateFloatResize(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const 
     }
 
     const avail_h: u16 = state.term_height - state.status_height;
-    const shadow_enabled = if (pane.float_style) |s| s.shadow_color != null else false;
+    const shadow_enabled = state.paneFloatHasShadow(pane);
     const usable_w: u16 = if (shadow_enabled) (state.term_width -| 1) else state.term_width;
     const usable_h: u16 = if (shadow_enabled and state.status_height == 0) (avail_h -| 1) else avail_h;
 
@@ -404,23 +410,29 @@ fn updateFloatResize(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const 
     // Convert to percentage fields.
     const usable_w_i: i32 = @intCast(@max(usable_w, 1));
     const usable_h_i: i32 = @intCast(@max(usable_h, 1));
-    pane.float_width_pct = @intCast(@max(@as(i32, 1), @divTrunc(100 * w0, usable_w_i)));
-    pane.float_height_pct = @intCast(@max(@as(i32, 1), @divTrunc(100 * h0, usable_h_i)));
+    const width_pct: u8 = @intCast(@max(@as(i32, 1), @divTrunc(100 * w0, usable_w_i)));
+    const height_pct: u8 = @intCast(@max(@as(i32, 1), @divTrunc(100 * h0, usable_h_i)));
 
     const max_x_u: u16 = @intCast(@max(@as(i32, 0), max_x));
     const max_y_u: u16 = @intCast(@max(@as(i32, 0), max_y));
-    if (max_x_u > 0) {
-        const xp: u32 = (@as(u32, @intCast(x0)) * 100) / @as(u32, max_x_u);
-        pane.float_pos_x_pct = @intCast(@min(100, xp));
-    } else {
-        pane.float_pos_x_pct = 0;
-    }
-    if (max_y_u > 0) {
-        const yp: u32 = (@as(u32, @intCast(y0)) * 100) / @as(u32, max_y_u);
-        pane.float_pos_y_pct = @intCast(@min(100, yp));
-    } else {
-        pane.float_pos_y_pct = 0;
-    }
+    const pos_x_pct: u8 = if (max_x_u > 0)
+        @intCast(@min(100, (@as(u32, @intCast(x0)) * 100) / @as(u32, max_x_u)))
+    else
+        0;
+    const pos_y_pct: u8 = if (max_y_u > 0)
+        @intCast(@min(100, (@as(u32, @intCast(y0)) * 100) / @as(u32, max_y_u)))
+    else
+        0;
+
+    state.setPaneFloatGeometryUi(
+        pane.uuid,
+        width_pct,
+        height_pct,
+        pos_x_pct,
+        pos_y_pct,
+        state.paneFloatPadX(pane),
+        state.paneFloatPadY(pane),
+    );
 
     state.resizeFloatingPanes();
     state.renderer.invalidate();
@@ -428,7 +440,7 @@ fn updateFloatResize(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const 
     state.needs_render = true;
 
     // Update resize info overlay with new dimensions
-    state.overlays.showResizeInfo(pane.uuid, pane.width, pane.height, pane.border_x, pane.border_y);
+    state.overlays.showResizeInfo(pane.uuid, pane.width, pane.height, state.paneBorderX(pane), state.paneBorderY(pane));
 }
 
 fn copySelectionRange(state: *State, pane: *Pane, range: anytype) bool {
@@ -519,15 +531,15 @@ fn desiredMouseShape(state: *State, ev: MouseEvent, override_active: bool) vaxis
 
     if (target.kind == .float) {
         const fp = target.pane;
-        if (float_title.hitTestTitle(fp, ev.x, ev.y)) return .pointer;
+        if (float_title.hitTestTitle(state, fp, ev.x, ev.y)) return .pointer;
 
         const in_content = ev.x >= fp.x and ev.x < fp.x + fp.width and ev.y >= fp.y and ev.y < fp.y + fp.height;
         if (!in_content) {
             var mask: u8 = 0;
-            if (ev.x == fp.border_x) mask |= 1;
-            if (ev.x == fp.border_x + fp.border_w -| 1) mask |= 2;
-            if (ev.y == fp.border_y) mask |= 4;
-            if (ev.y == fp.border_y + fp.border_h -| 1) mask |= 8;
+            if (ev.x == state.paneBorderX(fp)) mask |= 1;
+            if (ev.x == state.paneBorderX(fp) + state.paneBorderW(fp) -| 1) mask |= 2;
+            if (ev.y == state.paneBorderY(fp)) mask |= 4;
+            if (ev.y == state.paneBorderY(fp) + state.paneBorderH(fp) -| 1) mask |= 8;
             if (mask != 0) return shapeForResizeEdge(mask);
             return .pointer;
         }
@@ -558,7 +570,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
     if (!ev.is_release and !is_motion and is_left_btn and state.float_rename_uuid != null) {
         const uuid = state.float_rename_uuid.?;
         const pane = state.findPaneByUuid(uuid);
-        if (pane == null or !float_title.hitTestTitle(pane.?, ev.x, ev.y)) {
+        if (pane == null or !float_title.hitTestTitle(state, pane.?, ev.x, ev.y)) {
             state.clearFloatRename();
         }
     }
@@ -568,7 +580,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
     if (state.float_rename_uuid) |uuid| {
         if (is_left_btn) {
             if (state.findPaneByUuid(uuid)) |pane| {
-                if (float_title.hitTestTitle(pane, ev.x, ev.y)) {
+                if (float_title.hitTestTitle(state, pane, ev.x, ev.y)) {
                     return true;
                 }
             }
@@ -770,7 +782,7 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                 const in_content = ev.x >= fp.x and ev.x < fp.x + fp.width and ev.y >= fp.y and ev.y < fp.y + fp.height;
 
                 // Title move/rename (only if title exists and click is on it).
-                if (float_title.hitTestTitle(fp, ev.x, ev.y)) {
+                if (float_title.hitTestTitle(state, fp, ev.x, ev.y)) {
                     // Double-click title: begin rename in-place.
                     const now_ms = std.time.milliTimestamp();
                     const same = state.mouse_title_last_uuid != null and std.mem.eql(u8, &state.mouse_title_last_uuid.?, &fp.uuid);
@@ -799,10 +811,10 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                 if (!in_content) {
                     // Identify which edge/corner.
                     var mask: u8 = 0;
-                    if (ev.x == fp.border_x) mask |= 1;
-                    if (ev.x == fp.border_x + fp.border_w -| 1) mask |= 2;
-                    if (ev.y == fp.border_y) mask |= 4;
-                    if (ev.y == fp.border_y + fp.border_h -| 1) mask |= 8;
+                    if (ev.x == state.paneBorderX(fp)) mask |= 1;
+                    if (ev.x == state.paneBorderX(fp) + state.paneBorderW(fp) -| 1) mask |= 2;
+                    if (ev.y == state.paneBorderY(fp)) mask |= 4;
+                    if (ev.y == state.paneBorderY(fp) + state.paneBorderH(fp) -| 1) mask |= 8;
 
                     if (mask != 0) {
                         beginFloatResize(state, fp, mask, ev.x, ev.y);

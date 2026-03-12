@@ -381,9 +381,9 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
     const was_active = if (state.activeFloatingIndex()) |af| af == index else false;
     const exit_code = state.paneExitCode(pane.uuid);
 
-    if (state.paneFloatKey(pane) != 0 and !pane.capture_output) {
-        if (pane.retained_after_exit) return;
-        pane.retained_after_exit = true;
+    if (state.paneFloatKey(pane) != 0 and !state.paneCaptureOutput(pane)) {
+        if (state.paneRetainedAfterExit(pane)) return;
+        state.setPaneRetainedAfterExit(pane.uuid, true);
 
         terminal_main.debugLog("float pane retained after exit: uuid={s} exit_code={d} focused={}", .{
             pane.uuid[0..8],
@@ -434,6 +434,7 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
     // Float is already dead (detected via isAlive/pane_exited), so avoid
     // sending another synchronous kill request on the shared control channel.
 
+    state.clearFloatUi(pane.uuid);
     pane.deinit();
     state.allocator.destroy(pane);
     state.needs_render = true;

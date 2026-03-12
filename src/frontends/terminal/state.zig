@@ -10,6 +10,7 @@ pub const Tab = state_types.Tab;
 pub const TerminalViewState = state_types.TerminalViewState;
 pub const PendingFloatRequest = state_types.PendingFloatRequest;
 pub const CursorSnapshot = state_types.CursorSnapshot;
+pub const FloatUiState = state_types.FloatUiState;
 
 const layout_mod = @import("layout.zig");
 const Layout = layout_mod.Layout;
@@ -46,6 +47,29 @@ pub const PaneBounds = struct {
     y: u16,
     width: u16,
     height: u16,
+};
+
+pub const PaneFloatUiConfig = struct {
+    border_x: u16 = 0,
+    border_y: u16 = 0,
+    border_w: u16 = 0,
+    border_h: u16 = 0,
+    border_color: core.BorderColor = .{},
+    width_pct: u8 = 60,
+    height_pct: u8 = 60,
+    pos_x_pct: u8 = 50,
+    pos_y_pct: u8 = 50,
+    pad_x: u8 = 1,
+    pad_y: u8 = 0,
+    pwd_dir: ?[]const u8 = null,
+    navigatable: bool = false,
+    retained_after_exit: bool = false,
+    capture_output: bool = false,
+    dim_background: bool = false,
+    exit_key: ?[]const u8 = null,
+    closed_by_exit_key: bool = false,
+    float_style: ?*const core.FloatStyle = null,
+    float_title: ?[]const u8 = null,
 };
 
 pub const State = struct {
@@ -100,6 +124,7 @@ pub const State = struct {
     runtime: *FrontendRuntime,
     active_layout_floats: []const core.LayoutFloatDef,
     view: TerminalViewState,
+    float_ui: std.AutoHashMap([32]u8, FloatUiState),
     running: bool,
     needs_render: bool,
     force_full_render: bool,
@@ -259,6 +284,7 @@ pub const State = struct {
             .runtime = runtime,
             .active_layout_floats = layout_floats,
             .view = TerminalViewState.init(),
+            .float_ui = std.AutoHashMap([32]u8, FloatUiState).init(allocator),
             .running = true,
             .needs_render = true,
             .force_full_render = true,
@@ -333,7 +359,7 @@ pub const State = struct {
     }
 
     pub fn beginFloatRename(self: *State, pane: *Pane) void {
-        const title = pane.float_title orelse return;
+        const title = self.paneFloatTitle(pane) orelse return;
         if (title.len == 0) return;
 
         self.float_rename_uuid = pane.uuid;
@@ -359,13 +385,7 @@ pub const State = struct {
         };
 
         const new_title = std.mem.trim(u8, self.float_rename_buf.items, " \t\r\n");
-        if (pane.float_title) |old| {
-            self.allocator.free(old);
-            pane.float_title = null;
-        }
-        if (new_title.len > 0) {
-            pane.float_title = self.allocator.dupe(u8, new_title) catch null;
-        }
+        _ = self.setPaneFloatTitle(pane.uuid, if (new_title.len > 0) new_title else null);
 
         // Keep the pod's pane name separate from the float title.
 
@@ -383,6 +403,13 @@ pub const State = struct {
         self.key_timers.deinit(self.allocator);
 
         self.view.deinit(self.allocator);
+        {
+            var it = self.float_ui.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.deinit(self.allocator);
+            }
+            self.float_ui.deinit();
+        }
         self.config.deinit();
         var ses_cfg = self.ses_config;
         ses_cfg.deinit(self.allocator);
@@ -955,34 +982,258 @@ pub const State = struct {
         return false;
     }
 
+    pub fn floatUi(self: *State, pane: *const Pane) ?*FloatUiState {
+        return self.float_ui.getPtr(pane.uuid);
+    }
+
+    pub fn floatUiConst(self: *const State, pane: *const Pane) ?*const FloatUiState {
+        return self.float_ui.getPtr(pane.uuid);
+    }
+
+    pub fn ensureFloatUi(self: *State, pane_uuid: [32]u8) ?*FloatUiState {
+        const entry = self.float_ui.getOrPut(pane_uuid) catch return null;
+        if (!entry.found_existing) {
+            entry.value_ptr.* = .{};
+        }
+        return entry.value_ptr;
+    }
+
+    pub fn clearFloatUi(self: *State, pane_uuid: [32]u8) void {
+        if (self.float_ui.fetchRemove(pane_uuid)) |entry| {
+            var ui = entry.value;
+            ui.deinit(self.allocator);
+        }
+        if (self.float_rename_uuid) |uuid| {
+            if (std.mem.eql(u8, &uuid, &pane_uuid)) {
+                self.float_rename_uuid = null;
+                self.float_rename_buf.clearRetainingCapacity();
+            }
+        }
+    }
+
+    pub fn setPaneFloatUi(self: *State, pane_uuid: [32]u8, cfg: PaneFloatUiConfig) bool {
+        const ui = self.ensureFloatUi(pane_uuid) orelse return false;
+        ui.deinit(self.allocator);
+        ui.* = .{
+            .border_x = cfg.border_x,
+            .border_y = cfg.border_y,
+            .border_w = cfg.border_w,
+            .border_h = cfg.border_h,
+            .border_color = cfg.border_color,
+            .width_pct = cfg.width_pct,
+            .height_pct = cfg.height_pct,
+            .pos_x_pct = cfg.pos_x_pct,
+            .pos_y_pct = cfg.pos_y_pct,
+            .pad_x = cfg.pad_x,
+            .pad_y = cfg.pad_y,
+            .navigatable = cfg.navigatable,
+            .retained_after_exit = cfg.retained_after_exit,
+            .capture_output = cfg.capture_output,
+            .dim_background = cfg.dim_background,
+            .closed_by_exit_key = cfg.closed_by_exit_key,
+            .float_style = cfg.float_style,
+        };
+        if (cfg.pwd_dir) |dir| {
+            ui.pwd_dir = self.allocator.dupe(u8, dir) catch null;
+        }
+        if (cfg.exit_key) |key| {
+            ui.exit_key = self.allocator.dupe(u8, key) catch null;
+        }
+        if (cfg.float_title) |title| {
+            ui.float_title = self.allocator.dupe(u8, title) catch null;
+        }
+        return true;
+    }
+
+    pub fn setPaneBorderFrame(
+        self: *State,
+        pane_uuid: [32]u8,
+        border_x: u16,
+        border_y: u16,
+        border_w: u16,
+        border_h: u16,
+        border_color: core.BorderColor,
+    ) void {
+        if (self.ensureFloatUi(pane_uuid)) |ui| {
+            ui.border_x = border_x;
+            ui.border_y = border_y;
+            ui.border_w = border_w;
+            ui.border_h = border_h;
+            ui.border_color = border_color;
+        }
+    }
+
+    pub fn setPaneFloatGeometryUi(
+        self: *State,
+        pane_uuid: [32]u8,
+        width_pct: u8,
+        height_pct: u8,
+        pos_x_pct: u8,
+        pos_y_pct: u8,
+        pad_x: u8,
+        pad_y: u8,
+    ) void {
+        if (self.ensureFloatUi(pane_uuid)) |ui| {
+            ui.width_pct = width_pct;
+            ui.height_pct = height_pct;
+            ui.pos_x_pct = pos_x_pct;
+            ui.pos_y_pct = pos_y_pct;
+            ui.pad_x = pad_x;
+            ui.pad_y = pad_y;
+        }
+    }
+
+    pub fn swapPaneFloatUi(self: *State, a_uuid: [32]u8, b_uuid: [32]u8) void {
+        const a = self.float_ui.getPtr(a_uuid) orelse return;
+        const b = self.float_ui.getPtr(b_uuid) orelse return;
+
+        std.mem.swap(u16, &a.border_x, &b.border_x);
+        std.mem.swap(u16, &a.border_y, &b.border_y);
+        std.mem.swap(u16, &a.border_w, &b.border_w);
+        std.mem.swap(u16, &a.border_h, &b.border_h);
+        std.mem.swap(u8, &a.width_pct, &b.width_pct);
+        std.mem.swap(u8, &a.height_pct, &b.height_pct);
+        std.mem.swap(u8, &a.pos_x_pct, &b.pos_x_pct);
+        std.mem.swap(u8, &a.pos_y_pct, &b.pos_y_pct);
+        std.mem.swap(u8, &a.pad_x, &b.pad_x);
+        std.mem.swap(u8, &a.pad_y, &b.pad_y);
+    }
+
+    pub fn paneBorderX(self: *const State, pane: *const Pane) u16 {
+        if (self.floatUiConst(pane)) |ui| return ui.border_x;
+        return 0;
+    }
+
+    pub fn paneBorderY(self: *const State, pane: *const Pane) u16 {
+        if (self.floatUiConst(pane)) |ui| return ui.border_y;
+        return 0;
+    }
+
+    pub fn paneBorderW(self: *const State, pane: *const Pane) u16 {
+        if (self.floatUiConst(pane)) |ui| return ui.border_w;
+        return 0;
+    }
+
+    pub fn paneBorderH(self: *const State, pane: *const Pane) u16 {
+        if (self.floatUiConst(pane)) |ui| return ui.border_h;
+        return 0;
+    }
+
+    pub fn paneBorderColor(self: *const State, pane: *const Pane) core.BorderColor {
+        if (self.floatUiConst(pane)) |ui| return ui.border_color;
+        return .{};
+    }
+
+    pub fn paneFloatStyle(self: *const State, pane: *const Pane) ?*const core.FloatStyle {
+        if (self.floatUiConst(pane)) |ui| return ui.float_style;
+        return null;
+    }
+
+    pub fn paneFloatHasShadow(self: *const State, pane: *const Pane) bool {
+        if (self.paneFloatStyle(pane)) |style| {
+            return style.shadow_color != null;
+        }
+        return false;
+    }
+
+    pub fn paneFloatTitle(self: *const State, pane: *const Pane) ?[]const u8 {
+        if (self.floatUiConst(pane)) |ui| return ui.float_title;
+        return null;
+    }
+
+    pub fn setPaneFloatTitle(self: *State, pane_uuid: [32]u8, title: ?[]const u8) bool {
+        const ui = self.ensureFloatUi(pane_uuid) orelse return false;
+        if (ui.float_title) |old| {
+            self.allocator.free(old);
+            ui.float_title = null;
+        }
+        if (title) |value| {
+            ui.float_title = self.allocator.dupe(u8, value) catch null;
+        }
+        return true;
+    }
+
+    pub fn panePwdDir(self: *const State, pane: *const Pane) ?[]const u8 {
+        if (self.floatUiConst(pane)) |ui| return ui.pwd_dir;
+        return null;
+    }
+
+    pub fn paneNavigatable(self: *const State, pane: *const Pane) bool {
+        if (self.floatUiConst(pane)) |ui| return ui.navigatable;
+        return false;
+    }
+
+    pub fn paneRetainedAfterExit(self: *const State, pane: *const Pane) bool {
+        if (self.floatUiConst(pane)) |ui| return ui.retained_after_exit;
+        return false;
+    }
+
+    pub fn setPaneRetainedAfterExit(self: *State, pane_uuid: [32]u8, retained: bool) void {
+        if (self.ensureFloatUi(pane_uuid)) |ui| {
+            ui.retained_after_exit = retained;
+        }
+    }
+
+    pub fn paneCaptureOutput(self: *const State, pane: *const Pane) bool {
+        if (self.floatUiConst(pane)) |ui| return ui.capture_output;
+        return false;
+    }
+
+    pub fn setPaneCaptureOutput(self: *State, pane_uuid: [32]u8, capture_output: bool) void {
+        if (self.ensureFloatUi(pane_uuid)) |ui| {
+            ui.capture_output = capture_output;
+        }
+    }
+
+    pub fn paneDimBackground(self: *const State, pane: *const Pane) bool {
+        if (self.floatUiConst(pane)) |ui| return ui.dim_background;
+        return false;
+    }
+
+    pub fn paneExitKey(self: *const State, pane: *const Pane) ?[]const u8 {
+        if (self.floatUiConst(pane)) |ui| return ui.exit_key;
+        return null;
+    }
+
+    pub fn paneClosedByExitKey(self: *const State, pane_uuid: [32]u8) bool {
+        if (self.float_ui.get(pane_uuid)) |ui| return ui.closed_by_exit_key;
+        return false;
+    }
+
+    pub fn setPaneClosedByExitKey(self: *State, pane_uuid: [32]u8, closed: bool) void {
+        if (self.ensureFloatUi(pane_uuid)) |ui| {
+            ui.closed_by_exit_key = closed;
+        }
+    }
+
     pub fn paneFloatWidthPct(self: *const State, pane: *const Pane) u8 {
-        _ = self;
-        return pane.float_width_pct;
+        if (self.floatUiConst(pane)) |ui| return ui.width_pct;
+        return 60;
     }
 
     pub fn paneFloatHeightPct(self: *const State, pane: *const Pane) u8 {
-        _ = self;
-        return pane.float_height_pct;
+        if (self.floatUiConst(pane)) |ui| return ui.height_pct;
+        return 60;
     }
 
     pub fn paneFloatPosXPct(self: *const State, pane: *const Pane) u8 {
-        _ = self;
-        return pane.float_pos_x_pct;
+        if (self.floatUiConst(pane)) |ui| return ui.pos_x_pct;
+        return 50;
     }
 
     pub fn paneFloatPosYPct(self: *const State, pane: *const Pane) u8 {
-        _ = self;
-        return pane.float_pos_y_pct;
+        if (self.floatUiConst(pane)) |ui| return ui.pos_y_pct;
+        return 50;
     }
 
     pub fn paneFloatPadX(self: *const State, pane: *const Pane) u8 {
-        _ = self;
-        return pane.float_pad_x;
+        if (self.floatUiConst(pane)) |ui| return ui.pad_x;
+        return 1;
     }
 
     pub fn paneFloatPadY(self: *const State, pane: *const Pane) u8 {
-        _ = self;
-        return pane.float_pad_y;
+        if (self.floatUiConst(pane)) |ui| return ui.pad_y;
+        return 0;
     }
 
     pub fn setLocalFloatState(

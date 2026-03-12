@@ -19,7 +19,7 @@ const loop_actions_focus = @import("loop_actions_focus.zig");
 /// Hide or destroy a float. If it's a CLI-blocking float (capture_output=true),
 /// destroy it and send result back to CLI instead of just hiding.
 pub fn hideOrDestroyFloat(state: *State, pane: *Pane, tab: usize) void {
-    if (pane.capture_output) {
+    if (state.paneCaptureOutput(pane)) {
         // CLI is waiting - destroy the float and send cancellation result.
         destroyBlockingFloat(state, pane);
     } else {
@@ -55,6 +55,7 @@ fn destroyBlockingFloat(state: *State, pane: *Pane) void {
                 state.runtime.killPane(pane.uuid) catch {};
             }
             state.syncSessionFloatRemoved(pane.uuid);
+            state.clearFloatUi(pane.uuid);
             pane.deinit();
             state.allocator.destroy(pane);
             // Fix active_floating index.
@@ -398,6 +399,7 @@ pub fn performClose(state: *State) void {
             terminal_main.debugLogUuid(&pane.uuid, "performClose: killPane done", .{});
         }
         state.syncSessionFloatRemoved(pane.uuid);
+        state.clearFloatUi(pane.uuid);
         pane.deinit();
         state.allocator.destroy(pane);
         // Focus another float or fall back to tiled pane.
@@ -568,7 +570,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
             // For per_cwd floats, also check directory match.
             if (float_def.attributes.per_cwd and state.paneIsPwd(pane)) {
                 // Both dirs must exist and match, or both be null.
-                const dirs_match = if (pane.pwd_dir) |pane_dir| blk: {
+                const dirs_match = if (state.panePwdDir(pane)) |pane_dir| blk: {
                     if (current_dir) |curr| {
                         break :blk std.mem.eql(u8, pane_dir, curr);
                     }
@@ -592,6 +594,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
 
                 const stale = state.view.floats.orderedRemove(existing_idx);
                 state.syncSessionFloatRemoved(stale.uuid);
+                state.clearFloatUi(stale.uuid);
                 stale.deinit();
                 state.allocator.destroy(stale);
 
@@ -813,36 +816,24 @@ pub fn createAdhocFloatWithSize(
     try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
 
     pane.focused = true;
-
-    if (title) |t| {
-        if (t.len > 0) {
-            pane.float_title = try state.allocator.dupe(u8, t);
-        }
-    }
-
-    // Keep the pod's pane name separate from the float title.
-
-    pane.border_x = outer_x;
-    pane.border_y = outer_y;
-    pane.border_w = outer_w;
-    pane.border_h = outer_h;
-    pane.border_color = border_color;
-
-    pane.float_width_pct = @intCast(width_pct);
-    pane.float_height_pct = @intCast(height_pct);
-    pane.float_pos_x_pct = @intCast(pos_x_pct);
-    pane.float_pos_y_pct = @intCast(pos_y_pct);
-    pane.float_pad_x = @intCast(pad_x_cfg);
-    pane.float_pad_y = @intCast(pad_y_cfg);
-
-    pane.dim_background = size.dim_background;
-    if (size.exit_key) |ek| {
-        pane.exit_key = state.allocator.dupe(u8, ek) catch null;
-    }
-
-    if (style) |s| {
-        pane.float_style = s;
-    }
+    _ = state.setPaneFloatUi(result.uuid, .{
+        .border_x = outer_x,
+        .border_y = outer_y,
+        .border_w = outer_w,
+        .border_h = outer_h,
+        .border_color = border_color,
+        .width_pct = @intCast(width_pct),
+        .height_pct = @intCast(height_pct),
+        .pos_x_pct = @intCast(pos_x_pct),
+        .pos_y_pct = @intCast(pos_y_pct),
+        .pad_x = @intCast(pad_x_cfg),
+        .pad_y = @intCast(pad_y_cfg),
+        .capture_output = false,
+        .dim_background = size.dim_background,
+        .exit_key = size.exit_key,
+        .float_style = style,
+        .float_title = title,
+    });
 
     pane.configureNotificationsFromPop(&state.pop_config.pane.notification);
 
@@ -945,14 +936,6 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
 
     pane.focused = true;
 
-    // Title text is a pane property (outside style). Style only controls
-    // positioning/formatting of the title widget.
-    if (float_def.title) |t| {
-        if (t.len > 0) {
-            pane.float_title = state.allocator.dupe(u8, t) catch null;
-        }
-    }
-
     // Keep the pod's pane name separate from the float title.
     // For global floats (special or pwd), set per-tab visibility.
     // For tab-bound floats, use simple visible field.
@@ -964,34 +947,23 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
         (@as(u64, 1) << @intCast(state.activeTabIndex()))
     else
         0;
-    // Store outer dimensions and style for border rendering.
-    pane.border_x = outer_x;
-    pane.border_y = outer_y;
-    pane.border_w = outer_w;
-    pane.border_h = outer_h;
-    pane.border_color = border_color;
-    // Store percentages for resize recalculation.
-    pane.float_width_pct = @intCast(width_pct);
-    pane.float_height_pct = @intCast(height_pct);
-    pane.float_pos_x_pct = @intCast(pos_x_pct);
-    pane.float_pos_y_pct = @intCast(pos_y_pct);
-    pane.float_pad_x = @intCast(pad_x_cfg);
-    pane.float_pad_y = @intCast(pad_y_cfg);
-
-    // For pwd floats, store the directory and duplicate it.
-    if (float_def.attributes.per_cwd) {
-        if (current_dir) |dir| {
-            pane.pwd_dir = state.allocator.dupe(u8, dir) catch null;
-        }
-    }
-
-    // For navigatable floats, set navigatable.
-    pane.navigatable = float_def.attributes.navigatable;
-
-    // Store style reference.
-    if (style) |s| {
-        pane.float_style = s;
-    }
+    _ = state.setPaneFloatUi(result.uuid, .{
+        .border_x = outer_x,
+        .border_y = outer_y,
+        .border_w = outer_w,
+        .border_h = outer_h,
+        .border_color = border_color,
+        .width_pct = @intCast(width_pct),
+        .height_pct = @intCast(height_pct),
+        .pos_x_pct = @intCast(pos_x_pct),
+        .pos_y_pct = @intCast(pos_y_pct),
+        .pad_x = @intCast(pad_x_cfg),
+        .pad_y = @intCast(pad_y_cfg),
+        .pwd_dir = if (float_def.attributes.per_cwd) current_dir else null,
+        .navigatable = float_def.attributes.navigatable,
+        .float_style = style,
+        .float_title = float_def.title,
+    });
 
     // Configure pane notifications.
     pane.configureNotificationsFromPop(&state.pop_config.pane.notification);
