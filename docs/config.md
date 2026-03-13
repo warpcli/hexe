@@ -26,7 +26,7 @@ local hx = require("hexe")
 -- session layouts (tabs, splits, floats)
 hx.ses.layout.define({ ... })
 
--- mux config (tabs, status bar, floats, keybinds, etc.)
+-- terminal frontend config (tabs, status bar, floats, keybinds, etc.)
 hx.mux.config.setup({ ... })
 
 -- prompt segments
@@ -36,7 +36,7 @@ hx.shp.prompt.right({ ... })
 
 ---
 
-## Mux config reference
+## Terminal Frontend Config Reference
 
 ```lua
 hx.mux.config.setup({
@@ -123,6 +123,9 @@ hx.mux.float.set_match("^explorer$", {
 ```
 
 `set_match(...)` uses the float title with full libc regex matching.
+
+The `hx.mux.*` namespace name is kept for compatibility, but it now configures
+the terminal frontend UI layer. SES remains the session authority.
 
 ---
 

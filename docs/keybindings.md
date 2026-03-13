@@ -1,6 +1,7 @@
 # Keybindings
 
 Keybindings are defined with `hx.mux.keymap.set({...})` in your config.
+The `mux` namespace is the terminal frontend UI API (kept for compatibility naming).
 
 ---
 
@@ -46,11 +47,11 @@ key = { hx.key.ctrl, hx.key.alt, hx.key.comma }
 
 ## `action`
 
-Actions trigger mux operations. All available types:
+Actions trigger terminal frontend operations. Session-structure mutations are applied by SES after command handling. Available action types:
 
 | Action | Description |
 |---|---|
-| `hx.action.mux_quit` | Exit the mux |
+| `hx.action.mux_quit` | Exit the terminal frontend |
 | `hx.action.mux_detach` | Detach from session (leave running) |
 | `hx.action.pane_disown` | Orphan current pane |
 | `hx.action.pane_adopt` | Adopt an orphaned pane |
@@ -215,7 +216,7 @@ Pass `Ctrl+Alt+Arrow` through to nvim/vim, otherwise move focus:
 { key = { hx.key.ctrl, hx.key.alt, hx.key.left },  when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hx.mode.passthrough_only },
 { key = { hx.key.ctrl, hx.key.alt, hx.key.right }, when = function(ctx) return ctx.process_name == "nvim" or ctx.process_name == "vim" end, mode = hx.mode.passthrough_only },
 
--- fallback: move mux focus
+-- fallback: move frontend focus
 { key = { hx.key.ctrl, hx.key.alt, hx.key.up },    action = { type = hx.action.focus_move, dir = "up" } },
 { key = { hx.key.ctrl, hx.key.alt, hx.key.down },  action = { type = hx.action.focus_move, dir = "down" } },
 { key = { hx.key.ctrl, hx.key.alt, hx.key.left },  action = { type = hx.action.focus_move, dir = "left" } },

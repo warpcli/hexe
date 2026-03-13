@@ -74,10 +74,10 @@ Useful for project-scoped tools: `lazygit`, `nvim`, REPLs, file browsers.
 
 ### `sticky`
 
-The float survives mux restarts.
+The float survives terminal-frontend restarts.
 
-- Pod is kept alive in a half-attached state when mux detaches or exits
-- New mux automatically reclaims it on reattach
+- Pod is kept alive in a half-attached state when the frontend detaches or exits
+- A new frontend automatically reclaims it on reattach
 - Combine with `per_cwd` for directory-specific persistent floats
 
 ### `global`

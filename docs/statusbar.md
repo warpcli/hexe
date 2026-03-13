@@ -1,6 +1,6 @@
-# Mux Status Bar (`mux.tabs.status`)
+# Terminal Status Bar (`hx.mux.tabs.status`)
 
-This page documents the mux status bar system.
+This page documents the terminal frontend status bar system.
 
 For shell prompt details, see `docs/prompt.md`.
 

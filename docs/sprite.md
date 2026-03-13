@@ -40,7 +40,7 @@ Added a feature to display Pokemon sprites overlaid in the center of panes when 
 
 ### Add Keybinding to Config
 
-Edit `~/.config/hexe/init.lua` and add to `mux.input.binds`:
+Edit `~/.config/hexe/init.lua` and add to the terminal frontend keymap (`hx.mux.keymap`):
 
 ```lua
 { on = "press", mods = { hx.mod.ctrl, hx.mod.alt }, key = "p", action = { type = hx.action.sprite_toggle } },

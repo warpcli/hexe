@@ -2,7 +2,7 @@
 
 A session is a named collection of tabs, splits, and floats tracked by `hexe ses`.
 
-Sessions survive mux restarts. Detach and reattach freely — your shells keep running.
+Sessions survive terminal-frontend restarts. Detach and reattach freely — your shells keep running.
 
 ---
 
@@ -30,7 +30,7 @@ hexe terminal attach a3f2
 
 ## Detach and reattach
 
-Detaching leaves the ses daemon and all pods running. The mux process exits. On reattach:
+Detaching leaves the ses daemon and all pods running. The terminal frontend process exits. On reattach:
 
 - Layout is restored from ses state
 - Each pane reconnects to its pod
@@ -138,7 +138,7 @@ You can move orphaned panes between sessions.
 - **Disown**: remove a pane from the current session (pod keeps running, pane becomes orphaned)
 - **Adopt**: pick up an orphaned pane into the current session
 
-Keybinds (configure in `mux.input.binds`):
+Keybinds (configure in the frontend keymap namespace `hx.mux.keymap`):
 - `action = { type = hx.action.pane_disown }`
 - `action = { type = hx.action.pane_adopt }`
 
