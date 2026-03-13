@@ -211,16 +211,15 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
     const pane = try self.allocator.create(Pane);
     errdefer self.allocator.destroy(pane);
 
-    const cfg = &self.config;
-
     // Use per-float settings or fall back to defaults.
-    const width_pct: u16 = float_def.width_percent orelse cfg.float_width_percent;
-    const height_pct: u16 = float_def.height_percent orelse cfg.float_height_percent;
+    const visuals = self.resolveFloatVisuals(.named, float_def.title);
+    const width_pct: u16 = float_def.width_percent orelse visuals.width_pct;
+    const height_pct: u16 = float_def.height_percent orelse visuals.height_pct;
     const pos_x_pct: u16 = float_def.pos_x orelse 50;
     const pos_y_pct: u16 = float_def.pos_y orelse 50;
-    const pad_x_cfg: u16 = float_def.padding_x orelse cfg.float_padding_x;
-    const pad_y_cfg: u16 = float_def.padding_y orelse cfg.float_padding_y;
-    const border_color = float_def.color orelse cfg.float_color;
+    const pad_x_cfg: u16 = visuals.pad_x;
+    const pad_y_cfg: u16 = visuals.pad_y;
+    const border_color = visuals.border_color;
 
     // Calculate outer frame size.
     const avail_h = self.term_height - self.status_height;
@@ -288,7 +287,8 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
         .pad_x = @intCast(pad_x_cfg),
         .pad_y = @intCast(pad_y_cfg),
         .pwd_dir = if (float_def.attributes.per_cwd) cwd else null,
-        .float_style = if (float_def.style) |*style| style else null,
+        .float_style = visuals.float_style,
+        .float_title = float_def.title,
     });
 
     // Configure pane notifications.

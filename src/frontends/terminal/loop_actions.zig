@@ -782,17 +782,17 @@ pub fn createAdhocFloatWithSize(
     const pane = try state.allocator.create(Pane);
     errdefer state.allocator.destroy(pane);
 
-    const cfg = &state.config;
-    const style = if (cfg.float_style_default) |*s| s else null;
+    const visuals = state.resolveFloatVisuals(.adhoc, title);
+    const style = visuals.float_style;
     const shadow_enabled = if (style) |s| s.shadow_color != null else false;
-    const width_pct: u16 = if (size.width > 0) size.width else cfg.float_width_percent;
-    const height_pct: u16 = if (size.height > 0) size.height else cfg.float_height_percent;
+    const width_pct: u16 = if (size.width > 0) size.width else visuals.width_pct;
+    const height_pct: u16 = if (size.height > 0) size.height else visuals.height_pct;
     // Base position at center (50%), then apply shift
     const pos_x_pct: u16 = @intCast(@as(i32, 50) + @as(i32, size.shift_x));
     const pos_y_pct: u16 = @intCast(@as(i32, 50) + @as(i32, size.shift_y));
-    const pad_x_cfg: u16 = cfg.float_padding_x;
-    const pad_y_cfg: u16 = cfg.float_padding_y;
-    const border_color = cfg.float_color;
+    const pad_x_cfg: u16 = visuals.pad_x;
+    const pad_y_cfg: u16 = visuals.pad_y;
+    const border_color = visuals.border_color;
 
     const avail_h = state.term_height - state.status_height;
     const usable_w: u16 = if (shadow_enabled) (state.term_width -| 1) else state.term_width;
@@ -869,19 +869,18 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     const pane = try state.allocator.create(Pane);
     errdefer state.allocator.destroy(pane);
 
-    const cfg = &state.config;
-
-    const style = if (float_def.style) |*s| s else if (cfg.float_style_default) |*s| s else null;
+    const visuals = state.resolveFloatVisuals(.named, float_def.title);
+    const style = visuals.float_style;
     const shadow_enabled = if (style) |s| s.shadow_color != null else false;
 
     // Use per-float settings or fall back to defaults.
-    const width_pct: u16 = float_def.width_percent orelse cfg.float_width_percent;
-    const height_pct: u16 = float_def.height_percent orelse cfg.float_height_percent;
+    const width_pct: u16 = float_def.width_percent orelse visuals.width_pct;
+    const height_pct: u16 = float_def.height_percent orelse visuals.height_pct;
     const pos_x_pct: u16 = float_def.pos_x orelse 50; // default center
     const pos_y_pct: u16 = float_def.pos_y orelse 50; // default center
-    const pad_x_cfg: u16 = float_def.padding_x orelse cfg.float_padding_x;
-    const pad_y_cfg: u16 = float_def.padding_y orelse cfg.float_padding_y;
-    const border_color = float_def.color orelse cfg.float_color;
+    const pad_x_cfg: u16 = visuals.pad_x;
+    const pad_y_cfg: u16 = visuals.pad_y;
+    const border_color = visuals.border_color;
 
     // Calculate outer frame size.
     const avail_h = state.term_height - state.status_height;

@@ -410,16 +410,6 @@ fn restoreFloatPane(
     recyclePaneForFloat(self, pane, float_state, actual_focus_uuid);
     hydratePaneMetadata(self, pane, float_state.pane_uuid);
 
-    if (float_state.float_key != 0) {
-        if (self.getLayoutFloatByKey(float_state.float_key)) |float_def| {
-            const style = if (float_def.style) |*s| s else if (self.config.float_style_default) |*s| s else null;
-            self.setPaneBorderFrame(pane.uuid, self.paneBorderX(pane), self.paneBorderY(pane), self.paneBorderW(pane), self.paneBorderH(pane), float_def.color orelse self.config.float_color);
-            if (self.floatUi(pane)) |ui| {
-                ui.float_style = style;
-            }
-        }
-    }
-
     const restored_title = blk: {
         if (float_state.float_key != 0) {
             if (self.getLayoutFloatByKey(float_state.float_key)) |float_def| {
@@ -429,6 +419,18 @@ fn restoreFloatPane(
         if (preserved_title) |title| break :blk title;
         break :blk null;
     };
+    const visuals = self.resolveFloatVisuals(if (float_state.float_key != 0) .named else .adhoc, restored_title);
+    self.setPaneBorderFrame(
+        pane.uuid,
+        self.paneBorderX(pane),
+        self.paneBorderY(pane),
+        self.paneBorderW(pane),
+        self.paneBorderH(pane),
+        visuals.border_color,
+    );
+    if (self.floatUi(pane)) |ui| {
+        ui.float_style = visuals.float_style;
+    }
     _ = self.setPaneFloatTitle(pane.uuid, restored_title);
 
     used_uuids.put(float_state.pane_uuid, {}) catch {};
@@ -454,8 +456,7 @@ fn layoutMatchesSnapshot(layout: *const layout_mod.Layout, node: ?*const LayoutN
         },
         .split => |split| switch (expected.*) {
             .pane => false,
-            .split => |expected_split|
-                split.dir == @as(layout_mod.SplitDir, if (expected_split.dir == .horizontal) .horizontal else .vertical) and
+            .split => |expected_split| split.dir == @as(layout_mod.SplitDir, if (expected_split.dir == .horizontal) .horizontal else .vertical) and
                 std.math.approxEqAbs(f32, split.ratio, expected_split.ratio, 0.0001) and
                 layoutMatchesSnapshot(layout, split.first, expected_split.first) and
                 layoutMatchesSnapshot(layout, split.second, expected_split.second),
@@ -547,27 +548,25 @@ fn updateFloatPresentation(self: anytype, pane: *Pane, float_state: SessionFloat
             self.allocator.free(ui.pwd_dir.?);
             ui.pwd_dir = null;
         }
-        ui.float_style = null;
     }
-    if (float_state.float_key != 0) {
+    var title = self.paneFloatTitle(pane);
+    if (title == null and float_state.float_key != 0) {
         if (self.getLayoutFloatByKey(float_state.float_key)) |float_def| {
-            if (self.floatUi(pane)) |ui| {
-                if (float_def.style) |*style| {
-                    ui.float_style = style;
-                } else if (self.config.float_style_default) |*style| {
-                    ui.float_style = style;
-                }
-            }
-            self.setPaneBorderFrame(
-                pane.uuid,
-                self.paneBorderX(pane),
-                self.paneBorderY(pane),
-                self.paneBorderW(pane),
-                self.paneBorderH(pane),
-                float_def.color orelse self.config.float_color,
-            );
+            title = float_def.title;
         }
     }
+    const visuals = self.resolveFloatVisuals(if (float_state.float_key != 0) .named else .adhoc, title);
+    if (self.floatUi(pane)) |ui| {
+        ui.float_style = visuals.float_style;
+    }
+    self.setPaneBorderFrame(
+        pane.uuid,
+        self.paneBorderX(pane),
+        self.paneBorderY(pane),
+        self.paneBorderW(pane),
+        self.paneBorderH(pane),
+        visuals.border_color,
+    );
 }
 
 fn applySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) bool {

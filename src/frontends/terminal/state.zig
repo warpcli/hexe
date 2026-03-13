@@ -1,5 +1,8 @@
 const std = @import("std");
 const posix = std.posix;
+const cregex = @cImport({
+    @cInclude("regex_shim.h");
+});
 
 const core = @import("core");
 const wire = core.wire;
@@ -71,7 +74,67 @@ pub const PaneFloatUiConfig = struct {
     float_title: ?[]const u8 = null,
 };
 
+pub const FloatVisualKind = enum { named, adhoc };
+
+pub const ResolvedFloatVisuals = struct {
+    width_pct: u8,
+    height_pct: u8,
+    pad_x: u8,
+    pad_y: u8,
+    border_color: core.BorderColor,
+    float_style: ?*const core.FloatStyle = null,
+};
+
 pub const State = struct {
+    fn titleMatchesPattern(self: *const State, pattern: []const u8, title: ?[]const u8) bool {
+        const title_text = title orelse return false;
+        if (pattern.len == 0 or title_text.len == 0) return false;
+        const pattern_z = self.allocator.dupeZ(u8, pattern) catch return false;
+        defer self.allocator.free(pattern_z);
+        const title_z = self.allocator.dupeZ(u8, title_text) catch return false;
+        defer self.allocator.free(title_z);
+
+        const holder = cregex.hexe_regex_create() orelse return false;
+        defer cregex.hexe_regex_destroy(holder);
+
+        if (cregex.hexe_regex_compile(holder, pattern_z.ptr) != 0) {
+            return false;
+        }
+        return cregex.hexe_regex_match(holder, title_z.ptr) == 0;
+    }
+
+    fn applyFloatMatchRule(result: *ResolvedFloatVisuals, rule: *const core.config.FloatVisualRule) void {
+        if (rule.width_percent) |value| result.width_pct = value;
+        if (rule.height_percent) |value| result.height_pct = value;
+        if (rule.padding_x) |value| result.pad_x = value;
+        if (rule.padding_y) |value| result.pad_y = value;
+        if (rule.color) |value| result.border_color = value;
+        if (rule.style) |*value| result.float_style = value;
+    }
+
+    pub fn resolveFloatVisuals(self: *const State, kind: FloatVisualKind, title: ?[]const u8) ResolvedFloatVisuals {
+        const base = switch (kind) {
+            .named => &self.config.float_named_defaults,
+            .adhoc => &self.config.float_adhoc_defaults,
+        };
+
+        var result = ResolvedFloatVisuals{
+            .width_pct = base.width_percent,
+            .height_pct = base.height_percent,
+            .pad_x = base.padding_x,
+            .pad_y = base.padding_y,
+            .border_color = base.color,
+            .float_style = if (base.style) |*style| style else null,
+        };
+
+        for (self.config.float_match_rules) |*rule| {
+            if (!self.titleMatchesPattern(rule.pattern, title)) continue;
+            applyFloatMatchRule(&result, &rule.visual);
+        }
+
+        return result;
+    }
+
     /// Get float definition by key from active layout
     pub fn getLayoutFloatByKey(self: *const State, key: u8) ?*const core.LayoutFloatDef {
         for (self.active_layout_floats) |*f| {

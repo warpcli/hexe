@@ -89,6 +89,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    terminal_module.addIncludePath(b.path("src/frontends/terminal"));
     terminal_module.addImport("core", core_module);
     terminal_module.addImport("xev", xev_mod);
     terminal_module.addImport("shp", shp_module);
@@ -143,6 +144,10 @@ pub fn build(b: *std.Build) void {
     const cli_exe = b.addExecutable(.{
         .name = "hexe",
         .root_module = cli_root,
+    });
+    cli_exe.addIncludePath(b.path("src/frontends/terminal"));
+    cli_exe.addCSourceFile(.{
+        .file = b.path("src/frontends/terminal/regex_shim.c"),
     });
     b.installArtifact(cli_exe);
 
