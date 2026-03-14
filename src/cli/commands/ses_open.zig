@@ -8,7 +8,7 @@ const print = std.debug.print;
 pub fn runSesOpen(
     allocator: std.mem.Allocator,
     target: []const u8,
-    debug: bool,
+    log_level: ?core.logging.Level,
     log_file: []const u8,
     instance: []const u8,
 ) !void {
@@ -80,7 +80,7 @@ pub fn runSesOpen(
     const terminal = @import("terminal");
     try terminal.run(.{
         .name = session_name,
-        .debug = debug,
+        .log_level = log_level,
         .log_file = if (log_file.len > 0) log_file else null,
         .session_config_path = resolved.path,
         .session_tab_filter = selected_tab_filter,

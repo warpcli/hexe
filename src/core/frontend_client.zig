@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const ipc = @import("ipc.zig");
 const liblink_transport = @import("frontend_liblink_transport.zig");
+const logging = @import("logging.zig");
 const session_model = @import("session_model.zig");
 const wire = @import("wire.zig");
 
@@ -36,6 +37,7 @@ pub const SesClient = struct {
     vt_fd: ?posix.fd_t,
     just_started_daemon: bool,
     debug: bool,
+    log_level: ?logging.Level,
     log_file: ?[]const u8,
     frontend_kind: wire.FrontendKind,
     transport: Transport,
@@ -55,8 +57,8 @@ pub const SesClient = struct {
     pending_pane_exits: std.ArrayList([32]u8),
     pending_session_state: ?[]u8 = null,
 
-    pub fn init(allocator: std.mem.Allocator, session_id: [32]u8, session_name: []const u8, keepalive: bool, debug: bool, log_file: ?[]const u8) SesClient {
-        return initLocalIpc(allocator, session_id, session_name, keepalive, debug, log_file, .terminal);
+    pub fn init(allocator: std.mem.Allocator, session_id: [32]u8, session_name: []const u8, keepalive: bool, log_level: ?logging.Level, log_file: ?[]const u8) SesClient {
+        return initLocalIpc(allocator, session_id, session_name, keepalive, log_level, log_file, .terminal);
     }
 
     pub fn initLocalIpc(
@@ -64,11 +66,11 @@ pub const SesClient = struct {
         session_id: [32]u8,
         session_name: []const u8,
         keepalive: bool,
-        debug: bool,
+        log_level: ?logging.Level,
         log_file: ?[]const u8,
         frontend_kind: wire.FrontendKind,
     ) SesClient {
-        return initWithTransport(allocator, session_id, session_name, keepalive, debug, log_file, frontend_kind, .{
+        return initWithTransport(allocator, session_id, session_name, keepalive, log_level, log_file, frontend_kind, .{
             .local_ipc = .{},
         });
     }
@@ -78,7 +80,7 @@ pub const SesClient = struct {
         session_id: [32]u8,
         session_name: []const u8,
         keepalive: bool,
-        debug: bool,
+        log_level: ?logging.Level,
         log_file: ?[]const u8,
         frontend_kind: wire.FrontendKind,
         transport: Transport,
@@ -88,7 +90,8 @@ pub const SesClient = struct {
             .ctl_fd = null,
             .vt_fd = null,
             .just_started_daemon = false,
-            .debug = debug,
+            .debug = logging.levelEnablesDebug(log_level),
+            .log_level = log_level,
             .log_file = log_file,
             .frontend_kind = frontend_kind,
             .transport = transport,
@@ -115,19 +118,24 @@ pub const SesClient = struct {
 
     fn debugLog(self: *const SesClient, comptime fmt: []const u8, args: anytype) void {
         if (!self.debug) return;
-        const ms = std.time.milliTimestamp();
-        const secs = @divTrunc(ms, 1000);
-        const frac = @mod(ms, 1000);
-        std.debug.print("{d}.{d:0>3} [frontend-client] " ++ fmt ++ "\n", .{ secs, frac } ++ args);
+        logging.debugWithSource("frontend-client", fmt, args, @src());
     }
 
     fn debugLogUuid(self: *const SesClient, uuid: []const u8, comptime fmt: []const u8, args: anytype) void {
         if (!self.debug) return;
         const short_uuid = if (uuid.len >= 8) uuid[0..8] else uuid;
-        const ms = std.time.milliTimestamp();
-        const secs = @divTrunc(ms, 1000);
-        const frac = @mod(ms, 1000);
-        std.debug.print("{d}.{d:0>3} [frontend-client][{s}] " ++ fmt ++ "\n", .{ secs, frac, short_uuid } ++ args);
+        logging.debugWithSource("frontend-client", "[{s}] " ++ fmt, .{short_uuid} ++ args, @src());
+    }
+
+    fn traceLog(self: *const SesClient, comptime fmt: []const u8, args: anytype) void {
+        if (self.log_level != .trace) return;
+        logging.traceWithSource("frontend-client", fmt, args, @src());
+    }
+
+    fn traceLogUuid(self: *const SesClient, uuid: []const u8, comptime fmt: []const u8, args: anytype) void {
+        if (self.log_level != .trace) return;
+        const short_uuid = if (uuid.len >= 8) uuid[0..8] else uuid;
+        logging.traceWithSource("frontend-client", "[{s}] " ++ fmt, .{short_uuid} ++ args, @src());
     }
 
     fn transportKind(self: *const SesClient) wire.FrontendTransportKind {
@@ -201,6 +209,11 @@ pub const SesClient = struct {
         self.debugLog("ses connect: transport=preconnected ctl_fd={d} vt_fd={d}", .{
             transport.ctl_fd,
             transport.vt_fd,
+        });
+        self.traceLog("connectPreconnected: session={s} keepalive={} log_level={s}", .{
+            self.session_id[0..8],
+            self.keepalive,
+            if (self.log_level) |level| @tagName(level) else "off",
         });
 
         self.ctl_fd = transport.ctl_fd;
@@ -1271,8 +1284,9 @@ pub const SesClient = struct {
                 try args_list.append(self.allocator, "--test-only");
             }
         }
-        if (self.debug) {
-            try args_list.append(self.allocator, "--debug");
+        if (self.log_level) |level| {
+            try args_list.append(self.allocator, "--log");
+            try args_list.append(self.allocator, @tagName(level));
         }
         if (self.log_file) |path| {
             if (path.len > 0) {
@@ -1281,12 +1295,19 @@ pub const SesClient = struct {
             }
         }
 
+        self.traceLog("startSes: argv_count={d}", .{args_list.items.len});
+        for (args_list.items) |arg| {
+            self.traceLog("startSes argv: {s}", .{arg});
+        }
+
         var child = std.process.Child.init(args_list.items, std.heap.page_allocator);
         child.spawn() catch |err| {
             self.debugLog("failed to start ses daemon: {s}", .{@errorName(err)});
             return err;
         };
+        self.traceLog("startSes: spawned pid={d}", .{child.id});
         _ = child.wait() catch {};
+        self.traceLog("startSes: child exited", .{});
     }
 
     /// Check if connected to ses.

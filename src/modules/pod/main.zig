@@ -49,12 +49,9 @@ const containsClearSeq = buffering.containsClearSeq;
 
 var pod_debug: bool = false;
 
-fn debugLog(comptime fmt: []const u8, args: anytype) void {
+inline fn debugLog(comptime fmt: []const u8, args: anytype) void {
     if (!pod_debug) return;
-    const ms = std.time.milliTimestamp();
-    const secs = @divTrunc(ms, 1000);
-    const frac = @mod(ms, 1000);
-    std.debug.print("{d}.{d:0>3} [pod] " ++ fmt ++ "\n", .{ secs, frac } ++ args);
+    core.logging.debugWithSource("pod", fmt, args, @src());
 }
 
 fn setBlocking(fd: posix.fd_t) void {
@@ -78,7 +75,7 @@ pub const PodArgs = struct {
     labels: ?[]const u8 = null,
     write_meta: bool = true,
     write_alias: bool = false,
-    debug: bool = false,
+    log_level: ?core.logging.Level = null,
     log_file: ?[]const u8 = null,
     /// When true, print a single JSON line on stdout once ready.
     emit_ready: bool = false,
@@ -108,7 +105,7 @@ pub fn run(args: PodArgs) !void {
     // Use page_allocator for log path since it must survive daemonization
     const log_path: ?[]const u8 = if (args.log_file) |path|
         (if (path.len > 0) path else null)
-    else if (args.debug)
+    else if (args.log_level != null)
         (core.ipc.getLogPath(std.heap.page_allocator) catch null)
     else
         null;
@@ -118,6 +115,8 @@ pub fn run(args: PodArgs) !void {
     } else if (log_path) |path| {
         redirectStderrToLog(path);
     }
+
+    core.logging.setLogLevel(args.log_level);
 
     // Best-effort: name this process for `ps` discovery.
     setProcessName(args.name);
@@ -141,8 +140,13 @@ pub fn run(args: PodArgs) !void {
         created_alias_path = createAliasSymlink(allocator, args.name.?, args.socket_path) catch null;
     }
 
-    pod_debug = args.debug;
+    pod_debug = core.logging.levelEnablesDebug(args.log_level);
     debugLog("started uuid={s} socket={s} name={s}", .{ args.uuid[0..@min(args.uuid.len, 8)], args.socket_path, args.name orelse "(none)" });
+    debugLog("daemon={} level={s} logfile={s}", .{
+        args.daemon,
+        if (args.log_level) |level| @tagName(level) else "off",
+        log_path orelse "(none)",
+    });
 
     if (args.emit_ready) {
         // IMPORTANT: write handshake to stdout (ses reads stdout).

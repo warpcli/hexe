@@ -19,6 +19,11 @@ const statusbar = @import("statusbar.zig");
 
 var debug_enabled: bool = false;
 
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = core.logging.stdLogFn,
+};
+
 /// Global state pointer for signal handlers.
 var global_state: std.atomic.Value(?*State) = std.atomic.Value(?*State).init(null);
 
@@ -38,21 +43,15 @@ fn sigtermHandler(_: c_int) callconv(.c) void {
     }
 }
 
-pub fn debugLog(comptime fmt: []const u8, args: anytype) void {
+pub inline fn debugLog(comptime fmt: []const u8, args: anytype) void {
     if (!debug_enabled) return;
-    const ms = std.time.milliTimestamp();
-    const secs = @divTrunc(ms, 1000);
-    const frac = @mod(ms, 1000);
-    std.debug.print("{d}.{d:0>3} [terminal] " ++ fmt ++ "\n", .{ secs, frac } ++ args);
+    core.logging.debugWithSource("terminal", fmt, args, @src());
 }
 
-pub fn debugLogUuid(uuid: []const u8, comptime fmt: []const u8, args: anytype) void {
+pub inline fn debugLogUuid(uuid: []const u8, comptime fmt: []const u8, args: anytype) void {
     if (!debug_enabled) return;
     const short_uuid = if (uuid.len >= 8) uuid[0..8] else uuid;
-    const ms = std.time.milliTimestamp();
-    const secs = @divTrunc(ms, 1000);
-    const frac = @mod(ms, 1000);
-    std.debug.print("{d}.{d:0>3} [terminal][{s}] " ++ fmt ++ "\n", .{ secs, frac, short_uuid } ++ args);
+    core.logging.debugWithSource("terminal", "[{s}] " ++ fmt, .{short_uuid} ++ args, @src());
 }
 
 fn notifySessionNameChange(state: *State, change: *FrontendAttach.SessionNameChange) void {
@@ -73,7 +72,7 @@ pub const TerminalArgs = struct {
     attach: ?[]const u8 = null,
     notify_message: ?[]const u8 = null,
     list: bool = false,
-    debug: bool = false,
+    log_level: ?core.logging.Level = null,
     log_file: ?[]const u8 = null,
     session_config_path: ?[]const u8 = null,
     session_tab_filter: ?[]const u8 = null,
@@ -92,7 +91,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
     // Handle --list: show detached sessions and orphaned panes.
     if (terminal_args.list) {
-        var runtime = try FrontendRuntime.createTerminalProbe(allocator, false, null, terminal_args.connect_options);
+        var runtime = try FrontendRuntime.createTerminalProbe(allocator, terminal_args.log_level, terminal_args.log_file, terminal_args.connect_options);
         defer runtime.destroy();
         runtime.connect() catch {
             std.debug.print("Could not connect to ses daemon\n", .{});
@@ -175,25 +174,37 @@ pub fn run(terminal_args: TerminalArgs) !void {
     _ = std.os.linux.sigaction(posix.SIG.INT, &sigterm_action, null);
 
     // Redirect stderr to a log file or /dev/null to avoid display corruption.
-    // When --debug is set without --logfile, default to instance-specific log.
+    // When --log is set without --logfile, default to instance-specific log.
     var default_log_path: ?[]const u8 = null;
     defer if (default_log_path) |p| allocator.free(p);
 
     const effective_log: ?[]const u8 = if (terminal_args.log_file) |p|
         (if (p.len > 0) p else null)
-    else if (terminal_args.debug) blk: {
+    else if (terminal_args.log_level != null) blk: {
         default_log_path = core.ipc.getLogPath(allocator) catch null;
         break :blk default_log_path;
     } else null;
     redirectStderr(effective_log);
-    debug_enabled = terminal_args.debug;
+    debug_enabled = core.logging.levelEnablesDebug(terminal_args.log_level);
+    core.logging.setLogLevel(terminal_args.log_level);
     debugLog("started", .{});
+    debugLog("level={s} logfile={s}", .{
+        if (terminal_args.log_level) |level| @tagName(level) else "off",
+        effective_log orelse "(none)",
+    });
 
     // Get terminal size.
     const size = terminal.getTermSize();
 
     // Initialize state.
-    var state = try State.init(allocator, size.cols, size.rows, terminal_args.debug, terminal_args.log_file, terminal_args.connect_options);
+    var state = try State.init(
+        allocator,
+        size.cols,
+        size.rows,
+        terminal_args.log_level,
+        effective_log,
+        terminal_args.connect_options,
+    );
     defer {
         statusbar.deinitThreadlocals();
         state.deinit();
@@ -359,8 +370,21 @@ pub fn main() !void {
         } else if ((std.mem.eql(u8, arg, "--name") or std.mem.eql(u8, arg, "-N")) and i + 1 < args.len) {
             i += 1;
             terminal_args.name = args[i];
-        } else if (std.mem.eql(u8, arg, "--debug") or std.mem.eql(u8, arg, "-d")) {
-            terminal_args.debug = true;
+        } else if (std.mem.eql(u8, arg, "--log")) {
+            if (i + 1 >= args.len) {
+                std.debug.print("Error: --log requires a level (trace|debug|info)\n", .{});
+                return;
+            }
+            i += 1;
+            const parsed = core.logging.parseLevel(args[i]) orelse {
+                std.debug.print("Error: invalid --log level '{s}' (use trace|debug|info)\n", .{args[i]});
+                return;
+            };
+            if (parsed != .trace and parsed != .debug and parsed != .info) {
+                std.debug.print("Error: invalid --log level '{s}' (use trace|debug|info)\n", .{args[i]});
+                return;
+            }
+            terminal_args.log_level = parsed;
         } else if ((std.mem.eql(u8, arg, "--logfile") or std.mem.eql(u8, arg, "-L")) and i + 1 < args.len) {
             i += 1;
             terminal_args.log_file = args[i];

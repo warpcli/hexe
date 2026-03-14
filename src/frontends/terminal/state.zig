@@ -288,7 +288,7 @@ pub const State = struct {
         allocator: std.mem.Allocator,
         width: u16,
         height: u16,
-        debug: bool,
+        log_level: ?core.logging.Level,
         log_file: ?[]const u8,
         connect_options: core.FrontendConnectOptions,
     ) !State {
@@ -335,7 +335,7 @@ pub const State = struct {
 
         const uuid = core.ipc.generateUuid();
         const session_name = core.ipc.generateSessionName();
-        const runtime = try FrontendRuntime.createTerminal(allocator, uuid, session_name, debug, log_file, connect_options);
+        const runtime = try FrontendRuntime.createTerminal(allocator, uuid, session_name, log_level, log_file, connect_options);
         errdefer runtime.destroy();
 
         return .{

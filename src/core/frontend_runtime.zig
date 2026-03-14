@@ -70,7 +70,7 @@ pub const FrontendRuntime = struct {
         session_id: [32]u8,
         session_name: []const u8,
         keepalive: bool,
-        debug: bool,
+        log_level: ?logging.Level,
         log_file: ?[]const u8,
         frontend_kind: wire.FrontendKind,
         transport: Transport,
@@ -84,7 +84,7 @@ pub const FrontendRuntime = struct {
             session_id,
             session_name,
             keepalive,
-            debug,
+            log_level,
             log_file,
             frontend_kind,
             transport,
@@ -100,7 +100,7 @@ pub const FrontendRuntime = struct {
         allocator: std.mem.Allocator,
         session_id: [32]u8,
         session_name: []const u8,
-        debug: bool,
+        log_level: ?logging.Level,
         log_file: ?[]const u8,
         connect_options: ConnectOptions,
     ) !*FrontendRuntime {
@@ -109,7 +109,7 @@ pub const FrontendRuntime = struct {
             session_id,
             session_name,
             true,
-            debug,
+            log_level,
             log_file,
             .terminal,
             transport_helpers.resolveTransport(connect_options),
@@ -118,7 +118,7 @@ pub const FrontendRuntime = struct {
 
     pub fn createTerminalProbe(
         allocator: std.mem.Allocator,
-        debug: bool,
+        log_level: ?logging.Level,
         log_file: ?[]const u8,
         connect_options: ConnectOptions,
     ) !*FrontendRuntime {
@@ -127,7 +127,7 @@ pub const FrontendRuntime = struct {
             ipc.generateUuid(),
             ipc.generateSessionName(),
             false,
-            debug,
+            log_level,
             log_file,
             .terminal,
             transport_helpers.resolveTransport(connect_options),

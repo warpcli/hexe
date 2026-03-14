@@ -21,6 +21,11 @@ const App = yazap.App;
 const Arg = yazap.Arg;
 const print = std.debug.print;
 
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = core.logging.stdLogFn,
+};
+
 const help_ansi = struct {
     pub const RESET = "\x1b[0m";
     pub const BOLD = "\x1b[1m";
@@ -74,6 +79,21 @@ fn parseOptionalI64(value: ?[]const u8, field_name: []const u8) !i64 {
         };
     }
     return 0;
+}
+
+fn parseCliLogLevel(value: ?[]const u8) !?core.logging.Level {
+    if (value) |raw| {
+        const level = core.logging.parseLevel(raw) orelse {
+            print("Error: invalid --log level '{s}' (use trace|debug|info)\n", .{raw});
+            return error.InvalidArgument;
+        };
+        if (level != .trace and level != .debug and level != .info) {
+            print("Error: invalid --log level '{s}' (use trace|debug|info)\n", .{raw});
+            return error.InvalidArgument;
+        }
+        return level;
+    }
+    return null;
 }
 
 fn normalizeTopLevelCommand(command: []const u8) []const u8 {
@@ -198,7 +218,7 @@ pub fn main() !void {
     // SES subcommands
     var ses_daemon = app.createCommand("daemon", "Start the session daemon");
     try ses_daemon.addArg(Arg.booleanOption("foreground", 'f', null));
-    try ses_daemon.addArg(Arg.booleanOption("debug", 'd', null));
+    try ses_daemon.addArg(Arg.singleValueOption("log", null, null));
     try ses_daemon.addArg(Arg.singleValueOption("logfile", 'L', null));
     try ses_daemon.addArg(Arg.singleValueOption("instance", 'I', null));
     try ses_daemon.addArg(Arg.booleanOption("test-only", 'T', null));
@@ -246,7 +266,7 @@ pub fn main() !void {
 
     var layout_open = app.createCommand("open", "Open a saved session layout");
     try layout_open.addArg(Arg.positional("target", null, null));
-    try layout_open.addArg(Arg.booleanOption("debug", 'd', null));
+    try layout_open.addArg(Arg.singleValueOption("log", null, null));
     try layout_open.addArg(Arg.singleValueOption("logfile", 'L', null));
     try layout_open.addArg(Arg.singleValueOption("instance", 'I', null));
 
@@ -268,7 +288,7 @@ pub fn main() !void {
     try pod_daemon.addArg(Arg.booleanOption("no-write-meta", null, null));
     try pod_daemon.addArg(Arg.booleanOption("write-alias", null, null));
     try pod_daemon.addArg(Arg.booleanOption("foreground", 'f', null));
-    try pod_daemon.addArg(Arg.booleanOption("debug", 'd', null));
+    try pod_daemon.addArg(Arg.singleValueOption("log", null, null));
     try pod_daemon.addArg(Arg.singleValueOption("logfile", 'L', null));
     try pod_daemon.addArg(Arg.singleValueOption("instance", 'I', null));
     try pod_daemon.addArg(Arg.booleanOption("test-only", 'T', null));
@@ -285,7 +305,7 @@ pub fn main() !void {
     try pod_new.addArg(Arg.singleValueOption("cwd", 'C', null));
     try pod_new.addArg(Arg.singleValueOption("labels", null, null));
     try pod_new.addArg(Arg.booleanOption("alias", null, null));
-    try pod_new.addArg(Arg.booleanOption("debug", 'd', null));
+    try pod_new.addArg(Arg.singleValueOption("log", null, null));
     try pod_new.addArg(Arg.singleValueOption("logfile", 'L', null));
     try pod_new.addArg(Arg.singleValueOption("instance", 'I', null));
     try pod_new.addArg(Arg.booleanOption("test-only", 'T', null));
@@ -327,7 +347,7 @@ pub fn main() !void {
     // MUX subcommands
     var mux_new = app.createCommand("new", "Create new terminal session");
     try mux_new.addArg(Arg.singleValueOption("name", 'n', null));
-    try mux_new.addArg(Arg.booleanOption("debug", 'd', null));
+    try mux_new.addArg(Arg.singleValueOption("log", null, null));
     try mux_new.addArg(Arg.singleValueOption("logfile", 'L', null));
     try mux_new.addArg(Arg.singleValueOption("ses-socket", null, null));
     try mux_new.addArg(Arg.booleanOption("no-autostart-ses", null, null));
@@ -336,7 +356,7 @@ pub fn main() !void {
 
     var mux_attach = app.createCommand("attach", "Attach to existing session");
     try mux_attach.addArg(Arg.positional("name", null, null));
-    try mux_attach.addArg(Arg.booleanOption("debug", 'd', null));
+    try mux_attach.addArg(Arg.singleValueOption("log", null, null));
     try mux_attach.addArg(Arg.singleValueOption("logfile", 'L', null));
     try mux_attach.addArg(Arg.singleValueOption("ses-socket", null, null));
     try mux_attach.addArg(Arg.booleanOption("no-autostart-ses", null, null));
@@ -527,12 +547,12 @@ pub fn main() !void {
         } else |_| {}
         if (has_local_layout and shouldLoadLocalLayoutPrompt()) {
             if (askUseLocalLayout()) {
-                try cli_cmds.runSesOpen(allocator, ".", false, "", "");
+                try cli_cmds.runSesOpen(allocator, ".", null, "", "");
                 return;
             }
         }
 
-        try runTerminalNew("", false, "", "", false);
+        try runTerminalNew("", null, "", "", false);
         return;
     }
 
@@ -547,7 +567,8 @@ pub fn main() !void {
                     return;
                 }
             }
-            try runSesDaemon(m.containsArg("foreground"), m.containsArg("debug"), m.getSingleValue("logfile") orelse "");
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
+            try runSesDaemon(m.containsArg("foreground"), log_level, m.getSingleValue("logfile") orelse "");
             return;
         }
         if (ses_matches.subcommandMatches("status")) |m| {
@@ -598,10 +619,11 @@ pub fn main() !void {
         if (layout_matches.subcommandMatches("open")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
             try cli_cmds.runSesOpen(
                 allocator,
                 m.getSingleValue("target") orelse ".",
-                m.containsArg("debug"),
+                log_level,
                 m.getSingleValue("logfile") orelse "",
                 instance,
             );
@@ -629,6 +651,7 @@ pub fn main() !void {
                     return;
                 }
             }
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
             try runPodDaemon(
                 m.containsArg("foreground"),
                 m.getSingleValue("uuid") orelse "",
@@ -640,7 +663,7 @@ pub fn main() !void {
                 m.containsArg("write-meta"),
                 m.containsArg("no-write-meta"),
                 m.containsArg("write-alias"),
-                m.containsArg("debug"),
+                log_level,
                 m.getSingleValue("logfile") orelse "",
             );
             return;
@@ -661,6 +684,7 @@ pub fn main() !void {
                     return;
                 }
             }
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
             try cli_cmds.runPodNew(
                 allocator,
                 m.getSingleValue("name") orelse "",
@@ -668,7 +692,7 @@ pub fn main() !void {
                 m.getSingleValue("cwd") orelse "",
                 m.getSingleValue("labels") orelse "",
                 m.containsArg("alias"),
-                m.containsArg("debug"),
+                log_level,
                 m.getSingleValue("logfile") orelse "",
             );
             return;
@@ -736,9 +760,10 @@ pub fn main() !void {
             } else if (m.containsArg("test-only")) {
                 setGeneratedTestInstance();
             }
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
             try runTerminalNew(
                 m.getSingleValue("name") orelse "",
-                m.containsArg("debug"),
+                log_level,
                 m.getSingleValue("logfile") orelse "",
                 m.getSingleValue("ses-socket") orelse "",
                 m.containsArg("no-autostart-ses"),
@@ -748,9 +773,10 @@ pub fn main() !void {
         if (mux_matches.subcommandMatches("attach")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
             try runTerminalAttach(
                 m.getSingleValue("name") orelse "",
-                m.containsArg("debug"),
+                log_level,
                 m.getSingleValue("logfile") orelse "",
                 m.getSingleValue("ses-socket") orelse "",
                 m.containsArg("no-autostart-ses"),
@@ -939,11 +965,11 @@ pub fn main() !void {
     }
 }
 
-fn runSesDaemon(foreground: bool, debug: bool, log_file: []const u8) !void {
+fn runSesDaemon(foreground: bool, log_level: ?core.logging.Level, log_file: []const u8) !void {
     const log: ?[]const u8 = if (log_file.len > 0) log_file else null;
     try ses.run(.{
         .daemon = !foreground,
-        .debug = debug,
+        .log_level = log_level,
         .log_file = log,
     });
 }
@@ -975,7 +1001,7 @@ fn runPodDaemon(
     write_meta: bool,
     no_write_meta: bool,
     write_alias: bool,
-    debug: bool,
+    log_level: ?core.logging.Level,
     log_file: []const u8,
 ) !void {
     if (uuid.len == 0 or socket_path.len == 0) {
@@ -995,7 +1021,7 @@ fn runPodDaemon(
         .labels = if (labels.len > 0) labels else null,
         .write_meta = effective_write_meta,
         .write_alias = write_alias,
-        .debug = debug,
+        .log_level = log_level,
         .log_file = if (log_file.len > 0) log_file else null,
         .emit_ready = foreground,
     });
@@ -1074,7 +1100,7 @@ fn buildTerminalConnectOptions(socket_path: []const u8, no_autostart_ses: bool) 
     };
 }
 
-fn runTerminalNew(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
+fn runTerminalNew(name: []const u8, log_level: ?core.logging.Level, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
     if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
         if (pane_uuid.len >= 32) {
             if (!try showNestedMuxConfirmation(pane_uuid)) {
@@ -1085,17 +1111,17 @@ fn runTerminalNew(name: []const u8, debug: bool, log_file: []const u8, socket_pa
 
     try terminal.run(.{
         .name = if (name.len > 0) name else null,
-        .debug = debug,
+        .log_level = log_level,
         .log_file = if (log_file.len > 0) log_file else null,
         .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses),
     });
 }
 
-fn runTerminalAttach(name: []const u8, debug: bool, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
+fn runTerminalAttach(name: []const u8, log_level: ?core.logging.Level, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
     if (name.len > 0) {
         try terminal.run(.{
             .attach = name,
-            .debug = debug,
+            .log_level = log_level,
             .log_file = if (log_file.len > 0) log_file else null,
             .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses),
         });

@@ -7,10 +7,15 @@ const server = @import("server.zig");
 const persist = @import("persist.zig");
 const txlog = @import("txlog.zig");
 
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = core.logging.stdLogFn,
+};
+
 /// Arguments for ses commands
 pub const SesArgs = struct {
     daemon: bool = false,
-    debug: bool = false,
+    log_level: ?core.logging.Level = null,
     log_file: ?[]const u8 = null,
     list: bool = false,
     full: bool = false,
@@ -20,23 +25,23 @@ pub const SesArgs = struct {
 
 /// Debug logging - only outputs when debug mode is enabled
 pub var debug_enabled: bool = false;
+pub var active_log_level: ?core.logging.Level = null;
 pub var log_file_path: ?[]const u8 = null;
 
-pub fn debugLog(comptime fmt: []const u8, args: anytype) void {
+pub inline fn debugLog(comptime fmt: []const u8, args: anytype) void {
     if (!debug_enabled) return;
-    const ms = std.time.milliTimestamp();
-    const secs = @divTrunc(ms, 1000);
-    const frac = @mod(ms, 1000);
-    std.debug.print("{d}.{d:0>3} [ses] " ++ fmt ++ "\n", .{ secs, frac } ++ args);
+    core.logging.debugWithSource("ses", fmt, args, @src());
 }
 
-pub fn debugLogUuid(uuid: []const u8, comptime fmt: []const u8, args: anytype) void {
+pub inline fn debugLogUuid(uuid: []const u8, comptime fmt: []const u8, args: anytype) void {
     if (!debug_enabled) return;
     const short_uuid = if (uuid.len >= 8) uuid[0..8] else uuid;
-    const ms = std.time.milliTimestamp();
-    const secs = @divTrunc(ms, 1000);
-    const frac = @mod(ms, 1000);
-    std.debug.print("{d}.{d:0>3} [ses][{s}] " ++ fmt ++ "\n", .{ secs, frac, short_uuid } ++ args);
+    core.logging.debugWithSource("ses", "[{s}] " ++ fmt, .{short_uuid} ++ args, @src());
+}
+
+pub inline fn traceLog(comptime fmt: []const u8, args: anytype) void {
+    if (active_log_level != .trace) return;
+    core.logging.traceWithSource("ses", fmt, args, @src());
 }
 
 /// Recover from incomplete transactions after crash.
@@ -130,12 +135,13 @@ pub fn run(args: SesArgs) !void {
         return;
     }
 
-    // Enable debug mode and optional logging.
-    // When --debug is set without --logfile, default to instance-specific log.
-    debug_enabled = args.debug;
+    // Enable logging and optional log-file redirection.
+    // When --log is set without --logfile, default to instance-specific log.
+    active_log_level = args.log_level;
+    debug_enabled = core.logging.levelEnablesDebug(args.log_level);
     log_file_path = if (args.log_file) |path|
         (if (path.len > 0) path else null)
-    else if (args.debug)
+    else if (args.log_level != null)
         (ipc.getLogPath(page_alloc) catch null)
     else
         null;
@@ -164,6 +170,17 @@ pub fn run(args: SesArgs) !void {
     if (args.daemon) {
         try daemonize(log_file_path);
     }
+
+    core.logging.setLogLevel(args.log_level);
+    debugLog("daemon={} level={s} logfile={s}", .{
+        args.daemon,
+        if (args.log_level) |level| @tagName(level) else "off",
+        log_file_path orelse "(none)",
+    });
+    traceLog("env HEXE_INSTANCE={s} HEXE_TEST_ONLY={s}", .{
+        std.posix.getenv("HEXE_INSTANCE") orelse "(none)",
+        std.posix.getenv("HEXE_TEST_ONLY") orelse "(none)",
+    });
 
     // Now create GPA AFTER fork - this ensures clean allocator state
     // Note: GPA still has issues after fork, so we use page_allocator for most operations
@@ -202,6 +219,7 @@ pub fn run(args: SesArgs) !void {
         const socket_path = ipc.getSesSocketPath(allocator) catch "";
         defer if (socket_path.len > 0) allocator.free(socket_path);
         std.debug.print("ses: listening on {s}\n", .{socket_path});
+        traceLog("listening socket={s}", .{socket_path});
     }
 
     // Run server
@@ -231,8 +249,22 @@ pub fn main() !void {
             ses_args.list = true;
         } else if (std.mem.eql(u8, arg, "--full") or std.mem.eql(u8, arg, "-f")) {
             ses_args.full = true;
-        } else if (std.mem.eql(u8, arg, "--debug")) {
-            ses_args.debug = true;
+        } else if (std.mem.eql(u8, arg, "--log")) {
+            if (i + 1 < args.len) {
+                i += 1;
+                const parsed = core.logging.parseLevel(args[i]) orelse {
+                    print("Error: invalid --log level '{s}' (use trace|debug|info)\n", .{args[i]});
+                    return;
+                };
+                if (parsed != .trace and parsed != .debug and parsed != .info) {
+                    print("Error: invalid --log level '{s}' (use trace|debug|info)\n", .{args[i]});
+                    return;
+                }
+                ses_args.log_level = parsed;
+            } else {
+                print("Error: --log requires a level (trace|debug|info)\n", .{});
+                return;
+            }
         } else if (std.mem.eql(u8, arg, "--logfile") or std.mem.eql(u8, arg, "-L")) {
             if (i + 1 < args.len) {
                 i += 1;
@@ -284,8 +316,8 @@ fn printUsage() !void {
         \\  -d, --daemon       Run as a background daemon
         \\  -l, --list         List connected muxes and their panes
         \\  -f, --full         Show full tree (use with --list)
-        \\  --debug            Enable debug output
-        \\  -L, --logfile PATH Log debug output to PATH
+        \\  --log LEVEL        Logging level (trace|debug|info)
+        \\  -L, --logfile PATH Write logs to PATH
         \\  -n, --notify MSG   Send notification to all connected muxes
         \\  -u, --uuid UUID    Target specific mux or pane (use with --notify)
         \\  -h, --help         Show this help message

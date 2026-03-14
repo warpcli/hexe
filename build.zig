@@ -31,6 +31,12 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     }).module("xev");
 
+    // Get logly dependency (structured logging backend)
+    const logly_mod = b.dependency("logly", .{
+        .target = target,
+        .optimize = optimize,
+    }).module("logly");
+
     // Get libvaxis dependency (required TUI rendering library)
     const vaxis_mod = b.dependency("libvaxis", .{
         .target = target,
@@ -65,6 +71,7 @@ pub fn build(b: *std.Build) void {
     if (liblink_mod) |ll| {
         core_module.addImport("liblink", ll);
     }
+    core_module.addImport("logly", logly_mod);
 
     // Create shell module (shell prompt/status bar segments)
     const shp_module = b.createModule(.{

@@ -11,7 +11,7 @@ pub fn runPodNew(
     cwd: []const u8,
     labels: []const u8,
     alias: bool,
-    debug: bool,
+    log_level: ?core.logging.Level,
     log_file: []const u8,
 ) !void {
     const uuid = ipc.generateUuid();
@@ -65,8 +65,9 @@ pub fn runPodNew(
     if (alias) {
         try args.append(allocator, "--write-alias");
     }
-    if (debug) {
-        try args.append(allocator, "--debug");
+    if (log_level) |level| {
+        try args.append(allocator, "--log");
+        try args.append(allocator, @tagName(level));
     }
     if (log_file.len > 0) {
         try args.append(allocator, "--logfile");

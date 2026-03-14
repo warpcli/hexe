@@ -2272,14 +2272,27 @@ pub const SesState = struct {
             try args_list.append(self.allocator, "--cwd");
             try args_list.append(self.allocator, dir);
         }
-        if (ses.debug_enabled) {
-            try args_list.append(self.allocator, "--debug");
+        if (ses.active_log_level) |level| {
+            try args_list.append(self.allocator, "--log");
+            try args_list.append(self.allocator, @tagName(level));
         }
         if (ses.log_file_path) |path| {
             try args_list.append(self.allocator, "--logfile");
             try args_list.append(self.allocator, path);
         }
         try args_list.append(self.allocator, "--foreground");
+
+        ses.traceLog(
+            "spawnPod uuid={s} name={s} socket={s} shell={s} cwd={s} log_level={s}",
+            .{
+                uuid[0..8],
+                name,
+                pod_socket_path,
+                shell,
+                cwd orelse "(none)",
+                if (ses.active_log_level) |level| @tagName(level) else "off",
+            },
+        );
 
         var child = std.process.Child.init(args_list.items, self.allocator);
         child.stdin_behavior = .Ignore;
@@ -2330,6 +2343,7 @@ pub const SesState = struct {
 
             env_map_storage = env_map;
             child.env_map = &env_map_storage.?;
+            ses.traceLog("spawnPod: custom env map entries={d}", .{env_map_storage.?.count()});
         }
 
         try child.spawn();
