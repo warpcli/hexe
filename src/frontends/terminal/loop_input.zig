@@ -766,6 +766,12 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
 
             forward_bytes = inp[i .. i + res.n];
         } else {
+            // Fallback for terminals that may not decode a key into a parser
+            // event: keep adhoc float exit keys responsive on raw bytes.
+            if (loop_input_keys.checkExitKeyRawByte(state, inp[i])) {
+                i += 1;
+                continue;
+            }
             // Parser-first policy: never forward undecoded bytes.
             // Keep rename mode isolated and drop unknown bytes in normal mode.
             i += 1;

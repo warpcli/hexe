@@ -31,6 +31,7 @@ pub const character = @import("character.zig");
 pub const duration = @import("duration.zig");
 pub const jobs = @import("jobs.zig");
 pub const pod_name = @import("pod_name.zig");
+pub const title = @import("title.zig");
 
 // Custom segments (shell command runner)
 pub const custom = @import("custom.zig");
@@ -74,4 +75,5 @@ pub const registry = std.StaticStringMap(SegmentFn).initComptime(.{
     .{ "duration", duration.render },
     .{ "jobs", jobs.render },
     .{ "pod_name", pod_name.render },
+    .{ "title", title.render },
 });

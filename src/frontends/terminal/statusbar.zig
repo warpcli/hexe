@@ -1524,6 +1524,7 @@ pub fn draw(
             ctx.float_key = state.paneFloatKey(fp);
             ctx.float_sticky = state.paneSticky(fp);
             ctx.float_global = state.paneParentTab(fp) == null;
+            ctx.title = state.paneFloatTitle(fp) orelse state.paneName(fp.uuid);
 
             if (ctx.float_key != 0) {
                 if (state.getLayoutFloatByKey(ctx.float_key)) |fd| {
@@ -1532,11 +1533,13 @@ pub fn draw(
                     ctx.float_per_cwd = fd.attributes.per_cwd;
                     ctx.float_isolated = fd.attributes.isolated;
                     ctx.float_global = ctx.float_global or fd.attributes.global;
+                    if (ctx.title == null) ctx.title = fd.title;
                 }
             }
         }
     } else if (state.currentLayout().getFocusedPane()) |pane| {
         ctx.alt_screen = pane.vt.inAltScreen();
+        ctx.title = state.paneName(pane.uuid);
     }
 
     emitStatusbarRedrawEventIfDue(state, &ctx, term_width, term_height, active_tab);
@@ -1956,6 +1959,7 @@ pub fn hitTestAction(
             ctx.float_key = state.paneFloatKey(fp);
             ctx.float_sticky = state.paneSticky(fp);
             ctx.float_global = state.paneParentTab(fp) == null;
+            ctx.title = state.paneFloatTitle(fp) orelse state.paneName(fp.uuid);
             if (ctx.float_key != 0) {
                 if (state.getLayoutFloatByKey(ctx.float_key)) |fd| {
                     ctx.float_destroyable = fd.attributes.destroy;
@@ -1963,11 +1967,13 @@ pub fn hitTestAction(
                     ctx.float_per_cwd = fd.attributes.per_cwd;
                     ctx.float_isolated = fd.attributes.isolated;
                     ctx.float_global = ctx.float_global or fd.attributes.global;
+                    if (ctx.title == null) ctx.title = fd.title;
                 }
             }
         }
     } else if (state.currentLayout().getFocusedPane()) |pane| {
         ctx.alt_screen = pane.vt.inAltScreen();
+        ctx.title = state.paneName(pane.uuid);
     }
 
     var use_basename = true;

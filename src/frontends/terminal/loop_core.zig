@@ -381,40 +381,6 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
     const exit_code = state.paneExitCode(pane.uuid);
     const pane_uuid = pane.uuid;
 
-    if (state.paneFloatKey(pane) != 0 and !state.paneCaptureOutput(pane)) {
-        if (state.paneRetainedAfterExit(pane)) return;
-        state.setPaneRetainedAfterExit(pane_uuid, true);
-
-        terminal_main.debugLog("float pane retained after exit: uuid={s} exit_code={d} focused={}", .{
-            pane_uuid[0..8],
-            exit_code,
-            was_active,
-        });
-
-        if (exit_code != 0) {
-            const msg = std.fmt.allocPrint(
-                state.allocator,
-                "Float exited with code {d}",
-                .{exit_code},
-            ) catch "Float exited unexpectedly";
-            defer if (!std.mem.eql(u8, msg, "Float exited unexpectedly")) state.allocator.free(msg);
-            state.notifications.showFor(msg, 3000);
-        }
-
-        if (was_active) {
-            state.setActiveFloatingIndex(null);
-            state.cursor_needs_restore = true;
-            if (state.currentLayout().getFocusedPane()) |tiled| {
-                state.syncPaneFocus(tiled, pane_uuid);
-            }
-        }
-
-        state.needs_render = true;
-        state.force_full_render = true;
-        state.renderer.invalidate();
-        return;
-    }
-
     _ = state.view.float_views.orderedRemove(index);
 
     terminal_main.debugLog("float pane died: uuid={s} exit_code={d} focused={}", .{ pane_uuid[0..8], exit_code, was_active });

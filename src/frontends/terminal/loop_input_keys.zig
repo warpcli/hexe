@@ -87,10 +87,12 @@ fn formatKeycastEvent(ev: input.KeyEvent, buf: *[32]u8) []const u8 {
 pub fn checkExitKeyEvent(state: *State, mods: u8, key: core.Config.BindKey, when: core.Config.BindWhen) bool {
     if (when != .press) return false;
     const exit_key = getFocusedFloatExitKey(state) orelse return false;
-    if (exit_key.len == 0) return false;
+    const trimmed_key = std.mem.trim(u8, exit_key, " \t\r\n");
+    if (trimmed_key.len == 0) return false;
 
-    const parsed = parseExitKeySpec(exit_key);
-    if (mods != parsed.mods) return false;
+    const parsed = parseExitKeySpec(trimmed_key);
+    const adhoc = isFocusedAdhocFloat(state);
+    if (!(adhoc and parsed.mods == 0) and mods != parsed.mods) return false;
 
     const expected = getKeyChar(parsed.key) orelse return false;
 
@@ -108,6 +110,33 @@ pub fn checkExitKeyEvent(state: *State, mods: u8, key: core.Config.BindKey, when
 
     if (!matched) return false;
 
+    closeFocusedFloatViaExitKey(state);
+    return true;
+}
+
+/// Fallback matcher for undecoded raw stdin bytes.
+/// This keeps adhoc exit keys responsive even if a terminal doesn't decode a
+/// particular key press into a parser key event.
+pub fn checkExitKeyRawByte(state: *State, b: u8) bool {
+    if (!isFocusedAdhocFloat(state)) return false;
+    const exit_key = getFocusedFloatExitKey(state) orelse return false;
+    const trimmed_key = std.mem.trim(u8, exit_key, " \t\r\n");
+    if (trimmed_key.len == 0) return false;
+
+    const parsed = parseExitKeySpec(trimmed_key);
+    if (parsed.mods != 0) return false;
+
+    var expected = getKeyChar(parsed.key) orelse return false;
+    var got = b;
+    if (got >= 'A' and got <= 'Z') got = std.ascii.toLower(got);
+    if (expected >= 'A' and expected <= 'Z') expected = std.ascii.toLower(expected);
+    if (got != expected) return false;
+
+    closeFocusedFloatViaExitKey(state);
+    return true;
+}
+
+fn closeFocusedFloatViaExitKey(state: *State) void {
     if (state.activeFloatingIndex()) |idx| {
         if (idx < state.view.float_views.items.len) {
             state.setPaneClosedByExitKey(state.view.float_views.items[idx].uuid, true);
@@ -115,7 +144,12 @@ pub fn checkExitKeyEvent(state: *State, mods: u8, key: core.Config.BindKey, when
     }
     actions.performClose(state);
     state.needs_render = true;
-    return true;
+}
+
+fn isFocusedAdhocFloat(state: *State) bool {
+    const idx = state.activeFloatingIndex() orelse return false;
+    if (idx >= state.view.float_views.items.len) return false;
+    return state.paneFloatKey(state.view.float_views.items[idx]) == 0;
 }
 
 fn isFocusedPaneInPasswordMode(state: *State) bool {

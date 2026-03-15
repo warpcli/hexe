@@ -416,6 +416,23 @@ pub fn drawFloatingBorder(
 
         if (s.module) |*module| {
             if (s.position) |pos| {
+                const inner_w = floatTitleInnerWidth(w);
+                if (inner_w == 0) return;
+
+                // Preferred path: evaluate the module directly so callbacks that
+                // return styled segments (including explicit padding spaces) are
+                // rendered exactly as configured.
+                if (ctx != null and query != null) {
+                    const tctx = ctx.?;
+                    const tq = query.?;
+                    const module_w = statusbar.calcModuleWidth(tctx, tq, module);
+                    if (module_w > 0 and module_w <= inner_w) {
+                        const place = floatTitlePlacement(x, y, w, h, pos, module_w);
+                        _ = statusbar.drawModule(renderer, tctx, tq, module, place.x, place.y, false);
+                        return;
+                    }
+                }
+
                 // Run the module to get output
                 var output_buf: [256]u8 = undefined;
                 // If a title is provided, treat the module area as the title widget.
@@ -427,8 +444,6 @@ pub fn drawFloatingBorder(
 
                 // Render styled output
                 const segments = statusbar.renderSegmentOutput(module, output);
-                const inner_w = floatTitleInnerWidth(w);
-                if (inner_w == 0) return;
 
                 // If module formatting produced no visible text, fallback to raw name.
                 if (segments.total_len == 0 and name.len > 0) {

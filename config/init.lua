@@ -127,9 +127,9 @@ if section == nil or section == "mux" then
         value = function(ctx)
           local t = hx.segment.title(ctx)
           return {
-            { text = " ", style = "bg:0 fg:1" },
+            { text = " ", style = "bg:1 fg:1" },
             { text = t, style = "bg:1 fg:0" },
-            { text = " ", style = "bg:0 fg:1" },
+            { text = " ", style = "bg:1 fg:1" },
           }
         end,
         position = "bottomright",

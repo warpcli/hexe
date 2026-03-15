@@ -27,6 +27,7 @@ pub const Context = struct {
 
     // Shell metadata (for mux status bar mode)
     last_command: ?[]const u8 = null,
+    title: ?[]const u8 = null,
 
     // Shell activity telemetry (for mux status bar mode)
     shell_running: bool = false,

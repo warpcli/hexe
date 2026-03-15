@@ -119,6 +119,7 @@ fn sanitizeLabelUtf8(raw: []const u8, out: *[128]u8) []const u8 {
 }
 
 fn composeFloatBorderLabel(state: *State, pane: *const Pane, out: *[256]u8) []const u8 {
+    _ = out;
     const title = blk: {
         if (state.paneFloatTitle(pane)) |t| break :blk t;
         const float_key = state.paneFloatKey(pane);
@@ -131,22 +132,8 @@ fn composeFloatBorderLabel(state: *State, pane: *const Pane, out: *[256]u8) []co
     };
     const pokemon = state.paneName(pane.uuid) orelse "";
 
-    if (title.len == 0) return pokemon;
-    if (pokemon.len == 0) return title;
-
-    var n: usize = 0;
-    const title_n = @min(title.len, out.len);
-    @memcpy(out[0..title_n], title[0..title_n]);
-    n = title_n;
-    if (n < out.len) {
-        out[n] = ' ';
-        n += 1;
-    }
-    const remain = out.len - n;
-    const pokemon_n = @min(pokemon.len, remain);
-    @memcpy(out[n .. n + pokemon_n], pokemon[0..pokemon_n]);
-    n += pokemon_n;
-    return out[0..n];
+    if (title.len > 0) return title;
+    return pokemon;
 }
 
 fn populateFloatTitleContext(state: *State, pane: *Pane, ctx: *shp.Context, now_ms: u64) void {
@@ -159,6 +146,16 @@ fn populateFloatTitleContext(state: *State, pane: *Pane, ctx: *shp.Context, now_
     ctx.focus_is_float = true;
     ctx.focus_is_split = false;
     ctx.alt_screen = pane.vt.inAltScreen();
+    const title = state.paneFloatTitle(pane) orelse blk: {
+        const float_key = state.paneFloatKey(pane);
+        if (float_key != 0) {
+            if (state.getLayoutFloatByKey(float_key)) |fd| {
+                if (fd.title) |t| break :blk t;
+            }
+        }
+        break :blk state.paneName(pane.uuid) orelse "";
+    };
+    ctx.title = title;
 
     if (state.getPaneShell(pane.uuid)) |info| {
         if (info.cmd) |c| ctx.last_command = c;
