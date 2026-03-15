@@ -101,7 +101,6 @@ pub const FloatUiState = struct {
     navigatable: bool = false,
     retained_after_exit: bool = false,
     capture_output: bool = false,
-    dim_background: bool = false,
     exit_key: ?[]u8 = null,
     closed_by_exit_key: bool = false,
     float_style: ?*const core.FloatStyle = null,

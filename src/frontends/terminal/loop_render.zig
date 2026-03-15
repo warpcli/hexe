@@ -333,14 +333,8 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
         statusbar.draw(renderer, state, state.allocator, &state.config, state.term_width, state.term_height, state.view.tab_views, state.activeTabIndex(), state.runtime.sessionName());
     }
 
-    // Check if active float has dim_background set (focus mode)
-    const float_dim = if (state.activeFloatingIndex()) |idx| blk: {
-        if (idx < state.view.float_views.items.len) break :blk state.paneDimBackground(state.view.float_views.items[idx]);
-        break :blk false;
-    } else false;
-
-    // Draw overlays (dimming, pane labels, resize info, keycast)
-    if (state.overlays.hasContent() or state.overlays.shouldDim() or float_dim) {
+    // Draw overlays (pane labels, resize info, keycast)
+    if (state.overlays.hasContent() or state.overlays.shouldDim()) {
         // Get focused pane bounds to exclude from dimming
         // For floats: use border dimensions + shadow (1 cell right/bottom) if shadow enabled
         const focused_bounds: ?overlay_render.Bounds = blk: {
@@ -362,11 +356,6 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             }
             break :blk null;
         };
-
-        // Apply dimming for float focus mode (when overlays.shouldDim() is false)
-        if (float_dim and !state.overlays.shouldDim()) {
-            overlay_render.applyDimEffect(renderer, state.term_width, state.term_height, focused_bounds);
-        }
 
         overlay_render.renderOverlays(renderer, &state.overlays, state.term_width, state.term_height, state.status_height, focused_bounds);
     }

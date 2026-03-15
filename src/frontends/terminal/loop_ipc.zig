@@ -670,7 +670,6 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
 
     const wait_for_exit = (fr.flags & 1) != 0;
     const isolated = (fr.flags & 2) != 0;
-    const focus = (fr.flags & 4) != 0;
 
     // Build extra_env (isolated flag).
     var extra_env_list: std.ArrayList([]const u8) = .empty;
@@ -759,7 +758,6 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         .height = fr.size_height,
         .shift_x = fr.shift_x,
         .shift_y = fr.shift_y,
-        .dim_background = focus,
         .exit_key = if (exit_key_slice.len > 0) exit_key_slice else null,
     };
     const new_uuid = actions.createAdhocFloatWithSize(state, command, title, spawn_cwd, env_items, extra_items, use_pod, float_size, isolation_profile) catch {

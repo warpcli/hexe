@@ -225,7 +225,6 @@ Options:
 | `--title` | Border title |
 | `--cwd` | Working directory |
 | `--size WxH,X,Y` | Size and position |
-| `--focus` | Focus the float on open |
 | `--isolation <profile>` | Isolation profile |
 | `--key <key>` | Exit key (sent on dismiss) |
 | `--result-file <path>` | Write float output here on close |

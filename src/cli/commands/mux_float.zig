@@ -16,7 +16,6 @@ pub fn runMuxFloat(
     isolated: bool,
     isolation_profile: []const u8,
     size: []const u8,
-    focus: bool,
     exit_key: []const u8,
 ) !void {
     if (command.len == 0) {
@@ -135,8 +134,7 @@ pub fn runMuxFloat(
 
     // Build FloatRequest.
     const flags: u8 = 1 | // wait_for_exit always true for CLI
-        (if (isolated) @as(u8, 2) else 0) |
-        (if (focus) @as(u8, 4) else 0);
+        (if (isolated) @as(u8, 2) else 0);
     const req = wire.FloatRequest{
         .flags = flags,
         .cmd_len = @intCast(command.len),

@@ -492,7 +492,7 @@ pub const ExitIntentResult = extern struct {
 /// Followed by: cmd (cmd_len), title (title_len), cwd (cwd_len),
 /// result_path (result_path_len), exit_key (exit_key_len), then env_count entries each prefixed with u16 len.
 pub const FloatRequest = extern struct {
-    flags: u8 align(1), // bit 0: wait_for_exit, bit 1: isolated, bit 2: focus (dim background)
+    flags: u8 align(1), // bit 0: wait_for_exit, bit 1: isolated
     cmd_len: u16 align(1),
     title_len: u16 align(1),
     cwd_len: u16 align(1),

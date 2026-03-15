@@ -377,7 +377,6 @@ pub fn main() !void {
     try mux_float.addArg(Arg.booleanOption("isolated", null, null));
     try mux_float.addArg(Arg.singleValueOption("isolation", null, null));
     try mux_float.addArg(Arg.singleValueOption("size", null, null));
-    try mux_float.addArg(Arg.booleanOption("focus", null, null));
     try mux_float.addArg(Arg.singleValueOption("key", null, null));
     try mux_float.addArg(Arg.singleValueOption("instance", 'I', null));
 
@@ -809,7 +808,6 @@ pub fn main() !void {
                 m.containsArg("isolated"),
                 m.getSingleValue("isolation") orelse "",
                 m.getSingleValue("size") orelse "",
-                m.containsArg("focus"),
                 exit_key,
             );
             return;

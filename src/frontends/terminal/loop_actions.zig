@@ -751,7 +751,6 @@ pub const FloatSize = struct {
     height: u16 = 0, // 0 = use config default
     shift_x: i16 = 0, // shift from center (-50 to 50)
     shift_y: i16 = 0, // shift from center (-50 to 50)
-    dim_background: bool = false, // dim the background when this float is visible
     exit_key: ?[]const u8 = null, // key that closes the float (e.g., "Esc")
 };
 
@@ -833,7 +832,6 @@ pub fn createAdhocFloatWithSize(
         .pad_x = @intCast(pad_x_cfg),
         .pad_y = @intCast(pad_y_cfg),
         .capture_output = false,
-        .dim_background = size.dim_background,
         .exit_key = size.exit_key,
         .float_style = style,
         .float_title = title,

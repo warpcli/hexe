@@ -67,7 +67,6 @@ pub const PaneFloatUiConfig = struct {
     navigatable: bool = false,
     retained_after_exit: bool = false,
     capture_output: bool = false,
-    dim_background: bool = false,
     exit_key: ?[]const u8 = null,
     closed_by_exit_key: bool = false,
     float_style: ?*const core.FloatStyle = null,
@@ -1124,7 +1123,6 @@ pub const State = struct {
             .navigatable = cfg.navigatable,
             .retained_after_exit = cfg.retained_after_exit,
             .capture_output = cfg.capture_output,
-            .dim_background = cfg.dim_background,
             .closed_by_exit_key = cfg.closed_by_exit_key,
             .float_style = cfg.float_style,
         };
@@ -1278,11 +1276,6 @@ pub const State = struct {
         if (self.ensureFloatUi(pane_uuid)) |ui| {
             ui.capture_output = capture_output;
         }
-    }
-
-    pub fn paneDimBackground(self: *const State, pane: *const Pane) bool {
-        if (self.floatUiConst(pane)) |ui| return ui.dim_background;
-        return false;
     }
 
     pub fn paneExitKey(self: *const State, pane: *const Pane) ?[]const u8 {

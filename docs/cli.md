@@ -27,7 +27,6 @@ Spawn a one-off floating pane.
 | `--title <text>` | Border title |
 | `--cwd <path>` | Working directory |
 | `--size WxH,X,Y` | Size (%) and position (%) |
-| `--focus` | Focus the float immediately |
 | `--isolation <profile>` | none / minimal / default / sandbox / full |
 | `--key <key>` | Key sent to pane on dismiss |
 | `--result-file <path>` | Write exit output here |
