@@ -107,6 +107,21 @@ if section == nil or section == "mux" then
     },
     color = { active = 1, passive = 237 },
     style = {
+      border = {
+        chars = {
+          top_left = "╔",
+          top_right = "╗",
+          bottom_left = "╚",
+          bottom_right = "╝",
+          horizontal = "═",
+          vertical = "║",
+          left_t = "╠",
+          right_t = "╣",
+          top_t = "╦",
+          bottom_t = "╩",
+          cross = "╬",
+        },
+      },
       title = {
         name = "title",
         value = function(ctx)
@@ -125,23 +140,9 @@ if section == nil or section == "mux" then
   hx.mux.float.set_adhoc({
     size = { width = 82, height = 72 },
     color = { active = 4, passive = 237 },
-    style = {
-      title = {
-        name = "title",
-        value = function(ctx)
-          local t = hx.segment.title(ctx)
-          return {
-            { text = " ", style = "bg:0 fg:4" },
-            { text = t, style = "bg:4 fg:0" },
-            { text = " ", style = "bg:0 fg:4" },
-          }
-        end,
-        position = "topright",
-      },
-    },
   })
 
-  hx.mux.float.set_match("^explorer$", {
+  hx.mux.float.set_match("^container$", {
     color = { active = 1, passive = 237 },
     padding = { x = 2, y = 1 },
     style = {
