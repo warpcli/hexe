@@ -235,7 +235,7 @@ fn writePodMetaSidecar(
     const line = try meta.formatMetaLine(allocator);
     defer allocator.free(line);
 
-    var f = try std.fs.cwd().createFile(path, .{ .truncate = true, .mode = 0o644 });
+    var f = try std.fs.cwd().createFile(path, .{ .truncate = true, .mode = 0o600 });
     defer f.close();
     try f.writeAll(line);
     try f.writeAll("\n");

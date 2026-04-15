@@ -105,22 +105,26 @@ the connection instead of allocating. A corrupted session file with a 2GB
 
 ## Phase 4 — Privacy fixes (file perms + password mode)
 
-- [ ] **P4.1** — `src/modules/pod/main.zig:238` — pod metadata sidecar
+- [x] **P4.1** — `src/modules/pod/main.zig:238` — pod metadata sidecar now
       created with `0o600`.
-- [ ] **P4.2** — `src/core/recording/asciicast.zig:21` — recording files
-      created with `0o600`.
-- [ ] **P4.3** — `src/modules/pod/buffering.zig` — gate ring-buffer appends
-      on `pane.flags.password_input`. When set, don't capture the input (or
-      the echo back from the shell) into the backlog. Same guard in
-      `src/core/recording/asciicast.zig` for recording.
-- [ ] **P4.4** — Audit `state.overlays.recordKeypress` call sites
-      (`src/frontends/terminal/loop_input_keys.zig:26` already checks it for
-      keycast — verify the same guard is applied everywhere user input could
-      be observed).
+- [x] **P4.2** — `src/core/recording/asciicast.zig:21` — recording files
+      now created with `0o600`.
+- [~] **P4.3** — Deferred. The `pane.flags.password_input` bit lives on
+      the frontend's ghostty VT instance, but backlog buffering happens in
+      the POD process and recording happens in separate CLI tools — neither
+      parses the VT stream. Gating these requires a new control message
+      ("enter/exit password mode") that the frontend emits when it observes
+      the flag change, routed through SES → POD and also to any attached
+      recorders. That's a non-trivial protocol addition; tracked as a
+      Phase 8 follow-up under "protocol additions".
+- [x] **P4.4** — Confirmed. `loop_input_keys.zig:26` already calls
+      `isFocusedPaneInPasswordMode(state)` before emitting keycast events.
+      `state.overlays.recordKeypress` is only reached from that one call
+      site, so no additional guards needed.
 
-**Exit criteria:** typing `sudo <password>` into a recorded pane leaves no
-trace in the asciicast or session backlog. New asciicast and pod metadata
-files are `-rw-------`.
+**Exit criteria (partial):** new asciicast and pod metadata files are
+`-rw-------`. ✅ Password-mode backlog skip still pending P4.3's protocol
+work.
 
 ---
 
