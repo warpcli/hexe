@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const linux = std.os.linux;
 
 const c = @cImport({
     @cInclude("sys/socket.h");
@@ -10,6 +11,36 @@ const c = @cImport({
 fn setCloexec(fd: posix.fd_t) void {
     const flags = posix.fcntl(fd, posix.F.GETFD, 0) catch return;
     _ = posix.fcntl(fd, posix.F.SETFD, flags | 1) catch {};
+}
+
+/// Unix peer credentials returned by SO_PEERCRED.
+pub const PeerCredentials = extern struct {
+    pid: i32,
+    uid: u32,
+    gid: u32,
+};
+
+const SO_PEERCRED: u32 = 17;
+
+/// Read the peer credentials for a connected Unix domain socket. Returns
+/// null if the kernel call fails (non-Linux, unconnected socket, etc.).
+pub fn getPeerCredentials(fd: posix.fd_t) ?PeerCredentials {
+    var cred: PeerCredentials = undefined;
+    var len: linux.socklen_t = @sizeOf(PeerCredentials);
+    const rc = linux.getsockopt(fd, linux.SOL.SOCKET, SO_PEERCRED, @ptrCast(&cred), &len);
+    if (rc != 0) return null;
+    return cred;
+}
+
+/// Reject a connected peer unless it runs as the same UID as this process.
+/// Set HEXE_ALLOW_CROSS_UID=1 in the environment to allow cross-UID access
+/// (intended for test setups that legitimately need it).
+pub fn verifyPeerUid(fd: posix.fd_t) bool {
+    if (std.posix.getenv("HEXE_ALLOW_CROSS_UID")) |v| {
+        if (std.mem.eql(u8, v, "1")) return true;
+    }
+    const cred = getPeerCredentials(fd) orelse return false;
+    return cred.uid == linux.getuid();
 }
 
 /// Unix domain socket server for IPC

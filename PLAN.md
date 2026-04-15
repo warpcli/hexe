@@ -130,17 +130,19 @@ work.
 
 ## Phase 5 — Peer authentication for frontends
 
-- [ ] **P5.1** — Extract `verifyPeerCredentials` from
-      `src/modules/pod/main.zig:23-37` into `src/core/ipc.zig` as a reusable
+- [x] **P5.1** — Added `ipc.PeerCredentials`, `ipc.getPeerCredentials`, and
+      `ipc.verifyPeerUid` in `src/core/ipc.zig`. POD's
+      `verifyPeerCredentials` is now a one-line wrapper around the shared
       helper.
-- [ ] **P5.2** — Call it from every `accept()` in
-      `src/modules/session/server.zig` (`dispatchNewConnection`, etc.). Reject
-      connections whose peer UID differs from the SES process UID.
-- [ ] **P5.3** — Add an env override `HEXE_ALLOW_CROSS_UID=1` for test setups
-      that legitimately need it (don't document it prominently).
+- [x] **P5.2** — `Server.dispatchNewConnection` calls `ipc.verifyPeerUid`
+      first thing. Cross-UID peers get a warn log and their fd closed
+      before any handshake bytes are read.
+- [x] **P5.3** — `HEXE_ALLOW_CROSS_UID=1` environment variable bypasses
+      the check inside `verifyPeerUid` itself, so both SES and POD honor
+      it consistently.
 
-**Exit criteria:** a sibling process running as a different UID cannot
-`register` or `reattach` against our SES socket.
+**Exit criteria:** a process running as a different UID cannot connect to
+SES — the connection is closed pre-handshake with a log line. ✅
 
 ---
 

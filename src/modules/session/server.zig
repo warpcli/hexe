@@ -539,6 +539,21 @@ pub const Server = struct {
     /// Dispatch a newly accepted connection based on its handshake bytes.
     /// Handshake format: [channel_type, protocol_version]
     fn dispatchNewConnection(self: *Server, conn: ipc.Connection) void {
+        // Reject peers running as a different UID. This prevents a sibling
+        // process owned by another user from driving our session. Override
+        // via HEXE_ALLOW_CROSS_UID=1 for legitimate test setups.
+        if (!ipc.verifyPeerUid(conn.fd)) {
+            core.logging.warnWithSource(
+                "ses",
+                "reject: peer uid mismatch on fd={d}",
+                .{conn.fd},
+                @src(),
+            );
+            var tmp = conn;
+            tmp.close();
+            return;
+        }
+
         // Check resource limits and rate limiting
         if (!self.resource_monitor.allowNewConnection()) {
             ses.debugLog("reject: connection limit or rate limit exceeded", .{});

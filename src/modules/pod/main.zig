@@ -9,34 +9,15 @@ const c = @cImport({
 
 const linux = std.os.linux;
 
-/// Unix credentials structure for SO_PEERCRED
-const ucred = extern struct {
-    pid: i32,
-    uid: u32,
-    gid: u32,
-};
-
-/// SO_PEERCRED option value (from Linux headers)
-const SO_PEERCRED: u32 = 17;
-
-/// Verify connecting peer has same UID as current process (security check)
-fn verifyPeerCredentials(fd: posix.fd_t) bool {
-    var cred: ucred = undefined;
-    var len: linux.socklen_t = @sizeOf(ucred);
-    const rc = linux.getsockopt(fd, linux.SOL.SOCKET, SO_PEERCRED, @ptrCast(&cred), &len);
-    if (rc != 0) {
-        debugLog("SO_PEERCRED failed", .{});
-        return false;
-    }
-    const my_uid = linux.getuid();
-    if (cred.uid != my_uid) {
-        debugLog("peer uid {d} != our uid {d}, rejecting", .{ cred.uid, my_uid });
-        return false;
-    }
-    return true;
-}
-
 const core = @import("core");
+
+/// Verify connecting peer has same UID as current process (security check).
+/// Thin wrapper around `core.ipc.verifyPeerUid` that preserves the debug log.
+fn verifyPeerCredentials(fd: posix.fd_t) bool {
+    if (core.ipc.verifyPeerUid(fd)) return true;
+    debugLog("peer uid mismatch on fd={d}, rejecting", .{fd});
+    return false;
+}
 const pod_protocol = core.pod_protocol;
 const pod_meta = core.pod_meta;
 const wire = core.wire;
