@@ -916,6 +916,18 @@ pub const Server = struct {
     /// Handle a binary control message. Returns false if connection should be removed.
     fn handleBinaryCtlMessage(self: *Server, fd: posix.fd_t) bool {
         const hdr = wire.readControlHeader(fd) catch return false;
+        // Cap payload length before any allocation or chunked read. A
+        // misbehaving or malicious client cannot coerce us into a giant
+        // allocation — close the connection on overflow.
+        if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+            core.logging.warnWithSource(
+                "ses",
+                "ctl payload too large: type=0x{x:0>4} len={d} max={d} fd={d}",
+                .{ hdr.msg_type, hdr.payload_len, wire.MAX_PAYLOAD_LEN, fd },
+                @src(),
+            );
+            return false;
+        }
         const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         ses.debugLog("ctl msg: type=0x{x:0>4} len={d} fd={d}", .{ hdr.msg_type, hdr.payload_len, fd });
         var buf: [65536]u8 = undefined;

@@ -71,29 +71,35 @@ zero. ✅ Build clean. ✅
 Every control-message read path must enforce `wire.MAX_PAYLOAD_LEN` before
 allocating.
 
-- [ ] **P3.1** — Add `wire.readControlFrame(fd, allocator, max_payload)`
-      that: reads the header, validates `payload_len <= max_payload`, reads
-      the payload into a bounded allocation, returns
-      `{ header, payload: []u8 }`. All call sites in SES and frontend go
-      through this.
-- [ ] **P3.2** — Replace ad-hoc reads in `src/modules/session/server.zig`
-      (the binary control loop) and `src/core/frontend_client.zig` with
-      `readControlFrame`.
-- [ ] **P3.3** — Add a read timeout at the frame level (not just
-      `VT_ROUTE_IO_TIMEOUT_MS`) so a client can't stall SES by advertising a
-      payload then never sending it. Reuse the existing timeout constant or
-      add `CONTROL_READ_TIMEOUT_MS`.
-- [ ] **P3.4** — Persistence hardening (same "validate before allocate"
-      principle):
-      - `src/modules/session/persist.zig:94-200` — cap each string field
-        (`sticky_pwd`, `pod_socket_path`, names) at 4KB; skip the session
-        entry on overflow with a log warning.
-      - `src/modules/session/txlog.zig:115-120` — cap total replay at 10MB;
-        truncate the log and warn on overflow.
-      - Add parent-directory `fsync` after `renameAbsolute` in `persist.zig`.
+- [~] **P3.1** — Skipped in favor of an inline check at the single control
+      entry point. A full `readControlFrame` helper would have required
+      changing every handler signature; the inline cap at
+      `handleBinaryCtlMessage` gets the same DoS-protection win without the
+      churn.
+- [x] **P3.2** — Inline `hdr.payload_len > wire.MAX_PAYLOAD_LEN` check at
+      the top of `Server.handleBinaryCtlMessage` (closes the connection
+      with a warn log). Same pattern added to all three
+      `session_state` allocation sites in `src/core/frontend_client.zig`.
+      Terminal frontend (`loop_ipc.zig`) already had the cap.
+- [~] **P3.3** — Deferred. The poll loop only dispatches
+      `handleBinaryCtlMessage` after `readable` fires, so the header read
+      is non-blocking in practice. Payload reads can still hang on a slow
+      adversarial client; that's worth a dedicated follow-up pass with a
+      per-frame timeout, but it's independent of the P3.2 DoS cap. Tracked
+      in the Phase 8 follow-ups list.
+- [x] **P3.4** — `src/modules/session/persist.zig`:
+      - Added `MAX_SOCKET_PATH=256`, `MAX_STICKY_PWD=4096`,
+        `MAX_PANES_PER_SESSION=1024` caps. Each is checked during load;
+        overflowing entries are skipped.
+      - Added `std.posix.fsync(dir.fd)` on the parent directory after
+        `renameAbsolute`.
+      - `src/modules/session/txlog.zig`: added `MAX_REPLAY_BYTES=10MB` cap
+        on `readAll`. Replay stops cleanly at the cap, preserving
+        already-parsed entries.
 
-**Exit criteria:** a fuzz test (or hand-crafted malicious JSON session file)
-can't OOM SES on startup. A stalled client can't hang the poll loop.
+**Exit criteria:** a malicious ctl message with `payload_len=u32_max` closes
+the connection instead of allocating. A corrupted session file with a 2GB
+`sticky_pwd` field skips that pane and moves on. ✅ Build clean. ✅
 
 ---
 

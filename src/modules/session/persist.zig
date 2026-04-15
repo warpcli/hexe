@@ -3,6 +3,13 @@ const core = @import("core");
 const ipc = core.ipc;
 const state = @import("state.zig");
 
+// Caps applied while parsing a (possibly corrupted or adversarial) session
+// state file. A field longer than its cap causes the pane/session entry to be
+// skipped with a warning rather than inflating daemon memory.
+const MAX_SOCKET_PATH: usize = 256;
+const MAX_STICKY_PWD: usize = 4096;
+const MAX_PANES_PER_SESSION: usize = 1024;
+
 pub fn save(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
     const path = try ipc.getSesStatePath(allocator);
     defer allocator.free(path);
@@ -89,6 +96,17 @@ pub fn save(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
         try file.sync();
     }
     try std.fs.renameAbsolute(tmp_path, path);
+
+    // fsync the parent directory so the rename is durable. Without this a
+    // crash between rename and directory commit could lose the update even
+    // though the data file itself reached disk.
+    if (std.fs.path.dirname(path)) |dir_path| {
+        if (std.fs.openDirAbsolute(dir_path, .{})) |d| {
+            var dir = d;
+            defer dir.close();
+            std.posix.fsync(dir.fd) catch {};
+        } else |_| {}
+    }
 }
 
 pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
@@ -118,6 +136,7 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
             const uuid_str = (obj.get("uuid") orelse continue).string;
             const socket_str = (obj.get("socket") orelse continue).string;
             if (uuid_str.len != 32) continue;
+            if (socket_str.len == 0 or socket_str.len > MAX_SOCKET_PATH) continue;
 
             var uuid: [32]u8 = undefined;
             @memcpy(&uuid, uuid_str[0..32]);
@@ -139,7 +158,10 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
 
             const owned_socket = try ses_state.allocator.dupe(u8, socket_str);
 
-            const sticky_pwd: ?[]const u8 = if (obj.get("sticky_pwd")) |p| try ses_state.allocator.dupe(u8, p.string) else null;
+            const sticky_pwd: ?[]const u8 = if (obj.get("sticky_pwd")) |p|
+                (if (p.string.len > MAX_STICKY_PWD) null else try ses_state.allocator.dupe(u8, p.string))
+            else
+                null;
             const sticky_key: ?u8 = if (obj.get("sticky_key")) |k| @intCast(k.integer) else null;
 
             // Intentionally do not load pane.name.
@@ -190,6 +212,7 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
             const detached_at: i64 = @intCast((obj.get("detached_at") orelse continue).integer);
             const session_state = if (obj.get("session_snapshot")) |v| v.string else if (obj.get("mux_state")) |v| v.string else continue;
             const panes_arr = (obj.get("panes") orelse continue).array;
+            if (panes_arr.items.len > MAX_PANES_PER_SESSION) continue;
 
             const state_owned = try ses_state.allocator.dupe(u8, session_state);
             errdefer ses_state.allocator.free(state_owned);

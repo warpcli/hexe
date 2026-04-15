@@ -78,6 +78,10 @@ pub const TxLog = struct {
         posix.fsync(fd) catch {};
     }
 
+    /// Maximum total bytes accepted across all entries during replay. A log
+    /// larger than this is likely corrupt or adversarial; truncate the tail.
+    const MAX_REPLAY_BYTES: usize = 10 * 1024 * 1024;
+
     /// Read all transaction entries from the log.
     pub fn readAll(self: *TxLog, allocator: std.mem.Allocator) !std.ArrayList(TxLogEntry) {
         if (self.log_fd == null) try self.open();
@@ -92,6 +96,8 @@ pub const TxLog = struct {
             }
             entries.deinit(allocator);
         }
+
+        var total_bytes: usize = 0;
 
         while (true) {
             var header: TxEntry = undefined;
@@ -137,6 +143,9 @@ pub const TxLog = struct {
                 .session_id = header.session_id,
                 .payload = payload,
             });
+
+            total_bytes += header_bytes.len + payload.len;
+            if (total_bytes > MAX_REPLAY_BYTES) break;
         }
 
         return entries;

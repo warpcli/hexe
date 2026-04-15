@@ -770,19 +770,21 @@ pub const SesClient = struct {
                     continue;
                 }
                 if (mt == .session_state) {
-                    if (h.payload_len > 0) {
-                        const json = self.allocator.alloc(u8, h.payload_len) catch {
-                            self.skipPayload(fd, h.payload_len);
-                            continue;
-                        };
-                        errdefer self.allocator.free(json);
-                        wire.readExact(fd, json) catch {
-                            self.allocator.free(json);
-                            continue;
-                        };
-                        self.queuePendingSessionState(json);
-                        self.allocator.free(json);
+                    if (h.payload_len == 0 or h.payload_len > wire.MAX_PAYLOAD_LEN) {
+                        self.skipPayload(fd, h.payload_len);
+                        continue;
                     }
+                    const json = self.allocator.alloc(u8, h.payload_len) catch {
+                        self.skipPayload(fd, h.payload_len);
+                        continue;
+                    };
+                    errdefer self.allocator.free(json);
+                    wire.readExact(fd, json) catch {
+                        self.allocator.free(json);
+                        continue;
+                    };
+                    self.queuePendingSessionState(json);
+                    self.allocator.free(json);
                     continue;
                 }
                 break :blk h;
@@ -1370,19 +1372,21 @@ pub const SesClient = struct {
                     continue;
                 },
                 .session_state => {
-                    if (hdr.payload_len > 0) {
-                        const json = self.allocator.alloc(u8, hdr.payload_len) catch {
-                            self.skipPayload(fd, hdr.payload_len);
-                            continue;
-                        };
-                        errdefer self.allocator.free(json);
-                        wire.readExact(fd, json) catch {
-                            self.allocator.free(json);
-                            continue;
-                        };
-                        self.queuePendingSessionState(json);
-                        self.allocator.free(json);
+                    if (hdr.payload_len == 0 or hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+                        self.skipPayload(fd, hdr.payload_len);
+                        continue;
                     }
+                    const json = self.allocator.alloc(u8, hdr.payload_len) catch {
+                        self.skipPayload(fd, hdr.payload_len);
+                        continue;
+                    };
+                    errdefer self.allocator.free(json);
+                    wire.readExact(fd, json) catch {
+                        self.allocator.free(json);
+                        continue;
+                    };
+                    self.queuePendingSessionState(json);
+                    self.allocator.free(json);
                     continue;
                 },
                 // Return pane_info directly — this is what we're waiting for.
@@ -1429,19 +1433,21 @@ pub const SesClient = struct {
                     continue;
                 },
                 .session_state => {
-                    if (hdr.payload_len > 0) {
-                        const json = self.allocator.alloc(u8, hdr.payload_len) catch {
-                            self.skipPayload(fd, hdr.payload_len);
-                            continue;
-                        };
-                        errdefer self.allocator.free(json);
-                        wire.readExact(fd, json) catch {
-                            self.allocator.free(json);
-                            continue;
-                        };
-                        self.queuePendingSessionState(json);
-                        self.allocator.free(json);
+                    if (hdr.payload_len == 0 or hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+                        self.skipPayload(fd, hdr.payload_len);
+                        continue;
                     }
+                    const json = self.allocator.alloc(u8, hdr.payload_len) catch {
+                        self.skipPayload(fd, hdr.payload_len);
+                        continue;
+                    };
+                    errdefer self.allocator.free(json);
+                    wire.readExact(fd, json) catch {
+                        self.allocator.free(json);
+                        continue;
+                    };
+                    self.queuePendingSessionState(json);
+                    self.allocator.free(json);
                     continue;
                 },
                 else => return hdr,
