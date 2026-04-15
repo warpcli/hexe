@@ -180,6 +180,21 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_ses_tests = b.addRunArtifact(ses_tests);
-    const test_step = b.step("test", "Run SES error handling tests");
+
+    // Wire protocol round-trip tests.
+    const wire_test_module = b.createModule(.{
+        .root_source_file = b.path("src/core/wire_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    wire_test_module.addImport("core", core_module);
+
+    const wire_tests = b.addTest(.{
+        .root_module = wire_test_module,
+    });
+    const run_wire_tests = b.addRunArtifact(wire_tests);
+
+    const test_step = b.step("test", "Run hexe test suites");
     test_step.dependOn(&run_ses_tests.step);
+    test_step.dependOn(&run_wire_tests.step);
 }

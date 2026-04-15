@@ -499,6 +499,78 @@ test "TxLog: write and read entries" {
     try testing.expectEqualSlices(u8, &session_id, &entries.items[0].session_id);
 }
 
+test "TxLog: readAll stops cleanly on truncated trailing entry" {
+    const tmp_path = "/tmp/hexe-test-txlog-truncated";
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    var log = try txlog.TxLog.init(testing.allocator, tmp_path);
+    defer log.deinit();
+    try log.open();
+
+    const session_id = [_]u8{7} ** 16;
+    try log.write(.detach_start, session_id, "ok");
+
+    // Append a partial entry: write a header claiming 100-byte payload but
+    // only provide 10 bytes. readAll must skip the partial record without
+    // leaking memory or treating the corruption as fatal.
+    const partial: txlog.TxEntry = .{
+        .tx_type = .detach_commit,
+        .timestamp = 0,
+        .session_id = session_id,
+        .payload_len = 100,
+    };
+    const fd = log.log_fd.?;
+    _ = try std.posix.write(fd, std.mem.asBytes(&partial));
+    var junk: [10]u8 = [_]u8{'x'} ** 10;
+    _ = try std.posix.write(fd, &junk);
+
+    var entries = try log.readAll(testing.allocator);
+    defer {
+        for (entries.items) |*e| {
+            testing.allocator.free(e.payload);
+        }
+        entries.deinit(testing.allocator);
+    }
+
+    // Only the first, fully-written entry should be recovered.
+    try testing.expectEqual(@as(usize, 1), entries.items.len);
+    try testing.expectEqual(txlog.TxType.detach_start, entries.items[0].tx_type);
+}
+
+test "TxLog: readAll rejects per-entry payload_len over 1MB cap" {
+    const tmp_path = "/tmp/hexe-test-txlog-oversize";
+    defer std.fs.cwd().deleteFile(tmp_path) catch {};
+
+    var log = try txlog.TxLog.init(testing.allocator, tmp_path);
+    defer log.deinit();
+    try log.open();
+
+    const session_id = [_]u8{8} ** 16;
+    try log.write(.detach_start, session_id, "valid");
+
+    // Forge a header with a 2MB payload_len. readAll caps per-entry payload
+    // at 1MB and breaks the replay loop.
+    const forged: txlog.TxEntry = .{
+        .tx_type = .reattach_start,
+        .timestamp = 0,
+        .session_id = session_id,
+        .payload_len = 2 * 1024 * 1024,
+    };
+    const fd = log.log_fd.?;
+    _ = try std.posix.write(fd, std.mem.asBytes(&forged));
+
+    var entries = try log.readAll(testing.allocator);
+    defer {
+        for (entries.items) |*e| {
+            testing.allocator.free(e.payload);
+        }
+        entries.deinit(testing.allocator);
+    }
+
+    // Oversized entry is skipped; only the valid first entry survives.
+    try testing.expectEqual(@as(usize, 1), entries.items.len);
+}
+
 test "TxLog: findIncompleteTransactions detects incomplete detach" {
     const page_alloc = std.heap.page_allocator;
     var entries: std.ArrayList(txlog.TxLogEntry) = .empty;
@@ -1104,6 +1176,11 @@ test "findStickyPaneWithAffinity: prefers same session" {
     const pwd = "/home/test";
     const key: u8 = 'a';
 
+    // findStickyPaneWithAffinity filters out panes whose child_pid is dead,
+    // so the tests must use a live pid. The current test process is always
+    // alive, so use its pid for both synthetic panes.
+    const live_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
+
     // Create two sticky panes with same pwd+key, different sessions
     const uuid1 = [_]u8{1} ** 32;
     const uuid2 = [_]u8{2} ** 32;
@@ -1113,7 +1190,7 @@ test "findStickyPaneWithAffinity: prefers same session" {
         .name = try testing.allocator.dupe(u8, "pane1"),
         .pod_pid = 1234,
         .pod_socket_path = try testing.allocator.dupe(u8, "/tmp/pane1"),
-        .child_pid = 5678,
+        .child_pid = live_pid,
         .state = .sticky,
         .sticky_pwd = try testing.allocator.dupe(u8, pwd),
         .sticky_key = key,
@@ -1130,7 +1207,7 @@ test "findStickyPaneWithAffinity: prefers same session" {
         .name = try testing.allocator.dupe(u8, "pane2"),
         .pod_pid = 1235,
         .pod_socket_path = try testing.allocator.dupe(u8, "/tmp/pane2"),
-        .child_pid = 5679,
+        .child_pid = live_pid,
         .state = .sticky,
         .sticky_pwd = try testing.allocator.dupe(u8, pwd),
         .sticky_key = key,
@@ -1159,6 +1236,7 @@ test "findStickyPaneWithAffinity: fallback when no affinity match" {
 
     const pwd = "/home/test";
     const key: u8 = 'a';
+    const live_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
 
     const uuid = [_]u8{1} ** 32;
     const pane = state.Pane{
@@ -1166,7 +1244,7 @@ test "findStickyPaneWithAffinity: fallback when no affinity match" {
         .name = try testing.allocator.dupe(u8, "pane1"),
         .pod_pid = 1234,
         .pod_socket_path = try testing.allocator.dupe(u8, "/tmp/pane1"),
-        .child_pid = 5678,
+        .child_pid = live_pid,
         .state = .sticky,
         .sticky_pwd = try testing.allocator.dupe(u8, pwd),
         .sticky_key = key,
