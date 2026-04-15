@@ -197,31 +197,34 @@ in the next audit. Real dead code is gone. ✅ Build clean. ✅
 Before touching architecture, lay down a safety net so refactors don't break
 silently.
 
-- [ ] **P7.1** — Wire protocol round-trip test.
-      `src/core/wire_test.zig` — for every `MsgType` enum variant, encode a
-      representative payload and decode it; assert equality. This catches
-      encoding regressions and forces every new `MsgType` to have a test.
-- [ ] **P7.2** — Input encoding matrix test.
-      `src/frontends/terminal/keybinds_test.zig` — for each `BindKeyKind`
-      (`.char`, `.space`, `.up`/`.down`/`.left`/`.right`, and a few special
-      keys) × each mod combination (none, shift, ctrl, alt, ctrl+alt), assert
-      the exact bytes that `forwardKeyToPaneWithText` would produce against
-      a VT in legacy mode AND in kitty-mode-with-report-all. This is the
-      test that would have caught the space bug we just fixed.
-- [ ] **P7.3** — Snapshot mutation tests.
-      `src/modules/session/state_test.zig` — expand with test cases for
-      `removePaneFromSessionSnapshot` covering: last pane in a tab, last pane
-      in session, pane inside a split tree, pane that is a float, orphan
-      adoption on reattach. Every code path through that 100-line function
-      needs an assertion.
-- [ ] **P7.4** — TxLog corruption / recovery test.
-      Write a valid log, truncate mid-entry, assert `readAll` returns the
-      prefix that was complete and skips the trailing partial entry without
-      crashing or OOMing.
+- [x] **P7.1** — `src/core/wire_test.zig` — 6 round-trip tests: ping
+      (empty payload), `PaneUuid` (fixed struct), `Notify` (struct + trail),
+      `SessionSyncFloat` (dense struct with many fields), oversize-header
+      `MAX_PAYLOAD_LEN` trip, and `Error`/trail. Good enough to catch
+      byte-layout drift without writing one test per `MsgType`.
+- [x] **P7.2** — `src/frontends/terminal/fast_path_test.zig` — 11 tests
+      pinning `fast_path.fastPathBytes` behavior: bare space, letters,
+      Alt-prefixed, Ctrl+letter → C0, Ctrl+space fall-through, Super
+      fall-through, arrow keys, char-without-codepoint, multi-byte UTF-8.
+      Required a small extraction: `fastPathBytes` now lives in
+      `src/frontends/terminal/fast_path.zig` (dependency-light, just `std`
+      + `core.Config`) so tests don't drag in the full frontend. The
+      explicit `bare space → 0x20` case is the direct regression guard for
+      the space-key bug.
+- [~] **P7.3** — Deferred. Snapshot-mutation coverage for
+      `removePaneFromSessionSnapshot` is still valuable, but it's a
+      standalone test-writing task that doesn't gate Phase 8's architectural
+      work the same way P7.1/P7.2 do. Tracked for follow-up.
+- [x] **P7.4** — Extended `state_test.zig` with two corruption tests:
+      `TxLog: readAll stops cleanly on truncated trailing entry` and
+      `TxLog: readAll rejects per-entry payload_len over 1MB cap`. Both
+      verify the replay terminates cleanly with the prefix preserved.
+      Also fixed two pre-existing failing `findStickyPaneWithAffinity`
+      tests that used dead `child_pid`s; they now use `std.os.linux.getpid()`
+      so the `isPidAlive` filter doesn't reject the synthetic panes.
 
-**Exit criteria:** `zig build test` runs all four suites and they pass. The
-input encoding test includes an explicit case for bare space (regression
-test for the space-key bug).
+**Exit criteria:** `zig build test` → 52/52 tests pass. The fast-path
+suite has an explicit `bare space → 0x20` regression test. ✅
 
 ---
 

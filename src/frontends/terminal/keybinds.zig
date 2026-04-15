@@ -9,6 +9,7 @@ const input = @import("input.zig");
 const loop_ipc = @import("loop_ipc.zig");
 const keybinds_actions = @import("keybinds_actions.zig");
 const key_translate = @import("key_translate.zig");
+const fast_path = @import("fast_path.zig");
 const main = @import("main.zig");
 
 pub const BindWhen = core.Config.BindWhen;
@@ -96,36 +97,9 @@ pub fn forwardKeyToPane(state: *State, mods: u8, key: BindKey) void {
 pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_codepoint: ?u21) void {
     var out: [64]u8 = undefined;
 
-    // For plain Ctrl+letter keys, prefer canonical C0 control bytes.
-    // This guarantees signals like Ctrl+C (ETX) reach apps reliably.
-    if (mods == 2 and @as(BindKeyKind, key) == .char) {
-        const ch = key.char;
-        if ((ch >= 'a' and ch <= 'z') or (ch >= 'A' and ch <= 'Z')) {
-            const lc = std.ascii.toLower(ch);
-            out[0] = (lc - 'a') + 1;
-            forwardInputToFocusedPaneWithEvent(state, out[0..1], null);
-            return;
-        }
-    }
-
-    const key_kind = @as(BindKeyKind, key);
-    if (key_kind == .char or key_kind == .space) {
-        if (text_codepoint) |cp| {
-            // For text-producing keys, prefer forwarding the produced codepoint
-            // directly unless Ctrl/Super is involved.
-            if ((mods & 2) == 0 and (mods & 8) == 0) {
-                var n: usize = 0;
-                if ((mods & 1) != 0) {
-                    out[n] = 0x1b;
-                    n += 1;
-                }
-                n += std.unicode.utf8Encode(cp, out[n..]) catch 0;
-                if (n > 0) {
-                    forwardInputToFocusedPaneWithEvent(state, out[0..n], null);
-                    return;
-                }
-            }
-        }
+    if (fast_path.fastPathBytes(&out, mods, key, text_codepoint)) |n| {
+        forwardInputToFocusedPaneWithEvent(state, out[0..n], null);
+        return;
     }
 
     const target_pane = blk: {

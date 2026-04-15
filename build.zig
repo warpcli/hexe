@@ -194,7 +194,21 @@ pub fn build(b: *std.Build) void {
     });
     const run_wire_tests = b.addRunArtifact(wire_tests);
 
+    // Terminal frontend fast-path encoding regression tests.
+    const fast_path_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/fast_path_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    fast_path_test_module.addImport("core", core_module);
+
+    const fast_path_tests = b.addTest(.{
+        .root_module = fast_path_test_module,
+    });
+    const run_fast_path_tests = b.addRunArtifact(fast_path_tests);
+
     const test_step = b.step("test", "Run hexe test suites");
     test_step.dependOn(&run_ses_tests.step);
     test_step.dependOn(&run_wire_tests.step);
+    test_step.dependOn(&run_fast_path_tests.step);
 }
