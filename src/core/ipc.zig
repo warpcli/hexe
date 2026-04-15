@@ -144,7 +144,8 @@ pub const Client = struct {
             .path = undefined,
         };
         @memset(&addr.path, 0);
-        @memcpy(addr.path[0..path.len], path);
+        const path_len = @min(path.len, addr.path.len - 1);
+        @memcpy(addr.path[0..path_len], path[0..path_len]);
 
         try posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
 

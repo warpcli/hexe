@@ -275,9 +275,13 @@ pub const Pty = struct {
         const result = linux.syscall3(.close_range, first_fd, max_fd, 0);
         const signed: isize = @bitCast(result);
         if (!(signed < 0 and signed > -4096)) return;
-        // Fallback: close_range not available, close FDs individually
+        // Fallback: close_range not available (pre-Linux 5.9). Walk up to the
+        // actual RLIMIT_NOFILE so raised ulimits don't leak FDs >= 1024 to
+        // the child shell.
+        const limit = posix.getrlimit(.NOFILE) catch posix.rlimit{ .cur = 1024, .max = 1024 };
+        const end_fd: usize = @intCast(limit.cur);
         var fd: usize = first_fd;
-        while (fd < 1024) : (fd += 1) {
+        while (fd < end_fd) : (fd += 1) {
             posix.close(@intCast(fd));
         }
     }
