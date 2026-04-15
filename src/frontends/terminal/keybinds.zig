@@ -108,7 +108,8 @@ pub fn forwardKeyToPaneWithText(state: *State, mods: u8, key: BindKey, text_code
         }
     }
 
-    if (@as(BindKeyKind, key) == .char) {
+    const key_kind = @as(BindKeyKind, key);
+    if (key_kind == .char or key_kind == .space) {
         if (text_codepoint) |cp| {
             // For text-producing keys, prefer forwarding the produced codepoint
             // directly unless Ctrl/Super is involved.
