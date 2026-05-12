@@ -49,7 +49,9 @@ pub fn runPopNotify(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64
         .timeout_ms = timeout_ms,
         .msg_len = @intCast(message.len),
     };
-    wire.writeControlWithTrail(fd, .targeted_notify, std.mem.asBytes(&tn), message) catch {};
+    wire.writeControlWithTrail(fd, .targeted_notify, std.mem.asBytes(&tn), message) catch |err| {
+        print("Error: failed to send popup notify: {s}\n", .{@errorName(err)});
+    };
 }
 
 pub fn runPopConfirm(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64, message: []const u8) !void {

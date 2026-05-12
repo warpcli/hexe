@@ -1102,5 +1102,7 @@ fn runShpSpinner(name: []const u8, width_i: i64, interval_i: i64, hold_i: i64, l
         std.Thread.sleep(interval_ms * std.time.ns_per_ms);
     }
 
-    stdout.writeAll("\r\n") catch {};
+    stdout.writeAll("\r\n") catch |err| {
+        core.logging.logError("cli", "failed to finish animation line", err);
+    };
 }

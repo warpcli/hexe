@@ -10,6 +10,7 @@ pub const FrameType = enum(u8) {
     input = 2,
     resize = 3,
     backlog_end = 4,
+    password_mode = 5,
 };
 
 pub fn writeFrame(conn: *ipc.Connection, frame_type: FrameType, payload: []const u8) !void {

@@ -7,6 +7,7 @@ const LuaType = zlua.LuaType;
 const config_builder = @import("config_builder.zig");
 const ConfigBuilder = config_builder.ConfigBuilder;
 const api_bridge = @import("api_bridge.zig");
+const log = std.log.scoped(.lua_runtime);
 
 // Import C API functions
 const hexe_mux_config_set = api_bridge.hexe_mux_config_set;
@@ -156,10 +157,17 @@ fn injectRecordTargetHelper(lua: *Lua) void {
         "end; " ++
         "end";
 
-    const z = std.heap.page_allocator.dupeZ(u8, code) catch return;
+    const z = std.heap.page_allocator.dupeZ(u8, code) catch |alloc_err| {
+        log.warn("failed to allocate record helper Lua chunk: {}", .{alloc_err});
+        return;
+    };
     defer std.heap.page_allocator.free(z);
-    lua.loadString(z) catch return;
-    lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
+    lua.loadString(z) catch |load_err| {
+        log.warn("failed to load record helper Lua chunk: {}", .{load_err});
+        return;
+    };
+    lua.protectedCall(.{ .args = 0, .results = 0 }) catch |call_err| {
+        log.warn("failed to install record helper Lua chunk: {}", .{call_err});
         lua.pop(1);
         return;
     };
@@ -212,10 +220,17 @@ fn injectStatusHelpers(lua: *Lua) void {
         "end; " ++
         "end";
 
-    const z = std.heap.page_allocator.dupeZ(u8, code) catch return;
+    const z = std.heap.page_allocator.dupeZ(u8, code) catch |alloc_err| {
+        log.warn("failed to allocate status helper Lua chunk: {}", .{alloc_err});
+        return;
+    };
     defer std.heap.page_allocator.free(z);
-    lua.loadString(z) catch return;
-    lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
+    lua.loadString(z) catch |load_err| {
+        log.warn("failed to load status helper Lua chunk: {}", .{load_err});
+        return;
+    };
+    lua.protectedCall(.{ .args = 0, .results = 0 }) catch |call_err| {
+        log.warn("failed to install status helper Lua chunk: {}", .{call_err});
         lua.pop(1);
         return;
     };
@@ -414,7 +429,10 @@ pub const LuaRuntime = struct {
         _ = self.lua.getField(table_idx, key);
         defer self.lua.pop(1);
         if (self.lua.typeOf(-1) == .string) {
-            return self.lua.toString(-1) catch null;
+            return self.lua.toString(-1) catch |err| {
+                log.warn("failed to read Lua string field '{s}': {}", .{ key, err });
+                return null;
+            };
         }
         return null;
     }
@@ -422,7 +440,10 @@ pub const LuaRuntime = struct {
     /// Get an allocated copy of a string field
     pub fn getStringAlloc(self: *Self, table_idx: i32, key: [:0]const u8) ?[]const u8 {
         if (self.getString(table_idx, key)) |s| {
-            return self.allocator.dupe(u8, s) catch null;
+            return self.allocator.dupe(u8, s) catch |err| {
+                log.warn("failed to allocate Lua string field '{s}': {}", .{ key, err });
+                return null;
+            };
         }
         return null;
     }
@@ -432,7 +453,10 @@ pub const LuaRuntime = struct {
         _ = self.lua.getField(table_idx, key);
         defer self.lua.pop(1);
         if (self.lua.typeOf(-1) == .number) {
-            const val = self.lua.toInteger(-1) catch return null;
+            const val = self.lua.toInteger(-1) catch |err| {
+                log.warn("failed to read Lua integer field '{s}': {}", .{ key, err });
+                return null;
+            };
             return std.math.cast(T, val);
         }
         return null;
@@ -443,7 +467,10 @@ pub const LuaRuntime = struct {
         _ = self.lua.getField(table_idx, key);
         defer self.lua.pop(1);
         if (self.lua.typeOf(-1) == .number) {
-            return self.lua.toNumber(-1) catch null;
+            return self.lua.toNumber(-1) catch |err| {
+                log.warn("failed to read Lua number field '{s}': {}", .{ key, err });
+                return null;
+            };
         }
         return null;
     }
@@ -502,12 +529,18 @@ pub const LuaRuntime = struct {
 
     /// Convert stack top to string
     pub fn toStringAt(self: *Self, idx: i32) ?[]const u8 {
-        return self.lua.toString(idx) catch null;
+        return self.lua.toString(idx) catch |err| {
+            log.warn("failed to read Lua string at stack index {d}: {}", .{ idx, err });
+            return null;
+        };
     }
 
     /// Convert stack top to integer
     pub fn toIntAt(self: *Self, comptime T: type, idx: i32) ?T {
-        const val = self.lua.toInteger(idx) catch return null;
+        const val = self.lua.toInteger(idx) catch |err| {
+            log.warn("failed to read Lua integer at stack index {d}: {}", .{ idx, err });
+            return null;
+        };
         return std.math.cast(T, val);
     }
 };
@@ -539,16 +572,28 @@ fn safeRequire(state: ?*LuaState) callconv(.c) c_int {
 
 fn setupUnsafeRequire(lua: *Lua, allocator: std.mem.Allocator) !void {
     // Set up restricted package.path (only hexe config dirs)
-    const config_dir = getConfigDir(allocator) catch return;
+    const config_dir = getConfigDir(allocator) catch |err| {
+        log.warn("failed to resolve config dir for Lua package.path: {}", .{err});
+        return;
+    };
     defer allocator.free(config_dir);
 
-    const path = std.fmt.allocPrint(allocator, "{s}/lua/?.lua;{s}/lua/?/init.lua", .{ config_dir, config_dir }) catch return;
+    const path = std.fmt.allocPrint(allocator, "{s}/lua/?.lua;{s}/lua/?/init.lua", .{ config_dir, config_dir }) catch |err| {
+        log.warn("failed to allocate Lua package.path: {}", .{err});
+        return;
+    };
     defer allocator.free(path);
-    const path_z = allocator.dupeZ(u8, path) catch return;
+    const path_z = allocator.dupeZ(u8, path) catch |err| {
+        log.warn("failed to zero-terminate Lua package.path: {}", .{err});
+        return;
+    };
     defer allocator.free(path_z);
 
     // Set package.path
-    _ = lua.getGlobal("package") catch return;
+    _ = lua.getGlobal("package") catch |err| {
+        log.warn("failed to read Lua package global for path setup: {}", .{err});
+        return;
+    };
     if (lua.typeOf(-1) == .table) {
         _ = lua.pushString(path_z);
         lua.setField(-2, "path");
@@ -559,7 +604,10 @@ fn setupUnsafeRequire(lua: *Lua, allocator: std.mem.Allocator) !void {
     lua.pop(1);
 
     // Preload hexe module
-    _ = lua.getGlobal("package") catch return;
+    _ = lua.getGlobal("package") catch |err| {
+        log.warn("failed to read Lua package global for preload setup: {}", .{err});
+        return;
+    };
     if (lua.typeOf(-1) == .table) {
         _ = lua.getField(-1, "preload");
         if (lua.typeOf(-1) == .table) {
@@ -799,7 +847,9 @@ fn injectHexeModule(lua: *Lua) !void {
     lua.setField(-2, "add");
     lua.setField(-2, "prompt");
 
-    lua.createTable(0, 0); // hexe.shp.segment (TODO: builder pattern)
+    // Reuse the shared segment helper table so prompt configs can spell
+    // helpers as either `hexe.segment.*` or `hexe.shp.segment.*`.
+    _ = lua.getField(-2, "segment");
     lua.setField(-2, "segment");
     lua.setField(-2, "shp");
 

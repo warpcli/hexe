@@ -70,7 +70,6 @@ pub const FloatStylePosition = config.FloatStylePosition;
 pub const BorderColor = config.BorderColor;
 pub const SplitStyle = config.SplitStyle;
 pub const SplitsConfig = config.SplitsConfig;
-pub const PanesConfig = config.PanesConfig;
 pub const SesConfig = config.SesConfig;
 pub const LayoutDef = config.LayoutDef;
 pub const LayoutTabDef = config.LayoutTabDef;

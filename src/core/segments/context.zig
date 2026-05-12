@@ -123,7 +123,9 @@ pub const Context = struct {
         if (segments_mod.registry.get(name)) |render_fn| {
             if (render_fn(self)) |segs| {
                 if (!is_dynamic) {
-                    self.cached_segments.put(name, segs) catch {};
+                    self.cached_segments.put(name, segs) catch |err| {
+                        std.log.scoped(.segments).warn("failed to cache segment '{s}': {}", .{ name, err });
+                    };
                 }
                 return segs;
             }

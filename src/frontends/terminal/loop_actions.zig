@@ -16,6 +16,12 @@ const helpers = @import("helpers.zig");
 const float_completion = @import("float_completion.zig");
 const loop_actions_focus = @import("loop_actions_focus.zig");
 
+fn writeControlLogged(fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8, comptime context: []const u8) void {
+    wire.writeControl(fd, msg_type, payload) catch |err| {
+        core.logging.logError("terminal", context, err);
+    };
+}
+
 /// Hide or destroy a float. If it's a CLI-blocking float (capture_output=true),
 /// destroy it and send result back to CLI instead of just hiding.
 pub fn hideOrDestroyFloat(state: *State, pane: *Pane, tab: usize) void {
@@ -24,8 +30,12 @@ pub fn hideOrDestroyFloat(state: *State, pane: *Pane, tab: usize) void {
         destroyBlockingFloat(state, pane);
     } else {
         // Normal float - just hide it.
+        const was_visible = state.paneVisibleOnTab(pane, tab);
         state.setPaneVisibleOnTab(pane, tab, false);
-        state.syncSessionFloat(pane, false);
+        if (!state.syncSessionFloatChecked(pane, false)) {
+            state.setPaneVisibleOnTab(pane, tab, was_visible);
+            state.notifications.show("Hide float failed: session sync rejected update");
+        }
     }
 }
 
@@ -34,27 +44,38 @@ fn destroyBlockingFloat(state: *State, pane: *Pane) void {
     // Send completion with exit code 130 (like Ctrl+C cancellation).
     if (state.pending_float_requests.fetchRemove(pane.uuid)) |entry| {
         if (entry.value.result_path) |path| {
-            std.fs.cwd().deleteFile(path) catch {};
+            std.fs.cwd().deleteFile(path) catch |err| {
+                if (err != error.FileNotFound) {
+                    terminal_main.debugLog("destroyBlockingFloat: failed to delete result file '{s}': {s}", .{ path, @errorName(err) });
+                }
+            };
             state.allocator.free(path);
         }
         // Send cancellation result to CLI.
-        const ctl_fd = state.runtime.getCtlFd() orelse return;
+        const ctl_fd = state.runtime.getCtlFd() orelse {
+            core.logging.warn("terminal", "destroyBlockingFloat: cannot send cancellation result because SES CTL channel is unavailable", .{});
+            return;
+        };
         const result = wire.FloatResult{
             .uuid = pane.uuid,
             .exit_code = 130, // Cancelled (like SIGINT)
             .output_len = 0,
         };
-        wire.writeControl(ctl_fd, .float_result, std.mem.asBytes(&result)) catch {};
+        writeControlLogged(ctl_fd, .float_result, std.mem.asBytes(&result), "failed to send cancelled float result");
     }
 
     // Find and remove the float from state.view.float_views.
     for (state.view.float_views.items, 0..) |p, i| {
         if (p == pane) {
-            _ = state.view.float_views.orderedRemove(i);
             if (state.runtime.isConnected()) {
-                state.runtime.killPane(pane.uuid) catch {};
+                state.runtime.killPane(pane.uuid) catch |e| {
+                    terminal_main.debugLogUuid(&pane.uuid, "destroyBlockingFloat: killPane failed: {s}", .{@errorName(e)});
+                    state.notifications.show("Close float failed: session rejected pane kill");
+                    return;
+                };
             }
-            state.syncSessionFloatRemoved(pane.uuid);
+            _ = state.view.float_views.orderedRemove(i);
+            state.clearLocalFloatState(pane.uuid);
             state.clearTransientPaneState(pane);
             state.clearFloatUi(pane.uuid);
             pane.deinit();
@@ -195,7 +216,12 @@ fn parseNulSeparatedEnv(allocator: std.mem.Allocator, data: []const u8) !?[]cons
 fn readPaneEnvSnapshot(allocator: std.mem.Allocator, uuid: [32]u8) !?[]const []const u8 {
     var path_buf: [64]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "/tmp/hexe-env-{s}", .{&uuid});
-    const file = std.fs.openFileAbsolute(path, .{}) catch return null;
+    const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
+        if (err != error.FileNotFound) {
+            core.logging.logError("terminal", "failed to open pane env snapshot", err);
+        }
+        return null;
+    };
     defer file.close();
 
     const data = try file.readToEndAlloc(allocator, 256 * 1024);
@@ -209,7 +235,12 @@ fn readProcEnvironByPid(allocator: std.mem.Allocator, pid: i32) !?[]const []cons
 
     var path_buf: [64]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "/proc/{d}/environ", .{pid});
-    const file = std.fs.openFileAbsolute(path, .{}) catch return null;
+    const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
+        if (err != error.FileNotFound) {
+            core.logging.logError("terminal", "failed to open process environ", err);
+        }
+        return null;
+    };
     defer file.close();
 
     const data = try file.readToEndAlloc(allocator, 256 * 1024);
@@ -227,12 +258,18 @@ fn syncEnvIntoExistingFloat(state: *State, pane: *Pane, parent_uuid: [32]u8) voi
             if (info.fg_name) |s| state.allocator.free(s);
         }
         if (info.fg_pid) |pid| {
-            parent_env = readProcEnvironByPid(state.allocator, pid) catch null;
+            parent_env = readProcEnvironByPid(state.allocator, pid) catch |err| blk: {
+                core.logging.logError("terminal", "failed to read parent process environment for float sync", err);
+                break :blk null;
+            };
         }
     }
 
     if (parent_env == null) {
-        parent_env = readPaneEnvSnapshot(state.allocator, parent_uuid) catch null;
+        parent_env = readPaneEnvSnapshot(state.allocator, parent_uuid) catch |err| blk: {
+            core.logging.logError("terminal", "failed to read pane environment snapshot for float sync", err);
+            break :blk null;
+        };
     }
     if (parent_env == null) return;
     defer freeEnvLines(state.allocator, parent_env.?);
@@ -245,12 +282,24 @@ fn syncEnvIntoExistingFloat(state: *State, pane: *Pane, parent_uuid: [32]u8) voi
         if (eq == 0) continue;
         const key = line[0..eq];
         if (shouldSkipEnvSyncKey(key)) continue;
-        appendEnvExport(&cmd, state.allocator, line) catch return;
+        appendEnvExport(&cmd, state.allocator, line) catch |err| {
+            core.logging.logError("terminal", "failed to build pane environment sync command", err);
+            state.notifications.show("Environment sync failed");
+            state.needs_render = true;
+            return;
+        };
     }
 
     if (cmd.items.len == 0) return;
-    cmd.append(state.allocator, '\n') catch return;
-    pane.write(cmd.items) catch {};
+    cmd.append(state.allocator, '\n') catch |err| {
+        core.logging.logError("terminal", "failed to finish pane environment sync command", err);
+        state.notifications.show("Environment sync failed");
+        state.needs_render = true;
+        return;
+    };
+    pane.write(cmd.items) catch |err| {
+        terminal_main.debugLogUuid(&pane.uuid, "syncPaneEnvFromParent write failed: {s}", .{@errorName(err)});
+    };
 }
 
 fn paneExistsInSes(state: *State, uuid: [32]u8) bool {
@@ -272,8 +321,16 @@ fn paneExistsInSes(state: *State, uuid: [32]u8) bool {
 fn isProcessAlive(pid: i32) bool {
     if (pid <= 0) return false;
     var path_buf: [64]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch return false;
-    const file = std.fs.openFileAbsolute(path, .{}) catch return false;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/stat", .{pid}) catch |err| {
+        core.logging.logError("terminal", "failed to format process stat path", err);
+        return false;
+    };
+    const file = std.fs.openFileAbsolute(path, .{}) catch |err| {
+        if (err != error.FileNotFound) {
+            core.logging.logError("terminal", "failed to open process stat", err);
+        }
+        return false;
+    };
     file.close();
     return true;
 }
@@ -316,11 +373,16 @@ pub fn performDisown(state: *State) void {
         state.currentLayout().getFocusedPane();
 
     if (pane) |p| {
+        const old_uuid = p.uuid;
+
         // Get current working directory from the process before orphaning.
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
         var cwd = state.getReliableCwd(p);
         if (cwd == null) {
-            cwd = std.posix.getcwd(&cwd_buf) catch null;
+            cwd = std.posix.getcwd(&cwd_buf) catch |err| blk: {
+                core.logging.logError("terminal", "performDisown: failed to get fallback cwd", err);
+                break :blk null;
+            };
         }
 
         // Get the old pane's auxiliary info (created_from, focused_from) to inherit.
@@ -329,20 +391,34 @@ pub fn performDisown(state: *State) void {
             .focused_from = null,
         };
 
-        // Orphan the current pane in ses (keeps process alive).
-        state.runtime.orphanPane(p.uuid) catch {};
-
         // Create a new shell via ses in the same directory and replace the pane's backend.
         if (state.runtime.createPane(null, cwd, null, null, null, null, null)) |result| {
             const vt_fd = state.runtime.getVtFd() orelse {
+                state.runtime.killPane(result.uuid) catch |e| {
+                    terminal_main.debugLogUuid(&result.uuid, "performDisown: rollback killPane failed after missing VT fd: {s}", .{@errorName(e)});
+                };
                 state.notifications.show("Disown failed: no VT channel");
                 state.needs_render = true;
                 return;
             };
-            p.replaceWithPod(result.pane_id, vt_fd, result.uuid) catch {
+            const active_float = state.paneIsFloating(p);
+            if (!state.replacePaneWithPodSynced(
+                old_uuid,
+                result.uuid,
+                result.pane_id,
+                vt_fd,
+                p,
+                active_float,
+                .kill_new_pane,
+                "performDisown: rollback killPane failed after replacement error",
+            )) {
                 state.notifications.show("Disown failed: couldn't replace pane");
                 state.needs_render = true;
                 return;
+            }
+
+            state.runtime.orphanPane(old_uuid) catch |e| {
+                terminal_main.debugLogUuid(&old_uuid, "performDisown: orphanPane failed after replacement: {s}", .{@errorName(e)});
             };
 
             // Sync inherited auxiliary info to the new pane.
@@ -351,7 +427,10 @@ pub fn performDisown(state: *State) void {
             const cursor_style = p.vt.getCursorStyle();
             const cursor_visible = p.vt.isCursorVisible();
             const alt_screen = p.vt.inAltScreen();
-            const layout_path = helpers.getLayoutPath(state, p) catch null;
+            const layout_path = helpers.getLayoutPath(state, p) catch |err| blk: {
+                core.logging.logError("terminal", "performDisown: failed to resolve layout path", err);
+                break :blk null;
+            };
             defer if (layout_path) |path| state.allocator.free(path);
             state.runtime.updatePaneAux(
                 p.uuid,
@@ -370,7 +449,10 @@ pub fn performDisown(state: *State) void {
                 null,
                 null,
                 layout_path,
-            ) catch {};
+            ) catch |err| {
+                core.logging.logError("terminal", "disown replacement metadata sync failed", err);
+                state.notifications.show("Disown metadata sync failed");
+            };
 
             state.notifications.show("Pane disowned (adopt with Alt+a)");
         } else |_| {
@@ -384,22 +466,25 @@ pub fn performDisown(state: *State) void {
 pub fn performClose(state: *State) void {
     if (state.activeFloatingIndex()) |idx| {
         const old_uuid = state.getCurrentFocusedUuid();
-        const pane = state.view.float_views.orderedRemove(idx);
+        const pane = state.view.float_views.items[idx];
         terminal_main.debugLogUuid(&pane.uuid, "performClose: float pane_id={?d} vt_fd={?d}", .{
             pane.getPaneId(),
             state.runtime.currentVtFd(),
         });
-        state.syncPaneUnfocus(pane);
-        float_completion.handleBlockingFloatCompletion(state, pane);
-        // Kill in ses.
         if (state.runtime.isConnected()) {
             terminal_main.debugLogUuid(&pane.uuid, "performClose: sending killPane to SES", .{});
             state.runtime.killPane(pane.uuid) catch |e| {
                 terminal_main.debugLogUuid(&pane.uuid, "performClose: killPane error: {s}", .{@errorName(e)});
+                state.notifications.show("Close float failed: session rejected pane kill");
+                state.needs_render = true;
+                return;
             };
             terminal_main.debugLogUuid(&pane.uuid, "performClose: killPane done", .{});
         }
-        state.syncSessionFloatRemoved(pane.uuid);
+        _ = state.view.float_views.orderedRemove(idx);
+        state.syncPaneUnfocus(pane);
+        float_completion.handleBlockingFloatCompletion(state, pane);
+        state.clearLocalFloatState(pane.uuid);
         state.clearTransientPaneState(pane);
         state.clearFloatUi(pane.uuid);
         pane.deinit();
@@ -451,8 +536,9 @@ pub fn startAdoptFlow(state: *State) void {
             return;
         };
         state.runtime.setSelectedOrphanedPaneUuid(orphan.uuid);
-        state.pending_action = .adopt_confirm;
-        state.popups.showConfirm("Destroy current pane?", .{}) catch {};
+        if (!state.showConfirmOrNotify(.adopt_confirm, "Destroy current pane?")) {
+            state.runtime.setSelectedOrphanedPaneUuid(null);
+        }
     } else {
         // Multiple orphans - show picker.
         // Build items list for picker (owned by popup).
@@ -468,11 +554,7 @@ pub fn startAdoptFlow(state: *State) void {
                 return;
             };
         }
-        state.pending_action = .adopt_choose;
-        state.popups.showPickerOwned(items_list.items, .{ .title = "Select pane to adopt" }) catch {
-            state.notifications.show("Failed to show picker");
-            state.pending_action = null;
-        };
+        _ = state.showPickerOrNotify(.adopt_choose, items_list.items, "Select pane to adopt");
     }
     state.needs_render = true;
 }
@@ -480,53 +562,55 @@ pub fn startAdoptFlow(state: *State) void {
 /// Perform the actual adopt action.
 /// If destroy_current is true, kills the current pane; otherwise orphans it (swap).
 pub fn performAdopt(state: *State, orphan_uuid: [32]u8, destroy_current: bool) void {
-    // Adopt the selected orphan from ses.
+    // Resolve all local prerequisites before asking SES to attach the orphan.
+    // Once adopted, the pane is no longer listed as orphaned, so failing after
+    // that point can otherwise leave it attached to this client without a view.
+    const pane: *Pane = if (state.activeFloatingIndex()) |idx|
+        state.view.float_views.items[idx]
+    else
+        state.currentLayout().getFocusedPane() orelse {
+            state.notifications.show("No focused pane");
+            return;
+        };
+
+    const vt_fd = state.runtime.getVtFd() orelse {
+        state.notifications.show("Failed to replace pane: no VT channel");
+        return;
+    };
+
     const result = state.runtime.adoptPane(orphan_uuid) catch {
         state.notifications.show("Failed to adopt pane");
         return;
     };
 
-    // Get the current focused pane.
-    const current_pane: ?*Pane = if (state.activeFloatingIndex()) |idx|
-        state.view.float_views.items[idx]
-    else
-        state.currentLayout().getFocusedPane();
+    const old_uuid = pane.uuid;
+    const active_float = state.paneIsFloating(pane);
+    if (!state.replacePaneWithPodSynced(
+        old_uuid,
+        result.uuid,
+        result.pane_id,
+        vt_fd,
+        pane,
+        active_float,
+        .orphan_new_pane,
+        "performAdopt: rollback orphanPane failed after replacement error",
+    )) {
+        state.notifications.show("Failed to replace pane");
+        return;
+    }
 
-    if (current_pane) |pane| {
-        const old_uuid = pane.uuid;
-        if (destroy_current) {
-            // Kill current pane in ses, then replace with adopted.
-            state.runtime.killPane(pane.uuid) catch {};
-        } else {
-            // Orphan current pane (swap mode).
-            state.runtime.orphanPane(pane.uuid) catch {};
-            state.notifications.show("Swapped panes (old pane orphaned)");
-        }
+    state.syncPaneAux(pane, null);
 
-        const vt_fd = state.runtime.getVtFd() orelse {
-            state.notifications.show("Failed to replace pane: no VT channel");
-            return;
+    if (destroy_current) {
+        state.runtime.killPane(old_uuid) catch |e| {
+            terminal_main.debugLogUuid(&old_uuid, "performAdopt: killPane failed after replace: {s}", .{@errorName(e)});
         };
-
-        pane.replaceWithPod(result.pane_id, vt_fd, result.uuid) catch {
-            state.notifications.show("Failed to replace pane");
-            return;
-        };
-
-        if (state.paneIsFloating(pane)) {
-            // Sync the new pane info.
-            state.syncPaneAux(pane, null);
-            state.syncSessionFloat(pane, state.activeFloatingIndex() != null);
-        } else {
-            state.syncSessionReplaceSplitPane(old_uuid, pane.uuid, if (pane.focused) pane.uuid else null);
-            state.syncPaneAux(pane, null);
-        }
-
-        if (destroy_current) {
-            state.notifications.show("Adopted pane (old destroyed)");
-        }
+        state.notifications.show("Adopted pane (old destroyed)");
     } else {
-        state.notifications.show("No focused pane");
+        state.runtime.orphanPane(old_uuid) catch |e| {
+            terminal_main.debugLogUuid(&old_uuid, "performAdopt: orphanPane failed after replace: {s}", .{@errorName(e)});
+        };
+        state.notifications.show("Swapped panes (old pane orphaned)");
     }
 
     state.renderer.invalidate();
@@ -546,7 +630,10 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
     }
     // Fallback to the terminal process CWD if pane CWD is unavailable.
     if (current_dir == null) {
-        current_dir = std.posix.getcwd(&cwd_buf) catch null;
+        current_dir = std.posix.getcwd(&cwd_buf) catch |err| blk: {
+            core.logging.logError("terminal", "toggleNamedFloat: failed to get fallback cwd", err);
+            break :blk null;
+        };
     }
 
     // per_cwd floats are unique per *split cwd*, not per tab.
@@ -596,7 +683,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 }
 
                 const stale = state.view.float_views.orderedRemove(existing_idx);
-                state.syncSessionFloatRemoved(stale.uuid);
+                state.clearLocalFloatState(stale.uuid);
                 state.clearTransientPaneState(stale);
                 state.clearFloatUi(stale.uuid);
                 stale.deinit();
@@ -651,7 +738,10 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
 
                     for (state.view.float_views.items) |other| {
                         if (state.paneFloatKey(other) != float_def.key) {
-                            to_hide.append(state.allocator, other.uuid) catch {};
+                            to_hide.append(state.allocator, other.uuid) catch |err| {
+                                terminal_main.debugLogUuid(&other.uuid, "toggleNamedFloat: failed to queue exclusive float hide: {s}", .{@errorName(err)});
+                                state.notifications.show("Float exclusivity incomplete: couldn't queue hide");
+                            };
                         }
                     }
 
@@ -677,7 +767,9 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 }
             }
 
-            state.syncSessionFloat(pane, state.activeFloatingIndex() == existing_idx and state.paneVisibleOnTab(pane, state.activeTabIndex()));
+            if (!state.syncSessionFloatChecked(pane, state.activeFloatingIndex() == existing_idx and state.paneVisibleOnTab(pane, state.activeTabIndex()))) {
+                state.notifications.show("Toggle float failed: session sync rejected update");
+            }
 
             state.renderer.invalidate();
             state.force_full_render = true;
@@ -710,7 +802,10 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
 
         for (state.view.float_views.items) |pane| {
             if (state.paneFloatKey(pane) != float_def.key) {
-                to_hide.append(state.allocator, pane.uuid) catch {};
+                to_hide.append(state.allocator, pane.uuid) catch |err| {
+                    terminal_main.debugLogUuid(&pane.uuid, "toggleNamedFloat: failed to queue exclusive float hide: {s}", .{@errorName(err)});
+                    state.notifications.show("Float exclusivity incomplete: couldn't queue hide");
+                };
             }
         }
 
@@ -731,7 +826,10 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
 
         for (state.view.float_views.items, 0..) |pane, i| {
             if (i != new_idx and state.paneFloatKey(pane) == float_def.key) {
-                to_hide.append(state.allocator, pane.uuid) catch {};
+                to_hide.append(state.allocator, pane.uuid) catch |err| {
+                    terminal_main.debugLogUuid(&pane.uuid, "toggleNamedFloat: failed to queue per-cwd float hide: {s}", .{@errorName(err)});
+                    state.notifications.show("Per-directory float cleanup incomplete");
+                };
             }
         }
 
@@ -753,6 +851,30 @@ pub const FloatSize = struct {
     shift_y: i16 = 0, // shift from center (-50 to 50)
     exit_key: ?[]const u8 = null, // key that closes the float (e.g., "Esc")
 };
+
+fn rollbackCreatedFloat(state: *State, pane: *Pane) void {
+    var idx: ?usize = null;
+    for (state.view.float_views.items, 0..) |candidate, i| {
+        if (candidate == pane) {
+            idx = i;
+            break;
+        }
+    }
+    if (idx) |i| {
+        _ = state.view.float_views.orderedRemove(i);
+        if (state.activeFloatingIndex()) |active| {
+            if (active == i) {
+                state.setActiveFloatingIndex(null);
+            } else if (active > i) {
+                state.setActiveFloatingIndex(active - 1);
+            }
+        }
+    }
+    state.clearTransientPaneState(pane);
+    state.clearFloatUi(pane.uuid);
+    state.clearLocalFloatState(pane.uuid);
+    pane.deinit();
+}
 
 pub fn createAdhocFloat(
     state: *State,
@@ -787,55 +909,51 @@ pub fn createAdhocFloatWithSize(
     const width_pct: u16 = if (size.width > 0) size.width else visuals.width_pct;
     const height_pct: u16 = if (size.height > 0) size.height else visuals.height_pct;
     // Base position at center (50%), then apply shift
-    const pos_x_pct: u16 = @intCast(@as(i32, 50) + @as(i32, size.shift_x));
-    const pos_y_pct: u16 = @intCast(@as(i32, 50) + @as(i32, size.shift_y));
+    const pos_x_pct: u16 = @intCast(std.math.clamp(@as(i32, 50) + @as(i32, size.shift_x), 0, 100));
+    const pos_y_pct: u16 = @intCast(std.math.clamp(@as(i32, 50) + @as(i32, size.shift_y), 0, 100));
     const pad_x_cfg: u16 = visuals.pad_x;
     const pad_y_cfg: u16 = visuals.pad_y;
     const border_color = visuals.border_color;
 
-    const avail_h = state.term_height - state.status_height;
-    const usable_w: u16 = if (shadow_enabled) (state.term_width -| 1) else state.term_width;
-    const usable_h: u16 = if (shadow_enabled and state.status_height == 0) (avail_h -| 1) else avail_h;
-    const outer_w = usable_w * width_pct / 100;
-    const outer_h = usable_h * height_pct / 100;
-    const max_x = usable_w -| outer_w;
-    const max_y = usable_h -| outer_h;
-    const outer_x = max_x * pos_x_pct / 100;
-    const outer_y = max_y * pos_y_pct / 100;
-
-    const pad_x: u16 = 1 + pad_x_cfg;
-    const pad_y: u16 = 1 + pad_y_cfg;
-    const content_x = outer_x + pad_x;
-    const content_y = outer_y + pad_y;
-    const content_w = outer_w -| (pad_x * 2);
-    const content_h = outer_h -| (pad_y * 2);
+    const frame = state.floatFrameFromValues(width_pct, height_pct, pos_x_pct, pos_y_pct, pad_x_cfg, pad_y_cfg, shadow_enabled);
+    const width_pct_u8: u8 = @intCast(@min(width_pct, 100));
+    const height_pct_u8: u8 = @intCast(@min(height_pct, 100));
+    const pos_x_pct_u8: u8 = @intCast(@min(pos_x_pct, 100));
+    const pos_y_pct_u8: u8 = @intCast(@min(pos_y_pct, 100));
 
     const id: u16 = @intCast(100 + state.view.float_views.items.len);
     if (!state.runtime.isConnected()) return error.SesUnavailable;
-    const merged_env = mergeEnvLines(state.allocator, env, extra_env) catch null;
+    const merged_env = mergeEnvLines(state.allocator, env, extra_env) catch |err| {
+        core.logging.logError("terminal", "failed to merge adhoc float environment", err);
+        return err;
+    };
     defer if (merged_env) |slice| state.allocator.free(slice);
     const result = try state.runtime.createPane(command, cwd, null, null, merged_env, isolation_profile, null);
+    var pane_registered = false;
+    errdefer if (!pane_registered) state.runtime.killPane(result.uuid) catch |e| {
+        terminal_main.debugLogUuid(&result.uuid, "createAdhocFloat rollback killPane failed: {s}", .{@errorName(e)});
+    };
     const vt_fd = state.runtime.getVtFd() orelse return error.SesUnavailable;
-    try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
+    try pane.initWithPod(state.allocator, id, frame.content_x, frame.content_y, frame.content_w, frame.content_h, result.pane_id, vt_fd, result.uuid);
 
     pane.focused = true;
-    _ = state.setPaneFloatUi(result.uuid, .{
-        .border_x = outer_x,
-        .border_y = outer_y,
-        .border_w = outer_w,
-        .border_h = outer_h,
+    if (!state.setPaneFloatUi(result.uuid, .{
+        .border_x = frame.outer_x,
+        .border_y = frame.outer_y,
+        .border_w = frame.outer_w,
+        .border_h = frame.outer_h,
         .border_color = border_color,
-        .width_pct = @intCast(width_pct),
-        .height_pct = @intCast(height_pct),
-        .pos_x_pct = @intCast(pos_x_pct),
-        .pos_y_pct = @intCast(pos_y_pct),
+        .width_pct = width_pct_u8,
+        .height_pct = height_pct_u8,
+        .pos_x_pct = pos_x_pct_u8,
+        .pos_y_pct = pos_y_pct_u8,
         .pad_x = @intCast(pad_x_cfg),
         .pad_y = @intCast(pad_y_cfg),
         .capture_output = false,
         .exit_key = size.exit_key,
         .float_style = style,
         .float_title = title,
-    });
+    })) return error.OutOfMemory;
 
     pane.configureNotificationsFromPop(&state.pop_config.pane.notification);
 
@@ -849,16 +967,20 @@ pub fn createAdhocFloatWithSize(
         false,
         false,
         0,
-        @intCast(width_pct),
-        @intCast(height_pct),
-        @intCast(pos_x_pct),
-        @intCast(pos_y_pct),
+        width_pct_u8,
+        height_pct_u8,
+        pos_x_pct_u8,
+        pos_y_pct_u8,
         @intCast(pad_x_cfg),
         @intCast(pad_y_cfg),
         true,
     );
     state.syncPaneAux(pane, null);
-    state.syncSessionFloat(pane, true);
+    if (!state.syncSessionFloatChecked(pane, true)) {
+        rollbackCreatedFloat(state, pane);
+        return error.SesUnavailable;
+    }
+    pane_registered = true;
 
     return pane.uuid;
 }
@@ -880,26 +1002,11 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     const pad_y_cfg: u16 = visuals.pad_y;
     const border_color = visuals.border_color;
 
-    // Calculate outer frame size.
-    const avail_h = state.term_height - state.status_height;
-    const usable_w: u16 = if (shadow_enabled) (state.term_width -| 1) else state.term_width;
-    const usable_h: u16 = if (shadow_enabled and state.status_height == 0) (avail_h -| 1) else avail_h;
-    const outer_w = usable_w * width_pct / 100;
-    const outer_h = usable_h * height_pct / 100;
-
-    // Calculate position based on pos_x/pos_y percentages.
-    const max_x = usable_w -| outer_w;
-    const max_y = usable_h -| outer_h;
-    const outer_x = max_x * pos_x_pct / 100;
-    const outer_y = max_y * pos_y_pct / 100;
-
-    // Content area: 1 cell border + configurable padding.
-    const pad_x: u16 = 1 + pad_x_cfg;
-    const pad_y: u16 = 1 + pad_y_cfg;
-    const content_x = outer_x + pad_x;
-    const content_y = outer_y + pad_y;
-    const content_w = outer_w -| (pad_x * 2);
-    const content_h = outer_h -| (pad_y * 2);
+    const frame = state.floatFrameFromValues(width_pct, height_pct, pos_x_pct, pos_y_pct, pad_x_cfg, pad_y_cfg, shadow_enabled);
+    const width_pct_u8: u8 = @intCast(@min(width_pct, 100));
+    const height_pct_u8: u8 = @intCast(@min(height_pct, 100));
+    const pos_x_pct_u8: u8 = @intCast(@min(pos_x_pct, 100));
+    const pos_y_pct_u8: u8 = @intCast(@min(pos_y_pct, 100));
 
     const id: u16 = @intCast(100 + state.view.float_views.items.len);
 
@@ -925,13 +1032,20 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     if (!state.runtime.isConnected()) return error.SesUnavailable;
     const env_parent = if (float_def.attributes.inherit_env) parent_uuid else null;
     const result = try state.runtime.createPane(float_def.command, current_dir, sticky_pwd, sticky_key, null, isolation_profile, env_parent);
+    var pane_registered = false;
+    errdefer if (!pane_registered) state.runtime.killPane(result.uuid) catch |e| {
+        terminal_main.debugLogUuid(&result.uuid, "createNamedFloat rollback killPane failed: {s}", .{@errorName(e)});
+    };
     const vt_fd = state.runtime.getVtFd() orelse return error.SesUnavailable;
-    try pane.initWithPod(state.allocator, id, content_x, content_y, content_w, content_h, result.pane_id, vt_fd, result.uuid);
+    try pane.initWithPod(state.allocator, id, frame.content_x, frame.content_y, frame.content_w, frame.content_h, result.pane_id, vt_fd, result.uuid);
 
     // Persist sticky affinity metadata for better reclaim preference.
     if (sticky_pwd) |pwd| {
         if (sticky_key) |key| {
-            state.runtime.setSticky(result.uuid, pwd, key) catch {};
+            state.runtime.setSticky(result.uuid, pwd, key) catch |err| {
+                terminal_main.debugLogUuid(&result.uuid, "createNamedFloat setSticky failed: {s}", .{@errorName(err)});
+                state.notifications.show("Sticky float sync failed");
+            };
         }
     }
 
@@ -948,23 +1062,23 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
         (@as(u64, 1) << @intCast(state.activeTabIndex()))
     else
         0;
-    _ = state.setPaneFloatUi(result.uuid, .{
-        .border_x = outer_x,
-        .border_y = outer_y,
-        .border_w = outer_w,
-        .border_h = outer_h,
+    if (!state.setPaneFloatUi(result.uuid, .{
+        .border_x = frame.outer_x,
+        .border_y = frame.outer_y,
+        .border_w = frame.outer_w,
+        .border_h = frame.outer_h,
         .border_color = border_color,
-        .width_pct = @intCast(width_pct),
-        .height_pct = @intCast(height_pct),
-        .pos_x_pct = @intCast(pos_x_pct),
-        .pos_y_pct = @intCast(pos_y_pct),
+        .width_pct = width_pct_u8,
+        .height_pct = height_pct_u8,
+        .pos_x_pct = pos_x_pct_u8,
+        .pos_y_pct = pos_y_pct_u8,
         .pad_x = @intCast(pad_x_cfg),
         .pad_y = @intCast(pad_y_cfg),
         .pwd_dir = if (float_def.attributes.per_cwd) current_dir else null,
         .navigatable = float_def.attributes.navigatable,
         .float_style = style,
         .float_title = float_def.title,
-    });
+    })) return error.OutOfMemory;
 
     // Configure pane notifications.
     pane.configureNotificationsFromPop(&state.pop_config.pane.notification);
@@ -979,16 +1093,20 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
         float_def.attributes.sticky,
         float_def.attributes.per_cwd,
         float_def.key,
-        @intCast(width_pct),
-        @intCast(height_pct),
-        @intCast(pos_x_pct),
-        @intCast(pos_y_pct),
+        width_pct_u8,
+        height_pct_u8,
+        pos_x_pct_u8,
+        pos_y_pct_u8,
         @intCast(pad_x_cfg),
         @intCast(pad_y_cfg),
         true,
     );
     state.syncPaneAux(pane, parent_uuid);
-    state.syncSessionFloat(pane, true);
+    if (!state.syncSessionFloatChecked(pane, true)) {
+        rollbackCreatedFloat(state, pane);
+        return error.SesUnavailable;
+    }
+    pane_registered = true;
 }
 
 pub fn enterPaneSelectMode(state: *State, swap: bool) void {

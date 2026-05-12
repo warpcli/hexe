@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("core");
 const pop = @import("pop");
 const vaxis = @import("vaxis");
+const log = std.log.scoped(.terminal_input);
 
 pub fn handlePopupEvent(popups: *pop.PopupManager, event: vaxis.Event) bool {
     const key = popupKeyFromVaxisEvent(event) orelse return false;
@@ -90,7 +91,10 @@ fn textCodepointForForwarding(vk: vaxis.Key) ?u21 {
     // Prefer parser-provided text when available. This preserves shifted
     // punctuation (e.g. ':' vs ';') and non-ASCII text input.
     if (vk.text) |txt| {
-        var view = std.unicode.Utf8View.init(txt) catch return null;
+        var view = std.unicode.Utf8View.init(txt) catch |err| {
+            log.debug("failed to parse forwarded key text as UTF-8: {}", .{err});
+            return null;
+        };
         var it = view.iterator();
         const cp = it.nextCodepoint() orelse return null;
         if (it.nextCodepoint() != null) return null;

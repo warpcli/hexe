@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const xev = @import("xev").Dynamic;
+const log = std.log.scoped(.wire);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Protocol limits
@@ -12,11 +13,12 @@ pub const MAX_PAYLOAD_LEN: usize = @import("constants.zig").Sizes.max_payload_le
 
 /// Current protocol version. Increment when making breaking changes.
 /// Sent as second byte after handshake byte.
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 2;
 
-/// Minimum supported protocol version for backward compatibility.
-/// Clients with versions >= MIN_VERSION and <= PROTOCOL_VERSION are accepted.
-pub const MIN_PROTOCOL_VERSION: u8 = 1;
+/// Minimum supported protocol version.
+/// Version 2 adds password-mode VT frames; accepting older frontends would
+/// silently disable POD-side backlog/observer privacy guarantees.
+pub const MIN_PROTOCOL_VERSION: u8 = 2;
 
 /// Check if a client protocol version is supported.
 pub fn isProtocolVersionSupported(version: u8) bool {
@@ -122,7 +124,8 @@ pub const MsgType = enum(u16) {
     session_sync_float = 0x013A,
     session_remove_float = 0x013B,
     session_split_pane = 0x013D,
-    session_close_split_pane = 0x013E,
+    // 0x013E (session_close_split_pane) reserved — removed 2026-05;
+    // live split close is represented by kill_pane, dead pane cleanup by SES.
     session_replace_split_pane = 0x013F,
     session_set_split_ratio = 0x0140,
 
@@ -299,15 +302,6 @@ pub const SessionSplitPane = extern struct {
     focused_pane_uuid: [32]u8 align(1),
     active_tab: u16 align(1),
     dir: u8 align(1),
-    has_focused_pane: u8 align(1),
-};
-
-/// SessionCloseSplitPane: remove one split pane from the canonical split tree.
-pub const SessionCloseSplitPane = extern struct {
-    tab_uuid: [32]u8 align(1),
-    pane_uuid: [32]u8 align(1),
-    focused_pane_uuid: [32]u8 align(1),
-    active_tab: u16 align(1),
     has_focused_pane: u8 align(1),
 };
 
@@ -626,6 +620,7 @@ pub const ForwardedShellEvent = extern struct {
 /// PaneCwd response.
 /// Followed by: cwd bytes (cwd_len).
 pub const PaneCwd = extern struct {
+    uuid: [32]u8 align(1),
     cwd_len: u16 align(1),
 };
 
@@ -900,7 +895,11 @@ fn waitForReadable(fd: posix.fd_t, timeout_ms: i32) !void {
             result: xev.PollError!xev.PollEvent,
         ) xev.CallbackAction {
             const c = cb_ctx orelse return .disarm;
-            _ = result catch return .disarm;
+            _ = result catch |err| {
+                log.debug("waitForReadable: poll error: {}", .{err});
+                c.ready = true;
+                return .disarm;
+            };
             c.ready = true;
             return .disarm;
         }
@@ -914,7 +913,11 @@ fn waitForReadable(fd: posix.fd_t, timeout_ms: i32) !void {
             result: xev.Timer.RunError!void,
         ) xev.CallbackAction {
             const c = cb_ctx orelse return .disarm;
-            _ = result catch return .disarm;
+            _ = result catch |err| {
+                log.debug("waitForReadable: timer error: {}", .{err});
+                c.timed_out = true;
+                return .disarm;
+            };
             c.timed_out = true;
             return .disarm;
         }
@@ -965,7 +968,11 @@ fn waitDelayTimeout(timeout_ms: i32) !void {
             result: xev.Timer.RunError!void,
         ) xev.CallbackAction {
             const c = cctx orelse return .disarm;
-            _ = result catch return .disarm;
+            _ = result catch |err| {
+                log.debug("waitDelayTimeout: timer error: {}", .{err});
+                c.done = true;
+                return .disarm;
+            };
             c.done = true;
             return .disarm;
         }

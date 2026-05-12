@@ -296,42 +296,26 @@ if section == nil or section == "mux" then
     },
   })
 
-  hx.mux.tabs.add_segment("right", {
-    name = "virt",
-    priority = 12,
-    value = function(_)
-      local p = io.popen("systemd-detect-virt 2>/dev/null")
-      if not p then
-        return nil
-      end
-      local out = p:read("*a") or ""
-      p:close()
-      local virt = out:match("^%s*(.-)%s*$")
-      if virt == "" or virt == "none" then
-        return nil
-      end
-      if virt == "lxc" then
-        return { { text = " >> ", style = "bg:5 fg:0" } }
-      end
-      return { { text = " :: ", style = "bg:5 fg:0" } }
-    end,
-  })
-
-  hx.mux.tabs.add_segment("right", {
-    name = "cpu",
-    priority = 15,
-    builtin = function(_)
-      return hx.segment.builtin.cpu({ style = "bg:1 fg:0", prefix = " ", suffix = " " })
-    end,
-  })
-
-  hx.mux.tabs.add_segment("right", {
-    name = "mem",
-    priority = 20,
-    builtin = function(_)
-      return hx.segment.builtin.mem({ style = "bg:237 fg:250", prefix = " ", suffix = " " })
-    end,
-  })
+  -- hx.mux.tabs.add_segment("right", {
+  --   name = "virt",
+  --   priority = 12,
+  --   value = function(_)
+  --     local p = io.popen("systemd-detect-virt 2>/dev/null")
+  --     if not p then
+  --       return nil
+  --     end
+  --     local out = p:read("*a") or ""
+  --     p:close()
+  --     local virt = out:match("^%s*(.-)%s*$")
+  --     if virt == "" or virt == "none" then
+  --       return nil
+  --     end
+  --     if virt == "lxc" then
+  --       return { { text = " >> ", style = "bg:5 fg:0" } }
+  --     end
+  --     return { { text = " :: ", style = "bg:5 fg:0" } }
+  --   end,
+  -- })
 
   hx.mux.tabs.add_segment("right", {
     name = "battery",
@@ -341,11 +325,97 @@ if section == nil or section == "mux" then
     end,
   })
 
+  -- Helper function for fish-style path truncation
+  local function fish_style_truncate(path)
+    if not path or path == "" then return "/" end
+
+    -- Replace home with ~ (only if path is absolute and starts with HOME)
+    local home = os and os.getenv("HOME") or ""
+    local p = path
+    if home and home ~= "" and p:sub(1, home:len()) == home then
+      p = "~" .. p:sub(home:len() + 1)
+    end
+
+    -- Check if already starts with ~ or /
+    local starts_with_tilde = p:sub(1, 1) == "~"
+    local starts_with_slash = p:sub(1, 1) == "/"
+
+    -- Remove leading ~ or / for processing
+    local base = p
+    if starts_with_tilde then
+      base = p:sub(2)
+    elseif starts_with_slash then
+      base = p:sub(2)
+    end
+
+    -- Split by /
+    local components = {}
+    for comp in base:gmatch("[^/]+") do
+      table.insert(components, comp)
+    end
+
+    -- Handle empty or root
+    if #components == 0 then
+      return p:sub(1, 1)
+    end
+
+    -- Build truncated path
+    local result = {}
+    for i, comp in ipairs(components) do
+      if i < #components then
+        -- Truncate to first char (or .x for hidden dirs)
+        if comp:sub(1, 1) == "." and comp:len() > 1 then
+          table.insert(result, "." .. comp:sub(2, 2))
+        else
+          table.insert(result, comp:sub(1, 1))
+        end
+      else
+        -- Keep last component full
+        table.insert(result, comp)
+      end
+    end
+
+    -- Add leading ~ or /
+    local prefix = ""
+    if starts_with_tilde then
+      prefix = "~"
+    elseif starts_with_slash then
+      prefix = "/"
+    end
+
+    return prefix .. table.concat(result, "/")
+  end
+
   hx.mux.tabs.add_segment("right", {
-    name = "jobs_lua",
-    priority = 200,
-    builtin = function(_)
-      return hx.segment.builtin.jobs({ style = "fg:7", prefix = " " })
+    name = "directory",
+    priority = 50,
+    value = function(ctx)
+      -- Get cwd from context first
+      local cwd = ctx and ctx.cwd and ctx.cwd ~= "" and ctx.cwd or nil
+
+      -- If no cwd from context, try to get from PWD environment
+      if not cwd then
+        cwd = os and os.getenv and os.getenv("PWD") or nil
+      end
+
+      -- If still no path, try to get from pane
+      if not cwd and ctx and ctx.pane then
+        local p = ctx.pane(0)
+        if p and p.cwd and p.cwd ~= "" then
+          cwd = p.cwd
+        end
+      end
+
+      -- If we have a path, display it with fish-style truncation
+      if cwd and cwd ~= "" then
+        local truncated = fish_style_truncate(cwd)
+        return {
+          { text = " " .. truncated, style = "bg:237 fg:15" },
+          { text = " ", style = "bg:237 fg:15" }
+        }
+      end
+
+      return nil
     end,
   })
 end
@@ -510,13 +580,6 @@ if section == nil or section == "shp" then
       priority = 5,
       builtin = function(_)
         return hx.segment.builtin.git_status({ style = "bg:1 fg:0", prefix = " ", suffix = " " })
-      end,
-    },
-    {
-      name = "directory",
-      priority = 2,
-      builtin = function(_)
-        return hx.segment.builtin.directory({ style = "bg:237 fg:15", suffix = " " })
       end,
     },
   })

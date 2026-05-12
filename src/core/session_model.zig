@@ -1,4 +1,5 @@
 const std = @import("std");
+const log = std.log.scoped(.session_model);
 
 pub const SessionSplitDir = enum {
     horizontal,
@@ -837,7 +838,10 @@ fn nullableUuidField(obj: std.json.ObjectMap, key: []const u8) ?[32]u8 {
     const value = obj.get(key) orelse return null;
     return switch (value) {
         .null => null,
-        .string => |s| parseUuid(s) catch null,
+        .string => |s| parseUuid(s) catch |err| {
+            log.warn("failed to parse nullable uuid field '{s}': {}", .{ key, err });
+            return null;
+        },
         else => null,
     };
 }

@@ -167,6 +167,23 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run hexe");
     run_step.dependOn(&run_hexe.step);
 
+    // Optional runtime smoke: expects a SES daemon to be running for the
+    // current HEXE_INSTANCE and drives register/create/detach/reattach/adopt.
+    const session_protocol_smoke_module = b.createModule(.{
+        .root_source_file = b.path("src/tools/session_protocol_smoke.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    session_protocol_smoke_module.addImport("core", core_module);
+    const session_protocol_smoke_exe = b.addExecutable(.{
+        .name = "hexe-session-protocol-smoke",
+        .root_module = session_protocol_smoke_module,
+    });
+    const run_session_protocol_smoke = b.addRunArtifact(session_protocol_smoke_exe);
+    const session_protocol_smoke_step = b.step("session-protocol-smoke", "Run SES protocol detach/reattach smoke against an already-running daemon");
+    session_protocol_smoke_step.dependOn(&run_session_protocol_smoke.step);
+
     // Test step for session module error handling tests
     const ses_test_module = b.createModule(.{
         .root_source_file = b.path("src/modules/session/state_test.zig"),
@@ -180,6 +197,23 @@ pub fn build(b: *std.Build) void {
     });
 
     const run_ses_tests = b.addRunArtifact(ses_tests);
+
+    const ses_server_test_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/session/server.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    ses_server_test_module.addImport("core", core_module);
+    ses_server_test_module.addImport("xev", xev_mod);
+    if (libvoid_mod) |vb| {
+        ses_server_test_module.addImport("libvoid", vb);
+    }
+
+    const ses_server_tests = b.addTest(.{
+        .root_module = ses_server_test_module,
+    });
+    const run_ses_server_tests = b.addRunArtifact(ses_server_tests);
 
     // Wire protocol round-trip tests.
     const wire_test_module = b.createModule(.{
@@ -209,6 +243,7 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run hexe test suites");
     test_step.dependOn(&run_ses_tests.step);
+    test_step.dependOn(&run_ses_server_tests.step);
     test_step.dependOn(&run_wire_tests.step);
     test_step.dependOn(&run_fast_path_tests.step);
 }

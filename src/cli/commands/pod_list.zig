@@ -46,7 +46,9 @@ pub fn runPodList(allocator: std.mem.Allocator, where_lua: []const u8, probe: bo
     }
 
     if (json_output) {
-        outputJson(records.items);
+        outputJson(records.items) catch |err| {
+            print("Error: failed to write pod JSON: {s}\n", .{@errorName(err)});
+        };
         return;
     }
 
@@ -76,62 +78,62 @@ pub fn runPodList(allocator: std.mem.Allocator, where_lua: []const u8, probe: bo
     }
 }
 
-fn outputJson(records: []const PodRecord) void {
+fn outputJson(records: []const PodRecord) !void {
     const stdout = std.fs.File.stdout();
-    stdout.writeAll("[") catch return;
+    try stdout.writeAll("[");
     for (records, 0..) |r, i| {
-        if (i > 0) stdout.writeAll(",") catch return;
-        stdout.writeAll("\n  {") catch return;
+        if (i > 0) try stdout.writeAll(",");
+        try stdout.writeAll("\n  {");
         var buf: [256]u8 = undefined;
         const uuid_str = std.fmt.bufPrint(&buf, "\"uuid\":\"{s}\",", .{r.uuid[0..]}) catch continue;
-        stdout.writeAll(uuid_str) catch return;
+        try stdout.writeAll(uuid_str);
         // Escape JSON strings
-        stdout.writeAll("\"name\":\"") catch return;
-        writeJsonEscaped(stdout, r.name);
-        stdout.writeAll("\",") catch return;
+        try stdout.writeAll("\"name\":\"");
+        try writeJsonEscaped(stdout, r.name);
+        try stdout.writeAll("\",");
         const pid_str = std.fmt.bufPrint(&buf, "\"pid\":{d},", .{r.pid}) catch continue;
-        stdout.writeAll(pid_str) catch return;
+        try stdout.writeAll(pid_str);
         const child_pid_str = std.fmt.bufPrint(&buf, "\"child_pid\":{d},", .{r.child_pid}) catch continue;
-        stdout.writeAll(child_pid_str) catch return;
-        stdout.writeAll("\"cwd\":\"") catch return;
-        writeJsonEscaped(stdout, r.cwd);
-        stdout.writeAll("\",") catch return;
+        try stdout.writeAll(child_pid_str);
+        try stdout.writeAll("\"cwd\":\"");
+        try writeJsonEscaped(stdout, r.cwd);
+        try stdout.writeAll("\",");
         if (r.shell.len > 0) {
-            stdout.writeAll("\"shell\":\"") catch return;
-            writeJsonEscaped(stdout, r.shell);
-            stdout.writeAll("\",") catch return;
+            try stdout.writeAll("\"shell\":\"");
+            try writeJsonEscaped(stdout, r.shell);
+            try stdout.writeAll("\",");
         }
         const iso_str = std.fmt.bufPrint(&buf, "\"isolated\":{},", .{r.isolated}) catch continue;
-        stdout.writeAll(iso_str) catch return;
+        try stdout.writeAll(iso_str);
         if (r.alive) |a| {
             const alive_str = std.fmt.bufPrint(&buf, "\"alive\":{},", .{a}) catch continue;
-            stdout.writeAll(alive_str) catch return;
+            try stdout.writeAll(alive_str);
         }
-        stdout.writeAll("\"labels\":[") catch return;
+        try stdout.writeAll("\"labels\":[");
         for (r.labels, 0..) |lab, li| {
-            if (li > 0) stdout.writeAll(",") catch return;
-            stdout.writeAll("\"") catch return;
-            writeJsonEscaped(stdout, lab);
-            stdout.writeAll("\"") catch return;
+            if (li > 0) try stdout.writeAll(",");
+            try stdout.writeAll("\"");
+            try writeJsonEscaped(stdout, lab);
+            try stdout.writeAll("\"");
         }
-        stdout.writeAll("],") catch return;
+        try stdout.writeAll("],");
         const created_str = std.fmt.bufPrint(&buf, "\"created_at\":{d}}}", .{r.created_at}) catch continue;
-        stdout.writeAll(created_str) catch return;
+        try stdout.writeAll(created_str);
     }
-    stdout.writeAll("\n]\n") catch return;
+    try stdout.writeAll("\n]\n");
 }
 
-fn writeJsonEscaped(stdout: std.fs.File, s: []const u8) void {
+fn writeJsonEscaped(stdout: std.fs.File, s: []const u8) !void {
     for (s) |c| {
         switch (c) {
-            '"' => stdout.writeAll("\\\"") catch return,
-            '\\' => stdout.writeAll("\\\\") catch return,
-            '\n' => stdout.writeAll("\\n") catch return,
-            '\r' => stdout.writeAll("\\r") catch return,
-            '\t' => stdout.writeAll("\\t") catch return,
+            '"' => try stdout.writeAll("\\\""),
+            '\\' => try stdout.writeAll("\\\\"),
+            '\n' => try stdout.writeAll("\\n"),
+            '\r' => try stdout.writeAll("\\r"),
+            '\t' => try stdout.writeAll("\\t"),
             else => {
                 const buf = [1]u8{c};
-                stdout.writeAll(&buf) catch return;
+                try stdout.writeAll(&buf);
             },
         }
     }

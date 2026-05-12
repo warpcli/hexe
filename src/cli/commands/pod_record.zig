@@ -11,6 +11,7 @@ const print = std.debug.print;
 const RecordContext = struct {
     writer: *AsciicastWriter,
     capture_input: bool,
+    failed: ?anyerror = null,
 };
 
 pub fn runPodRecord(
@@ -38,7 +39,10 @@ pub fn runPodRecord(
     };
     defer client.close();
 
-    wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_OBSERVER) catch return;
+    wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_OBSERVER) catch |err| {
+        print("Error: failed to handshake with pod: {s}\n", .{@errorName(err)});
+        return;
+    };
     const conn = client.toConnection();
 
     const width = parseEnvU16("COLUMNS", 80);
@@ -51,7 +55,9 @@ pub fn runPodRecord(
         .command = "hexe pod record",
     });
     defer {
-        writer.flush() catch {};
+        writer.flush() catch |err| {
+            core.logging.logError("pod_record", "failed to flush recording", err);
+        };
         writer.deinit();
     }
 
@@ -68,6 +74,7 @@ pub fn runPodRecord(
         };
         if (n == 0) break;
         reader.feed(buf[0..n], @ptrCast(&ctx), podFrameCallback);
+        if (ctx.failed) |err| return err;
     }
 }
 
@@ -75,11 +82,15 @@ fn podFrameCallback(ctx_ptr: *anyopaque, frame: pod_protocol.Frame) void {
     const ctx: *RecordContext = @ptrCast(@alignCast(ctx_ptr));
     switch (frame.frame_type) {
         .output => {
-            ctx.writer.writeOutput(frame.payload) catch {};
+            ctx.writer.writeOutput(frame.payload) catch |err| {
+                ctx.failed = err;
+            };
         },
         .input => {
             if (ctx.capture_input) {
-                ctx.writer.writeInput(frame.payload) catch {};
+                ctx.writer.writeInput(frame.payload) catch |err| {
+                    ctx.failed = err;
+                };
             }
         },
         else => {},

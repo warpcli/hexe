@@ -82,10 +82,9 @@ fn clearStateForRestore(self: anytype) void {
         }
     }
 
-    self.setActiveTabIndex(0);
-    self.setActiveFloatingIndex(null);
-    self.runtime.setFocusedPaneUuid(null);
-    self.runtime.clearTabFocusMemory();
+    // Do not write through runtime setters here. Reattach has already loaded
+    // the authoritative snapshot into the projection, and those setters mutate
+    // active tab/float/focus fields on that snapshot.
 }
 
 fn deinitTabPreservingPanes(tab: *TabView) void {
@@ -98,16 +97,23 @@ fn deinitTabPreservingPanes(tab: *TabView) void {
     tab.popups.deinit();
 }
 
-fn captureExistingPaneViews(self: anytype, out: *ExistingPaneViews) void {
+fn captureExistingPaneViews(self: anytype, out: *ExistingPaneViews) bool {
     for (self.view.tab_views.items) |*tab| {
         var it = tab.layout.splits.valueIterator();
         while (it.next()) |pane_ptr| {
-            out.put(pane_ptr.*.uuid, pane_ptr.*) catch {};
+            out.put(pane_ptr.*.uuid, pane_ptr.*) catch |err| {
+                terminal_main.debugLog("captureExistingPaneViews: failed to record split pane: {s}", .{@errorName(err)});
+                return false;
+            };
         }
     }
     for (self.view.float_views.items) |pane| {
-        out.put(pane.uuid, pane) catch {};
+        out.put(pane.uuid, pane) catch |err| {
+            terminal_main.debugLog("captureExistingPaneViews: failed to record float pane: {s}", .{@errorName(err)});
+            return false;
+        };
     }
+    return true;
 }
 
 fn clearStatePreservingPanes(self: anytype) void {
@@ -189,6 +195,29 @@ fn hydratePaneMetadata(self: anytype, _: *Pane, uuid: [32]u8) void {
     }
 }
 
+fn orphanRestoredTabPanes(self: anytype, tab: *TabView, comptime context: []const u8) void {
+    var it = tab.layout.splits.valueIterator();
+    while (it.next()) |pane_ptr| {
+        const uuid = pane_ptr.*.uuid;
+        self.runtime.orphanPane(uuid) catch |err| {
+            terminal_main.debugLogUuid(&uuid, context ++ ": orphanPane rollback failed: {s}", .{@errorName(err)});
+        };
+    }
+}
+
+fn orphanRestoredPane(self: anytype, uuid: [32]u8, comptime context: []const u8) void {
+    self.runtime.orphanPane(uuid) catch |err| {
+        terminal_main.debugLogUuid(&uuid, context ++ ": orphanPane rollback failed: {s}", .{@errorName(err)});
+    };
+}
+
+fn orphanAdoptedPaneMap(self: anytype, uuid_pane_map: *std.AutoHashMap([32]u8, AdoptInfo), comptime context: []const u8) void {
+    var it = uuid_pane_map.keyIterator();
+    while (it.next()) |uuid_ptr| {
+        orphanRestoredPane(self, uuid_ptr.*, context);
+    }
+}
+
 fn ensureAdoptInfo(
     self: anytype,
     uuid: [32]u8,
@@ -211,16 +240,26 @@ fn ensureAdoptInfo(
             defer if (snap.fg_name) |s| self.allocator.free(s);
             if (snap.pane_id) |pane_id| {
                 const info = AdoptInfo{ .pane_id = pane_id };
-                uuid_pane_map.put(uuid, info) catch {};
+                uuid_pane_map.put(uuid, info) catch |err| {
+                    terminal_main.debugLog("ensureAdoptInfo: failed to cache snapshot pane uuid={s}: {s}", .{ uuid[0..8], @errorName(err) });
+                    return null;
+                };
                 return info;
             }
         }
     }
     if (self.runtime.adoptPane(uuid)) |adopt_res| {
         const info = AdoptInfo{ .pane_id = adopt_res.pane_id };
-        uuid_pane_map.put(uuid, info) catch {};
+        uuid_pane_map.put(uuid, info) catch |err| {
+            terminal_main.debugLog("ensureAdoptInfo: failed to cache adopted pane uuid={s}: {s}", .{ uuid[0..8], @errorName(err) });
+            self.runtime.orphanPane(adopt_res.uuid) catch |orphan_err| {
+                terminal_main.debugLogUuid(&adopt_res.uuid, "ensureAdoptInfo: rollback orphanPane failed after cache error: {s}", .{@errorName(orphan_err)});
+            };
+            return null;
+        };
         return info;
-    } else |_| {
+    } else |err| {
+        terminal_main.debugLogUuid(&uuid, "ensureAdoptInfo: adoptPane failed: {s}", .{@errorName(err)});
         return null;
     }
 }
@@ -239,8 +278,14 @@ fn ensureSplitPaneView(
     if (tab.layout.splits.contains(pane_uuid)) return true;
     if (used_uuids.contains(pane_uuid)) return false;
 
-    const info = ensureAdoptInfo(self, pane_uuid, uuid_pane_map, existing_views, attached_snapshot) orelse return false;
-    const vt_fd = self.runtime.getVtFd() orelse return false;
+    const info = ensureAdoptInfo(self, pane_uuid, uuid_pane_map, existing_views, attached_snapshot) orelse {
+        terminal_main.debugLogUuid(&pane_uuid, "ensureSplitPaneView: missing adopt info", .{});
+        return false;
+    };
+    const vt_fd = self.runtime.getVtFd() orelse {
+        terminal_main.debugLogUuid(&pane_uuid, "ensureSplitPaneView: missing VT fd", .{});
+        return false;
+    };
 
     const view_id = tab.layout.next_pane_view_id;
     tab.layout.next_pane_view_id +%= 1;
@@ -250,7 +295,8 @@ fn ensureSplitPaneView(
             if (views.fetchRemove(pane_uuid)) |entry| {
                 const pane = entry.value;
                 if (pane.getPaneId() != info.pane_id or !std.mem.eql(u8, &pane.uuid, &pane_uuid)) {
-                    pane.replaceWithPod(info.pane_id, vt_fd, pane_uuid) catch {
+                    pane.replaceWithPod(info.pane_id, vt_fd, pane_uuid) catch |err| {
+                        terminal_main.debugLogUuid(&pane_uuid, "ensureSplitPaneView: replaceWithPod failed: {s}", .{@errorName(err)});
                         pane.deinit();
                         self.allocator.destroy(pane);
                         return false;
@@ -261,10 +307,16 @@ fn ensureSplitPaneView(
             }
         }
 
-        const pane = self.allocator.create(Pane) catch return false;
-        errdefer self.allocator.destroy(pane);
+        const pane = self.allocator.create(Pane) catch |err| {
+            core.logging.logError("terminal", "ensureSplitPaneView failed to allocate pane", err);
+            return false;
+        };
 
-        pane.initWithPod(self.allocator, view_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, pane_uuid) catch return false;
+        pane.initWithPod(self.allocator, view_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, pane_uuid) catch |err| {
+            terminal_main.debugLogUuid(&pane_uuid, "ensureSplitPaneView: initWithPod failed: {s}", .{@errorName(err)});
+            self.allocator.destroy(pane);
+            return false;
+        };
         recyclePaneForSplit(self, tab, pane, view_id, pane_uuid, actual_focus_uuid);
         pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
         break :blk pane;
@@ -273,11 +325,19 @@ fn ensureSplitPaneView(
     hydratePaneMetadata(self, pane, pane_uuid);
 
     tab.layout.splits.put(pane_uuid, pane) catch {
+        terminal_main.debugLogUuid(&pane_uuid, "ensureSplitPaneView: failed to insert split pane", .{});
         pane.deinit();
         self.allocator.destroy(pane);
         return false;
     };
-    used_uuids.put(pane_uuid, {}) catch {};
+    used_uuids.put(pane_uuid, {}) catch |err| {
+        terminal_main.debugLogUuid(&pane_uuid, "ensureSplitPaneView: failed to mark uuid used: {s}", .{@errorName(err)});
+        if (tab.layout.splits.fetchRemove(pane_uuid)) |entry| {
+            entry.value.deinit();
+            self.allocator.destroy(entry.value);
+        }
+        return false;
+    };
 
     if (remembered_focus_uuid) |focus_uuid| {
         if (std.mem.eql(u8, &focus_uuid, &pane_uuid)) {
@@ -324,7 +384,10 @@ fn restoreLayoutNode(
                 actual_focus_uuid,
             );
             if (!ok) return null;
-            const restored = self.allocator.create(LayoutNode) catch return null;
+            const restored = self.allocator.create(LayoutNode) catch |err| {
+                core.logging.logError("terminal", "restoreLayoutNode failed to allocate pane node", err);
+                return null;
+            };
             restored.* = .{ .pane = pane_uuid };
             return restored;
         },
@@ -368,13 +431,22 @@ fn restoreFloatPane(
     actual_focus_uuid: ?[32]u8,
 ) ?*Pane {
     if (used_uuids.contains(float_state.pane_uuid)) return null;
-    const info = ensureAdoptInfo(self, float_state.pane_uuid, uuid_pane_map, existing_views, attached_snapshot) orelse return null;
-    const vt_fd = self.runtime.getVtFd() orelse return null;
+    const info = ensureAdoptInfo(self, float_state.pane_uuid, uuid_pane_map, existing_views, attached_snapshot) orelse {
+        terminal_main.debugLogUuid(&float_state.pane_uuid, "restoreFloatPane: missing adopt info", .{});
+        return null;
+    };
+    const vt_fd = self.runtime.getVtFd() orelse {
+        terminal_main.debugLogUuid(&float_state.pane_uuid, "restoreFloatPane: missing VT fd", .{});
+        return null;
+    };
     const preserved_title = blk: {
         if (existing_views) |views| {
             if (views.get(float_state.pane_uuid)) |existing_pane| {
                 if (self.paneFloatTitle(existing_pane)) |title| {
-                    break :blk self.allocator.dupe(u8, title) catch null;
+                    break :blk self.allocator.dupe(u8, title) catch |err| {
+                        core.logging.logError("terminal", "restoreFloatPane: failed to preserve float title", err);
+                        break :blk null;
+                    };
                 }
             }
         }
@@ -387,7 +459,8 @@ fn restoreFloatPane(
             if (views.fetchRemove(float_state.pane_uuid)) |entry| {
                 const pane = entry.value;
                 if (pane.getPaneId() != info.pane_id or !std.mem.eql(u8, &pane.uuid, &float_state.pane_uuid)) {
-                    pane.replaceWithPod(info.pane_id, vt_fd, float_state.pane_uuid) catch {
+                    pane.replaceWithPod(info.pane_id, vt_fd, float_state.pane_uuid) catch |err| {
+                        terminal_main.debugLogUuid(&float_state.pane_uuid, "restoreFloatPane: replaceWithPod failed: {s}", .{@errorName(err)});
                         pane.deinit();
                         self.allocator.destroy(pane);
                         return null;
@@ -397,11 +470,17 @@ fn restoreFloatPane(
             }
         }
 
-        const pane = self.allocator.create(Pane) catch return null;
-        errdefer self.allocator.destroy(pane);
+        const pane = self.allocator.create(Pane) catch |err| {
+            core.logging.logError("terminal", "restoreFloatPane failed to allocate pane", err);
+            return null;
+        };
 
         const local_id: u16 = @intCast(100 + self.view.float_views.items.len);
-        pane.initWithPod(self.allocator, local_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, float_state.pane_uuid) catch return null;
+        pane.initWithPod(self.allocator, local_id, 0, 0, self.layout_width, self.layout_height, info.pane_id, vt_fd, float_state.pane_uuid) catch |err| {
+            terminal_main.debugLogUuid(&float_state.pane_uuid, "restoreFloatPane: initWithPod failed: {s}", .{@errorName(err)});
+            self.allocator.destroy(pane);
+            return null;
+        };
         pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
         break :blk pane;
     };
@@ -433,7 +512,12 @@ fn restoreFloatPane(
     }
     _ = self.setPaneFloatTitle(pane.uuid, restored_title);
 
-    used_uuids.put(float_state.pane_uuid, {}) catch {};
+    used_uuids.put(float_state.pane_uuid, {}) catch |err| {
+        terminal_main.debugLogUuid(&float_state.pane_uuid, "restoreFloatPane: failed to mark uuid used: {s}", .{@errorName(err)});
+        pane.deinit();
+        self.allocator.destroy(pane);
+        return null;
+    };
     return pane;
 }
 
@@ -447,7 +531,10 @@ fn countSessionLayoutPanes(node: ?*const SessionLayoutNode) usize {
 
 fn layoutMatchesSnapshot(layout: *const layout_mod.Layout, node: ?*const LayoutNode, snapshot_node: ?*const SessionLayoutNode) bool {
     const live = node orelse return snapshot_node == null;
-    const expected = snapshot_node orelse return false;
+    const expected = snapshot_node orelse {
+        core.logging.warn("terminal", "reattach incremental snapshot check failed: live layout has extra node", .{});
+        return false;
+    };
 
     return switch (live.*) {
         .pane => |pane_uuid| switch (expected.*) {
@@ -484,7 +571,11 @@ fn canApplySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot
     }
 
     for (snapshot.tabs.items, 0..) |snapshot_tab, idx| {
-        if (!std.mem.eql(u8, &snapshot_tab.uuid, &(self.runtime.tabUuid(idx) orelse return false))) return false;
+        const live_tab_uuid = self.runtime.tabUuid(idx) orelse {
+            core.logging.warn("terminal", "reattach incremental snapshot check failed: live tab {d} has no session UUID", .{idx});
+            return false;
+        };
+        if (!std.mem.eql(u8, &snapshot_tab.uuid, &live_tab_uuid)) return false;
         if (!std.mem.eql(u8, snapshot_tab.name, self.runtime.tabName(idx) orelse "tab")) return false;
 
         const live_tab = &self.view.tab_views.items[idx];
@@ -632,7 +723,10 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     var reattach_result = result.?;
     defer reattach_result.deinit();
     terminal_main.debugLog("reattachSession: got parsed result with {d} panes", .{reattach_result.pane_uuids.len});
-    const snapshot = self.runtime.attachedSnapshot() orelse return false;
+    const snapshot = self.runtime.attachedSnapshot() orelse {
+        core.logging.warn("terminal", "reattachSession failed: daemon returned no attached snapshot", .{});
+        return false;
+    };
 
     // Check timeout after JSON parsing
     {
@@ -653,9 +747,14 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         }
     }
 
-    clearStateForRestore(self);
     const restored_name = normalizeRestoredSessionName(snapshot.session_name);
     const wanted_active_tab = snapshot.active_tab;
+    if (!self.runtime.setSessionIdentity(snapshot.uuid, restored_name)) {
+        terminal_main.debugLog("reattachSession: failed to set restored session identity before adoption", .{});
+        return false;
+    }
+
+    clearStateForRestore(self);
 
     var uuid_pane_map = std.AutoHashMap([32]u8, AdoptInfo).init(self.allocator);
     defer uuid_pane_map.deinit();
@@ -683,7 +782,14 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             continue;
         };
         terminal_main.debugLogUuid(&uuid, "reattachSession: adoptPane ok pane_id={d} vt_fd={?d}", .{ adopt_result.pane_id, self.runtime.currentVtFd() });
-        uuid_pane_map.put(uuid, .{ .pane_id = adopt_result.pane_id }) catch {};
+        uuid_pane_map.put(uuid, .{ .pane_id = adopt_result.pane_id }) catch |err| {
+            terminal_main.debugLog("reattachSession: failed to cache adopted pane uuid={s}: {s}", .{ uuid[0..8], @errorName(err) });
+            self.runtime.orphanPane(adopt_result.uuid) catch |orphan_err| {
+                terminal_main.debugLogUuid(&adopt_result.uuid, "reattachSession: rollback orphanPane failed after cache error: {s}", .{@errorName(orphan_err)});
+            };
+            failed_adoptions += 1;
+            continue;
+        };
     }
     terminal_main.debugLog("reattachSession: adopted {d} panes into uuid_pane_map", .{uuid_pane_map.count()});
 
@@ -705,6 +811,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         if (elapsed > 30000) {
             terminal_main.debugLog("reattachSession: timeout after pane adoption ({d}ms > 30s), aborting", .{elapsed});
             self.notifications.showFor("Reattach timeout: pane adoption took too long", 5000);
+            orphanAdoptedPaneMap(self, &uuid_pane_map, "reattachSession adoption timeout");
             return false;
         } else if (elapsed > 10000) {
             const msg = std.fmt.allocPrint(
@@ -748,7 +855,9 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         }
 
         if (tab.layout.root == null and tab.layout.splits.count() > 0) {
-            const node = self.allocator.create(LayoutNode) catch {
+            const node = self.allocator.create(LayoutNode) catch |err| {
+                core.logging.logError("terminal", "reattachSession failed to allocate fallback tab root", err);
+                orphanRestoredTabPanes(self, &tab, "reattachSession fallback root allocation");
                 tab.deinit();
                 continue;
             };
@@ -756,7 +865,9 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
             tab.layout.root = node;
         }
 
-        self.view.tab_views.append(self.allocator, tab) catch {
+        self.view.tab_views.append(self.allocator, tab) catch |err| {
+            core.logging.logError("terminal", "reattachSession failed to append restored tab", err);
+            orphanRestoredTabPanes(self, &tab, "reattachSession restored tab append");
             tab.deinit();
             continue;
         };
@@ -764,7 +875,9 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     for (snapshot.floats.items) |float_state| {
         const pane = restoreFloatPane(self, float_state, &uuid_pane_map, null, false, &used_uuids, snapshot.focused_pane_uuid) orelse continue;
-        self.view.float_views.append(self.allocator, pane) catch {
+        self.view.float_views.append(self.allocator, pane) catch |err| {
+            core.logging.logError("terminal", "reattachSession failed to append restored float", err);
+            orphanRestoredPane(self, pane.uuid, "reattachSession restored float append");
             pane.deinit();
             self.allocator.destroy(pane);
             continue;
@@ -819,6 +932,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         terminal_main.debugLog("reattachSession: CRITICAL - all tabs removed, creating new tab", .{});
         self.createTab() catch {
             terminal_main.debugLog("reattachSession: FAILED to create recovery tab", .{});
+            orphanAdoptedPaneMap(self, &uuid_pane_map, "reattachSession recovery tab creation");
             return false;
         };
         self.notifications.showFor("Warning: All tabs were empty, created new tab", 5000);
@@ -865,8 +979,6 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         self.rememberFloatingFocus(self.view.float_views.items[idx]);
     }
 
-    if (!self.runtime.setSessionIdentity(snapshot.uuid, restored_name)) return false;
-
     self.renderer.invalidate();
     self.force_full_render = true;
 
@@ -876,9 +988,8 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
     {
         const elapsed = std.time.milliTimestamp() - reattach_start;
         if (elapsed > 30000) {
-            terminal_main.debugLog("reattachSession: timeout after layout restore ({d}ms > 30s), aborting", .{elapsed});
-            self.notifications.showFor("Reattach timeout: layout restoration took too long", 5000);
-            return false;
+            terminal_main.debugLog("reattachSession: timeout after layout restore ({d}ms > 30s), continuing to finalize restored session", .{elapsed});
+            self.notifications.showFor("Reattach slow: finalizing restored session", 5000);
         } else if (elapsed > 10000) {
             const msg = std.fmt.allocPrint(
                 self.allocator,
@@ -893,6 +1004,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     if (self.view.tab_views.items.len == 0) {
         terminal_main.debugLog("reattachSession: no tabs restored, returning false", .{});
+        orphanAdoptedPaneMap(self, &uuid_pane_map, "reattachSession no restored tabs");
         return false;
     }
 
@@ -933,7 +1045,10 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 }
 
 pub fn applySessionSnapshot(self: anytype) bool {
-    const snapshot = self.runtime.attachedSnapshot() orelse return false;
+    const snapshot = self.runtime.attachedSnapshot() orelse {
+        core.logging.warn("terminal", "applySessionSnapshot skipped: no attached snapshot", .{});
+        return false;
+    };
 
     if (applySnapshotIncrementally(self, snapshot)) {
         terminal_main.debugLog("applySessionSnapshot: incrementally applied tabs={d} floats={d}", .{ self.view.tab_views.items.len, self.view.float_views.items.len });
@@ -952,7 +1067,10 @@ pub fn applySessionSnapshot(self: anytype) bool {
         destroyUnusedPaneViews(self, &existing_views);
         existing_views.deinit();
     }
-    captureExistingPaneViews(self, &existing_views);
+    if (!captureExistingPaneViews(self, &existing_views)) {
+        terminal_main.debugLog("applySessionSnapshot: failed to capture existing pane views", .{});
+        return false;
+    }
     clearStatePreservingPanes(self);
 
     const wanted_active_tab = snapshot.active_tab;
@@ -993,7 +1111,8 @@ pub fn applySessionSnapshot(self: anytype) bool {
         }
 
         if (tab.layout.root == null and tab.layout.splits.count() > 0) {
-            const node = self.allocator.create(LayoutNode) catch {
+            const node = self.allocator.create(LayoutNode) catch |err| {
+                core.logging.logError("terminal", "applySessionSnapshot failed to allocate fallback tab root", err);
                 tab.deinit();
                 continue;
             };
@@ -1001,7 +1120,8 @@ pub fn applySessionSnapshot(self: anytype) bool {
             tab.layout.root = node;
         }
 
-        self.view.tab_views.append(self.allocator, tab) catch {
+        self.view.tab_views.append(self.allocator, tab) catch |err| {
+            core.logging.logError("terminal", "applySessionSnapshot failed to append restored tab", err);
             tab.deinit();
             continue;
         };
@@ -1009,7 +1129,8 @@ pub fn applySessionSnapshot(self: anytype) bool {
 
     for (snapshot.floats.items) |float_state| {
         const pane = restoreFloatPane(self, float_state, &uuid_pane_map, &existing_views, true, &used_uuids, snapshot.focused_pane_uuid) orelse continue;
-        self.view.float_views.append(self.allocator, pane) catch {
+        self.view.float_views.append(self.allocator, pane) catch |err| {
+            core.logging.logError("terminal", "applySessionSnapshot failed to append restored float", err);
             pane.deinit();
             self.allocator.destroy(pane);
             continue;
@@ -1062,12 +1183,17 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
 
     // Get list of orphaned panes and find matching UUID.
     var tabs: [32]OrphanedPaneInfo = undefined;
-    const count = self.runtime.listOrphanedPanes(&tabs) catch return false;
+    const count = self.runtime.listOrphanedPanes(&tabs) catch |err| {
+        core.logging.logError("terminal", "attachOrphanedPane failed to list orphaned panes", err);
+        return false;
+    };
 
     for (tabs[0..count]) |p| {
         if (std.mem.startsWith(u8, &p.uuid, uuid_prefix)) {
-            // Found matching pane, adopt it.
-            const result = self.runtime.adoptPane(p.uuid) catch return false;
+            const vt_fd = self.runtime.getVtFd() orelse {
+                terminal_main.debugLogUuid(&p.uuid, "attachOrphanedPane: missing VT fd", .{});
+                return false;
+            };
 
             // Create a new tab with this pane.
             const tab_uuid = core.ipc.generateUuid();
@@ -1080,13 +1206,31 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             }
             tab.layout.setPanePopConfig(&self.pop_config.pane.notification);
 
-            const vt_fd = self.runtime.getVtFd() orelse return false;
-
-            const pane = self.allocator.create(Pane) catch return false;
+            const pane = self.allocator.create(Pane) catch |err| {
+                core.logging.logError("terminal", "attachOrphanedPane failed to allocate pane", err);
+                return false;
+            };
             var pane_needs_cleanup = true;
             defer if (pane_needs_cleanup) self.allocator.destroy(pane);
 
-            pane.initWithPod(self.allocator, 0, 0, 0, self.layout_width, self.layout_height, result.pane_id, vt_fd, result.uuid) catch {
+            const node = self.allocator.create(LayoutNode) catch |err| {
+                core.logging.logError("terminal", "attachOrphanedPane failed to allocate layout node", err);
+                return false;
+            };
+            var node_needs_cleanup = true;
+            defer if (node_needs_cleanup) self.allocator.destroy(node);
+
+            // Found matching pane, adopt it only after local prerequisites are ready.
+            const result = self.runtime.adoptPane(p.uuid) catch |err| {
+                terminal_main.debugLogUuid(&p.uuid, "attachOrphanedPane adoptPane failed: {s}", .{@errorName(err)});
+                return false;
+            };
+
+            pane.initWithPod(self.allocator, 0, 0, 0, self.layout_width, self.layout_height, result.pane_id, vt_fd, result.uuid) catch |err| {
+                terminal_main.debugLogUuid(&result.uuid, "attachOrphanedPane initWithPod failed: {s}", .{@errorName(err)});
+                self.runtime.orphanPane(result.uuid) catch |e| {
+                    terminal_main.debugLogUuid(&result.uuid, "attachOrphanedPaneAsTab rollback orphanPane failed: {s}", .{@errorName(e)});
+                };
                 return false;
             };
 
@@ -1109,35 +1253,60 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
             pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
 
             // Add pane to layout manually.
-            tab.layout.splits.put(pane.uuid, pane) catch {
+            tab.layout.splits.put(pane.uuid, pane) catch |err| {
+                terminal_main.debugLogUuid(&pane.uuid, "attachOrphanedPane failed to insert split pane: {s}", .{@errorName(err)});
+                self.runtime.orphanPane(result.uuid) catch |e| {
+                    terminal_main.debugLogUuid(&result.uuid, "attachOrphanedPaneAsTab rollback orphanPane failed: {s}", .{@errorName(e)});
+                };
                 pane.deinit();
                 return false;
             };
             // Pane is now owned by tab, no longer needs separate cleanup
             pane_needs_cleanup = false;
 
-            const node = self.allocator.create(LayoutNode) catch return false;
             node.* = .{ .pane = pane.uuid };
+            node_needs_cleanup = false;
             tab.layout.root = node;
             tab.layout.focused_pane_uuid = pane.uuid;
             tab.layout.next_pane_view_id = 1;
 
-            self.view.tab_views.append(self.allocator, tab) catch return false;
+            self.view.tab_views.append(self.allocator, tab) catch |err| {
+                core.logging.logError("terminal", "attachOrphanedPane failed to append tab", err);
+                self.runtime.orphanPane(result.uuid) catch |e| {
+                    terminal_main.debugLogUuid(&result.uuid, "attachOrphanedPaneAsTab rollback orphanPane failed: {s}", .{@errorName(e)});
+                };
+                return false;
+            };
             // Tab is now owned by tabs array, no longer needs cleanup
             tab_needs_cleanup = false;
             if (!self.runtime.appendTabMeta(tab_uuid, "attached")) {
+                self.runtime.orphanPane(result.uuid) catch |e| {
+                    terminal_main.debugLogUuid(&result.uuid, "attachOrphanedPaneAsTab rollback orphanPane failed: {s}", .{@errorName(e)});
+                };
                 var failed_tab = self.view.tab_views.pop().?;
                 failed_tab.deinit();
                 return false;
             }
             if (!self.runtime.appendTabFocusMemory()) {
+                self.runtime.orphanPane(result.uuid) catch |e| {
+                    terminal_main.debugLogUuid(&result.uuid, "attachOrphanedPaneAsTab rollback orphanPane failed: {s}", .{@errorName(e)});
+                };
                 self.runtime.removeTabMeta(self.view.tab_views.items.len - 1);
                 var failed_tab = self.view.tab_views.pop().?;
                 failed_tab.deinit();
                 return false;
             }
             self.setActiveTabIndex(self.view.tab_views.items.len - 1);
-            self.syncSessionTabAdded(tab_uuid, self.runtime.tabName(self.activeTabIndex()) orelse "tab", pane.uuid);
+            if (!self.syncSessionTabAddedChecked(tab_uuid, self.runtime.tabName(self.activeTabIndex()) orelse "tab", pane.uuid)) {
+                self.runtime.orphanPane(result.uuid) catch |e| {
+                    terminal_main.debugLogUuid(&result.uuid, "attachOrphanedPaneAsTab rollback orphanPane failed: {s}", .{@errorName(e)});
+                };
+                self.runtime.removeTabFocusMemory(self.view.tab_views.items.len - 1);
+                self.runtime.removeTabMeta(self.view.tab_views.items.len - 1);
+                var failed_tab = self.view.tab_views.pop().?;
+                failed_tab.deinit();
+                return false;
+            }
             self.renderer.invalidate();
             self.force_full_render = true;
             return true;

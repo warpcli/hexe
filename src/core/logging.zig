@@ -110,7 +110,10 @@ fn ensureBackend() ?*logly.Logger {
     if (backend_logger) |logger| return logger;
 
     backend_config = makeConfig();
-    const logger = logly.Logger.initWithConfig(backend_allocator, backend_config) catch return null;
+    const logger = logly.Logger.initWithConfig(backend_allocator, backend_config) catch |init_err| {
+        std.debug.print("[error][logging] failed to initialize logging backend: {s}\n", .{@errorName(init_err)});
+        return null;
+    };
     logger.setLogCallback(callbackWriteRecord);
     backend_logger = logger;
     return logger;

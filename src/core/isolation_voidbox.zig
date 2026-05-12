@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
 const voidbox = @import("libvoid");
+const log = std.log.scoped(.isolation_voidbox);
 
 // ============================================================================
 // Public API
@@ -60,7 +61,10 @@ pub fn applyParentCgroups(child_pid: posix.pid_t, pane_uuid: ?[]const u8) void {
 
     const allocator = std.heap.c_allocator;
 
-    const rel = readCgroupV2Path(allocator) catch return;
+    const rel = readCgroupV2Path(allocator) catch |err| {
+        log.debug("failed to read voidbox cgroup v2 path: {}", .{err});
+        return;
+    };
     defer allocator.free(rel);
 
     const uuid_short = if (pane_uuid) |uuid| uuid[0..@min(uuid.len, 8)] else "unknown";
@@ -68,25 +72,43 @@ pub fn applyParentCgroups(child_pid: posix.pid_t, pane_uuid: ?[]const u8) void {
         allocator,
         "/sys/fs/cgroup{s}/hexe/pod-{s}",
         .{ rel, uuid_short },
-    ) catch return;
+    ) catch |err| {
+        log.warn("failed to allocate voidbox cgroup path: {}", .{err});
+        return;
+    };
     defer allocator.free(dir_path);
 
-    std.fs.cwd().makePath(dir_path) catch return;
+    std.fs.cwd().makePath(dir_path) catch |err| {
+        log.debug("failed to create voidbox cgroup path {s}: {}", .{ dir_path, err });
+        return;
+    };
 
     var buf: [128]u8 = undefined;
-    const pid_line = std.fmt.bufPrint(&buf, "{d}\n", .{child_pid}) catch return;
+    const pid_line = std.fmt.bufPrint(&buf, "{d}\n", .{child_pid}) catch |err| {
+        log.warn("failed to format voidbox cgroup child pid: {}", .{err});
+        return;
+    };
     _ = tryWriteCgroupFile(dir_path, "cgroup.procs", pid_line);
 
     if (posix.getenv("HEXE_CGROUP_MEM_MAX")) |mem| {
-        const line = std.fmt.bufPrint(&buf, "{s}\n", .{mem}) catch return;
+        const line = std.fmt.bufPrint(&buf, "{s}\n", .{mem}) catch |err| {
+            log.warn("failed to format voidbox memory.max cgroup value: {}", .{err});
+            return;
+        };
         _ = tryWriteCgroupFile(dir_path, "memory.max", line);
     }
     if (posix.getenv("HEXE_CGROUP_PIDS_MAX")) |pids| {
-        const line = std.fmt.bufPrint(&buf, "{s}\n", .{pids}) catch return;
+        const line = std.fmt.bufPrint(&buf, "{s}\n", .{pids}) catch |err| {
+            log.warn("failed to format voidbox pids.max cgroup value: {}", .{err});
+            return;
+        };
         _ = tryWriteCgroupFile(dir_path, "pids.max", line);
     }
     if (posix.getenv("HEXE_CGROUP_CPU_MAX")) |cpu| {
-        const line = std.fmt.bufPrint(&buf, "{s}\n", .{cpu}) catch return;
+        const line = std.fmt.bufPrint(&buf, "{s}\n", .{cpu}) catch |err| {
+            log.warn("failed to format voidbox cpu.max cgroup value: {}", .{err});
+            return;
+        };
         _ = tryWriteCgroupFile(dir_path, "cpu.max", line);
     }
 }
@@ -200,7 +222,10 @@ fn buildFsActions(allocator: std.mem.Allocator, profile: []const u8) ![]const vo
 }
 
 fn dirExists(path: []const u8) bool {
-    std.fs.accessAbsolute(path, .{}) catch return false;
+    std.fs.accessAbsolute(path, .{}) catch |err| {
+        log.debug("directory not accessible for voidbox bind {s}: {}", .{ path, err });
+        return false;
+    };
     return true;
 }
 
@@ -225,9 +250,18 @@ fn readCgroupV2Path(allocator: std.mem.Allocator) ![]u8 {
 
 fn tryWriteCgroupFile(dir_path: []const u8, file_name: []const u8, data: []const u8) bool {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir_path, file_name }) catch return false;
-    var file = std.fs.openFileAbsolute(path, .{ .mode = .write_only }) catch return false;
+    const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir_path, file_name }) catch |err| {
+        log.debug("failed to format voidbox cgroup file path for {s}/{s}: {}", .{ dir_path, file_name, err });
+        return false;
+    };
+    var file = std.fs.openFileAbsolute(path, .{ .mode = .write_only }) catch |err| {
+        log.debug("failed to open voidbox cgroup file {s}: {}", .{ path, err });
+        return false;
+    };
     defer file.close();
-    file.writeAll(data) catch return false;
+    file.writeAll(data) catch |err| {
+        log.debug("failed to write voidbox cgroup file {s}: {}", .{ path, err });
+        return false;
+    };
     return true;
 }

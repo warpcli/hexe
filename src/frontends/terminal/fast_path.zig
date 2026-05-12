@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const core = @import("core");
+const log = std.log.scoped(.terminal_fast_path);
 
 const BindKey = core.Config.BindKey;
 const BindKeyKind = core.Config.BindKeyKind;
@@ -47,7 +48,10 @@ pub fn fastPathBytes(out: []u8, mods: u8, key: BindKey, text_codepoint: ?u21) ?u
         out[n] = 0x1b;
         n += 1;
     }
-    const written = std.unicode.utf8Encode(cp, out[n..]) catch return null;
+    const written = std.unicode.utf8Encode(cp, out[n..]) catch |err| {
+        log.debug("failed to encode fast-path key codepoint {d}: {}", .{ cp, err });
+        return null;
+    };
     n += written;
     return if (n > 0) n else null;
 }

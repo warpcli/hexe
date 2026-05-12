@@ -51,7 +51,7 @@ pub fn renderFrame(vx: *vaxis.Vaxis, stdout: std.fs.File, cursor: anytype, force
     var write_buf: [8192]u8 = undefined;
     var writer = stdout.writer(&write_buf);
     try vx.render(&writer.interface);
-    writer.interface.flush() catch {};
+    try writer.interface.flush();
 
     vx.refresh = false;
 }

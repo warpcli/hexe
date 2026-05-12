@@ -16,7 +16,30 @@ threadlocal var PARSE_ERROR: ?[]const u8 = null;
 
 fn setParseError(allocator: std.mem.Allocator, msg: []const u8) void {
     if (PARSE_ERROR != null) return;
-    PARSE_ERROR = allocator.dupe(u8, msg) catch null;
+    PARSE_ERROR = allocator.dupe(u8, msg) catch |err| {
+        log.warn("failed to allocate config parse error message: {}", .{err});
+        return;
+    };
+}
+
+fn dupeStatusMessage(allocator: std.mem.Allocator, msg: []const u8) ?[]const u8 {
+    return allocator.dupe(u8, msg) catch |err| {
+        log.warn("failed to allocate config status message: {}", .{err});
+        return null;
+    };
+}
+
+fn dupeConfigString(allocator: std.mem.Allocator, value: []const u8, comptime context: []const u8) ?[]u8 {
+    return allocator.dupe(u8, value) catch |err| {
+        log.warn(context ++ ": {}", .{err});
+        return null;
+    };
+}
+
+fn dupeTrimmedConfigString(allocator: std.mem.Allocator, value: []const u8, comptime context: []const u8) ?[]u8 {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return dupeConfigString(allocator, trimmed, context);
 }
 
 /// Output definition for status modules (style + format pair)
@@ -389,9 +412,6 @@ pub const NotificationConfig = struct {
     },
 };
 
-/// Panes configuration (placeholder for future use)
-pub const PanesConfig = struct {};
-
 // ===== Layout definitions for ses section =====
 
 /// Single pane in a layout
@@ -535,17 +555,26 @@ pub const SesConfig = struct {
     pub fn load(allocator: std.mem.Allocator) SesConfig {
         var config = SesConfig{};
 
-        var runtime = LuaRuntime.init(allocator) catch return config;
+        var runtime = LuaRuntime.init(allocator) catch |err| {
+            log.warn("failed to initialize ses config Lua runtime: {s}", .{@errorName(err)});
+            return config;
+        };
         defer runtime.deinit();
 
         // Set section to "ses"
         runtime.setHexeSection("ses");
 
         // Load global config
-        const config_path = lua_runtime.getConfigPath(allocator, "init.lua") catch return config;
+        const config_path = lua_runtime.getConfigPath(allocator, "init.lua") catch |err| {
+            log.warn("failed to resolve ses config path: {s}", .{@errorName(err)});
+            return config;
+        };
         defer allocator.free(config_path);
 
-        runtime.loadConfig(config_path) catch return config;
+        runtime.loadConfig(config_path) catch |err| {
+            log.warn("failed to load ses config {s}: {s}", .{ config_path, @errorName(err) });
+            return config;
+        };
 
         if (!shouldLoadLocalConfig()) {
             if (runtime.getBuilder()) |builder| {
@@ -559,7 +588,10 @@ pub const SesConfig = struct {
         }
 
         // Try to load local .hexe.lua from current directory
-        const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;
+        const local_path = allocator.dupe(u8, ".hexe.lua") catch |err| {
+            log.warn("failed to allocate local ses config path: {s}", .{@errorName(err)});
+            return config;
+        };
         defer allocator.free(local_path);
 
         // Check if local config exists
@@ -799,13 +831,13 @@ pub const Config = struct {
 
         const runtime_ptr = allocator.create(LuaRuntime) catch {
             config.status = .@"error";
-            config.status_message = allocator.dupe(u8, "failed to allocate Lua runtime") catch null;
+            config.status_message = dupeStatusMessage(allocator, "failed to allocate Lua runtime");
             return config;
         };
         runtime_ptr.* = LuaRuntime.init(allocator) catch {
             allocator.destroy(runtime_ptr);
             config.status = .@"error";
-            config.status_message = allocator.dupe(u8, "failed to initialize Lua") catch null;
+            config.status_message = dupeStatusMessage(allocator, "failed to initialize Lua");
             return config;
         };
         var runtime = runtime_ptr;
@@ -823,7 +855,7 @@ pub const Config = struct {
                 else => {
                     config.status = .@"error";
                     if (runtime.last_error) |msg| {
-                        config.status_message = allocator.dupe(u8, msg) catch null;
+                        config.status_message = dupeStatusMessage(allocator, msg);
                     }
                 },
             }
@@ -846,7 +878,10 @@ pub const Config = struct {
         }
 
         // Try to load local .hexe.lua from current directory
-        const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;
+        const local_path = allocator.dupe(u8, ".hexe.lua") catch |err| {
+            log.warn("failed to allocate local terminal config path: {s}", .{@errorName(err)});
+            return config;
+        };
         defer allocator.free(local_path);
 
         log.debug("checking for local config: {s}", .{local_path});
@@ -949,7 +984,7 @@ pub const Config = struct {
                 runtime.pop();
             } else {
                 config.status = .@"error";
-                config.status_message = runtime.allocator.dupe(u8, "no 'mux' section in config") catch null;
+                config.status_message = dupeStatusMessage(runtime.allocator, "no 'mux' section in config");
                 return config;
             }
             runtime.pop(); // Pop global config table
@@ -1107,7 +1142,9 @@ fn parseBinds(runtime: *LuaRuntime, allocator: std.mem.Allocator, existing: []co
     // Add existing binds first
     log.debug("parseBinds: starting with {} existing binds", .{existing.len});
     for (existing) |bind| {
-        list.append(allocator, bind) catch {};
+        list.append(allocator, bind) catch |err| {
+            log.warn("parseBinds: failed to keep existing bind: {s}", .{@errorName(err)});
+        };
     }
 
     const len = runtime.getArrayLen(-1);
@@ -1117,7 +1154,9 @@ fn parseBinds(runtime: *LuaRuntime, allocator: std.mem.Allocator, existing: []co
         if (runtime.pushArrayElement(-1, i)) {
             if (parseBind(runtime, allocator)) |bind| {
                 log.debug("parseBinds: successfully parsed bind #{}", .{i});
-                list.append(allocator, bind) catch {};
+                list.append(allocator, bind) catch |err| {
+                    log.warn("parseBinds: failed to append bind #{}: {s}", .{ i, @errorName(err) });
+                };
             } else {
                 log.warn("parseBinds: failed to parse bind #{}", .{i});
             }
@@ -1298,20 +1337,30 @@ fn parseStringList(runtime: *LuaRuntime, allocator: std.mem.Allocator, key: [:0]
         for (1..len + 1) |i| {
             if (runtime.pushArrayElement(-1, i)) {
                 if (runtime.toStringAt(-1)) |s| {
-                    const dup = allocator.dupe(u8, s) catch null;
+                    const dup = dupeConfigString(allocator, s, "failed to allocate config string-list item");
                     if (dup) |d| {
-                        out.append(allocator, d) catch allocator.free(d);
+                        out.append(allocator, d) catch |err| {
+                            log.warn("failed to append config string-list item: {}", .{err});
+                            allocator.free(d);
+                        };
                     }
                 }
                 runtime.pop();
             }
         }
-        return out.toOwnedSlice(allocator) catch null;
+        return out.toOwnedSlice(allocator) catch |err| {
+            log.warn("failed to finalize config string list: {}", .{err});
+            return null;
+        };
     }
 
     if (runtime.getString(-1, key)) |s| {
-        const one = allocator.dupe(u8, s) catch return null;
-        const slice = allocator.alloc([]u8, 1) catch {
+        const one = allocator.dupe(u8, s) catch |err| {
+            log.warn("failed to allocate string list value for {s}: {s}", .{ key, @errorName(err) });
+            return null;
+        };
+        const slice = allocator.alloc([]u8, 1) catch |err| {
+            log.warn("failed to allocate string list wrapper for {s}: {s}", .{ key, @errorName(err) });
             allocator.free(one);
             return null;
         };
@@ -1494,7 +1543,10 @@ fn parseFloatStyle(runtime: *LuaRuntime, allocator: std.mem.Allocator) FloatStyl
             defer runtime.pop();
             const len = runtime.getArrayLen(-1);
             if (len > 0) {
-                const segs = allocator.alloc(Segment, len) catch null;
+                const segs = allocator.alloc(Segment, len) catch |err| blk: {
+                    log.warn("failed to allocate float title segment list: {}", .{err});
+                    break :blk null;
+                };
                 if (segs) |arr| {
                     var count: usize = 0;
                     for (1..len + 1) |i| {
@@ -1531,26 +1583,25 @@ fn parseFloatStyle(runtime: *LuaRuntime, allocator: std.mem.Allocator) FloatStyl
 fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocator, default_name: ?[]const u8) ?Segment {
     const name = runtime.getStringAlloc(-1, "name") orelse blk: {
         if (default_name) |dn| {
-            break :blk allocator.dupe(u8, dn) catch return null;
+            break :blk allocator.dupe(u8, dn) catch |err| {
+                log.warn("failed to allocate default status segment name: {s}", .{@errorName(err)});
+                return null;
+            };
         }
         return null;
     };
 
     var value_code: ?[]const u8 = blk: {
         if (runtime.getString(-1, "value")) |v| {
-            const trimmed = std.mem.trim(u8, v, " \t\r\n");
-            if (trimmed.len == 0) break :blk null;
-            break :blk allocator.dupe(u8, trimmed) catch null;
+            break :blk dupeTrimmedConfigString(allocator, v, "failed to allocate status segment value code");
         }
         if (runtime.pushTable(-1, "value")) {
             defer runtime.pop();
             if (runtime.getString(-1, "lua")) |v| {
-                const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                if (trimmed.len > 0) break :blk allocator.dupe(u8, trimmed) catch null;
+                if (dupeTrimmedConfigString(allocator, v, "failed to allocate status segment lua value code")) |code| break :blk code;
             }
             if (runtime.getString(-1, "fn")) |v| {
-                const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                if (trimmed.len > 0) break :blk allocator.dupe(u8, trimmed) catch null;
+                if (dupeTrimmedConfigString(allocator, v, "failed to allocate status segment fn value code")) |code| break :blk code;
             }
         }
         break :blk null;
@@ -1562,8 +1613,7 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         defer runtime.pop();
         source_builtin = runtime.getStringAlloc(-1, "builtin") orelse runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
         if (runtime.getString(-1, "value")) |v| {
-            const trimmed = std.mem.trim(u8, v, " \t\r\n");
-            if (trimmed.len > 0) source_value = allocator.dupe(u8, trimmed) catch null;
+            source_value = dupeTrimmedConfigString(allocator, v, "failed to allocate status segment source value code");
         }
     }
 
@@ -1584,9 +1634,7 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
     }
     var show_when_code: ?[]const u8 = blk: {
         if (runtime.getString(-1, "show_when")) |v| {
-            const trimmed = std.mem.trim(u8, v, " \t\r\n");
-            if (trimmed.len == 0) break :blk null;
-            break :blk allocator.dupe(u8, trimmed) catch null;
+            break :blk dupeTrimmedConfigString(allocator, v, "failed to allocate status segment show_when code");
         }
         break :blk null;
     };
@@ -1598,8 +1646,7 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         }
         if (show_when_code == null) {
             if (runtime.getString(-1, "show_when")) |v| {
-                const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                if (trimmed.len > 0) show_when_code = allocator.dupe(u8, trimmed) catch null;
+                show_when_code = dupeTrimmedConfigString(allocator, v, "failed to allocate progress show_when code");
             }
         }
         if (builtin_name == null) {
@@ -1611,14 +1658,12 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         }
         if (value_code == null) {
             if (runtime.getString(-1, "value")) |v| {
-                const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+                value_code = dupeTrimmedConfigString(allocator, v, "failed to allocate progress value code");
             }
             if (value_code == null and runtime.pushTable(-1, "source")) {
                 defer runtime.pop();
                 if (runtime.getString(-1, "value")) |v| {
-                    const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                    if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+                    value_code = dupeTrimmedConfigString(allocator, v, "failed to allocate progress source value code");
                 }
             }
         }
@@ -1664,14 +1709,12 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         }
         if (value_code == null) {
             if (runtime.getString(-1, "value")) |v| {
-                const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+                value_code = dupeTrimmedConfigString(allocator, v, "failed to allocate button value code");
             }
             if (value_code == null and runtime.pushTable(-1, "source")) {
                 defer runtime.pop();
                 if (runtime.getString(-1, "value")) |v| {
-                    const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                    if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
+                    value_code = dupeTrimmedConfigString(allocator, v, "failed to allocate button source value code");
                 }
             }
         }
@@ -1793,7 +1836,9 @@ fn parseSegments(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const Seg
     for (1..len + 1) |i| {
         if (runtime.pushArrayElement(-1, i)) {
             if (parseSegment(runtime, allocator)) |mod| {
-                list.append(allocator, mod) catch {};
+                list.append(allocator, mod) catch |err| {
+                    log.warn("failed to append status segment #{}: {s}", .{ i, @errorName(err) });
+                };
             }
             runtime.pop();
         }
@@ -1819,7 +1864,10 @@ fn parseSpinner(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?SpinnerDef 
     var s = SpinnerDef{};
     // Always allocate kind so deinit is safe.
     const kind = runtime.getString(-1, "kind") orelse "knight_rider";
-    s.kind = allocator.dupe(u8, kind) catch return null;
+    s.kind = allocator.dupe(u8, kind) catch |err| {
+        log.warn("failed to allocate spinner kind: {s}", .{@errorName(err)});
+        return null;
+    };
 
     if (runtime.getInt(u8, -1, "width")) |v| s.width = v;
     if (runtime.getInt(u64, -1, "step")) |v| s.step_ms = v;
@@ -1835,7 +1883,9 @@ fn parseSpinner(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?SpinnerDef 
         for (1..len + 1) |i| {
             if (runtime.pushArrayElement(-1, i)) {
                 if (runtime.toIntAt(u8, -1)) |cv| {
-                    list.append(allocator, cv) catch {};
+                    list.append(allocator, cv) catch |err| {
+                        log.warn("failed to append spinner color #{}: {s}", .{ i, @errorName(err) });
+                    };
                 }
                 runtime.pop();
             }
@@ -1923,9 +1973,12 @@ fn parseTokenArray(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?[][]cons
     for (1..len + 1) |i| {
         if (runtime.pushArrayElement(-1, i)) {
             if (runtime.toStringAt(-1)) |s| {
-                const dup = allocator.dupe(u8, s) catch null;
+                const dup = dupeConfigString(allocator, s, "failed to allocate config when token");
                 if (dup) |d| {
-                    list.append(allocator, d) catch allocator.free(d);
+                    list.append(allocator, d) catch |err| {
+                        log.warn("failed to append config when token: {}", .{err});
+                        allocator.free(d);
+                    };
                 }
             }
             runtime.pop();
@@ -1933,7 +1986,10 @@ fn parseTokenArray(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?[][]cons
     }
 
     if (list.items.len == 0) return null;
-    return list.toOwnedSlice(allocator) catch null;
+    return list.toOwnedSlice(allocator) catch |err| {
+        log.warn("failed to finalize config when token list: {}", .{err});
+        return null;
+    };
 }
 
 /// Parse an array of expressions for 'any' clause.
@@ -1953,13 +2009,18 @@ fn parseAnyArray(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?[]const Wh
         if (elem_ty == .string) {
             // String element: wrap in single-token all
             if (runtime.toStringAt(-1)) |s| {
-                const dup = allocator.dupe(u8, s) catch continue;
-                const arr = allocator.alloc([]const u8, 1) catch {
+                const dup = allocator.dupe(u8, s) catch |err| {
+                    log.warn("failed to allocate when string expression #{}: {s}", .{ i, @errorName(err) });
+                    continue;
+                };
+                const arr = allocator.alloc([]const u8, 1) catch |err| {
+                    log.warn("failed to allocate when string wrapper #{}: {s}", .{ i, @errorName(err) });
                     allocator.free(dup);
                     continue;
                 };
                 arr[0] = dup;
-                list.append(allocator, .{ .all = arr }) catch {
+                list.append(allocator, .{ .all = arr }) catch |err| {
+                    log.warn("failed to append when string expression #{}: {s}", .{ i, @errorName(err) });
                     allocator.free(dup);
                     allocator.free(arr);
                 };
@@ -1967,7 +2028,8 @@ fn parseAnyArray(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?[]const Wh
         } else if (elem_ty == .table) {
             // Table element: parse recursively
             if (parseWhenExpr(runtime, allocator)) |w| {
-                list.append(allocator, w) catch {
+                list.append(allocator, w) catch |err| {
+                    log.warn("failed to append nested when expression #{}: {s}", .{ i, @errorName(err) });
                     var mw = w;
                     @constCast(&mw).deinit(allocator);
                 };
@@ -1976,7 +2038,10 @@ fn parseAnyArray(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?[]const Wh
     }
 
     if (list.items.len == 0) return null;
-    return list.toOwnedSlice(allocator) catch null;
+    return list.toOwnedSlice(allocator) catch |err| {
+        log.warn("failed to finalize when expression list: {s}", .{@errorName(err)});
+        return null;
+    };
 }
 
 fn parseOutputs(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const OutputDef {
@@ -1993,7 +2058,9 @@ fn parseOutputs(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const Outp
             list.append(allocator, .{
                 .style = runtime.getStringAlloc(-1, "style") orelse "",
                 .format = runtime.getStringAlloc(-1, "format") orelse "$output",
-            }) catch {};
+            }) catch |err| {
+                log.warn("failed to append output definition #{}: {s}", .{ i, @errorName(err) });
+            };
             runtime.pop();
         }
     }

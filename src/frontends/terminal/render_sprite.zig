@@ -1,5 +1,6 @@
 const std = @import("std");
 const pop = @import("pop");
+const core = @import("core");
 const vaxis = @import("vaxis");
 
 pub fn drawSpriteOverlay(
@@ -21,7 +22,10 @@ pub fn drawSpriteOverlay(
     defer temp_lines.deinit(renderer.allocator);
 
     while (lines.next()) |line| {
-        temp_lines.append(renderer.allocator, line) catch continue;
+        temp_lines.append(renderer.allocator, line) catch |err| {
+            core.logging.logError("terminal", "failed to append sprite overlay line", err);
+            continue;
+        };
         const visual_width = widgets.pokemon.estimateVisualWidth(line);
         if (visual_width > max_visual_width) {
             max_visual_width = visual_width;
@@ -108,7 +112,10 @@ fn parseSGR(seq: []const u8, style: *vaxis.Style) void {
 
     while (params_iter.next()) |param_str| {
         if (param_count >= param_list.len) break;
-        param_list[param_count] = std.fmt.parseInt(u8, param_str, 10) catch continue;
+        param_list[param_count] = std.fmt.parseInt(u8, param_str, 10) catch |err| {
+            core.logging.logError("terminal", "failed to parse sprite color parameter", err);
+            continue;
+        };
         param_count += 1;
     }
 

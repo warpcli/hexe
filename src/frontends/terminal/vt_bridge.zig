@@ -145,16 +145,25 @@ fn resolveCellText(
         var out = try alloc.alloc(u8, max_len);
         errdefer alloc.free(out);
         var n: usize = 0;
-        n += std.unicode.utf8Encode(cp, out[n..][0..4]) catch return " ";
+        n += std.unicode.utf8Encode(cp, out[n..][0..4]) catch |err| {
+            core.logging.logError("terminal", "failed to encode grapheme primary codepoint", err);
+            return " ";
+        };
         for (grapheme_tail) |tail_cp| {
-            n += std.unicode.utf8Encode(tail_cp, out[n..][0..4]) catch return " ";
+            n += std.unicode.utf8Encode(tail_cp, out[n..][0..4]) catch |err| {
+                core.logging.logError("terminal", "failed to encode grapheme tail codepoint", err);
+                return " ";
+            };
         }
         return out[0..n];
     }
 
     // Non-ASCII: encode to UTF-8 via arena
     var utf8_buf: [4]u8 = undefined;
-    const len = std.unicode.utf8Encode(cp, &utf8_buf) catch return " ";
+    const len = std.unicode.utf8Encode(cp, &utf8_buf) catch |err| {
+        core.logging.logError("terminal", "failed to encode cell codepoint", err);
+        return " ";
+    };
     return try alloc.dupe(u8, utf8_buf[0..len]);
 }
 
@@ -195,7 +204,9 @@ fn syncKittyImages(vt: *core.VT, vx: *vaxis.Vaxis, stdout: std.fs.File, arena: s
     var cache_it = vt.kitty_image_cache.iterator();
     while (cache_it.next()) |entry| {
         if (!storage.images.contains(entry.key_ptr.*)) {
-            stale.append(arena, entry.key_ptr.*) catch {};
+            stale.append(arena, entry.key_ptr.*) catch |err| {
+                core.logging.logError("terminal", "failed to collect stale Kitty image cache entry", err);
+            };
         }
     }
 
@@ -237,10 +248,16 @@ fn syncKittyImages(vt: *core.VT, vx: *vaxis.Vaxis, stdout: std.fs.File, arena: s
         if (w == 0 or h == 0) continue;
 
         const enc_size = std.base64.standard.Encoder.calcSize(img.data.len);
-        const enc_buf = arena.alloc(u8, enc_size) catch continue;
+        const enc_buf = arena.alloc(u8, enc_size) catch |err| {
+            core.logging.logError("terminal", "failed to allocate Kitty image transfer buffer", err);
+            continue;
+        };
         const b64 = std.base64.standard.Encoder.encode(enc_buf, img.data);
 
-        const vimg = vx.transmitPreEncodedImage(&writer.interface, b64, w, h, fmt) catch continue;
+        const vimg = vx.transmitPreEncodedImage(&writer.interface, b64, w, h, fmt) catch |err| {
+            core.logging.logError("terminal", "failed to transmit Kitty image", err);
+            continue;
+        };
         vt.kitty_image_cache.put(vt.allocator, ghost_id, .{
             .vaxis_id = vimg.id,
             .width = img.width,
@@ -248,7 +265,9 @@ fn syncKittyImages(vt: *core.VT, vx: *vaxis.Vaxis, stdout: std.fs.File, arena: s
             .data_len = img.data.len,
             .data_hash = data_hash,
             .format_tag = fmt_tag,
-        }) catch {};
+        }) catch |err| {
+            core.logging.logError("terminal", "failed to cache Kitty image metadata", err);
+        };
     }
 }
 
@@ -273,7 +292,10 @@ fn drawKittyVirtualPlacements(
     var it = ghostty.kitty.graphics.unicode.placementIterator(top, bottom);
     while (it.next()) |placement| {
         const image = storage.imageById(placement.image_id) orelse continue;
-        const rp = placement.renderPlacement(storage, &image, cell_w, cell_h) catch continue;
+        const rp = placement.renderPlacement(storage, &image, cell_w, cell_h) catch |err| {
+            core.logging.logError("terminal", "failed to render Kitty image placement", err);
+            continue;
+        };
 
         const cached = vt.kitty_image_cache.get(placement.image_id) orelse continue;
         const p = vt.terminal.screens.active.pages.pointFromPin(.viewport, placement.pin) orelse continue;
@@ -451,7 +473,10 @@ fn resolveCellLink(
     const uri_src = entry.uri.slice(pin.node.data.memory);
     if (uri_src.len == 0) return .{};
 
-    const uri = arena.dupe(u8, uri_src) catch return .{};
+    const uri = arena.dupe(u8, uri_src) catch |err| {
+        core.logging.logError("terminal", "failed to allocate hyperlink URI", err);
+        return .{};
+    };
     var params: []const u8 = "";
 
     switch (entry.id) {
@@ -459,7 +484,10 @@ fn resolveCellLink(
         .explicit => |id_slice| {
             const id_src = id_slice.slice(pin.node.data.memory);
             if (id_src.len > 0) {
-                const out = arena.alloc(u8, 3 + id_src.len) catch return .{ .uri = uri };
+                const out = arena.alloc(u8, 3 + id_src.len) catch |err| {
+                    core.logging.logError("terminal", "failed to allocate hyperlink id params", err);
+                    return .{ .uri = uri };
+                };
                 std.mem.copyForwards(u8, out[0..3], "id=");
                 std.mem.copyForwards(u8, out[3..], id_src);
                 params = out;

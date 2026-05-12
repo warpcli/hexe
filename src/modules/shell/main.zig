@@ -240,6 +240,12 @@ fn deinitModules(mods: []const core.Segment, allocator: std.mem.Allocator) void 
     }
 }
 
+fn writeStderr(bytes: []const u8) void {
+    std.fs.File.stderr().writeAll(bytes) catch |err| {
+        core.logging.logError("shp", "failed to write stderr diagnostic", err);
+    };
+}
+
 fn renderDefaultPrompt(ctx: *segment.Context, is_right: bool, stdout: std.fs.File) !void {
     const segment_names: []const []const u8 = if (is_right)
         &.{"time"}
@@ -357,14 +363,12 @@ fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
     defer allocator.free(path);
 
     const runtime_ptr = allocator.create(LuaRuntime) catch {
-        const stderr = std.fs.File.stderr();
-        stderr.writeAll("shp: failed to allocate Lua runtime\n") catch {};
+        writeStderr("shp: failed to allocate Lua runtime\n");
         return config;
     };
     runtime_ptr.* = LuaRuntime.init(allocator) catch {
         allocator.destroy(runtime_ptr);
-        const stderr = std.fs.File.stderr();
-        stderr.writeAll("shp: failed to initialize Lua\n") catch {};
+        writeStderr("shp: failed to initialize Lua\n");
         return config;
     };
     const runtime = runtime_ptr;
@@ -379,13 +383,12 @@ fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
                 // Silent - missing config is fine
             },
             else => {
-                const stderr = std.fs.File.stderr();
-                stderr.writeAll("shp: config error") catch {};
+                writeStderr("shp: config error");
                 if (runtime.last_error) |msg| {
-                    stderr.writeAll(": ") catch {};
-                    stderr.writeAll(msg) catch {};
+                    writeStderr(": ");
+                    writeStderr(msg);
                 }
-                stderr.writeAll("\n") catch {};
+                writeStderr("\n");
             },
         }
         return config;
@@ -460,7 +463,10 @@ fn parseModules(runtime: *LuaRuntime, allocator: std.mem.Allocator, key: [:0]con
     for (1..len + 1) |i| {
         if (runtime.pushArrayElement(-1, i)) {
             if (parseModule(runtime, allocator)) |mod| {
-                list.append(allocator, mod) catch {};
+                list.append(allocator, mod) catch |err| {
+                    core.logging.logError("shp", "failed to append parsed prompt module", err);
+                    deinitModuleDefOwned(mod, allocator);
+                };
             }
             runtime.pop();
         }
@@ -474,8 +480,7 @@ fn parseModule(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?core.Segment
 
     const when_ty = runtime.fieldType(-1, "when");
     if (when_ty != .nil and when_ty != .table) {
-        const stderr = std.fs.File.stderr();
-        stderr.writeAll("shp: module 'when' must be a table\n") catch {};
+        writeStderr("shp: module 'when' must be a table\n");
         allocator.free(name);
         return null;
     }

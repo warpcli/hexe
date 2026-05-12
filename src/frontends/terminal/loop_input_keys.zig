@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("core");
 const vaxis = @import("vaxis");
+const log = std.log.scoped(.terminal_input_keys);
 
 const State = @import("state.zig").State;
 const input = @import("input.zig");
@@ -52,27 +53,66 @@ fn formatKeycastEvent(ev: input.KeyEvent, buf: *[32]u8) []const u8 {
     var stream = std.io.fixedBufferStream(buf);
     const writer = stream.writer();
 
-    if (ev.mods & 2 != 0) writer.writeAll("C-") catch {};
-    if (ev.mods & 1 != 0) writer.writeAll("A-") catch {};
+    if (ev.mods & 2 != 0) writer.writeAll("C-") catch |err| {
+        log.debug("failed to format keycast ctrl modifier: {}", .{err});
+        return buf[0..stream.pos];
+    };
+    if (ev.mods & 1 != 0) writer.writeAll("A-") catch |err| {
+        log.debug("failed to format keycast alt modifier: {}", .{err});
+        return buf[0..stream.pos];
+    };
 
     switch (@as(core.Config.BindKeyKind, ev.key)) {
-        .up => writer.writeAll("Up") catch {},
-        .down => writer.writeAll("Down") catch {},
-        .left => writer.writeAll("Left") catch {},
-        .right => writer.writeAll("Right") catch {},
-        .space => writer.writeAll("Space") catch {},
+        .up => writer.writeAll("Up") catch |err| {
+            log.debug("failed to format keycast Up key: {}", .{err});
+            return buf[0..stream.pos];
+        },
+        .down => writer.writeAll("Down") catch |err| {
+            log.debug("failed to format keycast Down key: {}", .{err});
+            return buf[0..stream.pos];
+        },
+        .left => writer.writeAll("Left") catch |err| {
+            log.debug("failed to format keycast Left key: {}", .{err});
+            return buf[0..stream.pos];
+        },
+        .right => writer.writeAll("Right") catch |err| {
+            log.debug("failed to format keycast Right key: {}", .{err});
+            return buf[0..stream.pos];
+        },
+        .space => writer.writeAll("Space") catch |err| {
+            log.debug("failed to format keycast Space key: {}", .{err});
+            return buf[0..stream.pos];
+        },
         .char => {
             const ch = ev.key.char;
             switch (ch) {
-                '\r' => writer.writeAll("Enter") catch {},
-                '\t' => writer.writeAll("Tab") catch {},
-                0x7f => writer.writeAll("Bksp") catch {},
-                0x1b => writer.writeAll("Esc") catch {},
+                '\r' => writer.writeAll("Enter") catch |err| {
+                    log.debug("failed to format keycast Enter key: {}", .{err});
+                    return buf[0..stream.pos];
+                },
+                '\t' => writer.writeAll("Tab") catch |err| {
+                    log.debug("failed to format keycast Tab key: {}", .{err});
+                    return buf[0..stream.pos];
+                },
+                0x7f => writer.writeAll("Bksp") catch |err| {
+                    log.debug("failed to format keycast Backspace key: {}", .{err});
+                    return buf[0..stream.pos];
+                },
+                0x1b => writer.writeAll("Esc") catch |err| {
+                    log.debug("failed to format keycast Escape key: {}", .{err});
+                    return buf[0..stream.pos];
+                },
                 else => {
                     if (ch >= 0x20 and ch < 0x7f) {
-                        writer.writeByte(ch) catch {};
+                        writer.writeByte(ch) catch |err| {
+                            log.debug("failed to format keycast printable byte: {}", .{err});
+                            return buf[0..stream.pos];
+                        };
                     } else {
-                        std.fmt.format(writer, "0x{x:0>2}", .{ch}) catch {};
+                        std.fmt.format(writer, "0x{x:0>2}", .{ch}) catch |err| {
+                            log.debug("failed to format keycast byte value: {}", .{err});
+                            return buf[0..stream.pos];
+                        };
                     }
                 },
             }

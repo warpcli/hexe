@@ -44,14 +44,20 @@ fn applyPostQueryFeatureModes(state: *State) void {
 
     // Re-apply mouse mode after capability discovery so terminals with
     // SGR-pixels support get upgraded from cell-coordinates to pixel mode.
-    state.renderer.vx.setMouseMode(&tty.interface, true) catch {};
+    state.renderer.vx.setMouseMode(&tty.interface, true) catch |err| {
+        core.logging.logError("terminal", "failed to set mouse mode after capability query", err);
+    };
 
     // Enable runtime color-scheme updates only when detected.
     if (state.renderer.vx.caps.color_scheme_updates) {
-        state.renderer.vx.subscribeToColorSchemeUpdates(&tty.interface) catch {};
+        state.renderer.vx.subscribeToColorSchemeUpdates(&tty.interface) catch |err| {
+            core.logging.logError("terminal", "failed to subscribe to color-scheme updates", err);
+        };
     }
 
-    tty.interface.flush() catch {};
+    tty.interface.flush() catch |err| {
+        core.logging.logError("terminal", "failed to flush post-query feature modes", err);
+    };
 }
 
 fn logTerminalCapabilities(state: *State, timed_out: bool) void {
@@ -91,6 +97,30 @@ fn applyDeferredPaneExits(state: *State) void {
     }
 }
 
+fn applyDeferredCwdResponse(state: *State) void {
+    while (state.runtime.drainPendingCwdResponse()) |resp| {
+        defer state.allocator.free(resp.cwd);
+        state.setPaneShell(resp.uuid, null, resp.cwd, null, null, null);
+    }
+}
+
+fn applyDeferredPaneInfoResponse(state: *State) void {
+    while (state.runtime.drainPendingPaneInfoResponse()) |pending| {
+        var resp = pending;
+        defer resp.deinit(state.allocator);
+        if (resp.name) |name| {
+            const name_owned = state.allocator.dupe(u8, name) catch |err| {
+                core.logging.logError("terminal", "failed to allocate deferred pane name", err);
+                return;
+            };
+            state.setPaneNameOwned(resp.uuid, name_owned);
+        }
+        if (resp.fg_name != null or resp.fg_pid != null) {
+            state.setPaneProc(resp.uuid, resp.fg_name, resp.fg_pid);
+        }
+    }
+}
+
 fn applyDeferredSessionSnapshots(state: *State) void {
     if (!state.runtime.applyPendingSessionSnapshot()) return;
     _ = state.applySessionSnapshot();
@@ -117,9 +147,13 @@ fn finalizeTerminalQueryIfReady(state: *State, now_ms: i64) void {
     const stdout = std.fs.File.stdout();
     var tty_buf: [1024]u8 = undefined;
     var tty = stdout.writer(&tty_buf);
-    state.renderer.vx.enableDetectedFeatures(&tty.interface) catch {};
+    state.renderer.vx.enableDetectedFeatures(&tty.interface) catch |err| {
+        core.logging.logError("terminal", "failed to enable detected terminal features", err);
+    };
     applyPostQueryFeatureModes(state);
-    tty.interface.flush() catch {};
+    tty.interface.flush() catch |err| {
+        core.logging.logError("terminal", "failed to flush terminal feature enablement", err);
+    };
 
     state.renderer.vx.queries_done.store(true, .unordered);
     state.terminal_query_in_flight = false;
@@ -260,7 +294,14 @@ fn sesVtCallback(
             var remaining: usize = hdr.len;
             while (remaining > 0) {
                 const chunk = @min(remaining, slot.buffer.len);
-                wire.readExact(vt_fd, slot.buffer[0..chunk]) catch break;
+                wire.readExact(vt_fd, slot.buffer[0..chunk]) catch |read_err| {
+                    core.logging.logError("terminal", "failed to drain oversized VT frame", read_err);
+                    if (slot.watched_fd.* == slot.fd) slot.watched_fd.* = null;
+                    if (slot.state.runtime.closeVtFdIf(slot.fd)) {
+                        slot.state.notifications.showFor("Warning: Lost connection to ses daemon (VT channel) - panes frozen", 5000);
+                    }
+                    return .disarm;
+                };
                 remaining -= chunk;
             }
             continue;
@@ -407,7 +448,7 @@ fn cleanupDeadFloat(state: *State, index: usize) void {
     state.needs_render = true;
     state.force_full_render = true;
     state.renderer.invalidate();
-    state.syncSessionFloatRemoved(pane_uuid);
+    state.clearLocalFloatState(pane_uuid);
 
     if (was_active) {
         state.setActiveFloatingIndex(null);
@@ -429,7 +470,9 @@ pub fn runMainLoop(state: *State) !void {
 
     // Enter raw mode.
     const orig_termios = try terminal.enableRawMode(posix.STDIN_FILENO);
-    defer terminal.disableRawMode(posix.STDIN_FILENO, orig_termios) catch {};
+    defer terminal.disableRawMode(posix.STDIN_FILENO, orig_termios) catch |err| {
+        core.logging.logError("terminal", "failed to restore terminal raw mode", err);
+    };
 
     // Enter alternate screen and initialize terminal modes through libvaxis.
     const stdout = std.fs.File.stdout();
@@ -469,10 +512,16 @@ pub fn runMainLoop(state: *State) !void {
         }
         // Ensure in-band resize mode is reset even if vaxis internal state
         // tracking missed setting it during capability query setup.
-        tty_restore.interface.writeAll("\x1b[?2048l") catch {};
+        tty_restore.interface.writeAll("\x1b[?2048l") catch |err| {
+            core.logging.logError("terminal", "failed to disable in-band resize mode on restore", err);
+        };
         loop_mouse.resetShape(state);
-        state.renderer.vx.resetState(&tty_restore.interface) catch {};
-        tty_restore.interface.flush() catch {};
+        state.renderer.vx.resetState(&tty_restore.interface) catch |err| {
+            core.logging.logError("terminal", "failed to reset terminal renderer state", err);
+        };
+        tty_restore.interface.flush() catch |err| {
+            core.logging.logError("terminal", "failed to flush terminal restore state", err);
+        };
     }
 
     var ses_vt_buffer: [1024 * 1024]u8 = undefined;
@@ -512,6 +561,8 @@ pub fn runMainLoop(state: *State) !void {
     while (state.running) {
         if (applyRuntimeStopRequest(state)) break;
         applyDeferredPaneExits(state);
+        applyDeferredCwdResponse(state);
+        applyDeferredPaneInfoResponse(state);
         applyDeferredSessionSnapshots(state);
         state.flushPendingMuxVtWrites();
         ensureSesVtWatcherArmed(state, &ses_vt_watcher, &ses_vt_buffer);
@@ -521,6 +572,8 @@ pub fn runMainLoop(state: *State) !void {
         try loop.run(.once);
         if (applyRuntimeStopRequest(state)) break;
         if (!state.running) break;
+        applyDeferredCwdResponse(state);
+        applyDeferredPaneInfoResponse(state);
         applyDeferredSessionSnapshots(state);
 
         // Clear skip flag from previous iteration.
@@ -627,7 +680,9 @@ pub fn runMainLoop(state: *State) !void {
             var pane_it = state.currentLayout().splitIterator();
             while (pane_it.next()) |pane| {
                 if (!pane.*.isAlive()) {
-                    dead_splits.append(allocator, pane.*.uuid) catch {};
+                    dead_splits.append(allocator, pane.*.uuid) catch |err| {
+                        terminal_main.debugLogUuid(&pane.*.uuid, "main loop: failed to queue dead split cleanup: {s}", .{@errorName(err)});
+                    };
                 }
             }
         }
@@ -674,8 +729,6 @@ pub fn runMainLoop(state: *State) !void {
                         state.notifications.showFor(msg, 3000);
                     }
 
-                    const next_focus_uuid = if (state.currentLayout().getFocusedPane()) |pane| pane.uuid else null;
-                    state.syncSessionCloseSplitPane(dead_uuid, next_focus_uuid);
                     if (state.currentLayout().getFocusedPane()) |new_pane| {
                         state.syncPaneFocus(new_pane, null);
                     }
@@ -694,10 +747,11 @@ pub fn runMainLoop(state: *State) !void {
                         state.exit_intent_deadline_ms = 0;
                         state.running = false;
                     } else if (state.config.confirm_on_exit and state.pending_action == null) {
-                        state.pending_action = .exit;
                         state.exit_from_shell_death = true;
-                        state.popups.showConfirm("Shell exited. Close terminal session?", .{}) catch {};
-                        state.needs_render = true;
+                        if (!state.showConfirmOrNotify(.exit, "Shell exited. Close terminal session?")) {
+                            state.exit_from_shell_death = false;
+                            state.running = false;
+                        }
                     } else if (state.pending_action != .exit or !state.exit_from_shell_death) {
                         state.running = false;
                     }
@@ -709,31 +763,48 @@ pub fn runMainLoop(state: *State) !void {
         if (state.needs_respawn) {
             state.needs_respawn = false;
             if (state.currentLayout().getFocusedPane()) |pane| {
+                const old_uuid = pane.uuid;
                 var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
                 var cwd = state.getReliableCwd(pane);
                 if (cwd == null) {
-                    cwd = std.posix.getcwd(&cwd_buf) catch null;
+                    cwd = std.posix.getcwd(&cwd_buf) catch |err| blk: {
+                        core.logging.logError("terminal", "respawn dead pane: failed to get fallback cwd", err);
+                        break :blk null;
+                    };
                 }
                 const old_aux = state.runtime.getPaneAux(pane.uuid) catch FrontendRuntime.PaneAuxInfo{
                     .created_from = null,
                     .focused_from = null,
                 };
-                state.runtime.killPane(pane.uuid) catch {};
                 if (state.runtime.createPane(null, cwd, null, null, null, null, null)) |result| {
                     const vt_fd = state.runtime.getVtFd();
                     var replaced = true;
                     if (vt_fd) |fd| {
-                        pane.replaceWithPod(result.pane_id, fd, result.uuid) catch {
-                            replaced = false;
-                        };
+                        const active_float = state.paneIsFloating(pane);
+                        replaced = state.replacePaneWithPodSynced(
+                            old_uuid,
+                            result.uuid,
+                            result.pane_id,
+                            fd,
+                            pane,
+                            active_float,
+                            .kill_new_pane,
+                            "respawn dead pane: rollback killPane failed after replacement error",
+                        );
                     } else replaced = false;
                     if (replaced) {
+                        state.runtime.killPane(old_uuid) catch |e| {
+                            terminal_main.debugLogUuid(&old_uuid, "respawn dead pane: killPane failed after replace: {s}", .{@errorName(e)});
+                        };
                         const pane_type: FrontendRuntime.PaneType = if (state.paneIsFloating(pane)) .float else .split;
                         const cursor = pane.getCursorPos();
                         const cursor_style = pane.vt.getCursorStyle();
                         const cursor_visible = pane.vt.isCursorVisible();
                         const alt_screen = pane.vt.inAltScreen();
-                        const layout_path = helpers.getLayoutPath(state, pane) catch null;
+                        const layout_path = helpers.getLayoutPath(state, pane) catch |err| blk: {
+                            core.logging.logError("terminal", "respawn dead pane: failed to resolve layout path", err);
+                            break :blk null;
+                        };
                         defer if (layout_path) |path| state.allocator.free(path);
                         state.runtime.updatePaneAux(
                             pane.uuid,
@@ -752,7 +823,10 @@ pub fn runMainLoop(state: *State) !void {
                             null,
                             null,
                             layout_path,
-                        ) catch {};
+                        ) catch |err| {
+                            core.logging.logError("terminal", "respawn dead pane: updatePaneAux failed after replacement", err);
+                            state.notifications.show("Respawn metadata sync failed");
+                        };
                         state.skip_dead_check = true;
                         state.needs_render = true;
                     } else {
@@ -844,7 +918,9 @@ pub fn runMainLoop(state: *State) !void {
         if (state.needs_render) {
             const render_now = std.time.milliTimestamp();
             if (render_now - last_render >= 16) { // ~60fps
-                loop_render.renderTo(state, stdout) catch {};
+                loop_render.renderTo(state, stdout) catch |err| {
+                    core.logging.logError("terminal", "terminal render failed", err);
+                };
                 state.needs_render = false;
                 state.force_full_render = false;
                 last_render = render_now;

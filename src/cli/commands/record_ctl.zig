@@ -15,6 +15,14 @@ const RecordState = struct {
     started_ms: i64 = 0,
 };
 
+fn deleteStateFile(path: []const u8, comptime context: []const u8) void {
+    std.fs.cwd().deleteFile(path) catch |err| {
+        if (err != error.FileNotFound) {
+            print("Warning: {s}: failed to delete state file '{s}': {s}\n", .{ context, path, @errorName(err) });
+        }
+    };
+}
+
 pub fn runRecordStart(
     allocator: std.mem.Allocator,
     scope_raw: []const u8,
@@ -39,7 +47,7 @@ pub fn runRecordStart(
             print("already recording (pid={d})\n", .{st.pid});
             return;
         }
-        std.fs.cwd().deleteFile(state_path) catch {};
+        deleteStateFile(state_path, "start");
     }
 
     const exe = try std.fs.selfExePathAlloc(allocator);
@@ -120,9 +128,11 @@ pub fn runRecordStop(allocator: std.mem.Allocator, scope_raw: []const u8) !void 
     defer freeState(allocator, st);
 
     if (st.pid > 0 and isPidAlive(st.pid)) {
-        _ = std.c.kill(st.pid, std.c.SIG.TERM);
+        if (std.c.kill(st.pid, std.c.SIG.TERM) != 0) {
+            print("Warning: failed to signal recorder pid={d}\n", .{st.pid});
+        }
     }
-    std.fs.cwd().deleteFile(state_path) catch {};
+    deleteStateFile(state_path, "stop");
     print("recording stopped\n", .{});
 }
 
@@ -148,7 +158,7 @@ pub fn runRecordStatus(allocator: std.mem.Allocator, scope_raw: []const u8, json
 
     const active = st.pid > 0 and isPidAlive(st.pid);
     if (!active) {
-        std.fs.cwd().deleteFile(state_path) catch {};
+        deleteStateFile(state_path, "status");
         if (json) {
             print("{{\"active\":false}}\n", .{});
         } else {
@@ -187,7 +197,7 @@ pub fn runRecordToggle(
             try runRecordStop(allocator, scope_raw);
             return;
         }
-        std.fs.cwd().deleteFile(state_path) catch {};
+        deleteStateFile(state_path, "toggle");
     }
     try runRecordStart(allocator, scope_raw, target, uuid, name, socket, out, capture_input);
 }
@@ -221,7 +231,9 @@ fn resolveActivePodUuid(allocator: std.mem.Allocator) !?[]u8 {
         return null;
     defer allocator.free(out);
 
-    _ = child.wait() catch {};
+    _ = child.wait() catch |err| {
+        print("Warning: failed to wait for active-pod resolver: {s}\n", .{@errorName(err)});
+    };
 
     return extractUuidFromText(allocator, out);
 }
@@ -297,7 +309,7 @@ fn saveState(allocator: std.mem.Allocator, path: []const u8, st: RecordState) !v
     defer allocator.free(tmp_path);
     try std.fs.cwd().writeFile(.{ .sub_path = tmp_path, .data = payload });
     std.fs.cwd().rename(tmp_path, path) catch {
-        std.fs.cwd().deleteFile(path) catch {};
+        deleteStateFile(path, "save");
         try std.fs.cwd().rename(tmp_path, path);
     };
 }

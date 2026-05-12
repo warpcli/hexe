@@ -1,6 +1,7 @@
 const std = @import("std");
 const core = @import("core");
 const vaxis = @import("vaxis");
+const log = std.log.scoped(.terminal_keybinds);
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
@@ -206,7 +207,10 @@ fn matchesWhen(state: *State, when: ?core.config.WhenDef, query: *const PaneQuer
 
 fn callbackIdFromCode(code: []const u8) ?i32 {
     if (!std.mem.startsWith(u8, code, CALLBACK_REF_PREFIX)) return null;
-    return std.fmt.parseInt(i32, code[CALLBACK_REF_PREFIX.len..], 10) catch null;
+    return std.fmt.parseInt(i32, code[CALLBACK_REF_PREFIX.len..], 10) catch |err| {
+        log.warn("failed to parse keybind callback id: {}", .{err});
+        return null;
+    };
 }
 
 fn pushPaneLuaTable(rt: *LuaRuntime, state: *State, pane: *Pane, is_focused: bool, tab_index: usize, pane_index: usize) void {
@@ -367,7 +371,10 @@ fn populateWhenLuaContext(state: *State, rt: *LuaRuntime, query: *const PaneQuer
         rt.lua.setField(-2, "fg_pid");
     }
 
-    var env_map_opt = std.process.getEnvMap(rt.allocator) catch null;
+    var env_map_opt = std.process.getEnvMap(rt.allocator) catch |err| blk: {
+        core.logging.logError("terminal", "keybind Lua query failed to copy environment", err);
+        break :blk null;
+    };
     if (env_map_opt) |*env_map| {
         defer env_map.deinit();
         rt.lua.createTable(0, @intCast(env_map.count()));
@@ -481,9 +488,15 @@ fn populateWhenLuaContext(state: *State, rt: *LuaRuntime, query: *const PaneQuer
         "hexe.status=hexe.status or {}; " ++
         "hexe.status.pane=ctx.pane; " ++
         "end";
-    const status_api_z = rt.allocator.dupeZ(u8, status_api) catch return;
+    const status_api_z = rt.allocator.dupeZ(u8, status_api) catch |err| {
+        core.logging.logError("terminal", "failed to allocate status Lua API", err);
+        return;
+    };
     defer rt.allocator.free(status_api_z);
-    rt.lua.loadString(status_api_z) catch return;
+    rt.lua.loadString(status_api_z) catch |err| {
+        core.logging.logError("terminal", "failed to load status Lua API", err);
+        return;
+    };
     rt.lua.protectedCall(.{ .args = 0, .results = 0 }) catch {
         rt.lua.pop(1);
         return;
@@ -616,7 +629,9 @@ fn scheduleTimerFull(state: *State, kind: State.PendingKeyTimerKind, deadline_ms
         .focus_ctx = focus_ctx,
         .press_start_ms = press_start_ms,
         .is_repeat = is_repeat,
-    }) catch {};
+    }) catch |err| {
+        core.logging.logError("terminal", "failed to schedule key timer", err);
+    };
 }
 
 pub fn processKeyTimers(state: *State, now_ms: i64) void {
@@ -665,7 +680,9 @@ pub fn processKeyTimers(state: *State, now_ms: i64) void {
             .repeat_wait => {},
             .repeat_active => {},
             .repeat_locked => {},
-            .hold => unreachable,
+            .hold => {
+                core.logging.warn("terminal", "key timer sweep encountered stale hold timer after deadline processing", .{});
+            },
         }
     }
 }

@@ -192,7 +192,10 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
     // Draw splits into the cell buffer.
     var pane_it = state.currentLayout().splitIterator();
     while (pane_it.next()) |pane| {
-        const render_state = pane.*.getRenderState() catch continue;
+        const render_state = pane.*.getRenderState() catch |err| {
+            core.logging.logError("terminal", "failed to get split pane render state", err);
+            continue;
+        };
         drawPaneRenderState(renderer, pane.*, render_state, pane.*.x, pane.*.y, pane.*.width, pane.*.height, stdout);
 
         if (state.mouse_selection.rangeForPane(state.activeTabIndex(), pane.*)) |range| {
@@ -254,7 +257,10 @@ pub fn renderTo(state: *State, stdout: std.fs.File) !void {
             }
         }
 
-        const render_state = pane.getRenderState() catch continue;
+        const render_state = pane.getRenderState() catch |err| {
+            core.logging.logError("terminal", "failed to get floating pane render state", err);
+            continue;
+        };
         drawPaneRenderState(renderer, pane, render_state, pane.x, pane.y, pane.width, pane.height, stdout);
 
         if (state.mouse_selection.rangeForPane(state.activeTabIndex(), pane)) |range| {

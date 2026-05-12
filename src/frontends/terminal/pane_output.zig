@@ -1,7 +1,15 @@
 const std = @import("std");
+const core = @import("core");
 
 const pane_mod = @import("pane.zig");
 const Pane = pane_mod.Pane;
+
+fn writeResponse(self: *Pane, data: []const u8, comptime context: []const u8) void {
+    self.write(data) catch |err| {
+        core.logging.logError("terminal", context, err);
+    };
+}
+
 pub fn processOutput(self: *Pane, data: []const u8) void {
     handleCsiQueries(self, data);
     handleDcsQueries(self, data);
@@ -69,7 +77,9 @@ fn handleCsiQueryFinal(self: *Pane, final: u8, params: []const u8) void {
 
     self.csi_expected_responses +|= 1;
     const stdout = std.fs.File.stdout();
-    stdout.writeAll(seq_buf[0..n]) catch {};
+    stdout.writeAll(seq_buf[0..n]) catch |err| {
+        core.logging.logError("terminal", "forward CSI query to terminal stdout", err);
+    };
 }
 
 fn shouldForwardCsiQuery(final: u8, params: []const u8) bool {
@@ -141,7 +151,7 @@ fn handleDcsQuery(self: *Pane, payload: []const u8) void {
 
     // SGR request
     if (std.mem.eql(u8, req, "m")) {
-        self.write("\x1bP1$r 0m\x1b\\") catch {};
+        writeResponse(self, "\x1bP1$r 0m\x1b\\", "DCS SGR response write failed");
         return;
     }
 
@@ -149,21 +159,27 @@ fn handleDcsQuery(self: *Pane, payload: []const u8) void {
     if (std.mem.eql(u8, req, "q")) {
         const style = self.vt.getCursorStyle();
         var buf: [64]u8 = undefined;
-        const resp = std.fmt.bufPrint(&buf, "\x1bP1$r q{d}\x1b\\", .{style}) catch return;
-        self.write(resp) catch {};
+        const resp = std.fmt.bufPrint(&buf, "\x1bP1$r q{d}\x1b\\", .{style}) catch |err| {
+            core.logging.logError("terminal", "DCS cursor-style response format failed", err);
+            return;
+        };
+        writeResponse(self, resp, "DCS cursor-style response write failed");
         return;
     }
 
     // DECSTBM request
     if (std.mem.eql(u8, req, "r")) {
         var buf: [64]u8 = undefined;
-        const resp = std.fmt.bufPrint(&buf, "\x1bP1$r 1;{d}r\x1b\\", .{self.height}) catch return;
-        self.write(resp) catch {};
+        const resp = std.fmt.bufPrint(&buf, "\x1bP1$r 1;{d}r\x1b\\", .{self.height}) catch |err| {
+            core.logging.logError("terminal", "DCS margin response format failed", err);
+            return;
+        };
+        writeResponse(self, resp, "DCS margin response write failed");
         return;
     }
 
     // Invalid/unavailable request
-    self.write("\x1bP0$r\x1b\\") catch {};
+    writeResponse(self, "\x1bP0$r\x1b\\", "DCS unavailable response write failed");
 }
 
 fn forwardOsc(self: *Pane, data: []const u8) void {
@@ -246,11 +262,15 @@ fn forwardOsc(self: *Pane, data: []const u8) void {
                     if (!handleOscQuery(self, code)) {
                         self.osc_expected_responses +|= 1;
                         const stdout = std.fs.File.stdout();
-                        stdout.writeAll(self.osc_buf.items) catch {};
+                        stdout.writeAll(self.osc_buf.items) catch |err| {
+                            core.logging.logError("terminal", "forward OSC query to terminal stdout", err);
+                        };
                     }
                 } else {
                     const stdout = std.fs.File.stdout();
-                    stdout.writeAll(self.osc_buf.items) catch {};
+                    stdout.writeAll(self.osc_buf.items) catch |err| {
+                        core.logging.logError("terminal", "forward OSC sequence to terminal stdout", err);
+                    };
                 }
             }
 

@@ -33,6 +33,10 @@ pub fn run(allocator: std.mem.Allocator, session_id: []const u8, output_path: []
         print("Error: Unexpected response from ses daemon\n", .{});
         return error.UnexpectedResponse;
     }
+    if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+        print("Error: sessions list response too large\n", .{});
+        return error.ResponseTooLarge;
+    }
 
     const payload = try allocator.alloc(u8, hdr.payload_len);
     defer allocator.free(payload);
@@ -97,6 +101,10 @@ pub fn run(allocator: std.mem.Allocator, session_id: []const u8, output_path: []
         print("Error: Failed to retrieve session state\n", .{});
         return error.StateRetrievalFailed;
     }
+    if (state_hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+        print("Error: session state response too large\n", .{});
+        return error.ResponseTooLarge;
+    }
 
     const state_payload = try allocator.alloc(u8, state_hdr.payload_len);
     defer allocator.free(state_payload);
@@ -104,7 +112,7 @@ pub fn run(allocator: std.mem.Allocator, session_id: []const u8, output_path: []
 
     // Write to file or stdout
     if (output_path.len > 0) {
-        const file = try std.fs.cwd().createFile(output_path, .{});
+        const file = try std.fs.cwd().createFile(output_path, .{ .mode = 0o600 });
         defer file.close();
         try file.writeAll(state_payload);
         print("✓ Session exported to: {s}\n", .{output_path});

@@ -45,7 +45,9 @@ pub fn run(allocator: std.mem.Allocator, socket_path: []const u8) !void {
 }
 
 fn copyThreadMain(direction: CopyDirection) void {
-    copyFd(direction) catch {};
+    copyFd(direction) catch |err| {
+        core.logging.logError("ses_pipe", "copy thread failed", err);
+    };
 }
 
 fn copyFd(direction: CopyDirection) !void {
@@ -57,7 +59,9 @@ fn copyFd(direction: CopyDirection) !void {
         };
         if (len == 0) {
             if (direction.shutdown_send_on_eof) {
-                posix.shutdown(direction.dst_fd, .send) catch {};
+                posix.shutdown(direction.dst_fd, .send) catch |err| {
+                    if (err != error.NotConnected and err != error.BrokenPipe) return err;
+                };
             }
             return;
         }

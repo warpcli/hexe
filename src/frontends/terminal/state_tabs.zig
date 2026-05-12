@@ -15,6 +15,15 @@ const state_reattach = @import("state_reattach.zig");
 const tab_switch = @import("tab_switch.zig");
 const lua_events = @import("lua_events.zig");
 
+fn killTabPanes(self: anytype, tab: *TabView) void {
+    var it = tab.layout.splits.valueIterator();
+    while (it.next()) |pane_ptr| {
+        self.runtime.killPane(pane_ptr.*.uuid) catch |e| {
+            terminal_main.debugLogUuid(&pane_ptr.*.uuid, "killTabPanes: killPane failed during tab rollback: {s}", .{@errorName(e)});
+        };
+    }
+}
+
 /// Get the current tab's layout.
 pub fn currentLayout(self: anytype) *Layout {
     return &self.view.tab_views.items[self.activeTabIndex()].layout;
@@ -75,11 +84,17 @@ pub fn createTab(self: anytype) !void {
         }
         // If pane CWD is null, fall back to the terminal process current directory.
         if (cwd == null) {
-            cwd = std.posix.getcwd(&cwd_buf) catch null;
+            cwd = std.posix.getcwd(&cwd_buf) catch |err| blk: {
+                core.logging.logError("terminal", "createNewTab: failed to get focused fallback cwd", err);
+                break :blk null;
+            };
         }
     } else {
         // First tab - use the terminal process current directory.
-        cwd = std.posix.getcwd(&cwd_buf) catch null;
+        cwd = std.posix.getcwd(&cwd_buf) catch |err| blk: {
+            core.logging.logError("terminal", "createNewTab: failed to get first-tab cwd", err);
+            break :blk null;
+        };
     }
 
     // Generate tab name in format "session-N" (e.g., "alpha-1", "beta-2")
@@ -109,7 +124,10 @@ pub fn createTab(self: anytype) !void {
     errdefer self.runtime.removeTabFocusMemory(self.view.tab_views.items.len - 1);
     self.setActiveTabIndex(self.view.tab_views.items.len - 1);
     self.syncPaneAux(first_pane, parent_uuid);
-    self.syncSessionTabAdded(tab_uuid, self.runtime.tabName(self.activeTabIndex()) orelse "tab", first_pane.uuid);
+    if (!self.syncSessionTabAddedChecked(tab_uuid, self.runtime.tabName(self.activeTabIndex()) orelse "tab", first_pane.uuid)) {
+        killTabPanes(self, &self.view.tab_views.items[self.view.tab_views.items.len - 1]);
+        return error.SesUnavailable;
+    }
     self.renderer.invalidate();
     self.force_full_render = true;
 }
@@ -118,7 +136,19 @@ pub fn createTab(self: anytype) !void {
 pub fn closeCurrentTab(self: anytype) bool {
     if (self.view.tab_views.items.len <= 1) return false;
     const closing_tab = self.activeTabIndex();
-    const closing_uuid = self.runtime.tabUuid(closing_tab) orelse return false;
+    const closing_uuid = self.runtime.tabUuid(closing_tab) orelse {
+        core.logging.warn("terminal", "closeCurrentTab skipped: active tab has no session UUID", .{});
+        return false;
+    };
+    const next_active_tab: ?usize = if (self.view.tab_views.items.len > 1)
+        if (closing_tab >= self.view.tab_views.items.len - 1) self.view.tab_views.items.len - 2 else closing_tab
+    else
+        null;
+
+    if (!self.syncSessionTabRemovedChecked(closing_uuid, next_active_tab)) {
+        self.notifications.show("Close tab failed: session sync rejected removal");
+        return false;
+    }
 
     // Handle tab-bound floats belonging to this tab.
     var i: usize = 0;
@@ -144,7 +174,7 @@ pub fn closeCurrentTab(self: anytype) bool {
                         self.setActiveFloatingIndex(afi - 1);
                     }
                 }
-                self.syncSessionFloatRemoved(fp_uuid);
+                self.clearLocalFloatState(fp_uuid);
                 continue;
             }
         }
@@ -179,7 +209,6 @@ pub fn closeCurrentTab(self: anytype) bool {
     }
     self.renderer.invalidate();
     self.force_full_render = true;
-    self.syncSessionTabRemoved(closing_uuid);
     return true;
 }
 
@@ -190,17 +219,26 @@ pub fn adoptStickyPanes(self: anytype) void {
 
     // Get current working directory.
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = std.posix.getcwd(&cwd_buf) catch return;
+    const cwd = std.posix.getcwd(&cwd_buf) catch |err| {
+        core.logging.logError("terminal", "failed to get cwd for sticky pane adoption", err);
+        return;
+    };
 
     // Check each float definition for sticky floats.
     for (self.active_layout_floats) |*float_def| {
         if (!float_def.attributes.sticky) continue;
 
         // Try to find a sticky pane in ses matching this directory + key.
-        const result = self.runtime.findStickyPane(cwd, float_def.key) catch continue;
+        const result = self.runtime.findStickyPane(cwd, float_def.key) catch |err| {
+            core.logging.logError("terminal", "failed to query sticky pane for layout float", err);
+            continue;
+        };
         if (result) |r| {
             // Found a sticky pane - adopt it as a float.
-            self.adoptAsFloat(r.uuid, r.pane_id, float_def, cwd) catch continue;
+            self.adoptAsFloat(r.uuid, r.pane_id, float_def, cwd) catch |err| {
+                core.logging.logError("terminal", "failed to adopt sticky pane as float", err);
+                continue;
+            };
             self.notifications.showFor("Sticky float restored", 2000);
         }
     }
@@ -210,6 +248,10 @@ pub fn adoptStickyPanes(self: anytype) void {
 pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const core.LayoutFloatDef, cwd: []const u8) !void {
     const pane = try self.allocator.create(Pane);
     errdefer self.allocator.destroy(pane);
+    var pane_registered = false;
+    errdefer if (!pane_registered) self.runtime.orphanPane(uuid) catch |e| {
+        terminal_main.debugLogUuid(&uuid, "adoptAsFloat rollback orphanPane failed: {s}", .{@errorName(e)});
+    };
 
     // Use per-float settings or fall back to defaults.
     const visuals = self.resolveFloatVisuals(.named, float_def.title);
@@ -220,32 +262,19 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
     const pad_x_cfg: u16 = visuals.pad_x;
     const pad_y_cfg: u16 = visuals.pad_y;
     const border_color = visuals.border_color;
-
-    // Calculate outer frame size.
-    const avail_h = self.term_height - self.status_height;
-    const outer_w = self.term_width * width_pct / 100;
-    const outer_h = avail_h * height_pct / 100;
-
-    // Calculate position based on percentage.
-    const max_x = if (self.term_width > outer_w) self.term_width - outer_w else 0;
-    const max_y = if (avail_h > outer_h) avail_h - outer_h else 0;
-    const outer_x = max_x * pos_x_pct / 100;
-    const outer_y = max_y * pos_y_pct / 100;
-
-    // Apply padding.
-    const pad_x: u16 = @intCast(@min(pad_x_cfg, outer_w / 4));
-    const pad_y: u16 = @intCast(@min(pad_y_cfg, outer_h / 4));
-    const content_x = outer_x + 1 + pad_x;
-    const content_y = outer_y + 1 + pad_y;
-    const content_w = if (outer_w > 2 + 2 * pad_x) outer_w - 2 - 2 * pad_x else 1;
-    const content_h = if (outer_h > 2 + 2 * pad_y) outer_h - 2 - 2 * pad_y else 1;
+    const shadow_enabled = if (visuals.float_style) |style| style.shadow_color != null else false;
+    const frame = self.floatFrameFromValues(width_pct, height_pct, pos_x_pct, pos_y_pct, pad_x_cfg, pad_y_cfg, shadow_enabled);
+    const width_pct_u8: u8 = @intCast(@min(width_pct, 100));
+    const height_pct_u8: u8 = @intCast(@min(height_pct, 100));
+    const pos_x_pct_u8: u8 = @intCast(@min(pos_x_pct, 100));
+    const pos_y_pct_u8: u8 = @intCast(@min(pos_y_pct, 100));
 
     // Generate pane ID (floats use 100+ offset).
     const id: u16 = @intCast(100 + self.view.float_views.items.len);
 
     // Initialize pane with the adopted pod — VT routed through SES.
     const vt_fd = self.runtime.getVtFd() orelse return error.NoVtChannel;
-    try pane.initWithPod(self.allocator, id, content_x, content_y, content_w, content_h, pane_id, vt_fd, uuid);
+    try pane.initWithPod(self.allocator, id, frame.content_x, frame.content_y, frame.content_w, frame.content_h, pane_id, vt_fd, uuid);
 
     if (self.runtime.getPaneInfoSnapshot(uuid)) |snap| {
         defer if (snap.cwd) |snap_cwd| self.allocator.free(snap_cwd);
@@ -274,22 +303,22 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
     else
         0;
 
-    _ = self.setPaneFloatUi(uuid, .{
-        .border_x = outer_x,
-        .border_y = outer_y,
-        .border_w = outer_w,
-        .border_h = outer_h,
+    if (!self.setPaneFloatUi(uuid, .{
+        .border_x = frame.outer_x,
+        .border_y = frame.outer_y,
+        .border_w = frame.outer_w,
+        .border_h = frame.outer_h,
         .border_color = border_color,
-        .width_pct = @intCast(width_pct),
-        .height_pct = @intCast(height_pct),
-        .pos_x_pct = @intCast(pos_x_pct),
-        .pos_y_pct = @intCast(pos_y_pct),
+        .width_pct = width_pct_u8,
+        .height_pct = height_pct_u8,
+        .pos_x_pct = pos_x_pct_u8,
+        .pos_y_pct = pos_y_pct_u8,
         .pad_x = @intCast(pad_x_cfg),
         .pad_y = @intCast(pad_y_cfg),
         .pwd_dir = if (float_def.attributes.per_cwd) cwd else null,
         .float_style = visuals.float_style,
         .float_title = float_def.title,
-    });
+    })) return error.OutOfMemory;
 
     // Configure pane notifications.
     pane.configureNotificationsFromPop(&self.pop_config.pane.notification);
@@ -303,15 +332,16 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
         float_def.attributes.sticky,
         float_def.attributes.per_cwd,
         float_def.key,
-        @intCast(width_pct),
-        @intCast(height_pct),
-        @intCast(pos_x_pct),
-        @intCast(pos_y_pct),
+        width_pct_u8,
+        height_pct_u8,
+        pos_x_pct_u8,
+        pos_y_pct_u8,
         @intCast(pad_x_cfg),
         @intCast(pad_y_cfg),
         false,
     );
     // Don't set active_floating here - let user toggle it manually.
+    pane_registered = true;
 }
 
 /// Switch to next tab.
@@ -366,22 +396,46 @@ pub fn adoptOrphanedPane(self: anytype) bool {
 
     // Get list of orphaned panes.
     var panes: [32]OrphanedPaneInfo = undefined;
-    const count = self.runtime.listOrphanedPanes(&panes) catch return false;
+    const count = self.runtime.listOrphanedPanes(&panes) catch |err| {
+        core.logging.logError("terminal", "adoptOrphanedPane failed to list orphaned panes", err);
+        return false;
+    };
     if (count == 0) return false;
 
-    // Adopt the first one.
-    const result = self.runtime.adoptPane(panes[0].uuid) catch return false;
-    const vt_fd = self.runtime.getVtFd() orelse return false;
+    const vt_fd = self.runtime.getVtFd() orelse {
+        core.logging.warn("terminal", "adoptOrphanedPane skipped: SES VT channel is unavailable", .{});
+        return false;
+    };
 
-    // Get the current focused pane and replace it.
-    if (self.activeFloatingIndex()) |idx| {
-        const old_pane = self.view.float_views.items[idx];
-        old_pane.replaceWithPod(result.pane_id, vt_fd, result.uuid) catch return false;
-    } else if (self.currentLayout().getFocusedPane()) |pane| {
-        pane.replaceWithPod(result.pane_id, vt_fd, result.uuid) catch return false;
-    } else {
+    const pane = if (self.activeFloatingIndex()) |idx|
+        self.view.float_views.items[idx]
+    else
+        self.currentLayout().getFocusedPane() orelse {
+            core.logging.warn("terminal", "adoptOrphanedPane skipped: no focused pane to replace", .{});
+            return false;
+        };
+
+    const active_float = self.paneIsFloating(pane);
+    const old_uuid = pane.uuid;
+    const result = self.runtime.adoptPane(panes[0].uuid) catch |err| {
+        terminal_main.debugLogUuid(&panes[0].uuid, "adoptOrphanedPane adoptPane failed: {s}", .{@errorName(err)});
+        return false;
+    };
+    if (!self.replacePaneWithPodSynced(
+        old_uuid,
+        result.uuid,
+        result.pane_id,
+        vt_fd,
+        pane,
+        active_float,
+        .orphan_new_pane,
+        "adoptOrphanedPane: rollback orphanPane failed after replacement error",
+    )) {
         return false;
     }
+    self.runtime.killPane(old_uuid) catch |e| {
+        terminal_main.debugLogUuid(&old_uuid, "adoptOrphanedPane: killPane failed after replace: {s}", .{@errorName(e)});
+    };
 
     self.renderer.invalidate();
     self.force_full_render = true;

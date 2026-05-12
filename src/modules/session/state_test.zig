@@ -3,6 +3,7 @@ const testing = std.testing;
 const core = @import("core");
 const state = @import("state.zig");
 const txlog = @import("txlog.zig");
+const persist = @import("persist.zig");
 
 /// Test helper: failing allocator that fails after N allocations
 const FailingAllocator = struct {
@@ -23,12 +24,13 @@ const FailingAllocator = struct {
             .vtable = &.{
                 .alloc = alloc,
                 .resize = resize,
+                .remap = remap,
                 .free = free,
             },
         };
     }
 
-    fn alloc(ctx: *anyopaque, len: usize, ptr_align: u8, ret_addr: usize) ?[*]u8 {
+    fn alloc(ctx: *anyopaque, len: usize, ptr_align: std.mem.Alignment, ret_addr: usize) ?[*]u8 {
         const self: *FailingAllocator = @ptrCast(@alignCast(ctx));
         self.alloc_count += 1;
         if (self.alloc_count > self.fail_after) {
@@ -37,12 +39,17 @@ const FailingAllocator = struct {
         return self.parent_allocator.rawAlloc(len, ptr_align, ret_addr);
     }
 
-    fn resize(ctx: *anyopaque, buf: []u8, buf_align: u8, new_len: usize, ret_addr: usize) bool {
+    fn resize(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usize, ret_addr: usize) bool {
         const self: *FailingAllocator = @ptrCast(@alignCast(ctx));
         return self.parent_allocator.rawResize(buf, buf_align, new_len, ret_addr);
     }
 
-    fn free(ctx: *anyopaque, buf: []u8, buf_align: u8, ret_addr: usize) void {
+    fn remap(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, new_len: usize, ret_addr: usize) ?[*]u8 {
+        const self: *FailingAllocator = @ptrCast(@alignCast(ctx));
+        return self.parent_allocator.rawRemap(buf, buf_align, new_len, ret_addr);
+    }
+
+    fn free(ctx: *anyopaque, buf: []u8, buf_align: std.mem.Alignment, ret_addr: usize) void {
         const self: *FailingAllocator = @ptrCast(@alignCast(ctx));
         self.parent_allocator.rawFree(buf, buf_align, ret_addr);
     }
@@ -206,7 +213,7 @@ test "SessionLock: timeout releases stale locks" {
     try testing.expect(ses_state.isSessionLocked(session_id));
 
     // Manually set lock timestamp to old value (simulate timeout)
-    if (ses_state.session_locks.getPtr(session_id)) |lock| {
+    if (ses_state.locks.session_locks.getPtr(session_id)) |lock| {
         lock.locked_at = std.time.timestamp() - 31; // 31 seconds ago (timeout is 30s)
     }
 
@@ -215,6 +222,120 @@ test "SessionLock: timeout releases stale locks" {
     try testing.expect(ses_state.isSessionLocked(session_id));
 
     ses_state.releaseSessionLock(session_id);
+}
+
+test "SessionLock: releaseClient clears locks owned by disconnected client" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const first_session = [_]u8{1} ** 16;
+    const second_session = [_]u8{2} ** 16;
+
+    try ses_state.acquireSessionLock(first_session, 10, .attaching);
+    try ses_state.acquireSessionLock(second_session, 20, .attaching);
+
+    ses_state.releaseClientLocks(10);
+
+    try testing.expect(!ses_state.isSessionLocked(first_session));
+    try testing.expect(ses_state.isSessionLocked(second_session));
+
+    ses_state.releaseSessionLock(second_session);
+}
+
+test "SessionProjection: failed metadata replacement preserves old owned strings" {
+    var projection = try core.SessionProjection.init(testing.allocator, [_]u8{1} ** 32, "meta-test");
+    defer projection.deinit();
+
+    const pane_uuid = [_]u8{'m'} ** 32;
+    projection.setPaneShell(pane_uuid, "old-cmd", "old-cwd", null, null, null);
+    projection.setPaneProc(pane_uuid, "old-proc", 123);
+    projection.setPaneNameOwned(pane_uuid, try testing.allocator.dupe(u8, "old-name"));
+
+    var failing = FailingAllocator.init(testing.allocator, 0);
+    const original_allocator = projection.allocator;
+    projection.allocator = failing.allocator();
+    projection.setPaneShell(pane_uuid, "new-cmd", "new-cwd", null, null, null);
+    projection.setPaneProc(pane_uuid, "new-proc", 456);
+    projection.setPaneNameOwned(pane_uuid, try testing.allocator.dupe(u8, "new-name"));
+    projection.allocator = original_allocator;
+
+    const shell = projection.getPaneShell(pane_uuid) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("old-cmd", shell.cmd orelse return error.TestUnexpectedResult);
+    try testing.expectEqualStrings("old-cwd", shell.cwd orelse return error.TestUnexpectedResult);
+
+    const proc = projection.getPaneProc(pane_uuid) orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("old-proc", proc.name orelse return error.TestUnexpectedResult);
+    try testing.expectEqual(@as(?i32, 123), proc.pid);
+    try testing.expectEqualStrings("new-name", projection.paneName(pane_uuid) orelse return error.TestUnexpectedResult);
+}
+
+test "SessionProjection: failed tab focus memory updates are transactional" {
+    var projection = try core.SessionProjection.init(testing.allocator, [_]u8{2} ** 32, "focus-test");
+    defer projection.deinit();
+
+    try projection.resetTabFocusMemory(1);
+    try testing.expectEqual(@as(usize, 1), projection.tab_last_floating_uuid.items.len);
+    try testing.expectEqual(@as(usize, 1), projection.tab_last_focus_kind.items.len);
+
+    projection.tab_last_floating_uuid.deinit(testing.allocator);
+    projection.tab_last_focus_kind.deinit(testing.allocator);
+    projection.tab_last_floating_uuid = .empty;
+    projection.tab_last_focus_kind = .empty;
+
+    var failing = FailingAllocator.init(testing.allocator, 1);
+    const original_allocator = projection.allocator;
+    projection.allocator = failing.allocator();
+    try testing.expectError(error.OutOfMemory, projection.appendTabFocusMemory());
+    projection.allocator = original_allocator;
+
+    try testing.expectEqual(@as(usize, 0), projection.tab_last_floating_uuid.items.len);
+    try testing.expectEqual(@as(usize, 0), projection.tab_last_focus_kind.items.len);
+
+    try projection.resetTabFocusMemory(1);
+
+    failing = FailingAllocator.init(testing.allocator, 0);
+    projection.allocator = failing.allocator();
+    try testing.expectError(error.OutOfMemory, projection.resetTabFocusMemory(2));
+    projection.allocator = original_allocator;
+
+    try testing.expectEqual(@as(usize, 1), projection.tab_last_floating_uuid.items.len);
+    try testing.expectEqual(@as(usize, 1), projection.tab_last_focus_kind.items.len);
+}
+
+test "SessionProjection: failed snapshot replacement preserves old projection" {
+    var projection = try core.SessionProjection.init(testing.allocator, [_]u8{3} ** 32, "initial");
+    defer projection.deinit();
+
+    var old_snapshot = try core.session_model.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'o'} ** 32, "old");
+    try old_snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try testing.allocator.dupe(u8, "old-tab"),
+        .allocator = testing.allocator,
+    });
+    try projection.replaceAttachedSnapshotOwned(old_snapshot);
+
+    var new_snapshot = try core.session_model.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'n'} ** 32, "new");
+    defer new_snapshot.deinit();
+    try new_snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'u'} ** 32,
+        .name = try testing.allocator.dupe(u8, "new-tab"),
+        .allocator = testing.allocator,
+    });
+
+    var failing = FailingAllocator.init(testing.allocator, 1);
+    const original_allocator = projection.allocator;
+    projection.allocator = failing.allocator();
+    try testing.expectError(error.OutOfMemory, projection.replaceAttachedSnapshotOwned(new_snapshot));
+    projection.allocator = original_allocator;
+
+    const snapshot = projection.attachedSnapshot() orelse return error.TestUnexpectedResult;
+    try testing.expectEqual([_]u8{'o'} ** 32, snapshot.uuid);
+    try testing.expectEqualStrings("old", snapshot.session_name);
+    try testing.expectEqualStrings("old", projection.sessionName());
+    try testing.expectEqual(@as(usize, 1), projection.tabs.items.len);
+    try testing.expectEqualStrings("old-tab", projection.tabs.items[0].name_owned);
+    try testing.expectEqual(@as(usize, 1), projection.tab_last_floating_uuid.items.len);
+    try testing.expectEqual(@as(usize, 1), projection.tab_last_focus_kind.items.len);
 }
 
 test "reattachSession: returns snapshot borrowed from detached session map" {
@@ -238,7 +359,7 @@ test "reattachSession: returns snapshot borrowed from detached session map" {
     errdefer testing.allocator.free(pane_uuids);
     pane_uuids[0] = pane_uuid;
 
-    try ses_state.panes.put(pane_uuid, .{
+    try ses_state.store.panes.put(pane_uuid, .{
         .uuid = pane_uuid,
         .name = null,
         .pod_pid = live_pid,
@@ -254,7 +375,7 @@ test "reattachSession: returns snapshot borrowed from detached session map" {
         .allocator = testing.allocator,
     });
 
-    try ses_state.detached_sessions.put(session_id, .{
+    try ses_state.store.detached_sessions.put(session_id, .{
         .session_id = session_id,
         .session_snapshot = snapshot,
         .pane_uuids = pane_uuids,
@@ -263,7 +384,7 @@ test "reattachSession: returns snapshot borrowed from detached session map" {
     });
 
     const result = (try ses_state.reattachSession(session_id, 1)) orelse return error.TestUnexpectedResult;
-    const stored = ses_state.detached_sessions.getPtr(session_id) orelse return error.TestUnexpectedResult;
+    const stored = ses_state.store.detached_sessions.getPtr(session_id) orelse return error.TestUnexpectedResult;
 
     try testing.expect(result.session_snapshot == &stored.session_snapshot);
     try testing.expectEqualStrings("borrowed", result.session_snapshot.session_name);
@@ -299,7 +420,7 @@ test "reattachSession: seeds live client snapshot from detached state" {
     errdefer testing.allocator.free(pane_uuids);
     pane_uuids[0] = pane_uuid;
 
-    try ses_state.panes.put(pane_uuid, .{
+    try ses_state.store.panes.put(pane_uuid, .{
         .uuid = pane_uuid,
         .name = null,
         .pod_pid = live_pid,
@@ -315,7 +436,7 @@ test "reattachSession: seeds live client snapshot from detached state" {
         .allocator = testing.allocator,
     });
 
-    try ses_state.detached_sessions.put(session_id, .{
+    try ses_state.store.detached_sessions.put(session_id, .{
         .session_id = session_id,
         .session_snapshot = snapshot,
         .pane_uuids = pane_uuids,
@@ -366,7 +487,7 @@ test "reattachSession: prunes stale detached pane uuids before returning" {
     errdefer testing.allocator.free(pane_uuids);
     pane_uuids[0] = stale_uuid;
 
-    try ses_state.detached_sessions.put(session_id, .{
+    try ses_state.store.detached_sessions.put(session_id, .{
         .session_id = session_id,
         .session_snapshot = snapshot,
         .pane_uuids = pane_uuids,
@@ -375,7 +496,7 @@ test "reattachSession: prunes stale detached pane uuids before returning" {
     });
 
     const result = (try ses_state.reattachSession(session_id, client_id)) orelse return error.TestUnexpectedResult;
-    const stored = ses_state.detached_sessions.getPtr(session_id) orelse return error.TestUnexpectedResult;
+    const stored = ses_state.store.detached_sessions.getPtr(session_id) orelse return error.TestUnexpectedResult;
 
     try testing.expectEqual(@as(usize, 0), result.pane_uuids.len);
     try testing.expectEqual(@as(usize, 0), stored.pane_uuids.len);
@@ -383,6 +504,83 @@ test "reattachSession: prunes stale detached pane uuids before returning" {
     try testing.expectEqual(@as(usize, 0), stored.session_snapshot.floats.items.len);
     try testing.expect(stored.session_snapshot.active_float_uuid == null);
     try testing.expect(stored.session_snapshot.focused_pane_uuid == null);
+}
+
+test "detach to reattach to adopt preserves pane ownership and snapshot" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const original_client_id = try ses_state.addClient(99);
+    const session_id = [_]u8{8} ** 16;
+    const session_hex: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
+    const pane_uuid = [_]u8{'r'} ** 32;
+    const tab_uuid = [_]u8{'t'} ** 32;
+    const live_pid: std.posix.pid_t = @intCast(std.c.getpid());
+
+    if (ses_state.getClient(original_client_id)) |client| {
+        client.session_id = session_id;
+        client.session_name = try ses_state.allocator.dupe(u8, "roundtrip");
+        client.session_snapshot = try state.SessionSnapshot.initMinimal(ses_state.allocator, session_hex, "roundtrip");
+        try client.session_snapshot.?.tabs.append(ses_state.allocator, .{
+            .uuid = tab_uuid,
+            .name = try ses_state.allocator.dupe(u8, "main"),
+            .focused_pane_uuid = pane_uuid,
+            .allocator = ses_state.allocator,
+        });
+        try client.session_snapshot.?.panes.put(pane_uuid, .{ .uuid = pane_uuid, .kind = .split, .parent_tab = 0 });
+        client.session_snapshot.?.focused_pane_uuid = pane_uuid;
+        try client.appendUuid(pane_uuid);
+    }
+
+    try ses_state.store.panes.put(pane_uuid, .{
+        .uuid = pane_uuid,
+        .pod_pid = live_pid,
+        .pod_socket_path = try ses_state.allocator.dupe(u8, "/tmp/hexe-pane-reattach-roundtrip"),
+        .child_pid = live_pid,
+        .state = .attached,
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = original_client_id,
+        .session_id = null,
+        .created_at = 0,
+        .orphaned_at = null,
+        .allocator = ses_state.allocator,
+    });
+
+    try testing.expect(ses_state.detachSession(original_client_id, session_id, "roundtrip"));
+    try testing.expect(ses_state.getClient(original_client_id) == null);
+
+    const detached = ses_state.store.detached_sessions.getPtr(session_id) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), detached.pane_uuids.len);
+    try testing.expectEqual(pane_uuid, detached.pane_uuids[0]);
+
+    const detached_pane = ses_state.store.panes.get(pane_uuid) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(state.PaneState.detached, detached_pane.state);
+    try testing.expect(detached_pane.attached_to == null);
+    try testing.expectEqual(session_id, detached_pane.session_id.?);
+
+    const reattach_client_id = try ses_state.addClient(100);
+    const result = (try ses_state.reattachSession(session_id, reattach_client_id)) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 1), result.pane_uuids.len);
+    try testing.expectEqual(pane_uuid, result.pane_uuids[0]);
+
+    const reattach_client = ses_state.getClient(reattach_client_id) orelse return error.TestUnexpectedResult;
+    const snapshot = reattach_client.session_snapshot orelse return error.TestUnexpectedResult;
+    try testing.expectEqualStrings("roundtrip", snapshot.session_name);
+    try testing.expect(snapshot.panes.get(pane_uuid) != null);
+    try testing.expectEqual(pane_uuid, snapshot.focused_pane_uuid.?);
+
+    const adopted = try ses_state.attachPane(pane_uuid, reattach_client_id);
+    try testing.expectEqual(state.PaneState.attached, adopted.state);
+    try testing.expectEqual(reattach_client_id, adopted.attached_to.?);
+    try testing.expect(ses_state.paneAttachedToClient(pane_uuid, reattach_client_id));
+
+    ses_state.removeDetachedSession(session_id);
+    try testing.expect(ses_state.store.detached_sessions.get(session_id) == null);
+    const committed_pane = ses_state.store.panes.get(pane_uuid) orelse return error.TestUnexpectedResult;
+    try testing.expect(committed_pane.session_id == null);
+    try testing.expectEqual(state.PaneState.attached, committed_pane.state);
+    try testing.expectEqual(reattach_client_id, committed_pane.attached_to.?);
 }
 
 // ============================================================================
@@ -394,7 +592,7 @@ test "resolveSessionName: unique name returned as-is" {
     defer ses_state.deinit();
 
     const name = "alpha";
-    const resolved = ses_state.resolveSessionName(name, null, null) orelse return error.AllocationFailed;
+    const resolved = try ses_state.resolveSessionName(name, null, null);
     // Note: resolved is allocated with page_allocator (SesState.allocator), not testing.allocator
     defer ses_state.allocator.free(resolved);
 
@@ -413,7 +611,7 @@ test "resolveSessionName: conflicting name gets suffix" {
     }
 
     // Try to resolve "alpha" - should get "alpha-2"
-    const resolved = ses_state.resolveSessionName("alpha", null, null) orelse return error.AllocationFailed;
+    const resolved = try ses_state.resolveSessionName("alpha", null, null);
     defer ses_state.allocator.free(resolved);
 
     try testing.expectEqualStrings("alpha-2", resolved);
@@ -429,7 +627,7 @@ test "resolveSessionName: ignores current client on re-register" {
         client.session_name = try ses_state.allocator.dupe(u8, "alpha");
     }
 
-    const resolved = ses_state.resolveSessionName("alpha", client_id, null) orelse return error.AllocationFailed;
+    const resolved = try ses_state.resolveSessionName("alpha", client_id, null);
     defer ses_state.allocator.free(resolved);
 
     try testing.expectEqualStrings("alpha", resolved);
@@ -448,7 +646,7 @@ test "resolveSessionName: ignores matching detached session on reattach" {
     const pane_uuids = try testing.allocator.alloc([32]u8, 0);
     errdefer testing.allocator.free(pane_uuids);
 
-    try ses_state.detached_sessions.put(session_id, .{
+    try ses_state.store.detached_sessions.put(session_id, .{
         .session_id = session_id,
         .session_snapshot = snapshot,
         .pane_uuids = pane_uuids,
@@ -456,7 +654,7 @@ test "resolveSessionName: ignores matching detached session on reattach" {
         .allocator = testing.allocator,
     });
 
-    const resolved = ses_state.resolveSessionName("alpha", null, session_id) orelse return error.AllocationFailed;
+    const resolved = try ses_state.resolveSessionName("alpha", null, session_id);
     defer ses_state.allocator.free(resolved);
 
     try testing.expectEqualStrings("alpha", resolved);
@@ -470,7 +668,7 @@ test "TxLog: write and read entries" {
     const tmp_path = "/tmp/hexa-test-txlog";
     defer std.fs.cwd().deleteFile(tmp_path) catch {};
 
-    var log = try txlog.TxLog.init(testing.allocator, tmp_path);
+    var log = txlog.TxLog.init(testing.allocator, tmp_path);
     defer log.deinit();
 
     try log.open();
@@ -503,7 +701,7 @@ test "TxLog: readAll stops cleanly on truncated trailing entry" {
     const tmp_path = "/tmp/hexe-test-txlog-truncated";
     defer std.fs.cwd().deleteFile(tmp_path) catch {};
 
-    var log = try txlog.TxLog.init(testing.allocator, tmp_path);
+    var log = txlog.TxLog.init(testing.allocator, tmp_path);
     defer log.deinit();
     try log.open();
 
@@ -541,7 +739,7 @@ test "TxLog: readAll rejects per-entry payload_len over 1MB cap" {
     const tmp_path = "/tmp/hexe-test-txlog-oversize";
     defer std.fs.cwd().deleteFile(tmp_path) catch {};
 
-    var log = try txlog.TxLog.init(testing.allocator, tmp_path);
+    var log = txlog.TxLog.init(testing.allocator, tmp_path);
     defer log.deinit();
     try log.open();
 
@@ -634,7 +832,7 @@ test "TxLog: truncate clears log" {
     const tmp_path = "/tmp/hexa-test-txlog-truncate";
     defer std.fs.cwd().deleteFile(tmp_path) catch {};
 
-    var log = try txlog.TxLog.init(testing.allocator, tmp_path);
+    var log = txlog.TxLog.init(testing.allocator, tmp_path);
     defer log.deinit();
 
     try log.open();
@@ -651,6 +849,41 @@ test "TxLog: truncate clears log" {
     defer entries.deinit(testing.allocator);
 
     try testing.expectEqual(@as(usize, 0), entries.items.len);
+}
+
+test "persist: parseSessionIdHex rejects invalid pane session ids" {
+    const valid = "00112233445566778899aabbccddeeff";
+    const parsed = persist.parseSessionIdHex(valid) orelse return error.ExpectedValidSessionId;
+    try testing.expectEqualSlices(u8, &[_]u8{
+        0x00, 0x11, 0x22, 0x33,
+        0x44, 0x55, 0x66, 0x77,
+        0x88, 0x99, 0xaa, 0xbb,
+        0xcc, 0xdd, 0xee, 0xff,
+    }, &parsed);
+
+    try testing.expectEqual(@as(?[16]u8, null), persist.parseSessionIdHex("short"));
+    try testing.expectEqual(@as(?[16]u8, null), persist.parseSessionIdHex("00112233445566778899aabbccddeegx"));
+}
+
+test "persist: parseStoredUuidHex rejects malformed pane uuids" {
+    const valid = "00112233445566778899aabbccddeeff";
+    const parsed = persist.parseStoredUuidHex(valid) orelse return error.ExpectedValidPaneUuid;
+    try testing.expectEqualStrings(valid, &parsed);
+
+    try testing.expectEqual(@as(?[32]u8, null), persist.parseStoredUuidHex("short"));
+    try testing.expectEqual(@as(?[32]u8, null), persist.parseStoredUuidHex("00112233445566778899aabbccddeegx"));
+}
+
+test "persist: writeJsonString escapes persisted strings" {
+    var out: std.ArrayList(u8) = .empty;
+    defer out.deinit(testing.allocator);
+
+    try persist.writeJsonString(out.writer(testing.allocator), "a\"b\\c\n\r\t\x08\x0c\x01");
+
+    try testing.expectEqualStrings(
+        "\"a\\\"b\\\\c\\n\\r\\t\\b\\f\\u0001\"",
+        out.items,
+    );
 }
 
 // ============================================================================
@@ -691,6 +924,152 @@ test "detachSession: allocation failure during name dupe" {
     // of allocators, which is out of scope for this test suite.
 }
 
+test "detachSession: includes panes present only in canonical snapshot" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(99);
+    const session_id = [_]u8{1} ** 16;
+    const pane_a = [_]u8{'a'} ** 32;
+    const pane_b = [_]u8{'b'} ** 32;
+    const orphaned_old_pane = [_]u8{'o'} ** 32;
+
+    if (ses_state.getClient(client_id)) |client| {
+        client.session_id = session_id;
+        client.session_name = try ses_state.allocator.dupe(u8, "alpha");
+        client.session_snapshot = try state.SessionSnapshot.initMinimal(ses_state.allocator, [_]u8{'1'} ** 32, "alpha");
+        try client.session_snapshot.?.panes.put(pane_a, .{ .uuid = pane_a, .kind = .split, .parent_tab = 0 });
+        try client.session_snapshot.?.panes.put(pane_b, .{ .uuid = pane_b, .kind = .split, .parent_tab = 0 });
+        try client.session_snapshot.?.panes.put(orphaned_old_pane, .{ .uuid = orphaned_old_pane, .kind = .split, .parent_tab = 0 });
+        try client.appendUuid(pane_a);
+    }
+
+    try ses_state.store.panes.put(pane_a, .{
+        .uuid = pane_a,
+        .pod_pid = 1001,
+        .pod_socket_path = try ses_state.allocator.dupe(u8, "/tmp/hexe-pane-a"),
+        .child_pid = 2001,
+        .state = .attached,
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = client_id,
+        .session_id = null,
+        .created_at = 0,
+        .orphaned_at = null,
+        .allocator = ses_state.allocator,
+    });
+    try ses_state.store.panes.put(orphaned_old_pane, .{
+        .uuid = orphaned_old_pane,
+        .pod_pid = 1003,
+        .pod_socket_path = try ses_state.allocator.dupe(u8, "/tmp/hexe-pane-old"),
+        .child_pid = 2003,
+        .state = .orphaned,
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = null,
+        .session_id = null,
+        .created_at = 0,
+        .orphaned_at = 1,
+        .allocator = ses_state.allocator,
+    });
+    try ses_state.store.panes.put(pane_b, .{
+        .uuid = pane_b,
+        .pod_pid = 1002,
+        .pod_socket_path = try ses_state.allocator.dupe(u8, "/tmp/hexe-pane-b"),
+        .child_pid = 2002,
+        .state = .attached,
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = client_id,
+        .session_id = null,
+        .created_at = 0,
+        .orphaned_at = null,
+        .allocator = ses_state.allocator,
+    });
+
+    try testing.expect(ses_state.detachSession(client_id, session_id, "alpha"));
+    try testing.expect(ses_state.getClient(client_id) == null);
+
+    const detached = ses_state.store.detached_sessions.getPtr(session_id) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(@as(usize, 2), detached.pane_uuids.len);
+
+    var saw_a = false;
+    var saw_b = false;
+    var saw_orphaned_old = false;
+    for (detached.pane_uuids) |uuid| {
+        if (std.mem.eql(u8, &uuid, &pane_a)) saw_a = true;
+        if (std.mem.eql(u8, &uuid, &pane_b)) saw_b = true;
+        if (std.mem.eql(u8, &uuid, &orphaned_old_pane)) saw_orphaned_old = true;
+    }
+    try testing.expect(saw_a);
+    try testing.expect(saw_b);
+    try testing.expect(!saw_orphaned_old);
+    try testing.expect(detached.session_snapshot.panes.get(orphaned_old_pane) == null);
+
+    const restored_b = ses_state.store.panes.getPtr(pane_b) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(state.PaneState.detached, restored_b.state);
+    try testing.expect(restored_b.attached_to == null);
+    try testing.expect(restored_b.session_id != null);
+    try testing.expectEqualSlices(u8, &session_id, &restored_b.session_id.?);
+}
+
+test "detachSession: closes POD VT routing without removing detached pane" {
+    var fds: [2]std.posix.fd_t = undefined;
+    const rc = std.os.linux.socketpair(std.posix.AF.UNIX, std.posix.SOCK.STREAM, 0, &fds);
+    if (rc != 0) return error.SocketpairFailed;
+    var close_pod_vt = true;
+    defer if (close_pod_vt) std.posix.close(fds[0]);
+    defer std.posix.close(fds[1]);
+
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(99);
+    const session_id = [_]u8{9} ** 16;
+    const session_hex: [32]u8 = std.fmt.bytesToHex(&session_id, .lower);
+    const pane_uuid = [_]u8{'v'} ** 32;
+    const pane_id: u16 = 77;
+
+    if (ses_state.getClient(client_id)) |client| {
+        client.session_id = session_id;
+        client.session_name = try ses_state.allocator.dupe(u8, "vt-detach");
+        client.session_snapshot = try state.SessionSnapshot.initMinimal(ses_state.allocator, session_hex, "vt-detach");
+        try client.session_snapshot.?.panes.put(pane_uuid, .{ .uuid = pane_uuid, .kind = .split, .parent_tab = 0 });
+        try client.appendUuid(pane_uuid);
+    }
+
+    try ses_state.store.panes.put(pane_uuid, .{
+        .uuid = pane_uuid,
+        .pod_pid = @intCast(std.c.getpid()),
+        .pod_socket_path = try ses_state.allocator.dupe(u8, "/tmp/hexe-pane-vt-detach"),
+        .child_pid = @intCast(std.c.getpid()),
+        .state = .attached,
+        .pane_id = pane_id,
+        .pod_vt_fd = fds[0],
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = client_id,
+        .session_id = null,
+        .created_at = 0,
+        .orphaned_at = null,
+        .allocator = ses_state.allocator,
+    });
+    try ses_state.store.pod_vt_to_pane_id.put(fds[0], pane_id);
+    try ses_state.store.pane_id_to_pod_vt.put(pane_id, fds[0]);
+
+    try testing.expect(ses_state.detachSession(client_id, session_id, "vt-detach"));
+    close_pod_vt = false;
+
+    const pane = ses_state.store.panes.get(pane_uuid) orelse return error.TestUnexpectedResult;
+    try testing.expectEqual(state.PaneState.detached, pane.state);
+    try testing.expect(pane.pod_vt_fd == null);
+    try testing.expect(pane.attached_to == null);
+    try testing.expect(pane.session_id != null);
+    try testing.expectEqualSlices(u8, &session_id, &pane.session_id.?);
+    try testing.expect(!ses_state.store.pod_vt_to_pane_id.contains(fds[0]));
+    try testing.expect(!ses_state.store.pane_id_to_pod_vt.contains(pane_id));
+}
+
 // ============================================================================
 // Cleanup Tests
 // ============================================================================
@@ -717,15 +1096,15 @@ test "cleanupOrphanedPanes: removes timed-out panes" {
         .allocator = testing.allocator,
     };
 
-    try ses_state.panes.put(uuid, pane);
+    try ses_state.store.panes.put(uuid, pane);
 
     // Set timeout to 24 hours
-    ses_state.orphan_timeout_hours = 24;
+    ses_state.store.orphan_timeout_hours = 24;
 
     // Cleanup should remove the pane
     ses_state.cleanupOrphanedPanes();
 
-    try testing.expect(!ses_state.panes.contains(uuid));
+    try testing.expect(!ses_state.store.panes.contains(uuid));
 }
 
 test "killAllOrphanedPanes: removes all orphaned and sticky panes" {
@@ -785,17 +1164,17 @@ test "killAllOrphanedPanes: removes all orphaned and sticky panes" {
         .allocator = testing.allocator,
     };
 
-    try ses_state.panes.put(orphaned_uuid, orphaned_pane);
-    try ses_state.panes.put(sticky_uuid, sticky_pane);
-    try ses_state.panes.put(attached_uuid, attached_pane);
+    try ses_state.store.panes.put(orphaned_uuid, orphaned_pane);
+    try ses_state.store.panes.put(sticky_uuid, sticky_pane);
+    try ses_state.store.panes.put(attached_uuid, attached_pane);
 
     // Kill all orphaned panes
     const killed = ses_state.killAllOrphanedPanes();
 
     try testing.expectEqual(@as(usize, 2), killed);
-    try testing.expect(!ses_state.panes.contains(orphaned_uuid));
-    try testing.expect(!ses_state.panes.contains(sticky_uuid));
-    try testing.expect(ses_state.panes.contains(attached_uuid)); // Should remain
+    try testing.expect(!ses_state.store.panes.contains(orphaned_uuid));
+    try testing.expect(!ses_state.store.panes.contains(sticky_uuid));
+    try testing.expect(ses_state.store.panes.contains(attached_uuid)); // Should remain
 }
 
 // ============================================================================
@@ -840,6 +1219,18 @@ test "Client.deinit: cleans up all resources" {
 
     // This should not leak - verified by test allocator
     client.deinit();
+}
+
+test "Client.appendUuid: ignores duplicate pane UUIDs" {
+    var client = state.Client.init(testing.allocator, 1, 99);
+    defer client.deinit();
+
+    const uuid = [_]u8{7} ** 32;
+    try client.appendUuid(uuid);
+    try client.appendUuid(uuid);
+
+    try testing.expectEqual(@as(usize, 1), client.pane_uuids.items.len);
+    try testing.expectEqualSlices(u8, &uuid, &client.pane_uuids.items[0]);
 }
 
 test "DetachedSessionState.deinit: cleans up all resources" {
@@ -1119,6 +1510,10 @@ test "removeClientSessionTab: removes split panes and shifts later tab parents" 
     });
     try snapshot.panes.put([_]u8{'1'} ** 32, .{ .uuid = [_]u8{'1'} ** 32, .kind = .split, .parent_tab = 0 });
     try snapshot.panes.put([_]u8{'2'} ** 32, .{ .uuid = [_]u8{'2'} ** 32, .kind = .split, .parent_tab = 1 });
+    try snapshot.panes.put([_]u8{'f'} ** 32, .{ .uuid = [_]u8{'f'} ** 32, .kind = .float, .parent_tab = 0 });
+    try snapshot.panes.put([_]u8{'g'} ** 32, .{ .uuid = [_]u8{'g'} ** 32, .kind = .float, .parent_tab = 1 });
+    try snapshot.floats.append(testing.allocator, .{ .pane_uuid = [_]u8{'f'} ** 32, .parent_tab = 0 });
+    try snapshot.floats.append(testing.allocator, .{ .pane_uuid = [_]u8{'g'} ** 32, .parent_tab = 1 });
     client.updateSessionSnapshot(snapshot);
 
     ses_state.removeClientSessionTab(client_id, [_]u8{'t'} ** 32, 0);
@@ -1126,7 +1521,12 @@ test "removeClientSessionTab: removes split panes and shifts later tab parents" 
     try testing.expectEqual(@as(usize, 1), client.session_snapshot.?.tabs.items.len);
     try testing.expectEqualStrings("alpha-2", client.session_snapshot.?.tabs.items[0].name);
     try testing.expect(client.session_snapshot.?.panes.get([_]u8{'1'} ** 32) == null);
+    try testing.expect(client.session_snapshot.?.panes.get([_]u8{'f'} ** 32) == null);
     try testing.expectEqual(@as(usize, 0), client.session_snapshot.?.panes.get([_]u8{'2'} ** 32).?.parent_tab.?);
+    try testing.expectEqual(@as(usize, 0), client.session_snapshot.?.panes.get([_]u8{'g'} ** 32).?.parent_tab.?);
+    try testing.expectEqual(@as(usize, 1), client.session_snapshot.?.floats.items.len);
+    try testing.expectEqual([_]u8{'g'} ** 32, client.session_snapshot.?.floats.items[0].pane_uuid);
+    try testing.expectEqual(@as(usize, 0), client.session_snapshot.?.floats.items[0].parent_tab.?);
     try testing.expectEqual(@as(usize, 0), client.session_snapshot.?.active_tab);
 }
 
@@ -1219,8 +1619,8 @@ test "findStickyPaneWithAffinity: prefers same session" {
         .allocator = testing.allocator,
     };
 
-    try ses_state.panes.put(uuid1, pane1);
-    try ses_state.panes.put(uuid2, pane2);
+    try ses_state.store.panes.put(uuid1, pane1);
+    try ses_state.store.panes.put(uuid2, pane2);
 
     // Search with affinity for "beta"
     const found = ses_state.findStickyPaneWithAffinity(pwd, key, "beta");
@@ -1256,7 +1656,7 @@ test "findStickyPaneWithAffinity: fallback when no affinity match" {
         .allocator = testing.allocator,
     };
 
-    try ses_state.panes.put(uuid, pane);
+    try ses_state.store.panes.put(uuid, pane);
 
     // Search with affinity for "beta" (doesn't match "alpha")
     const found = ses_state.findStickyPaneWithAffinity(pwd, key, "beta");
@@ -1265,4 +1665,336 @@ test "findStickyPaneWithAffinity: fallback when no affinity match" {
         // Should still find the pane (fallback to any match)
         try testing.expectEqualSlices(u8, &uuid, &p.uuid);
     }
+}
+
+// ============================================================================
+// SessionSnapshot mutation tests (P7.3)
+//
+// These exercise `removePaneFromSessionSnapshot` directly. The function is
+// reached in production via the orphan/sticky/detach cleanup paths
+// (`prunePaneFromClientSnapshot` / `prunePaneFromDetachedSnapshot`), and its
+// branches are subtle enough to deserve unit coverage independent of those
+// callers — especially the parent_tab reindex that runs when removing the
+// last split pane in a tab also has to update floats living in later tabs.
+// ============================================================================
+
+fn makeLeafLayout(allocator: std.mem.Allocator, pane_uuid: [32]u8) !*core.session_model.SessionLayoutNode {
+    const node = try allocator.create(core.session_model.SessionLayoutNode);
+    node.* = .{ .pane = pane_uuid };
+    return node;
+}
+
+fn makeSplitLayout(
+    allocator: std.mem.Allocator,
+    first_uuid: [32]u8,
+    second_uuid: [32]u8,
+) !*core.session_model.SessionLayoutNode {
+    const first = try makeLeafLayout(allocator, first_uuid);
+    errdefer {
+        first.deinit(allocator);
+        allocator.destroy(first);
+    }
+    const second = try makeLeafLayout(allocator, second_uuid);
+    errdefer {
+        second.deinit(allocator);
+        allocator.destroy(second);
+    }
+    const node = try allocator.create(core.session_model.SessionLayoutNode);
+    node.* = .{ .split = .{
+        .dir = .horizontal,
+        .ratio = 0.5,
+        .first = first,
+        .second = second,
+    } };
+    return node;
+}
+
+test "removePaneFromSessionSnapshot: float removal clears panes, floats, and active_float_uuid" {
+    var snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'s'} ** 32, "alpha");
+    defer snapshot.deinit();
+
+    const float_uuid = [_]u8{'f'} ** 32;
+    try snapshot.panes.put(float_uuid, .{
+        .uuid = float_uuid,
+        .kind = .float,
+        .parent_tab = null,
+    });
+    try snapshot.floats.append(testing.allocator, .{
+        .pane_uuid = float_uuid,
+        .parent_tab = null,
+        .visible = true,
+    });
+    snapshot.active_float_uuid = float_uuid;
+    snapshot.focused_pane_uuid = float_uuid;
+
+    state.SesState.removePaneFromSessionSnapshot(testing.allocator, &snapshot, float_uuid);
+
+    try testing.expect(snapshot.panes.get(float_uuid) == null);
+    try testing.expectEqual(@as(usize, 0), snapshot.floats.items.len);
+    try testing.expect(snapshot.active_float_uuid == null);
+    try testing.expect(snapshot.focused_pane_uuid == null);
+}
+
+test "removePaneFromSessionSnapshot: removing one of two split panes keeps tab and updates focus" {
+    var snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'s'} ** 32, "alpha");
+    defer snapshot.deinit();
+
+    const left = [_]u8{'1'} ** 32;
+    const right = [_]u8{'2'} ** 32;
+
+    const root = try makeSplitLayout(testing.allocator, left, right);
+    try snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try testing.allocator.dupe(u8, "tab-0"),
+        .root = root,
+        .focused_pane_uuid = left,
+        .allocator = testing.allocator,
+    });
+    try snapshot.panes.put(left, .{ .uuid = left, .kind = .split, .parent_tab = 0 });
+    try snapshot.panes.put(right, .{ .uuid = right, .kind = .split, .parent_tab = 0 });
+    snapshot.active_tab = 0;
+    snapshot.focused_pane_uuid = left;
+
+    state.SesState.removePaneFromSessionSnapshot(testing.allocator, &snapshot, left);
+
+    try testing.expectEqual(@as(usize, 1), snapshot.tabs.items.len);
+    try testing.expect(snapshot.panes.get(left) == null);
+    try testing.expect(snapshot.panes.get(right) != null);
+    try testing.expectEqual(right, snapshot.tabs.items[0].focused_pane_uuid.?);
+    try testing.expectEqual(right, snapshot.focused_pane_uuid.?);
+
+    // Layout should now be a leaf for `right`.
+    const new_root = snapshot.tabs.items[0].root.?;
+    try testing.expect(new_root.* == .pane);
+    try testing.expectEqual(right, new_root.pane);
+}
+
+test "removePaneFromSessionSnapshot: emptying a tab reindexes floats in later tabs" {
+    var snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'s'} ** 32, "alpha");
+    defer snapshot.deinit();
+
+    const split0 = [_]u8{'1'} ** 32;
+    const split1 = [_]u8{'2'} ** 32;
+    const float_in_tab1 = [_]u8{'f'} ** 32;
+
+    // Tab 0: single split pane (will be removed → tab disappears).
+    const root0 = try makeLeafLayout(testing.allocator, split0);
+    try snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'t'} ** 32,
+        .name = try testing.allocator.dupe(u8, "tab-0"),
+        .root = root0,
+        .focused_pane_uuid = split0,
+        .allocator = testing.allocator,
+    });
+
+    // Tab 1: another split pane, plus a float anchored to this tab.
+    const root1 = try makeLeafLayout(testing.allocator, split1);
+    try snapshot.tabs.append(testing.allocator, .{
+        .uuid = [_]u8{'u'} ** 32,
+        .name = try testing.allocator.dupe(u8, "tab-1"),
+        .root = root1,
+        .focused_pane_uuid = split1,
+        .allocator = testing.allocator,
+    });
+
+    try snapshot.panes.put(split0, .{ .uuid = split0, .kind = .split, .parent_tab = 0 });
+    try snapshot.panes.put(split1, .{ .uuid = split1, .kind = .split, .parent_tab = 1 });
+    try snapshot.panes.put(float_in_tab1, .{
+        .uuid = float_in_tab1,
+        .kind = .float,
+        .parent_tab = 1,
+    });
+    try snapshot.floats.append(testing.allocator, .{
+        .pane_uuid = float_in_tab1,
+        .parent_tab = 1,
+        .visible = true,
+    });
+    snapshot.active_tab = 0;
+    snapshot.focused_pane_uuid = split0;
+
+    state.SesState.removePaneFromSessionSnapshot(testing.allocator, &snapshot, split0);
+
+    // Tab 0 collapsed → tab 1 is now tab 0.
+    try testing.expectEqual(@as(usize, 1), snapshot.tabs.items.len);
+    try testing.expectEqualStrings("tab-1", snapshot.tabs.items[0].name);
+    try testing.expectEqual(@as(usize, 0), snapshot.active_tab);
+
+    // Surviving split pane parent_tab decremented.
+    try testing.expectEqual(@as(usize, 0), snapshot.panes.get(split1).?.parent_tab.?);
+
+    // Float reindexed in BOTH the floats ArrayList AND the panes hashmap.
+    try testing.expectEqual(@as(usize, 1), snapshot.floats.items.len);
+    try testing.expectEqual(@as(usize, 0), snapshot.floats.items[0].parent_tab.?);
+    try testing.expectEqual(@as(usize, 0), snapshot.panes.get(float_in_tab1).?.parent_tab.?);
+
+    // Removed pane is gone.
+    try testing.expect(snapshot.panes.get(split0) == null);
+}
+
+test "suspendPane: prunes pane from client snapshot" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(99);
+    const pane_uuid = [_]u8{'p'} ** 32;
+    const session_uuid = [_]u8{'s'} ** 32;
+
+    if (ses_state.getClient(client_id)) |client| {
+        client.session_id = [_]u8{1} ** 16;
+        client.session_name = try ses_state.allocator.dupe(u8, "alpha");
+        client.session_snapshot = try state.SessionSnapshot.initMinimal(ses_state.allocator, session_uuid, "alpha");
+        try client.session_snapshot.?.panes.put(pane_uuid, .{ .uuid = pane_uuid, .kind = .split, .parent_tab = 0 });
+        client.session_snapshot.?.focused_pane_uuid = pane_uuid;
+        try client.appendUuid(pane_uuid);
+    }
+
+    try ses_state.store.panes.put(pane_uuid, .{
+        .uuid = pane_uuid,
+        .pod_pid = 1001,
+        .pod_socket_path = try ses_state.allocator.dupe(u8, "/tmp/hexe-pane-suspend"),
+        .child_pid = 2001,
+        .state = .attached,
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = client_id,
+        .session_id = null,
+        .created_at = 0,
+        .orphaned_at = null,
+        .allocator = ses_state.allocator,
+    });
+
+    try ses_state.suspendPane(pane_uuid);
+
+    const client = ses_state.getClient(client_id).?;
+    try testing.expectEqual(@as(usize, 0), client.pane_uuids.items.len);
+    try testing.expect(client.session_snapshot.?.panes.get(pane_uuid) == null);
+    try testing.expect(client.session_snapshot.?.focused_pane_uuid == null);
+
+    const pane = ses_state.store.panes.get(pane_uuid).?;
+    try testing.expectEqual(state.PaneState.orphaned, pane.state);
+    try testing.expect(pane.attached_to == null);
+}
+
+test "attachPane: missing client leaves pane adoptable" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const pane_uuid = [_]u8{'a'} ** 32;
+    try ses_state.store.panes.put(pane_uuid, .{
+        .uuid = pane_uuid,
+        .pod_pid = 1001,
+        .pod_socket_path = try ses_state.allocator.dupe(u8, "/tmp/hexe-pane-attach-missing-client"),
+        .child_pid = 2001,
+        .state = .orphaned,
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = null,
+        .session_id = null,
+        .created_at = 0,
+        .orphaned_at = 123,
+        .allocator = ses_state.allocator,
+    });
+
+    try testing.expectError(error.ClientNotFound, ses_state.attachPane(pane_uuid, 404));
+
+    const pane = ses_state.store.panes.get(pane_uuid).?;
+    try testing.expectEqual(state.PaneState.orphaned, pane.state);
+    try testing.expect(pane.attached_to == null);
+    try testing.expectEqual(@as(?i64, 123), pane.orphaned_at);
+    try testing.expect(!pane.needs_backlog_replay);
+}
+
+test "paneAttachedToClient: requires live attached ownership" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const attached_uuid = [_]u8{'a'} ** 32;
+    const orphan_uuid = [_]u8{'o'} ** 32;
+
+    try ses_state.store.panes.put(attached_uuid, .{
+        .uuid = attached_uuid,
+        .pod_pid = 1001,
+        .pod_socket_path = try ses_state.allocator.dupe(u8, "/tmp/hexe-pane-live-owned"),
+        .child_pid = 2001,
+        .state = .attached,
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = 7,
+        .session_id = null,
+        .created_at = 0,
+        .orphaned_at = null,
+        .allocator = ses_state.allocator,
+    });
+    try ses_state.store.panes.put(orphan_uuid, .{
+        .uuid = orphan_uuid,
+        .pod_pid = 1002,
+        .pod_socket_path = try ses_state.allocator.dupe(u8, "/tmp/hexe-pane-live-orphan"),
+        .child_pid = 2002,
+        .state = .orphaned,
+        .sticky_pwd = null,
+        .sticky_key = null,
+        .attached_to = null,
+        .session_id = null,
+        .created_at = 0,
+        .orphaned_at = 123,
+        .allocator = ses_state.allocator,
+    });
+
+    try testing.expect(ses_state.paneAttachedToClient(attached_uuid, 7));
+    try testing.expect(!ses_state.paneAttachedToClient(attached_uuid, 8));
+    try testing.expect(!ses_state.paneAttachedToClient(orphan_uuid, 7));
+    try testing.expect(!ses_state.paneAttachedToClient([_]u8{'m'} ** 32, 7));
+}
+
+// ============================================================================
+// Client snapshot ownership tests (P8.2)
+//
+// These cover the `snapshotOwnsPane` / `snapshotOwnsTab` helpers used by the
+// `session_*` handler guards in server.zig. The server-side glue is verified
+// by the build (requireSnapshotTab/Pane callsites type-check); these unit
+// tests pin the helper contract: allow before first sync, then enforce.
+// ============================================================================
+
+test "snapshotOwnsPane: allows when no snapshot attached" {
+    var client = state.Client.init(testing.allocator, 1, 42);
+    defer client.deinit();
+
+    try testing.expect(client.snapshotOwnsPane([_]u8{'x'} ** 32));
+}
+
+test "snapshotOwnsPane: accepts known pane, rejects unknown" {
+    var client = state.Client.init(testing.allocator, 1, 42);
+    defer client.deinit();
+
+    var snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'s'} ** 32, "alpha");
+    const known = [_]u8{'k'} ** 32;
+    try snapshot.panes.put(known, .{ .uuid = known, .kind = .split, .parent_tab = 0 });
+    client.updateSessionSnapshot(snapshot);
+
+    try testing.expect(client.snapshotOwnsPane(known));
+    try testing.expect(!client.snapshotOwnsPane([_]u8{'u'} ** 32));
+}
+
+test "snapshotOwnsTab: allows when no snapshot attached" {
+    var client = state.Client.init(testing.allocator, 1, 42);
+    defer client.deinit();
+
+    try testing.expect(client.snapshotOwnsTab([_]u8{'x'} ** 32));
+}
+
+test "snapshotOwnsTab: accepts known tab, rejects unknown" {
+    var client = state.Client.init(testing.allocator, 1, 42);
+    defer client.deinit();
+
+    var snapshot = try state.SessionSnapshot.initMinimal(testing.allocator, [_]u8{'s'} ** 32, "alpha");
+    const known = [_]u8{'t'} ** 32;
+    try snapshot.tabs.append(testing.allocator, .{
+        .uuid = known,
+        .name = try testing.allocator.dupe(u8, "tab-known"),
+        .allocator = testing.allocator,
+    });
+    client.updateSessionSnapshot(snapshot);
+
+    try testing.expect(client.snapshotOwnsTab(known));
+    try testing.expect(!client.snapshotOwnsTab([_]u8{'u'} ** 32));
 }

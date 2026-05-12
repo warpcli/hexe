@@ -32,6 +32,10 @@ pub fn run(allocator: std.mem.Allocator) !void {
         print("Error: Failed to retrieve status\n", .{});
         return error.StatusFailed;
     }
+    if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+        print("Error: status response too large\n", .{});
+        return error.ResponseTooLarge;
+    }
 
     const status_payload = try allocator.alloc(u8, hdr.payload_len);
     defer allocator.free(status_payload);
@@ -46,6 +50,10 @@ pub fn run(allocator: std.mem.Allocator) !void {
     if (sessions_msg_type != .sessions_list) {
         print("Error: Unexpected response\n", .{});
         return error.UnexpectedResponse;
+    }
+    if (sessions_hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+        print("Error: sessions list response too large\n", .{});
+        return error.ResponseTooLarge;
     }
 
     const payload = try allocator.alloc(u8, sessions_hdr.payload_len);

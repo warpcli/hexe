@@ -59,7 +59,10 @@ fn notifySessionNameChange(state: *State, change: *FrontendAttach.SessionNameCha
         state.allocator,
         "Session name changed: '{s}' -> '{s}' (collision)",
         .{ change.previous_name, change.resolved_name },
-    ) catch null;
+    ) catch |err| blk: {
+        core.logging.logError("terminal", "failed to allocate session-name change notification", err);
+        break :blk null;
+    };
     if (msg) |owned| {
         state.notifications.showFor(owned, 4000);
         state.allocator.free(owned);
@@ -100,7 +103,13 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
         // List detached sessions.
         var sessions: [16]DetachedSessionInfo = undefined;
-        const sess_count = runtime.listSessions(&sessions) catch 0;
+        var list_failed = false;
+        const sess_count = runtime.listSessions(&sessions) catch |err| blk: {
+            list_failed = true;
+            core.logging.logError("terminal", "failed to list detached sessions", err);
+            std.debug.print("Warning: failed to list detached sessions: {s}\n", .{@errorName(err)});
+            break :blk 0;
+        };
         if (sess_count > 0) {
             std.debug.print("Detached sessions (attach by name or UUID prefix):\n", .{});
             const instance = std.posix.getenv("HEXE_INSTANCE");
@@ -124,15 +133,20 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
         // List orphaned panes.
         var tabs: [32]OrphanedPaneInfo = undefined;
-        const count = runtime.listOrphanedPanes(&tabs) catch 0;
-        if (count > 0) {
+        const orphan_count = runtime.listOrphanedPanes(&tabs) catch |err| blk: {
+            list_failed = true;
+            core.logging.logError("terminal", "failed to list orphaned panes", err);
+            std.debug.print("Warning: failed to list orphaned panes: {s}\n", .{@errorName(err)});
+            break :blk 0;
+        };
+        if (orphan_count > 0) {
             std.debug.print("Orphaned panes (disowned):\n", .{});
-            for (tabs[0..count]) |p| {
+            for (tabs[0..orphan_count]) |p| {
                 std.debug.print("  [{s}] pid={d}\n", .{ p.uuid[0..8], p.pid });
             }
         }
 
-        if (sess_count == 0 and count == 0) {
+        if (!list_failed and sess_count == 0 and orphan_count == 0) {
             std.debug.print("No detached sessions or orphaned panes\n", .{});
         }
         return;
@@ -181,7 +195,10 @@ pub fn run(terminal_args: TerminalArgs) !void {
     const effective_log: ?[]const u8 = if (terminal_args.log_file) |p|
         (if (p.len > 0) p else null)
     else if (terminal_args.log_level != null) blk: {
-        default_log_path = core.ipc.getLogPath(allocator) catch null;
+        default_log_path = core.ipc.getLogPath(allocator) catch |err| path_blk: {
+            core.logging.logError("terminal", "failed to allocate default terminal log path", err);
+            break :path_blk null;
+        };
         break :blk default_log_path;
     } else null;
     redirectStderr(effective_log);
@@ -219,7 +236,10 @@ pub fn run(terminal_args: TerminalArgs) !void {
         .missing => state.notifications.showFor("Config not found (~/.config/hexe/init.lua), using defaults", 5000),
         .@"error" => {
             if (state.config.status_message) |msg| {
-                const err_msg = std.fmt.allocPrint(allocator, "Config error: {s}", .{msg}) catch null;
+                const err_msg = std.fmt.allocPrint(allocator, "Config error: {s}", .{msg}) catch |err| err_blk: {
+                    core.logging.logError("terminal", "failed to allocate config error notification", err);
+                    break :err_blk null;
+                };
                 if (err_msg) |m| {
                     state.notifications.showFor(m, 8000);
                     allocator.free(m);
@@ -310,7 +330,11 @@ pub fn run(terminal_args: TerminalArgs) !void {
         // Prefer layout-config name when provided.
         if (config.name) |loaded_name| {
             if (state.runtime.setSessionName(loaded_name)) {
-                if (state.runtime.syncSessionIdentity() catch null) |change| {
+                const identity_change = state.runtime.syncSessionIdentity() catch |err| blk: {
+                    core.logging.logError("terminal", "startup: failed to sync layout-config session identity", err);
+                    break :blk null;
+                };
+                if (identity_change) |change| {
                     var owned_change = change;
                     defer owned_change.deinit(allocator);
                 }
@@ -403,7 +427,10 @@ fn redirectStderr(log_file: ?[]const u8) void {
     var redirected = false;
     if (log_file) |path| {
         if (path.len > 0) {
-            const logfd = posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch null;
+            const logfd = posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch |err| fd_blk: {
+                core.logging.logError("terminal", "failed to open terminal log file", err);
+                break :fd_blk null;
+            };
             if (logfd) |fd| {
                 posix.dup2(fd, posix.STDERR_FILENO) catch |err| {
                     core.logging.logError("terminal", "failed to dup2 stderr for logging", err);
@@ -416,7 +443,10 @@ fn redirectStderr(log_file: ?[]const u8) void {
 
     if (redirected) return;
 
-    const devnull = std.fs.openFileAbsolute("/dev/null", .{ .mode = .write_only }) catch return;
+    const devnull = std.fs.openFileAbsolute("/dev/null", .{ .mode = .write_only }) catch |err| {
+        core.logging.logError("terminal", "failed to open /dev/null for stderr redirection", err);
+        return;
+    };
     posix.dup2(devnull.handle, posix.STDERR_FILENO) catch |err| {
         core.logging.logError("terminal", "failed to redirect stderr to /dev/null", err);
     };

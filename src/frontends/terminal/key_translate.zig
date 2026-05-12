@@ -1,6 +1,7 @@
 const std = @import("std");
 const ghostty = @import("ghostty-vt");
 const core = @import("core");
+const log = std.log.scoped(.terminal_key_translate);
 
 const BindKey = core.Config.BindKey;
 const BindKeyKind = core.Config.BindKeyKind;
@@ -29,14 +30,20 @@ pub fn encodeKey(
     var writer = std.Io.Writer.fixed(out);
     var opts = ghostty.input.KeyEncodeOptions.fromTerminal(terminal);
     opts.macos_option_as_alt = .false;
-    ghostty.input.encodeKey(&writer, event, opts) catch return null;
+    ghostty.input.encodeKey(&writer, event, opts) catch |err| {
+        log.debug("failed to encode key event: {}", .{err});
+        return null;
+    };
     return writer.buffered();
 }
 
 fn keyUtf8(key: BindKey, text_codepoint: ?u21, out: *[4]u8) []const u8 {
     if (text_codepoint) |cp| {
         if (cp == 0) return "";
-        const n = std.unicode.utf8Encode(cp, out) catch return "";
+        const n = std.unicode.utf8Encode(cp, out) catch |err| {
+            log.debug("failed to encode key text codepoint {d}: {}", .{ cp, err });
+            return "";
+        };
         return out[0..n];
     }
 

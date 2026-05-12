@@ -2,6 +2,7 @@ const std = @import("std");
 const posix = std.posix;
 const lua_runtime = @import("lua_runtime.zig");
 const LuaRuntime = lua_runtime.LuaRuntime;
+const logging = @import("logging.zig");
 
 /// Direction of a split in session config.
 pub const SplitDir = enum {
@@ -165,7 +166,10 @@ pub fn loadLayoutRegistry(allocator: std.mem.Allocator) !LayoutRegistry {
     defer allocator.free(raw);
     if (raw.len == 0) return .{};
 
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch return .{};
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, raw, .{}) catch |err| {
+        logging.logError("session_config", "failed to parse layout registry", err);
+        return .{};
+    };
     defer parsed.deinit();
 
     const root = switch (parsed.value) {
@@ -214,7 +218,7 @@ pub fn saveLayoutRegistry(allocator: std.mem.Allocator, registry: LayoutRegistry
     const tmp_path = try std.fmt.allocPrint(allocator, "{s}.tmp", .{index_path});
     defer allocator.free(tmp_path);
 
-    const file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true });
+    const file = try std.fs.cwd().createFile(tmp_path, .{ .truncate = true, .mode = 0o600 });
     defer file.close();
 
     var out = std.ArrayList(u8).empty;
@@ -308,7 +312,10 @@ pub fn resolveConfigPath(allocator: std.mem.Allocator, arg: []const u8) !?Resolv
     // Check if target is "."
     if (std.mem.eql(u8, target, ".")) {
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = std.posix.getcwd(&cwd_buf) catch return null;
+        const cwd = std.posix.getcwd(&cwd_buf) catch |err| {
+            logging.logError("session_config", "failed to resolve current directory layout target", err);
+            return null;
+        };
         const path = try std.fmt.allocPrint(allocator, "{s}/.hexe.lua", .{cwd});
         std.fs.cwd().access(path, .{}) catch {
             allocator.free(path);
@@ -321,7 +328,10 @@ pub fn resolveConfigPath(allocator: std.mem.Allocator, arg: []const u8) !?Resolv
     if (std.fs.cwd().openDir(target, .{})) |*dir_handle| {
         var dir = dir_handle.*;
         defer dir.close();
-        const abs_target = dir.realpathAlloc(allocator, ".") catch return null;
+        const abs_target = dir.realpathAlloc(allocator, ".") catch |err| {
+            logging.logError("session_config", "failed to resolve layout directory target", err);
+            return null;
+        };
         defer allocator.free(abs_target);
         const path = try std.fmt.allocPrint(allocator, "{s}/.hexe.lua", .{abs_target});
         std.fs.cwd().access(path, .{}) catch {
@@ -342,7 +352,10 @@ pub fn resolveConfigPath(allocator: std.mem.Allocator, arg: []const u8) !?Resolv
     }
 
     // Treat as registered layout name from sessions.json
-    var registry = loadLayoutRegistry(allocator) catch return null;
+    var registry = loadLayoutRegistry(allocator) catch |err| {
+        logging.logError("session_config", "failed to load layout registry", err);
+        return null;
+    };
     defer deinitLayoutRegistry(allocator, &registry);
     for (registry.entries) |entry| {
         if (!std.mem.eql(u8, entry.name, target)) continue;
@@ -449,11 +462,17 @@ fn parseTabs(allocator: std.mem.Allocator, runtime: *LuaRuntime, table_idx: i32)
             // Parse split tree
             if (runtime.pushTable(-1, "split")) {
                 defer runtime.pop();
-                tab.split = parseSplitConfig(allocator, runtime) catch null;
+                tab.split = parseSplitConfig(allocator, runtime) catch |err| blk: {
+                    logging.logError("session_config", "failed to parse tab split config", err);
+                    break :blk null;
+                };
             }
 
             // Parse per-tab floats
-            tab.floats = parseFloats(allocator, runtime, -1) catch &.{};
+            tab.floats = parseFloats(allocator, runtime, -1) catch |err| blk: {
+                logging.logError("session_config", "failed to parse tab float config", err);
+                break :blk &.{};
+            };
 
             try list.append(allocator, tab);
         }

@@ -17,9 +17,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
     switch (action) {
         .mux_quit => {
             if (cfg.confirm_on_exit) {
-                state.pending_action = .exit;
-                state.popups.showConfirm("Exit terminal session?", .{}) catch {};
-                state.needs_render = true;
+                _ = state.showConfirmOrNotify(.exit, "Exit terminal session?");
             } else {
                 state.running = false;
             }
@@ -40,9 +38,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             }
 
             if (cfg.confirm_on_disown) {
-                state.pending_action = .disown;
-                state.popups.showConfirm("Disown pane?", .{}) catch {};
-                state.needs_render = true;
+                _ = state.showConfirmOrNotify(.disown, "Disown pane?");
             } else {
                 actions.performDisown(state);
             }
@@ -151,7 +147,9 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
 
                             pane.pokemon_state.loadSprite(pokemon_name, false) catch {
                                 // Fallback to pikachu if loading fails
-                                pane.pokemon_state.loadSprite("pikachu", false) catch {};
+                                pane.pokemon_state.loadSprite("pikachu", false) catch |err| {
+                                    core.logging.logError("terminal", "failed to load fallback sprite for focused float", err);
+                                };
                             };
                         }
                         state.needs_render = true;
@@ -166,7 +164,9 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                         const pokemon_name = state.paneName(pane.uuid) orelse "pikachu";
 
                         pane.pokemon_state.loadSprite(pokemon_name, false) catch {
-                            pane.pokemon_state.loadSprite("pikachu", false) catch {};
+                            pane.pokemon_state.loadSprite("pikachu", false) catch |err| {
+                                core.logging.logError("terminal", "failed to load fallback sprite for focused pane", err);
+                            };
                         };
                     }
                     state.needs_render = true;
@@ -179,7 +179,10 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             if (state.isDetachMode()) {
                 return true; // Silently ignore during detach
             }
-            const parent_pane = state.currentLayout().getFocusedPane() orelse return true;
+            const parent_pane = state.currentLayout().getFocusedPane() orelse {
+                core.logging.warn("terminal", "split_h skipped: no focused pane", .{});
+                return true;
+            };
             const parent_uuid = parent_pane.uuid;
             var cwd: ?[]const u8 = null;
             if (state.currentLayout().getFocusedPane()) |p| {
@@ -188,11 +191,23 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             // Fallback to the terminal process CWD if pane CWD is unavailable.
             var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
             if (cwd == null) {
-                cwd = std.posix.getcwd(&cwd_buf) catch null;
+                cwd = std.posix.getcwd(&cwd_buf) catch |err| blk: {
+                    core.logging.logError("terminal", "split_h: failed to get fallback cwd", err);
+                    break :blk null;
+                };
             }
-            if (state.currentLayout().splitFocused(.horizontal, cwd) catch null) |new_pane| {
-                state.syncSessionSplitPane(parent_uuid, new_pane.uuid, .horizontal, new_pane.uuid);
-                state.syncPaneAux(new_pane, parent_uuid);
+            const new_pane = state.currentLayout().splitFocused(.horizontal, cwd) catch |err| blk: {
+                core.logging.logError("terminal", "split_h failed to create pane", err);
+                state.notifications.show("Split failed: pane creation error");
+                break :blk null;
+            };
+            if (new_pane) |pane| {
+                if (state.syncSessionSplitPaneChecked(parent_uuid, pane.uuid, .horizontal, pane.uuid)) {
+                    state.syncPaneAux(pane, parent_uuid);
+                } else {
+                    _ = state.currentLayout().closePane(pane.uuid);
+                    state.notifications.show("Split failed: session sync rejected pane");
+                }
             }
             state.needs_render = true;
             return true;
@@ -202,7 +217,10 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             if (state.isDetachMode()) {
                 return true; // Silently ignore during detach
             }
-            const parent_pane = state.currentLayout().getFocusedPane() orelse return true;
+            const parent_pane = state.currentLayout().getFocusedPane() orelse {
+                core.logging.warn("terminal", "split_v skipped: no focused pane", .{});
+                return true;
+            };
             const parent_uuid = parent_pane.uuid;
             var cwd: ?[]const u8 = null;
             if (state.currentLayout().getFocusedPane()) |p| {
@@ -211,11 +229,23 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             // Fallback to the terminal process CWD if pane CWD is unavailable.
             var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
             if (cwd == null) {
-                cwd = std.posix.getcwd(&cwd_buf) catch null;
+                cwd = std.posix.getcwd(&cwd_buf) catch |err| blk: {
+                    core.logging.logError("terminal", "split_v: failed to get fallback cwd", err);
+                    break :blk null;
+                };
             }
-            if (state.currentLayout().splitFocused(.vertical, cwd) catch null) |new_pane| {
-                state.syncSessionSplitPane(parent_uuid, new_pane.uuid, .vertical, new_pane.uuid);
-                state.syncPaneAux(new_pane, parent_uuid);
+            const new_pane = state.currentLayout().splitFocused(.vertical, cwd) catch |err| blk: {
+                core.logging.logError("terminal", "split_v failed to create pane", err);
+                state.notifications.show("Split failed: pane creation error");
+                break :blk null;
+            };
+            if (new_pane) |pane| {
+                if (state.syncSessionSplitPaneChecked(parent_uuid, pane.uuid, .vertical, pane.uuid)) {
+                    state.syncPaneAux(pane, parent_uuid);
+                } else {
+                    _ = state.currentLayout().closePane(pane.uuid);
+                    state.notifications.show("Split failed: session sync rejected pane");
+                }
             }
             state.needs_render = true;
             return true;
@@ -264,9 +294,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             if (state.activeFloatingIndex() != null) {
                 // Close the focused float.
                 if (cfg.confirm_on_close) {
-                    state.pending_action = .close;
-                    state.popups.showConfirm("Close float?", .{}) catch {};
-                    state.needs_render = true;
+                    _ = state.showConfirmOrNotify(.close, "Close float?");
                 } else {
                     actions.performClose(state);
                 }
@@ -275,16 +303,18 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 const layout = state.currentLayout();
                 if (layout.splitCount() > 1) {
                     if (cfg.confirm_on_close) {
-                        state.pending_action = .pane_close;
-                        state.popups.showConfirm("Close pane?", .{}) catch {};
-                        state.needs_render = true;
+                        _ = state.showConfirmOrNotify(.pane_close, "Close pane?");
                     } else {
                         const closing_pane = layout.getFocusedPane().?;
                         const closing_uuid = closing_pane.uuid;
+                        state.runtime.killPane(closing_uuid) catch |err| {
+                            core.logging.logError("terminal", "killPane failed before split close", err);
+                            state.notifications.show("Close pane failed: session rejected pane kill");
+                            state.needs_render = true;
+                            return true;
+                        };
                         state.clearTransientPaneState(closing_pane);
-                        _ = layout.closePane(closing_uuid);
-                        const next_focus_uuid = if (layout.getFocusedPane()) |pane| pane.uuid else null;
-                        state.syncSessionCloseSplitPane(closing_uuid, next_focus_uuid);
+                        _ = layout.closePaneLocal(closing_uuid);
                         if (layout.getFocusedPane()) |new_pane| {
                             state.syncPaneFocus(new_pane, null);
                         }
@@ -297,10 +327,8 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .tab_close => {
             if (cfg.confirm_on_close) {
-                state.pending_action = .close;
                 const msg = if (state.activeFloatingIndex() != null) "Close float?" else "Close tab?";
-                state.popups.showConfirm(msg, .{}) catch {};
-                state.needs_render = true;
+                _ = state.showConfirmOrNotify(.close, msg);
             } else {
                 actions.performClose(state);
             }
@@ -308,9 +336,7 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
         },
         .mux_detach => {
             if (cfg.confirm_on_detach) {
-                state.pending_action = .detach;
-                state.popups.showConfirm("Detach session?", .{}) catch {};
-                state.needs_render = true;
+                _ = state.showConfirmOrNotify(.detach, "Detach session?");
                 return true;
             }
             actions.performDetach(state);
@@ -333,11 +359,20 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 else => null,
             };
             if (dir == null) return false;
-            const fi = state.activeFloatingIndex() orelse return false;
-            if (fi >= state.view.float_views.items.len) return false;
+            const fi = state.activeFloatingIndex() orelse {
+                core.logging.warn("terminal", "float_nudge skipped: no active float", .{});
+                return false;
+            };
+            if (fi >= state.view.float_views.items.len) {
+                core.logging.warn("terminal", "float_nudge skipped: active float index is out of range", .{});
+                return false;
+            }
             const pane = state.view.float_views.items[fi];
             if (state.paneParentTab(pane)) |parent| {
-                if (parent != state.activeTabIndex()) return false;
+                if (parent != state.activeTabIndex()) {
+                    core.logging.warn("terminal", "float_nudge skipped: active float belongs to another tab", .{});
+                    return false;
+                }
             }
 
             nudgeFloat(state, pane, dir.?, 1);
@@ -356,42 +391,11 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             return true;
         },
         .layout_save => {
-            var items = std.ArrayList([]const u8).empty;
-            defer items.deinit(state.allocator);
-
-            const local_item = state.allocator.dupe(u8, "local") catch return true;
-            const global_item = state.allocator.dupe(u8, "global") catch {
-                state.allocator.free(local_item);
-                return true;
-            };
-            const both_item = state.allocator.dupe(u8, "both") catch {
-                state.allocator.free(local_item);
-                state.allocator.free(global_item);
-                return true;
-            };
-
-            items.append(state.allocator, local_item) catch {
-                state.allocator.free(local_item);
-                state.allocator.free(global_item);
-                state.allocator.free(both_item);
-                return true;
-            };
-            items.append(state.allocator, global_item) catch {
-                state.allocator.free(global_item);
-                state.allocator.free(both_item);
-                return true;
-            };
-            items.append(state.allocator, both_item) catch {
-                state.allocator.free(both_item);
-                return true;
-            };
-
-            state.popups.showPickerOwned(items.items, .{ .title = "Save layout scope" }) catch {
-                for (items.items) |item| state.allocator.free(item);
-                return true;
-            };
-            state.pending_action = .layout_save_choose;
-            state.needs_render = true;
+            _ = state.showPickerOrNotify(
+                .layout_save_choose,
+                &.{ "local", "global", "both" },
+                "Save layout scope",
+            );
             return true;
         },
         .layout_load => {
@@ -401,48 +405,20 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
                 return true;
             }
 
-            var items = std.ArrayList([]const u8).empty;
-            defer items.deinit(state.allocator);
-
-            const detach_item = state.allocator.dupe(u8, "detach") catch return true;
-            const replace_item = state.allocator.dupe(u8, "replace") catch {
-                state.allocator.free(detach_item);
-                return true;
-            };
-
-            items.append(state.allocator, detach_item) catch {
-                state.allocator.free(detach_item);
-                state.allocator.free(replace_item);
-                return true;
-            };
-            items.append(state.allocator, replace_item) catch {
-                state.allocator.free(replace_item);
-                return true;
-            };
-
-            state.popups.showPickerOwned(items.items, .{ .title = "Load local layout: detach or replace" }) catch {
-                for (items.items) |item| state.allocator.free(item);
-                return true;
-            };
-            state.pending_action = .layout_load_choose;
-            state.needs_render = true;
+            _ = state.showPickerOrNotify(
+                .layout_load_choose,
+                &.{ "detach", "replace" },
+                "Load local layout: detach or replace",
+            );
             return true;
         },
     }
 }
 
 fn nudgeFloat(state: *State, pane: *Pane, dir: layout_mod.Layout.Direction, step_cells: u16) void {
-    const avail_h: u16 = state.term_height - state.status_height;
-
-    const shadow_enabled = state.paneFloatHasShadow(pane);
-    const usable_w: u16 = if (shadow_enabled) (state.term_width -| 1) else state.term_width;
-    const usable_h: u16 = if (shadow_enabled and state.status_height == 0) (avail_h -| 1) else avail_h;
-
-    const outer_w: u16 = usable_w * state.paneFloatWidthPct(pane) / 100;
-    const outer_h: u16 = usable_h * state.paneFloatHeightPct(pane) / 100;
-
-    const max_x: u16 = usable_w -| outer_w;
-    const max_y: u16 = usable_h -| outer_h;
+    const frame = state.floatFrameForPane(pane);
+    const max_x: u16 = frame.max_x;
+    const max_y: u16 = frame.max_y;
 
     var outer_x: i32 = @intCast(state.paneBorderX(pane));
     var outer_y: i32 = @intCast(state.paneBorderY(pane));

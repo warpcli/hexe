@@ -4,6 +4,8 @@ const keycast = @import("keycast.zig");
 const pane_select = @import("pane_select.zig");
 const pokemon = @import("../widgets/pokemon.zig");
 
+const log = std.log.scoped(.popup_overlay);
+
 pub const Overlay = types.Overlay;
 pub const Position = types.Position;
 pub const Corner = types.Corner;
@@ -125,7 +127,9 @@ pub const OverlayManager = struct {
             .bold = true,
             .padding_x = 1,
             .padding_y = 0,
-        }) catch {};
+        }) catch |err| {
+            log.warn("failed to show info overlay: {}", .{err});
+        };
     }
 
     // =========================================================================

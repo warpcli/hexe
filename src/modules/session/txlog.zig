@@ -4,7 +4,6 @@ const posix = std.posix;
 /// Transaction log for crash recovery during critical operations.
 /// Writes append-only log entries to disk before modifying state.
 /// On restart, incomplete transactions can be detected and rolled back/completed.
-
 pub const TxType = enum(u8) {
     detach_start = 1,
     detach_commit = 2,
@@ -26,7 +25,7 @@ pub const TxLog = struct {
     log_fd: ?posix.fd_t,
     log_path: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, log_path: []const u8) !TxLog {
+    pub fn init(allocator: std.mem.Allocator, log_path: []const u8) TxLog {
         return TxLog{
             .allocator = allocator,
             .log_fd = null,
@@ -65,17 +64,12 @@ pub const TxLog = struct {
 
         const fd = self.log_fd.?;
 
-        // Write header
         const header_bytes = std.mem.asBytes(&entry);
-        _ = try posix.write(fd, header_bytes);
-
-        // Write payload
-        if (payload.len > 0) {
-            _ = try posix.write(fd, payload);
-        }
+        try writeAll(fd, header_bytes);
+        try writeAll(fd, payload);
 
         // Ensure durability (critical for crash recovery)
-        posix.fsync(fd) catch {};
+        try posix.fsync(fd);
     }
 
     /// Maximum total bytes accepted across all entries during replay. A log
@@ -167,6 +161,15 @@ pub const TxLog = struct {
         posix.close(fd);
     }
 };
+
+fn writeAll(fd: posix.fd_t, data: []const u8) !void {
+    var off: usize = 0;
+    while (off < data.len) {
+        const written = try posix.write(fd, data[off..]);
+        if (written == 0) return error.WriteZero;
+        off += written;
+    }
+}
 
 pub const TxLogEntry = struct {
     tx_type: TxType,
