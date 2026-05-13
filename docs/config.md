@@ -6,35 +6,36 @@ Hexe config is Lua. The canonical entrypoint is:
 local hexe = require("hexe")
 
 return hexe.setup({
-  theme = require("themes.default"),
-  keys = require("keys.default"),
-  mux = require("mux.default"),
-  status = require("status.default"),
-  prompt = require("prompt.default"),
-  pop = require("pop.default"),
+  theme = hexe.theme({
+    styles = {
+      ["git.branch"] = "bg:1 fg:0",
+    },
+  }),
+
+  keys = {
+    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.q }, hexe.action.quit()),
+  },
+
+  mux = {
+    confirm = { exit = true, detach = true },
+  },
+
   ses = {
     layouts = {
-      require("layouts.default"),
+      dofile(os.getenv("HOME") .. "/.config/hexe/layout.lua"),
     },
   },
 })
 ```
 
 The repo `config/` directory is linked to `~/.config/hexe`, so the live config
-uses normal Lua modules under `config/lua/`.
+is intentionally just two files:
 
-Segment helpers can live in normal Lua modules too:
+- `config/init.lua` for settings
+- `config/layout.lua` for the global layout
 
-```lua
-local git = require("segments.git")
-
-return {
-  right = {
-    git.branch(),
-    git.status(),
-  },
-}
-```
+Project config can provide its own `.hexe.lua` layout with the same layout
+constructors.
 
 ## Module Paths
 

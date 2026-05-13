@@ -47,8 +47,9 @@ return hexe.setup({
 })
 ```
 
-Modules under `./config/lua` should be normal Lua modules. Project config can
-use the same API from `.hexe.lua` and `.hexe/lua`.
+The live repo config should stay simple: `./config/init.lua` for settings and
+`./config/layout.lua` for the global layout. Project config can use the same
+layout API from `.hexe.lua`.
 
 ## Public Lua API
 
@@ -267,16 +268,7 @@ Target live config structure:
 ```text
 config/
   init.lua
-  lua/
-    keys/default.lua
-    layouts/default.lua
-    mux/default.lua
-    pop/default.lua
-    prompt/default.lua
-    segments/git.lua
-    segments/system.lua
-    status/default.lua
-    themes/default.lua
+  layout.lua
 ```
 
 ## Unified Context
@@ -397,15 +389,15 @@ Deliverables:
 Old builder functions may exist internally during the transition, but live
 config must stop calling them.
 
-### Phase 3: Migrate Live Config Modules
+### Phase 3: Migrate Live Config Files
 
 Edit `./config` in lockstep with the runtime.
 
 Deliverables:
 
-- small `config/init.lua`
-- normal modules under `config/lua`
-- `config/layout.lua` removed
+- `config/init.lua` contains settings
+- `config/layout.lua` contains the global layout
+- no `config/lua` module tree for live user config
 - `.hexe.lua` migrated to the same shape as global config
 - no shorthand namespace usage
 - no removed spellings or fields
@@ -552,7 +544,7 @@ Do not use raw compiler commands when the Makefile target exists.
 1. Add the normalized AST and validation scaffolding.
 2. Add `hexe.setup`, `hexe.validate`, and constructors.
 3. Add normal Lua module search paths.
-4. Rewrite `./config/init.lua` and split modules under `./config/lua`.
+4. Rewrite `./config/init.lua` and `./config/layout.lua`.
 5. Rewrite `.hexe.lua` project config to the same schema.
 6. Move data-only mux config to Zig-side AST application.
 7. Move pop config to Zig-side AST application.
