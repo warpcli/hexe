@@ -26,6 +26,8 @@ pub const FrontendRuntime = struct {
         pane_id: u16,
         pid: posix.pid_t,
     };
+    pub const PendingCwdResponse = FrontendClient.PendingCwdResponse;
+    pub const PendingPaneInfoResponse = FrontendClient.PendingPaneInfoResponse;
     pub const CursorPos = struct {
         x: u16,
         y: u16,
@@ -65,6 +67,10 @@ pub const FrontendRuntime = struct {
     projection: SessionProjection,
     attach_state: FrontendAttachState,
 
+    fn currentBaseRoot(allocator: std.mem.Allocator) ![]u8 {
+        return std.fs.cwd().realpathAlloc(allocator, ".");
+    }
+
     pub fn create(
         allocator: std.mem.Allocator,
         session_id: [32]u8,
@@ -79,6 +85,9 @@ pub const FrontendRuntime = struct {
         errdefer allocator.destroy(runtime);
 
         runtime.allocator = allocator;
+        const base_root = currentBaseRoot(allocator) catch "";
+        defer if (base_root.len > 0) allocator.free(base_root);
+
         runtime.client = FrontendClient.initWithTransport(
             allocator,
             session_id,
@@ -91,7 +100,8 @@ pub const FrontendRuntime = struct {
         );
         errdefer runtime.client.deinit();
 
-        runtime.projection = try SessionProjection.init(allocator, session_id, session_name);
+        runtime.projection = try SessionProjection.init(allocator, session_id, session_name, base_root);
+        runtime.syncClientSessionIdentity();
         runtime.attach_state = .{};
         return runtime;
     }
@@ -154,8 +164,15 @@ pub const FrontendRuntime = struct {
         return self.projection.sessionName();
     }
 
+    pub fn baseRoot(self: *const FrontendRuntime) []const u8 {
+        return self.projection.baseRoot();
+    }
+
     pub fn setSessionIdentity(self: *FrontendRuntime, uuid: [32]u8, session_name: []const u8) bool {
-        self.projection.setSessionIdentity(uuid, session_name) catch return false;
+        self.projection.setSessionIdentity(uuid, session_name) catch |err| {
+            logging.logError("frontend_runtime", "failed to set session identity", err);
+            return false;
+        };
         self.syncClientSessionIdentity();
         return true;
     }
@@ -254,15 +271,10 @@ pub const FrontendRuntime = struct {
         return false;
     }
 
-    pub fn takePendingCwdUuid(self: *FrontendRuntime) ?[32]u8 {
-        const uuid = self.client.pending_cwd_uuid orelse return null;
-        self.client.pending_cwd_uuid = null;
-        return uuid;
-    }
-
     pub fn syncClientSessionIdentity(self: *FrontendRuntime) void {
         self.client.session_id = self.projection.sessionUuid();
         self.client.session_name = self.projection.sessionName();
+        self.client.base_root = self.projection.baseRoot();
     }
 
     pub fn shutdown(self: *FrontendRuntime, preserve_sticky: bool) !void {
@@ -292,6 +304,14 @@ pub const FrontendRuntime = struct {
 
     pub fn drainPendingPaneExits(self: *FrontendRuntime, out: *std.ArrayList([32]u8)) void {
         self.client.drainPendingPaneExits(out);
+    }
+
+    pub fn drainPendingCwdResponse(self: *FrontendRuntime) ?PendingCwdResponse {
+        return self.client.drainPendingCwdResponse();
+    }
+
+    pub fn drainPendingPaneInfoResponse(self: *FrontendRuntime) ?PendingPaneInfoResponse {
+        return self.client.drainPendingPaneInfoResponse();
     }
 
     pub fn sendPing(self: *FrontendRuntime) bool {
@@ -730,7 +750,10 @@ pub const FrontendRuntime = struct {
     }
 
     pub fn appendTabMeta(self: *FrontendRuntime, uuid: [32]u8, name: []const u8) bool {
-        self.projection.appendTab(uuid, name) catch return false;
+        self.projection.appendTab(uuid, name) catch |err| {
+            logging.logError("frontend_runtime", "failed to append tab metadata", err);
+            return false;
+        };
         return true;
     }
 
@@ -755,7 +778,10 @@ pub const FrontendRuntime = struct {
     }
 
     pub fn resetTabFocusMemory(self: *FrontendRuntime, tab_count: usize) bool {
-        self.projection.resetTabFocusMemory(tab_count) catch return false;
+        self.projection.resetTabFocusMemory(tab_count) catch |err| {
+            logging.logError("frontend_runtime", "failed to reset tab focus memory", err);
+            return false;
+        };
         return true;
     }
 
@@ -764,7 +790,10 @@ pub const FrontendRuntime = struct {
     }
 
     pub fn appendTabFocusMemory(self: *FrontendRuntime) bool {
-        self.projection.appendTabFocusMemory() catch return false;
+        self.projection.appendTabFocusMemory() catch |err| {
+            logging.logError("frontend_runtime", "failed to append tab focus memory", err);
+            return false;
+        };
         return true;
     }
 
@@ -851,6 +880,10 @@ pub const FrontendRuntime = struct {
         self.projection.removeFloatState(pane_uuid);
     }
 
+    pub fn removeLocalFloatState(self: *FrontendRuntime, pane_uuid: [32]u8) void {
+        self.projection.removeFloatState(pane_uuid);
+    }
+
     pub fn sessionSplitPane(
         self: *FrontendRuntime,
         tab_uuid: [32]u8,
@@ -867,21 +900,6 @@ pub const FrontendRuntime = struct {
             active_tab,
             focused_pane_uuid,
             dir,
-        );
-    }
-
-    pub fn sessionCloseSplitPane(
-        self: *FrontendRuntime,
-        tab_uuid: [32]u8,
-        pane_uuid: [32]u8,
-        active_tab: usize,
-        focused_pane_uuid: ?[32]u8,
-    ) !void {
-        try self.client.sessionCloseSplitPane(
-            tab_uuid,
-            pane_uuid,
-            active_tab,
-            focused_pane_uuid,
         );
     }
 

@@ -68,8 +68,6 @@ pub const MuxConfigBuilder = struct {
     float_defaults: ?FloatVisualConfig = null,
     float_adhoc: ?FloatVisualConfig = null,
     float_matches: std.ArrayList(FloatMatchRule),
-    floats: std.ArrayList(config.FloatDef),
-
     // Tabs
     tabs_config: TabsConfig,
 
@@ -125,7 +123,6 @@ pub const MuxConfigBuilder = struct {
             .allocator = allocator,
             .binds = .{},
             .float_matches = .{},
-            .floats = .{},
             .tabs_config = .{
                 .segments_left = .{},
                 .segments_center = .{},
@@ -146,7 +143,6 @@ pub const MuxConfigBuilder = struct {
         }
         self.float_matches.deinit(self.allocator);
         self.binds.deinit(self.allocator);
-        self.floats.deinit(self.allocator);
         self.tabs_config.segments_left.deinit(self.allocator);
         self.tabs_config.segments_center.deinit(self.allocator);
         self.tabs_config.segments_right.deinit(self.allocator);

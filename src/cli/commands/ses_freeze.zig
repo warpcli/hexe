@@ -54,6 +54,10 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
         print("Error: unexpected response\n", .{});
         return;
     }
+    if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+        print("Error: layout response too large\n", .{});
+        return;
+    }
 
     // Read raw layout export JSON.
     const layout_export = allocator.alloc(u8, hdr.payload_len) catch {
@@ -108,29 +112,44 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
         });
     defer file.close();
 
-    file.writeAll("return {\n") catch return;
-    file.writeAll("  keybingings = {},\n") catch return;
-    file.writeAll("  layout = {\n") catch return;
-    w(file, "    name = \"{s}\",\n", .{layout_name});
-    writeLuaString(file, "    root = \"", cwd, "\",\n") catch return;
+    file.writeAll("local hexe = require(\"hexe\")\n\n") catch |err| {
+        print("Error: failed to write layout: {s}\n", .{@errorName(err)});
+        return;
+    };
+    file.writeAll("return hexe.setup({\n") catch |err| {
+        print("Error: failed to write layout: {s}\n", .{@errorName(err)});
+        return;
+    };
+    file.writeAll("  ses = {\n    layouts = {\n") catch |err| {
+        print("Error: failed to write layout: {s}\n", .{@errorName(err)});
+        return;
+    };
+    writeLuaString(file, "      hexe.layout(\"", layout_name, "\", {\n") catch |err| {
+        print("Error: failed to write layout: {s}\n", .{@errorName(err)});
+        return;
+    };
+    writeLuaString(file, "        root = \"", cwd, "\",\n") catch |err| {
+        print("Error: failed to write layout: {s}\n", .{@errorName(err)});
+        return;
+    };
 
     // Tabs
     const tabs_val = root_obj.get("tabs") orelse {
-        file.writeAll("  }\n}\n") catch {};
+        try file.writeAll("      }),\n    },\n  },\n})\n");
         try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
         return;
     };
     const tabs_arr = switch (tabs_val) {
         .array => |a| a,
         else => {
-            file.writeAll("  }\n}\n") catch {};
+            try file.writeAll("      }),\n    },\n  },\n})\n");
             try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
             return;
         },
     };
 
     // Build a CWD map for all panes across all tabs
-    file.writeAll("    tabs = {\n") catch return;
+    try file.writeAll("        tabs = {\n");
 
     for (tabs_arr.items, 0..) |tab_val, ti| {
         const tab = switch (tab_val) {
@@ -162,7 +181,7 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
                                 };
                                 if (split_obj.get("pwd_dir")) |pwd_val| {
                                     switch (pwd_val) {
-                                        .string => |s| cwd_map.put(id, s) catch {},
+                                        .string => |s| try cwd_map.put(id, s),
                                         else => {},
                                     }
                                 }
@@ -175,8 +194,11 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
             }
         }
 
-        file.writeAll("      {\n") catch return;
-        w(file, "        name = \"{s}\",\n", .{tab_name});
+        writeLuaString(file, "          hexe.tab(\"", tab_name, "\", {\n") catch |err| {
+            print("Error: failed to write layout: {s}\n", .{@errorName(err)});
+            return;
+        };
+        var wrote_root = false;
 
         // Check if there's a tree (split structure)
         if (tab.get("tree")) |tree_val| {
@@ -195,9 +217,10 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
 
                 if (type_str) |ts| {
                     if (std.mem.eql(u8, ts, "split")) {
-                        file.writeAll("        split = ") catch return;
-                        writeLuaSplitTree(file, tree, &cwd_map, cwd, 3) catch return;
-                        file.writeAll(",\n") catch return;
+                        try file.writeAll("            root = ");
+                        try writeLuaSplitTree(file, tree, &cwd_map, cwd, 3);
+                        try file.writeAll(",\n");
+                        wrote_root = true;
                     } else if (std.mem.eql(u8, ts, "pane")) {
                         // Single pane — check for cmd/cwd
                         const pane_id = if (tree.get("id")) |id_val|
@@ -210,7 +233,11 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
                         if (pane_id) |pid| {
                             if (cwd_map.get(pid)) |pane_cwd| {
                                 if (!std.mem.eql(u8, pane_cwd, cwd)) {
-                                    w(file, "        split = {{ cwd = \"{s}\" }},\n", .{pane_cwd});
+                                    writeLuaString(file, "            root = hexe.pane({ cwd = \"", pane_cwd, "\" }),\n") catch |err| {
+                                        print("Error: failed to write layout: {s}\n", .{@errorName(err)});
+                                        return;
+                                    };
+                                    wrote_root = true;
                                 }
                             }
                         }
@@ -219,12 +246,13 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
             }
         }
 
-        file.writeAll("      }") catch return;
-        if (ti + 1 < tabs_arr.items.len) file.writeAll(",") catch {};
-        file.writeAll("\n") catch return;
+        if (!wrote_root) try file.writeAll("            root = hexe.pane(),\n");
+        try file.writeAll("          })");
+        if (ti + 1 < tabs_arr.items.len) try file.writeAll(",");
+        try file.writeAll("\n");
     }
 
-    file.writeAll("    },\n") catch return;
+    try file.writeAll("        },\n");
 
     // Floats
     const floats_val = root_obj.get("floats");
@@ -232,52 +260,54 @@ pub fn runSesFreeze(allocator: std.mem.Allocator, scope: LayoutSaveScope) !void 
         switch (fv) {
             .array => |floats_arr| {
                 if (floats_arr.items.len > 0) {
-                    file.writeAll("    floats = {\n") catch return;
+                    try file.writeAll("        floats = {\n");
                     for (floats_arr.items, 0..) |float_val, fi| {
                         const float = switch (float_val) {
                             .object => |o| o,
                             else => continue,
                         };
 
-                        file.writeAll("      {") catch return;
+                        try w(file, "          hexe.float(\"float-{d}\", {{", .{fi + 1});
 
                         if (float.get("float_key")) |key_val| {
                             switch (key_val) {
                                 .integer => |k| {
                                     if (k > 0 and k < 128) {
                                         const key_char: u8 = @intCast(k);
-                                        w(file, " key = \"{c}\",", .{key_char});
+                                        try w(file, " key = \"{c}\",", .{key_char});
                                     }
                                 },
                                 else => {},
                             }
                         }
 
-                        if (float.get("float_width_pct")) |wv| {
-                            switch (wv) {
-                                .integer => |v| w(file, " width = {d},", .{v}),
-                                else => {},
-                            }
-                        }
-                        if (float.get("float_height_pct")) |h| {
-                            switch (h) {
-                                .integer => |v| w(file, " height = {d},", .{v}),
-                                else => {},
-                            }
+                        const width_pct: ?i64 = if (float.get("float_width_pct")) |wv| switch (wv) {
+                            .integer => |v| v,
+                            else => null,
+                        } else null;
+                        const height_pct: ?i64 = if (float.get("float_height_pct")) |hv| switch (hv) {
+                            .integer => |v| v,
+                            else => null,
+                        } else null;
+                        if (width_pct != null or height_pct != null) {
+                            try file.writeAll(" size = {");
+                            if (width_pct) |v| try w(file, " width = {d},", .{v});
+                            if (height_pct) |v| try w(file, " height = {d},", .{v});
+                            try file.writeAll(" },");
                         }
 
-                        file.writeAll(" }") catch return;
-                        if (fi + 1 < floats_arr.items.len) file.writeAll(",") catch {};
-                        file.writeAll("\n") catch return;
+                        try file.writeAll(" }");
+                        if (fi + 1 < floats_arr.items.len) try file.writeAll(",");
+                        try file.writeAll("\n");
                     }
-                    file.writeAll("    },\n") catch return;
+                    try file.writeAll("        },\n");
                 }
             },
             else => {},
         }
     }
 
-    file.writeAll("  }\n}\n") catch return;
+    try file.writeAll("      }),\n    },\n  },\n})\n");
     try finalizeSave(allocator, scope, output_path, tmp_path, layout_name, cwd);
 }
 
@@ -348,6 +378,7 @@ fn collectUsedLayoutNames(allocator: std.mem.Allocator) ![][]u8 {
     const hdr = wire.readControlHeader(fd) catch return names.toOwnedSlice(allocator);
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type != .status or hdr.payload_len < @sizeOf(wire.StatusResp)) return names.toOwnedSlice(allocator);
+    if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) return names.toOwnedSlice(allocator);
 
     const payload = allocator.alloc(u8, hdr.payload_len) catch return names.toOwnedSlice(allocator);
     defer allocator.free(payload);
@@ -417,13 +448,17 @@ fn finalizeSave(allocator: std.mem.Allocator, scope: LayoutSaveScope, output_pat
 }
 
 /// Helper: formatted write to a File using a stack buffer.
-fn w(file: std.fs.File, comptime fmt: []const u8, args: anytype) void {
+fn w(file: std.fs.File, comptime fmt: []const u8, args: anytype) !void {
     var buf: [4096]u8 = undefined;
-    const str = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    file.writeAll(str) catch {};
+    const str = std.fmt.bufPrint(&buf, fmt, args) catch return error.NoSpaceLeft;
+    try file.writeAll(str);
 }
 
-fn writeLuaSplitTree(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *std.AutoHashMap(i64, []const u8), root_cwd: []const u8, indent: usize) std.fs.File.WriteError!void {
+fn writeLuaSplitTree(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *std.AutoHashMap(i64, []const u8), root_cwd: []const u8, indent: usize) anyerror!void {
+    try writeLuaSplitTreeSized(file, obj, cwd_map, root_cwd, indent, null);
+}
+
+fn writeLuaSplitTreeSized(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *std.AutoHashMap(i64, []const u8), root_cwd: []const u8, indent: usize, size: ?u8) anyerror!void {
     const type_str = if (obj.get("type")) |t|
         switch (t) {
             .string => |s| s,
@@ -433,7 +468,8 @@ fn writeLuaSplitTree(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *std.A
         return;
 
     if (std.mem.eql(u8, type_str, "pane")) {
-        try file.writeAll("{");
+        try file.writeAll("hexe.pane({");
+        if (size) |s| try w(file, " size = {d},", .{s});
 
         const pane_id = if (obj.get("id")) |id_val|
             switch (id_val) {
@@ -446,17 +482,12 @@ fn writeLuaSplitTree(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *std.A
         if (pane_id) |pid| {
             if (cwd_map.get(pid)) |pane_cwd| {
                 if (!std.mem.eql(u8, pane_cwd, root_cwd)) {
-                    var buf: [4096]u8 = undefined;
-                    const str = std.fmt.bufPrint(&buf, " cwd = \"{s}\"", .{pane_cwd}) catch return;
-                    try file.writeAll(str);
+                    try writeLuaString(file, " cwd = \"", pane_cwd, "\",");
                 }
             }
         }
-        try file.writeAll(" }");
+        try file.writeAll(" })");
     } else if (std.mem.eql(u8, type_str, "split")) {
-        try file.writeAll("{\n");
-
-        // Direction
         const dir_str = if (obj.get("dir")) |d|
             switch (d) {
                 .string => |s| s,
@@ -464,10 +495,7 @@ fn writeLuaSplitTree(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *std.A
             }
         else
             "horizontal";
-        try writeIndent(file, indent + 1);
-        var dir_buf: [256]u8 = undefined;
-        const dir_line = std.fmt.bufPrint(&dir_buf, "dir = \"{s}\",\n", .{dir_str}) catch return;
-        try file.writeAll(dir_line);
+        try w(file, "hexe.split(\"{s}\", {{\n", .{dir_str});
 
         // Ratio — calculate sizes from it
         const ratio: f64 = if (obj.get("ratio")) |r|
@@ -507,11 +535,15 @@ fn writeLuaSplitTree(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *std.A
         }
 
         try writeIndent(file, indent);
-        try file.writeAll("}");
+        if (size) |s| {
+            try w(file, "}}, {{ size = {d} }})", .{s});
+        } else {
+            try file.writeAll("})");
+        }
     }
 }
 
-fn writeLuaSplitChildWithSize(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *std.AutoHashMap(i64, []const u8), root_cwd: []const u8, size: u8, indent: usize) std.fs.File.WriteError!void {
+fn writeLuaSplitChildWithSize(file: std.fs.File, obj: std.json.ObjectMap, cwd_map: *std.AutoHashMap(i64, []const u8), root_cwd: []const u8, size: u8, indent: usize) anyerror!void {
     const type_str = if (obj.get("type")) |t|
         switch (t) {
             .string => |s| s,
@@ -521,9 +553,7 @@ fn writeLuaSplitChildWithSize(file: std.fs.File, obj: std.json.ObjectMap, cwd_ma
         return;
 
     if (std.mem.eql(u8, type_str, "pane")) {
-        var buf: [4096]u8 = undefined;
-        const hdr = std.fmt.bufPrint(&buf, "{{ size = {d}", .{size}) catch return;
-        try file.writeAll(hdr);
+        try w(file, "hexe.pane({{ size = {d},", .{size});
 
         const pane_id = if (obj.get("id")) |id_val|
             switch (id_val) {
@@ -536,19 +566,13 @@ fn writeLuaSplitChildWithSize(file: std.fs.File, obj: std.json.ObjectMap, cwd_ma
         if (pane_id) |pid| {
             if (cwd_map.get(pid)) |pane_cwd| {
                 if (!std.mem.eql(u8, pane_cwd, root_cwd)) {
-                    const cwd_str = std.fmt.bufPrint(&buf, ", cwd = \"{s}\"", .{pane_cwd}) catch return;
-                    try file.writeAll(cwd_str);
+                    try writeLuaString(file, " cwd = \"", pane_cwd, "\",");
                 }
             }
         }
-        try file.writeAll(" }");
+        try file.writeAll(" })");
     } else if (std.mem.eql(u8, type_str, "split")) {
-        // Nested split — emit as a full split table with size
-        var buf: [256]u8 = undefined;
-        const hdr = std.fmt.bufPrint(&buf, "{{ size = {d}, ", .{size}) catch return;
-        try file.writeAll(hdr);
-        try writeLuaSplitTree(file, obj, cwd_map, root_cwd, indent);
-        try file.writeAll(" }");
+        try writeLuaSplitTreeSized(file, obj, cwd_map, root_cwd, indent, size);
     }
 }
 

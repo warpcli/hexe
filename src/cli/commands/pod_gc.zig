@@ -5,6 +5,14 @@ const pod_meta = core.pod_meta;
 
 const print = std.debug.print;
 
+fn deleteGcEntry(dir: std.fs.Dir, dir_path: []const u8, name: []const u8) void {
+    dir.deleteFile(name) catch |err| {
+        print("gc: failed to delete {s}/{s}: {s}\n", .{ dir_path, name, @errorName(err) });
+        return;
+    };
+    print("gc: deleted {s}/{s}\n", .{ dir_path, name });
+}
+
 pub fn runPodGc(allocator: std.mem.Allocator, dry_run: bool) !void {
     const dir = try ipc.getSocketDir(allocator);
     defer allocator.free(dir);
@@ -26,8 +34,7 @@ pub fn runPodGc(allocator: std.mem.Allocator, dry_run: bool) !void {
                 if (dry_run) {
                     print("gc: would delete {s}/{s}\n", .{ dir, entry.name });
                 } else {
-                    d.deleteFile(entry.name) catch {};
-                    print("gc: deleted {s}/{s}\n", .{ dir, entry.name });
+                    deleteGcEntry(d, dir, entry.name);
                 }
             }
             continue;
@@ -41,8 +48,7 @@ pub fn runPodGc(allocator: std.mem.Allocator, dry_run: bool) !void {
                 if (dry_run) {
                     print("gc: would delete {s}/{s}\n", .{ dir, entry.name });
                 } else {
-                    d.deleteFile(entry.name) catch {};
-                    print("gc: deleted {s}/{s}\n", .{ dir, entry.name });
+                    deleteGcEntry(d, dir, entry.name);
                 }
                 continue;
             }
@@ -54,7 +60,10 @@ pub fn runPodGc(allocator: std.mem.Allocator, dry_run: bool) !void {
                 if (dry_run) {
                     print("gc: would delete {s}\n", .{full});
                 } else {
-                    d.deleteFile(entry.name) catch {};
+                    d.deleteFile(entry.name) catch |err| {
+                        print("gc: failed to delete {s}: {s}\n", .{ full, @errorName(err) });
+                        continue;
+                    };
                     print("gc: deleted {s}\n", .{full});
                 }
             }

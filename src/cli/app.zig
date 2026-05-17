@@ -408,7 +408,10 @@ pub fn main() !void {
 
     // CONFIG subcommands
     const config_validate_cmd = app.createCommand("validate", "Validate configuration file");
-    try config_cmd.addSubcommand(config_validate_cmd);
+    const config_check_cmd = app.createCommand("check", "Check configuration file");
+    const config_dump_cmd = app.createCommand("dump", "Dump normalized configuration");
+    const config_paths_cmd = app.createCommand("paths", "Show configuration search paths");
+    try config_cmd.addSubcommands(&[_]yazap.Command{ config_validate_cmd, config_check_cmd, config_dump_cmd, config_paths_cmd });
 
     var record_start = app.createCommand("start", "Start background recording");
     try record_start.addArg(Arg.singleValueOption("scope", null, null));
@@ -882,6 +885,15 @@ pub fn main() !void {
         if (config_matches.subcommandMatches("validate")) |_| {
             try config_validate.run();
             return;
+        } else if (config_matches.subcommandMatches("check")) |_| {
+            try config_validate.runCheck();
+            return;
+        } else if (config_matches.subcommandMatches("dump")) |_| {
+            try config_validate.runDump();
+            return;
+        } else if (config_matches.subcommandMatches("paths")) |_| {
+            try config_validate.runPaths();
+            return;
         }
     }
 }
@@ -1102,5 +1114,7 @@ fn runShpSpinner(name: []const u8, width_i: i64, interval_i: i64, hold_i: i64, l
         std.Thread.sleep(interval_ms * std.time.ns_per_ms);
     }
 
-    stdout.writeAll("\r\n") catch {};
+    stdout.writeAll("\r\n") catch |err| {
+        core.logging.logError("cli", "failed to finish animation line", err);
+    };
 }

@@ -9,6 +9,7 @@ const float_title = @import("float_title.zig");
 const float_util = @import("float_util.zig");
 const mouse_selection = @import("mouse_selection.zig");
 const statusbar = @import("statusbar.zig");
+const terminal_main = @import("main.zig");
 
 const Pane = @import("pane.zig").Pane;
 const State = @import("state.zig").State;
@@ -25,14 +26,32 @@ fn runStatusbarAction(state: *State, command: []const u8) void {
     };
     defer state.allocator.free(wrapped);
 
-    var env_map_opt = std.process.getEnvMap(state.allocator) catch null;
+    var env_map_opt = std.process.getEnvMap(state.allocator) catch |err| blk: {
+        core.logging.logError("terminal", "failed to copy environment for status action", err);
+        break :blk null;
+    };
     defer if (env_map_opt) |*m| m.deinit();
 
     if (env_map_opt) |*env_map| {
         if (state.getCurrentFocusedUuid()) |uuid| {
-            env_map.put("HEXE_PANE_UUID", uuid[0..]) catch {};
-            env_map.put("HEXE_FOCUSED_PANE_UUID", uuid[0..]) catch {};
-            env_map.put("HEXE_STATUS_FOCUSED_PANE_UUID", uuid[0..]) catch {};
+            env_map.put("HEXE_PANE_UUID", uuid[0..]) catch |err| {
+                core.logging.logError("terminal", "failed to set HEXE_PANE_UUID for status action", err);
+                state.notifications.showFor("status action env failed", 1400);
+                state.needs_render = true;
+                return;
+            };
+            env_map.put("HEXE_FOCUSED_PANE_UUID", uuid[0..]) catch |err| {
+                core.logging.logError("terminal", "failed to set HEXE_FOCUSED_PANE_UUID for status action", err);
+                state.notifications.showFor("status action env failed", 1400);
+                state.needs_render = true;
+                return;
+            };
+            env_map.put("HEXE_STATUS_FOCUSED_PANE_UUID", uuid[0..]) catch |err| {
+                core.logging.logError("terminal", "failed to set HEXE_STATUS_FOCUSED_PANE_UUID for status action", err);
+                state.notifications.showFor("status action env failed", 1400);
+                state.needs_render = true;
+                return;
+            };
         }
     }
 
@@ -47,7 +66,9 @@ fn runStatusbarAction(state: *State, command: []const u8) void {
         state.needs_render = true;
         return;
     };
-    _ = child.wait() catch {};
+    _ = child.wait() catch |err| {
+        core.logging.logError("terminal", "status action wait failed", err);
+    };
 }
 
 fn mouseModsMask(btn: u16) u8 {
@@ -122,8 +143,13 @@ fn forwardMouseToPane(pane: *Pane, ev: MouseEvent) void {
     // Build SGR mouse sequence: ESC [ < btn ; x ; y M/m
     var buf: [32]u8 = undefined;
     const terminator: u8 = if (ev.is_release) 'm' else 'M';
-    const len = std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{ ev.btn, local_x, local_y, terminator }) catch return;
-    pane.write(len) catch {};
+    const len = std.fmt.bufPrint(&buf, "\x1b[<{d};{d};{d}{c}", .{ ev.btn, local_x, local_y, terminator }) catch |err| {
+        terminal_main.debugLogUuid(&pane.uuid, "mouse SGR forwarding format failed: {s}", .{@errorName(err)});
+        return;
+    };
+    pane.write(len) catch |err| {
+        terminal_main.debugLogUuid(&pane.uuid, "mouse SGR forwarding write failed: {s}", .{@errorName(err)});
+    };
 }
 
 fn focusTarget(state: *State, target: FocusTarget) void {
@@ -316,16 +342,9 @@ fn updateFloatMove(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const St
     const dx: i32 = @as(i32, @intCast(mx)) - @as(i32, @intCast(drag.start_x));
     const dy: i32 = @as(i32, @intCast(my)) - @as(i32, @intCast(drag.start_y));
 
-    const avail_h: u16 = state.term_height - state.status_height;
-    const shadow_enabled = state.paneFloatHasShadow(pane);
-    const usable_w: u16 = if (shadow_enabled) (state.term_width -| 1) else state.term_width;
-    const usable_h: u16 = if (shadow_enabled and state.status_height == 0) (avail_h -| 1) else avail_h;
-
-    const outer_w: u16 = usable_w * state.paneFloatWidthPct(pane) / 100;
-    const outer_h: u16 = usable_h * state.paneFloatHeightPct(pane) / 100;
-
-    const max_x: u16 = usable_w -| outer_w;
-    const max_y: u16 = usable_h -| outer_h;
+    const frame = state.floatFrameForPane(pane);
+    const max_x: u16 = frame.max_x;
+    const max_y: u16 = frame.max_y;
 
     var outer_x: i32 = @intCast(drag.orig_x);
     var outer_y: i32 = @intCast(drag.orig_y);
@@ -386,30 +405,27 @@ fn updateFloatResize(state: *State, pane: *Pane, mx: u16, my: u16, drag: *const 
         h0 += dy;
     }
 
-    const avail_h: u16 = state.term_height - state.status_height;
-    const shadow_enabled = state.paneFloatHasShadow(pane);
-    const usable_w: u16 = if (shadow_enabled) (state.term_width -| 1) else state.term_width;
-    const usable_h: u16 = if (shadow_enabled and state.status_height == 0) (avail_h -| 1) else avail_h;
+    const usable = state.floatUsableArea(state.paneFloatHasShadow(pane));
 
     const min_outer_w: i32 = @intCast((@as(u16, 1) + state.paneFloatPadX(pane)) * 2 + 1);
     const min_outer_h: i32 = @intCast((@as(u16, 1) + state.paneFloatPadY(pane)) * 2 + 1);
 
     if (w0 < min_outer_w) w0 = min_outer_w;
     if (h0 < min_outer_h) h0 = min_outer_h;
-    if (w0 > @as(i32, @intCast(usable_w))) w0 = @as(i32, @intCast(usable_w));
-    if (h0 > @as(i32, @intCast(usable_h))) h0 = @as(i32, @intCast(usable_h));
+    if (w0 > @as(i32, @intCast(usable.w))) w0 = @as(i32, @intCast(usable.w));
+    if (h0 > @as(i32, @intCast(usable.h))) h0 = @as(i32, @intCast(usable.h));
 
     if (x0 < 0) x0 = 0;
     if (y0 < 0) y0 = 0;
 
-    const max_x: i32 = @as(i32, @intCast(usable_w)) - w0;
-    const max_y: i32 = @as(i32, @intCast(usable_h)) - h0;
+    const max_x: i32 = @as(i32, @intCast(usable.w)) - w0;
+    const max_y: i32 = @as(i32, @intCast(usable.h)) - h0;
     if (x0 > max_x) x0 = max_x;
     if (y0 > max_y) y0 = max_y;
 
     // Convert to percentage fields.
-    const usable_w_i: i32 = @intCast(@max(usable_w, 1));
-    const usable_h_i: i32 = @intCast(@max(usable_h, 1));
+    const usable_w_i: i32 = @intCast(@max(usable.w, 1));
+    const usable_h_i: i32 = @intCast(@max(usable.h, 1));
     const width_pct: u8 = @intCast(@max(@as(i32, 1), @divTrunc(100 * w0, usable_w_i)));
     const height_pct: u8 = @intCast(@max(@as(i32, 1), @divTrunc(100 * h0, usable_h_i)));
 
@@ -485,7 +501,11 @@ fn copyTextToSystemClipboard(state: *State, bytes: []const u8) bool {
     const stdout = std.fs.File.stdout();
     var buf: [256]u8 = undefined;
     var writer = stdout.writer(&buf);
-    state.renderer.vx.copyToSystemClipboard(&writer.interface, bytes, state.allocator) catch return false;
+    state.renderer.vx.copyToSystemClipboard(&writer.interface, bytes, state.allocator) catch |err| {
+        core.logging.logError("terminal", "failed to copy mouse selection to system clipboard", err);
+        state.notifications.showFor("Clipboard copy failed", 1400);
+        return false;
+    };
     return true;
 }
 
@@ -623,7 +643,9 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
             if (ev.is_release) {
                 state.mouse_drag = .none;
                 if (state.findPaneByUuid(d.uuid)) |pane| {
-                    state.syncSessionFloat(pane, state.activeFloatingIndex() != null and state.view.float_views.items[state.activeFloatingIndex().?] == pane);
+                    if (!state.syncSessionFloatChecked(pane, state.activeFloatingIndex() != null and state.view.float_views.items[state.activeFloatingIndex().?] == pane)) {
+                        state.notifications.show("Move float failed: session sync rejected update");
+                    }
                 }
                 return true;
             }
@@ -640,7 +662,9 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                 state.overlays.hideResizeInfo();
                 state.needs_render = true;
                 if (state.findPaneByUuid(d.uuid)) |pane| {
-                    state.syncSessionFloat(pane, state.activeFloatingIndex() != null and state.view.float_views.items[state.activeFloatingIndex().?] == pane);
+                    if (!state.syncSessionFloatChecked(pane, state.activeFloatingIndex() != null and state.view.float_views.items[state.activeFloatingIndex().?] == pane)) {
+                        state.notifications.show("Resize float failed: session sync rejected update");
+                    }
                 }
                 return true;
             }
@@ -701,8 +725,9 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
         }
     }
 
-    // Status bar tab switching (only on press).
-    if (!ev.is_release and state.config.tabs.status.enabled and ev.y == state.term_height - 1) {
+    // Status bar tab switching and actions should only fire on actual button
+    // presses, not hover/motion events.
+    if (!ev.is_release and !is_motion and state.config.tabs.status.enabled and ev.y == state.term_height - 1) {
         if (statusbar.hitTestTab(state, state.allocator, &state.config, state.term_width, state.term_height, state.view.tab_views, state.activeTabIndex(), state.runtime.sessionName(), ev.x, ev.y)) |ti| {
             if (ti != state.activeTabIndex()) {
                 @import("tab_switch.zig").switchToTab(state, ti);

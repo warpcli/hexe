@@ -3,6 +3,8 @@ const posix = std.posix;
 const c = std.c;
 const liblink = @import("liblink");
 
+const log = std.log.scoped(.frontend_liblink_transport);
+
 pub const default_port: u16 = 2222;
 
 pub const TrustMode = enum {
@@ -128,7 +130,9 @@ pub fn connect(allocator: std.mem.Allocator, config: Config) !ConnectResult {
 }
 
 fn workerMain(args: WorkerArgs) void {
-    bridgeSession(args.bridge, args.kind) catch {};
+    bridgeSession(args.bridge, args.kind) catch |err| {
+        log.warn("{s} bridge session failed: {}", .{ @tagName(args.kind), err });
+    };
 }
 
 fn bridgeSession(bridge: *Bridge, kind: ChannelKind) !void {
@@ -157,11 +161,16 @@ fn bridgeSession(bridge: *Bridge, kind: ChannelKind) !void {
     defer bridge.allocator.free(command);
 
     var session = try conn.requestExec(command);
-    defer session.close() catch {};
+    defer session.close() catch |err| {
+        log.warn("{s} bridge session close failed: {}", .{ @tagName(kind), err });
+    };
 
     var local_eof = false;
     while (true) {
-        session.manager.transport.poll(10) catch {};
+        session.manager.transport.poll(10) catch |err| {
+            log.warn("{s} bridge transport poll failed: {}", .{ @tagName(kind), err });
+            return err;
+        };
 
         var made_progress = false;
         var remote_closed = false;
@@ -195,7 +204,10 @@ fn bridgeSession(bridge: *Bridge, kind: ChannelKind) !void {
                 made_progress = true;
             } else {
                 local_eof = true;
-                session.sendEof() catch {};
+                session.sendEof() catch |err| {
+                    log.warn("{s} bridge send EOF failed: {}", .{ @tagName(kind), err });
+                    return err;
+                };
             }
         }
 

@@ -51,6 +51,10 @@ pub const VT = struct {
             .max_scrollback = DEFAULT_SCROLLBACK_BYTES,
         });
         errdefer self.terminal.deinit(allocator);
+        // Ghostty's full Termio path defaults cursor blinking on from config.
+        // Hexe uses the raw Terminal, so apply the same default here while
+        // still allowing DECSCUSR steady-cursor sequences to disable it.
+        self.terminal.modes.set(.cursor_blinking, true);
 
         self.stream = self.terminal.vtStream();
         self.render_state = .empty;
@@ -82,9 +86,6 @@ pub const VT = struct {
     }
 
     /// Mark the VT as needing a fresh render snapshot.
-    ///
-    /// Kept for API compatibility with callers, but RenderState is currently not
-    /// cached so this is a no-op.
     pub fn invalidateRenderState(self: *VT) void {
         _ = self;
     }

@@ -49,7 +49,7 @@ fn recoverFromTransactionLog(ses_state: *state.SesState) !void {
     const allocator = ses_state.allocator;
 
     // Read all transaction log entries
-    var entries = ses_state.txlog.readAll(allocator) catch |e| {
+    var entries = ses_state.persistence.txlog.readAll(allocator) catch |e| {
         debugLog("txlog readAll failed: {s}", .{@errorName(e)});
         return;
     };
@@ -76,7 +76,9 @@ fn recoverFromTransactionLog(ses_state: *state.SesState) !void {
     if (incomplete.items.len == 0) {
         debugLog("txlog: no incomplete transactions", .{});
         // All transactions complete - truncate log
-        ses_state.txlog.truncate() catch {};
+        ses_state.persistence.txlog.truncate() catch |err| {
+            core.logging.logError("ses", "failed to truncate complete txlog", err);
+        };
         return;
     }
 
@@ -92,7 +94,7 @@ fn recoverFromTransactionLog(ses_state: *state.SesState) !void {
                 ses_state.removeDetachedSession(entry.session_id);
 
                 // Mark all panes with this session_id as orphaned
-                var pane_iter = ses_state.panes.valueIterator();
+                var pane_iter = ses_state.store.panes.valueIterator();
                 while (pane_iter.next()) |pane| {
                     if (pane.session_id) |sid| {
                         if (std.mem.eql(u8, &sid, &entry.session_id)) {
@@ -114,7 +116,9 @@ fn recoverFromTransactionLog(ses_state: *state.SesState) !void {
     }
 
     // Truncate log after recovery
-    ses_state.txlog.truncate() catch {};
+    ses_state.persistence.txlog.truncate() catch |err| {
+        core.logging.logError("ses", "failed to truncate txlog after recovery", err);
+    };
     debugLog("txlog: recovery complete", .{});
 }
 
@@ -141,7 +145,10 @@ pub fn run(args: SesArgs) !void {
     log_file_path = if (args.log_file) |path|
         (if (path.len > 0) path else null)
     else if (args.log_level != null)
-        (ipc.getLogPath(page_alloc) catch null)
+        (ipc.getLogPath(page_alloc) catch |err| blk: {
+            core.logging.logError("ses", "failed to resolve default log path", err);
+            break :blk null;
+        })
     else
         null;
 
@@ -194,7 +201,9 @@ pub fn run(args: SesArgs) !void {
     // Load persisted registry/layout (best-effort).
     // Uses page_allocator for temporary allocations to avoid GPA issues after fork.
     // Verifies pods are still alive before restoring them.
-    persist.load(allocator, &ses_state) catch {};
+    persist.load(allocator, &ses_state) catch |err| {
+        core.logging.logError("ses", "failed to load persisted session state", err);
+    };
 
     // Transaction log recovery: check for incomplete operations from crash.
     recoverFromTransactionLog(&ses_state) catch |e| {
@@ -299,8 +308,13 @@ pub fn main() !void {
 
 fn print(comptime fmt: []const u8, args: anytype) void {
     var buf: [4096]u8 = undefined;
-    const msg = std.fmt.bufPrint(&buf, fmt, args) catch return;
-    _ = posix.write(posix.STDOUT_FILENO, msg) catch {};
+    const msg = std.fmt.bufPrint(&buf, fmt, args) catch |err| {
+        core.logging.logError("ses", "failed to format CLI output", err);
+        return;
+    };
+    _ = posix.write(posix.STDOUT_FILENO, msg) catch |err| {
+        core.logging.logError("ses", "failed to write CLI output", err);
+    };
 }
 
 fn printUsage() !void {
@@ -348,8 +362,10 @@ fn sendNotify(allocator: std.mem.Allocator, message: []const u8, target_uuid: ?[
         defer client.close();
         const fd = client.fd;
 
-        const handshake: [1]u8 = .{wire.SES_HANDSHAKE_CLI};
-        wire.writeAll(fd, &handshake) catch return;
+        wire.sendCliHandshake(fd) catch |err| {
+            print("Failed to send CLI handshake: {s}\n", .{@errorName(err)});
+            return;
+        };
 
         if (uuid.len >= 32) {
             var tn: wire.TargetedNotify = .{
@@ -358,7 +374,10 @@ fn sendNotify(allocator: std.mem.Allocator, message: []const u8, target_uuid: ?[
                 .msg_len = @intCast(message.len),
             };
             @memcpy(&tn.uuid, uuid[0..32]);
-            wire.writeControlWithTrail(fd, .targeted_notify, std.mem.asBytes(&tn), message) catch return;
+            wire.writeControlWithTrail(fd, .targeted_notify, std.mem.asBytes(&tn), message) catch |err| {
+                print("Failed to send notification: {s}\n", .{@errorName(err)});
+                return;
+            };
         }
     } else {
         core.FrontendTransportHelpers.sendNotify(allocator, .{ .local_ipc = .{} }, message) catch |err| {
@@ -389,18 +408,30 @@ fn listStatus(allocator: std.mem.Allocator) !void {
     const fd = client.fd;
 
     // CLI handshake
-    const handshake: [1]u8 = .{wire.SES_HANDSHAKE_CLI};
-    wire.writeAll(fd, &handshake) catch return;
+    wire.sendCliHandshake(fd) catch |err| {
+        print("Failed to send CLI handshake: {s}\n", .{@errorName(err)});
+        return;
+    };
 
     // Always request full to get mux_state trees.
     const flag: [1]u8 = .{1}; // full mode
-    wire.writeControl(fd, .status, &flag) catch return;
+    wire.writeControl(fd, .status, &flag) catch |err| {
+        print("Failed to request daemon status: {s}\n", .{@errorName(err)});
+        return;
+    };
 
     // Read response
-    const hdr = wire.readControlHeader(fd) catch return;
+    const hdr = wire.readControlHeader(fd) catch |err| {
+        print("Failed to read daemon status response: {s}\n", .{@errorName(err)});
+        return;
+    };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type != .status or hdr.payload_len < @sizeOf(wire.StatusResp)) {
         print("Invalid response from daemon\n", .{});
+        return;
+    }
+    if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+        print("Status response too large\n", .{});
         return;
     }
 
@@ -409,7 +440,10 @@ fn listStatus(allocator: std.mem.Allocator) !void {
         return;
     };
     defer allocator.free(payload);
-    wire.readExact(fd, payload) catch return;
+    wire.readExact(fd, payload) catch |err| {
+        print("Failed to read daemon status payload: {s}\n", .{@errorName(err)});
+        return;
+    };
 
     var off: usize = 0;
 
@@ -591,7 +625,7 @@ fn daemonize(log_file: ?[]const u8) !void {
     }
 
     // Create new session
-    _ = posix.setsid() catch {};
+    _ = try posix.setsid();
 
     // Second fork (prevent reacquiring terminal)
     const pid2 = try posix.fork();
@@ -615,32 +649,27 @@ fn daemonize(log_file: ?[]const u8) !void {
     // Redirect stdin/stdout/stderr away from the controlling terminal.
     // If stderr isn't redirected too, some terminals will still keep the PTY
     // alive and can deliver a HUP/teardown in surprising ways.
-    const devnull = posix.open("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch return;
-    posix.dup2(devnull, posix.STDIN_FILENO) catch {};
-    posix.dup2(devnull, posix.STDOUT_FILENO) catch {};
+    const devnull = try posix.open("/dev/null", .{ .ACCMODE = .RDWR }, 0);
+    try posix.dup2(devnull, posix.STDIN_FILENO);
+    try posix.dup2(devnull, posix.STDOUT_FILENO);
 
     if (log_file) |log_path| {
         if (log_path.len > 0) {
-            const logfd = posix.open(log_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch {
-                posix.dup2(devnull, posix.STDERR_FILENO) catch {};
-                if (devnull > 2) posix.close(devnull);
-                std.posix.chdir("/") catch {};
-                return;
-            };
-            posix.dup2(logfd, posix.STDERR_FILENO) catch {};
+            const logfd = try posix.open(log_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644);
+            try posix.dup2(logfd, posix.STDERR_FILENO);
             if (logfd > 2) posix.close(logfd);
         } else {
-            posix.dup2(devnull, posix.STDERR_FILENO) catch {};
+            try posix.dup2(devnull, posix.STDERR_FILENO);
         }
     } else {
         // Default: no noisy logfile. If user wants logs, they pass --logfile.
-        posix.dup2(devnull, posix.STDERR_FILENO) catch {};
+        try posix.dup2(devnull, posix.STDERR_FILENO);
     }
 
     if (devnull > 2) posix.close(devnull);
 
     // Change to root directory
-    std.posix.chdir("/") catch {};
+    try std.posix.chdir("/");
 }
 
 var global_server: std.atomic.Value(?*server.Server) = std.atomic.Value(?*server.Server).init(null);
@@ -674,7 +703,7 @@ fn signalHandler(sig: c_int) callconv(.c) void {
         std.posix.SIG.INT => "ses: received SIGINT, stopping\n",
         else => "ses: received unknown signal, stopping\n",
     };
-    _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch {};
+    _ = std.posix.write(std.posix.STDERR_FILENO, msg) catch 0;
     if (global_server.load(.acquire)) |srv| {
         srv.stop();
     }

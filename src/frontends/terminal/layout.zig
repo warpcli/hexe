@@ -121,18 +121,25 @@ pub const Layout = struct {
         errdefer self.allocator.destroy(pane);
 
         const result = try runtime.createPane(null, cwd, null, null, null, null, null);
+        var pane_registered = false;
+        errdefer if (!pane_registered) runtime.killPane(result.uuid) catch |e| {
+            core.logging.logError("terminal", "createFirstPane rollback killPane failed", e);
+        };
         const vt_fd = runtime.getVtFd() orelse return error.SesUnavailable;
         try pane.initWithPod(self.allocator, view_id, self.x, self.y, self.width, self.height, result.pane_id, vt_fd, result.uuid);
+        errdefer pane.deinit();
 
         pane.focused = true;
-        self.focused_pane_uuid = pane.uuid;
+
+        const node = try self.allocator.create(LayoutNode);
+        errdefer self.allocator.destroy(node);
 
         try self.splits.put(pane.uuid, pane);
         self.configurePaneNotifications(pane);
-
-        const node = try self.allocator.create(LayoutNode);
         node.* = .{ .pane = pane.uuid };
         self.root = node;
+        self.focused_pane_uuid = pane.uuid;
+        pane_registered = true;
 
         return pane;
     }
@@ -141,9 +148,15 @@ pub const Layout = struct {
     pub fn splitFocused(self: *Layout, dir: SplitDir, cwd: ?[]const u8) !?*Pane {
         const runtime = self.runtime orelse return error.SesUnavailable;
         if (!runtime.isConnected()) return error.SesUnavailable;
-        if (self.root == null) return null;
+        const root = self.root orelse {
+            core.logging.warn("terminal", "splitFocused skipped: layout has no root", .{});
+            return null;
+        };
 
-        const focused = self.getFocusedPane() orelse return null;
+        const focused = self.getFocusedPane() orelse {
+            core.logging.warn("terminal", "splitFocused skipped: focused pane UUID is missing or stale", .{});
+            return null;
+        };
         const old_uuid = focused.uuid;
 
         // Create new pane
@@ -160,22 +173,31 @@ pub const Layout = struct {
         const new_y = if (dir == .vertical) focused.y + focused.height - new_height else focused.y;
 
         const result = try runtime.createPane(null, cwd, null, null, null, null, null);
+        var pane_registered = false;
+        errdefer if (!pane_registered) runtime.killPane(result.uuid) catch |e| {
+            core.logging.logError("terminal", "splitFocused rollback killPane failed", e);
+        };
         const vt_fd = runtime.getVtFd() orelse return error.SesUnavailable;
         try new_pane.initWithPod(self.allocator, view_id, new_x, new_y, new_width, new_height, result.pane_id, vt_fd, result.uuid);
         errdefer new_pane.deinit();
 
-        try self.splits.put(new_pane.uuid, new_pane);
-        self.configurePaneNotifications(new_pane);
-
         // Find and replace the node containing the focused pane
-        const node_to_split = self.findNode(self.root.?, old_uuid) orelse return null;
+        const node_to_split = self.findNode(root, old_uuid) orelse {
+            core.logging.warn("terminal", "splitFocused skipped: focused pane UUID is absent from layout tree", .{});
+            return null;
+        };
 
         // Create new split node
         const first_node = try self.allocator.create(LayoutNode);
+        errdefer self.allocator.destroy(first_node);
         first_node.* = .{ .pane = old_uuid };
 
         const second_node = try self.allocator.create(LayoutNode);
+        errdefer self.allocator.destroy(second_node);
         second_node.* = .{ .pane = new_pane.uuid };
+
+        try self.splits.put(new_pane.uuid, new_pane);
+        self.configurePaneNotifications(new_pane);
 
         node_to_split.* = .{
             .split = .{
@@ -193,6 +215,7 @@ pub const Layout = struct {
         focused.focused = false;
         new_pane.focused = true;
         self.focused_pane_uuid = new_pane.uuid;
+        pane_registered = true;
 
         return new_pane;
     }
@@ -219,8 +242,14 @@ pub const Layout = struct {
     }
 
     pub fn splitRatioSyncForSplit(self: *Layout, split: *const LayoutNode.Split) ?SplitRatioSync {
-        const first_anchor_uuid = self.firstLeafPaneUuid(split.first) orelse return null;
-        const second_anchor_uuid = self.firstLeafPaneUuid(split.second) orelse return null;
+        const first_anchor_uuid = self.firstLeafPaneUuid(split.first) orelse {
+            core.logging.warn("terminal", "splitRatioSyncForSplit skipped: first split branch has no live pane", .{});
+            return null;
+        };
+        const second_anchor_uuid = self.firstLeafPaneUuid(split.second) orelse {
+            core.logging.warn("terminal", "splitRatioSyncForSplit skipped: second split branch has no live pane", .{});
+            return null;
+        };
         return .{
             .first_anchor_uuid = first_anchor_uuid,
             .second_anchor_uuid = second_anchor_uuid,
@@ -239,7 +268,9 @@ pub const Layout = struct {
         switch (node.*) {
             .pane => |uuid| {
                 if (self.splits.get(uuid)) |pane| {
-                    pane.resize(x, y, w, h) catch {};
+                    pane.resize(x, y, w, h) catch |err| {
+                        core.logging.logError("terminal", "layout pane resize failed", err);
+                    };
                 }
             },
             .split => |split| {
@@ -356,7 +387,10 @@ pub const Layout = struct {
 
     /// Get focused pane
     pub fn getFocusedPane(self: *Layout) ?*Pane {
-        const focused_uuid = self.focused_pane_uuid orelse return null;
+        const focused_uuid = self.focused_pane_uuid orelse {
+            core.logging.warn("terminal", "resizeFocused skipped: layout has panes but no focused pane UUID", .{});
+            return null;
+        };
         return self.splits.get(focused_uuid);
     }
 
@@ -364,16 +398,36 @@ pub const Layout = struct {
     pub fn focusNext(self: *Layout) void {
         if (self.splits.count() <= 1) return;
 
-        if (self.getFocusedPane()) |current| {
-            current.focused = false;
-        }
-
         var panes: std.ArrayList(*Pane) = .empty;
         defer panes.deinit(self.allocator);
+        if (!self.collectPanesSortedById(&panes)) return;
 
+        const focused_uuid = self.focused_pane_uuid orelse {
+            core.logging.warn("terminal", "focusNext skipped: layout has panes but no focused pane UUID", .{});
+            return;
+        };
+        var next_uuid: ?[32]u8 = null;
+        for (panes.items, 0..) |pane, i| {
+            if (std.mem.eql(u8, &pane.uuid, &focused_uuid)) {
+                const next_idx = (i + 1) % panes.items.len;
+                next_uuid = panes.items[next_idx].uuid;
+                break;
+            }
+        }
+        self.focusPaneUuid(next_uuid orelse {
+            core.logging.warn("terminal", "focusNext skipped: focused pane UUID is not present in pane list", .{});
+            return;
+        });
+    }
+
+    fn collectPanesSortedById(self: *Layout, panes: *std.ArrayList(*Pane)) bool {
         var it = self.splits.valueIterator();
         while (it.next()) |pane_ptr| {
-            panes.append(self.allocator, pane_ptr.*) catch continue;
+            panes.append(self.allocator, pane_ptr.*) catch |err| {
+                core.logging.logError("terminal", "failed to collect panes for focus traversal", err);
+                panes.clearRetainingCapacity();
+                return false;
+            };
         }
 
         const Ctx = struct {
@@ -382,16 +436,14 @@ pub const Layout = struct {
             }
         };
         std.mem.sort(*Pane, panes.items, {}, Ctx.lessThan);
+        return true;
+    }
 
-        const focused_uuid = self.focused_pane_uuid orelse return;
-        for (panes.items, 0..) |pane, i| {
-            if (std.mem.eql(u8, &pane.uuid, &focused_uuid)) {
-                const next_idx = (i + 1) % panes.items.len;
-                self.focused_pane_uuid = panes.items[next_idx].uuid;
-                break;
-            }
+    fn focusPaneUuid(self: *Layout, uuid: [32]u8) void {
+        if (self.getFocusedPane()) |current| {
+            current.focused = false;
         }
-
+        self.focused_pane_uuid = uuid;
         if (self.getFocusedPane()) |new_focus| {
             new_focus.focused = true;
         }
@@ -401,37 +453,26 @@ pub const Layout = struct {
     pub fn focusPrev(self: *Layout) void {
         if (self.splits.count() <= 1) return;
 
-        if (self.getFocusedPane()) |current| {
-            current.focused = false;
-        }
-
         var panes: std.ArrayList(*Pane) = .empty;
         defer panes.deinit(self.allocator);
+        if (!self.collectPanesSortedById(&panes)) return;
 
-        var it = self.splits.valueIterator();
-        while (it.next()) |pane_ptr| {
-            panes.append(self.allocator, pane_ptr.*) catch continue;
-        }
-
-        const Ctx = struct {
-            fn lessThan(_: void, a: *Pane, b: *Pane) bool {
-                return a.id < b.id;
-            }
+        const focused_uuid = self.focused_pane_uuid orelse {
+            core.logging.warn("terminal", "focusPrev skipped: layout has panes but no focused pane UUID", .{});
+            return;
         };
-        std.mem.sort(*Pane, panes.items, {}, Ctx.lessThan);
-
-        const focused_uuid = self.focused_pane_uuid orelse return;
+        var prev_uuid: ?[32]u8 = null;
         for (panes.items, 0..) |pane, i| {
             if (std.mem.eql(u8, &pane.uuid, &focused_uuid)) {
                 const prev_idx = if (i == 0) panes.items.len - 1 else i - 1;
-                self.focused_pane_uuid = panes.items[prev_idx].uuid;
+                prev_uuid = panes.items[prev_idx].uuid;
                 break;
             }
         }
-
-        if (self.getFocusedPane()) |new_focus| {
-            new_focus.focused = true;
-        }
+        self.focusPaneUuid(prev_uuid orelse {
+            core.logging.warn("terminal", "focusPrev skipped: focused pane UUID is not present in pane list", .{});
+            return;
+        });
     }
 
     /// Focus pane in given direction (up/down/left/right)
@@ -439,7 +480,10 @@ pub const Layout = struct {
     pub fn focusDirection(self: *Layout, dir: Direction, cursor_pos: ?CursorPos) void {
         if (self.splits.count() <= 1) return;
 
-        const current = self.getFocusedPane() orelse return;
+        const current = self.getFocusedPane() orelse {
+            core.logging.warn("terminal", "focusDirection skipped: focused pane UUID is missing or stale", .{});
+            return;
+        };
         // Use cursor position if provided, otherwise fall back to pane center
         const cur_cx = if (cursor_pos) |pos| pos.x else current.x + current.width / 2;
         const cur_cy = if (cursor_pos) |pos| pos.y else current.y + current.height / 2;
@@ -507,11 +551,13 @@ pub const Layout = struct {
     pub fn resizeFocused(self: *Layout, dir: Direction, step_cells: u16) ?SplitRatioSync {
         // Adjust the nearest split divider that borders the focused pane in the
         // requested direction (i3/tmux-style resize).
-        if (self.root == null) return null;
+        const root = self.root orelse return null;
         if (self.splits.count() <= 1) return null;
 
-        const focused_uuid = self.focused_pane_uuid orelse return null;
-        const root = self.root.?;
+        const focused_uuid = self.focused_pane_uuid orelse {
+            core.logging.warn("terminal", "resizeFocused skipped: layout has panes but no focused pane UUID", .{});
+            return null;
+        };
 
         const Helper = struct {
             const Target = struct {
@@ -588,7 +634,10 @@ pub const Layout = struct {
     pub fn closeFocused(self: *Layout) bool {
         if (self.splits.count() <= 1) return false;
 
-        const uuid_to_close = self.focused_pane_uuid orelse return false;
+        const uuid_to_close = self.focused_pane_uuid orelse {
+            core.logging.warn("terminal", "closeFocused skipped: layout has panes but no focused pane UUID", .{});
+            return false;
+        };
 
         // Focus next before removing
         self.focusNext();
@@ -600,7 +649,9 @@ pub const Layout = struct {
             // without another synchronous kill request.
             if (self.runtime) |runtime| {
                 if (kv.value.isAlive()) {
-                    runtime.killPane(kv.value.uuid) catch {};
+                    runtime.killPane(kv.value.uuid) catch |e| {
+                        core.logging.logError("terminal", "closeFocused killPane failed", e);
+                    };
                 }
             }
             kv.value.deinit();
@@ -620,6 +671,14 @@ pub const Layout = struct {
     ///
     /// This is used when the event loop detects a specific pane has died.
     pub fn closePane(self: *Layout, uuid_to_close: [32]u8) bool {
+        return self.closePaneInternal(uuid_to_close, true);
+    }
+
+    pub fn closePaneLocal(self: *Layout, uuid_to_close: [32]u8) bool {
+        return self.closePaneInternal(uuid_to_close, false);
+    }
+
+    fn closePaneInternal(self: *Layout, uuid_to_close: [32]u8, kill_live_pane: bool) bool {
         if (self.splits.count() <= 1) return false;
         if (!self.splits.contains(uuid_to_close)) return false;
 
@@ -631,11 +690,13 @@ pub const Layout = struct {
         }
 
         if (self.splits.fetchRemove(uuid_to_close)) |kv| {
-            if (self.runtime) |runtime| {
+            if (kill_live_pane) if (self.runtime) |runtime| {
                 if (kv.value.isAlive()) {
-                    runtime.killPane(kv.value.uuid) catch {};
+                    runtime.killPane(kv.value.uuid) catch |e| {
+                        core.logging.logError("terminal", "closePane killPane failed", e);
+                    };
                 }
-            }
+            };
             kv.value.deinit();
             self.allocator.destroy(kv.value);
         }
@@ -649,10 +710,19 @@ pub const Layout = struct {
 
     pub fn swapPaneNodes(self: *Layout, pane_a_uuid: [32]u8, pane_b_uuid: [32]u8) bool {
         if (std.mem.eql(u8, &pane_a_uuid, &pane_b_uuid)) return false;
-        const root = self.root orelse return false;
+        const root = self.root orelse {
+            core.logging.warn("terminal", "swapPaneNodes skipped: layout has no root", .{});
+            return false;
+        };
 
-        const node_a = self.findNode(root, pane_a_uuid) orelse return false;
-        const node_b = self.findNode(root, pane_b_uuid) orelse return false;
+        const node_a = self.findNode(root, pane_a_uuid) orelse {
+            core.logging.warn("terminal", "swapPaneNodes skipped: first pane UUID not found in layout tree", .{});
+            return false;
+        };
+        const node_b = self.findNode(root, pane_b_uuid) orelse {
+            core.logging.warn("terminal", "swapPaneNodes skipped: second pane UUID not found in layout tree", .{});
+            return false;
+        };
 
         node_a.* = .{ .pane = pane_b_uuid };
         node_b.* = .{ .pane = pane_a_uuid };

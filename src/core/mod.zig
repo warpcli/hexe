@@ -1,5 +1,6 @@
 // Core - built entirely on ghostty-vt
 const std = @import("std");
+pub const build_options = @import("build_options");
 const logging_mod = @import("logging.zig");
 
 pub const std_options: std.Options = .{
@@ -10,6 +11,7 @@ pub const std_options: std.Options = .{
 pub const pty = @import("pty.zig");
 pub const vt = @import("vt.zig");
 pub const config = @import("config.zig");
+pub const config_v2 = @import("config_v2.zig");
 pub const ipc = @import("ipc.zig");
 pub const wire = @import("wire.zig");
 pub const query = @import("query.zig");
@@ -64,13 +66,13 @@ pub const IpcServer = ipc.Server;
 pub const IpcClient = ipc.Client;
 pub const IpcConnection = ipc.Connection;
 pub const Config = config.Config;
+pub const HexeConfigV2 = config_v2.HexeConfigV2;
 pub const FloatDef = config.FloatDef;
 pub const FloatStyle = config.FloatStyle;
 pub const FloatStylePosition = config.FloatStylePosition;
 pub const BorderColor = config.BorderColor;
 pub const SplitStyle = config.SplitStyle;
 pub const SplitsConfig = config.SplitsConfig;
-pub const PanesConfig = config.PanesConfig;
 pub const SesConfig = config.SesConfig;
 pub const LayoutDef = config.LayoutDef;
 pub const LayoutTabDef = config.LayoutTabDef;

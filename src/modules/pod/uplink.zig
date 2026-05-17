@@ -4,6 +4,7 @@ const linux = std.os.linux;
 
 const core = @import("core");
 const wire = core.wire;
+const log = std.log.scoped(.pod_uplink);
 
 pub const PodUplink = struct {
     allocator: std.mem.Allocator,
@@ -30,10 +31,16 @@ pub const PodUplink = struct {
         if (now_ms - self.last_sent_ms < 100) return;
         self.last_sent_ms = now_ms;
 
-        const proc_cwd = readProcCwd(self.allocator, child_pid) catch null;
+        const proc_cwd = readProcCwd(self.allocator, child_pid) catch |err| blk: {
+            log.warn("failed to read process cwd for pid={d}: {}", .{ child_pid, err });
+            break :blk null;
+        };
         defer if (proc_cwd) |s| self.allocator.free(s);
 
-        const fg = readProcForeground(self.allocator, child_pid) catch null;
+        const fg = readProcForeground(self.allocator, child_pid) catch |err| blk: {
+            log.warn("failed to read foreground process for pid={d}: {}", .{ child_pid, err });
+            break :blk null;
+        };
         defer if (fg) |v| {
             self.allocator.free(v.name);
         };
@@ -47,10 +54,16 @@ pub const PodUplink = struct {
         if (!changed) return;
 
         if (self.last_cwd) |s| self.allocator.free(s);
-        self.last_cwd = if (proc_cwd) |s| self.allocator.dupe(u8, s) catch null else null;
+        self.last_cwd = if (proc_cwd) |s| self.allocator.dupe(u8, s) catch |err| blk: {
+            log.warn("failed to cache uplink cwd: {}", .{err});
+            break :blk null;
+        } else null;
 
         if (self.last_fg_process) |s| self.allocator.free(s);
-        self.last_fg_process = if (fg_name) |s| self.allocator.dupe(u8, s) catch null else null;
+        self.last_fg_process = if (fg_name) |s| self.allocator.dupe(u8, s) catch |err| blk: {
+            log.warn("failed to cache uplink foreground process: {}", .{err});
+            break :blk null;
+        } else null;
         self.last_fg_pid = fg_pid;
 
         if (!self.ensureConnected()) return;
@@ -62,7 +75,8 @@ pub const PodUplink = struct {
                 .cwd_len = @intCast(@min(cwd_str.len, std.math.maxInt(u16))),
             };
             const trails = [_][]const u8{cwd_str[0..cwd_msg.cwd_len]};
-            wire.writeControlMsg(fd, .cwd_changed, std.mem.asBytes(&cwd_msg), &trails) catch {
+            wire.writeControlMsg(fd, .cwd_changed, std.mem.asBytes(&cwd_msg), &trails) catch |err| {
+                log.warn("failed to send cwd_changed uplink message: {}", .{err});
                 self.disconnect();
                 return;
             };
@@ -75,7 +89,8 @@ pub const PodUplink = struct {
                 .name_len = @intCast(@min(name_str.len, std.math.maxInt(u16))),
             };
             const trails = [_][]const u8{name_str[0..fg_msg.name_len]};
-            wire.writeControlMsg(fd, .fg_changed, std.mem.asBytes(&fg_msg), &trails) catch {
+            wire.writeControlMsg(fd, .fg_changed, std.mem.asBytes(&fg_msg), &trails) catch |err| {
+                log.warn("failed to send fg_changed uplink message: {}", .{err});
                 self.disconnect();
                 return;
             };
@@ -85,10 +100,16 @@ pub const PodUplink = struct {
     pub fn ensureConnected(self: *PodUplink) bool {
         if (self.fd != null) return true;
 
-        const ses_path = core.ipc.getSesSocketPath(self.allocator) catch return false;
+        const ses_path = core.ipc.getSesSocketPath(self.allocator) catch |err| {
+            log.warn("failed to resolve SES socket path for POD uplink: {}", .{err});
+            return false;
+        };
         defer self.allocator.free(ses_path);
 
-        const client = core.ipc.Client.connect(ses_path) catch return false;
+        const client = core.ipc.Client.connect(ses_path) catch |err| {
+            log.debug("failed to connect POD uplink to SES at {s}: {}", .{ ses_path, err });
+            return false;
+        };
         const fd = client.fd;
 
         var handshake: [18]u8 = undefined;
@@ -100,7 +121,8 @@ pub const PodUplink = struct {
             return false;
         };
         @memcpy(handshake[2..18], &uuid_bin);
-        wire.writeAll(fd, &handshake) catch {
+        wire.writeAll(fd, &handshake) catch |err| {
+            log.warn("failed to send POD uplink handshake: {}", .{err});
             posix.close(fd);
             return false;
         };
@@ -132,7 +154,10 @@ fn readProcCwd(allocator: std.mem.Allocator, pid: posix.pid_t) !?[]u8 {
     var path_buf: [64]u8 = undefined;
     const path = try std.fmt.bufPrint(&path_buf, "/proc/{d}/cwd", .{pid});
     var tmp: [std.fs.max_path_bytes]u8 = undefined;
-    const link = posix.readlink(path, &tmp) catch return null;
+    const link = posix.readlink(path, &tmp) catch |err| {
+        log.debug("failed to readlink {s}: {}", .{ path, err });
+        return null;
+    };
     return try allocator.dupe(u8, link);
 }
 
@@ -141,11 +166,17 @@ fn readProcForeground(allocator: std.mem.Allocator, child_pid: posix.pid_t) !?st
 
     var stat_path_buf: [64]u8 = undefined;
     const stat_path = try std.fmt.bufPrint(&stat_path_buf, "/proc/{d}/stat", .{child_pid});
-    const stat_file = std.fs.openFileAbsolute(stat_path, .{}) catch return null;
+    const stat_file = std.fs.openFileAbsolute(stat_path, .{}) catch |err| {
+        log.debug("failed to open {s}: {}", .{ stat_path, err });
+        return null;
+    };
     defer stat_file.close();
 
     var stat_buf: [512]u8 = undefined;
-    const stat_len = stat_file.read(&stat_buf) catch return null;
+    const stat_len = stat_file.read(&stat_buf) catch |err| {
+        log.debug("failed to read {s}: {}", .{ stat_path, err });
+        return null;
+    };
     if (stat_len == 0) return null;
     const stat = stat_buf[0..stat_len];
 
@@ -159,7 +190,10 @@ fn readProcForeground(allocator: std.mem.Allocator, child_pid: posix.pid_t) !?st
     while (it.next()) |tok| {
         idx += 1;
         if (idx == 6) {
-            const v = std.fmt.parseInt(i32, tok, 10) catch return null;
+            const v = std.fmt.parseInt(i32, tok, 10) catch |err| {
+                log.debug("failed to parse foreground process group from /proc stat token '{s}': {}", .{ tok, err });
+                return null;
+            };
             if (v > 0) tpgid = v;
             break;
         }
@@ -168,10 +202,16 @@ fn readProcForeground(allocator: std.mem.Allocator, child_pid: posix.pid_t) !?st
 
     var comm_path_buf: [64]u8 = undefined;
     const comm_path = try std.fmt.bufPrint(&comm_path_buf, "/proc/{d}/comm", .{tpgid.?});
-    const comm_file = std.fs.openFileAbsolute(comm_path, .{}) catch return null;
+    const comm_file = std.fs.openFileAbsolute(comm_path, .{}) catch |err| {
+        log.debug("failed to open {s}: {}", .{ comm_path, err });
+        return null;
+    };
     defer comm_file.close();
     var comm_buf: [128]u8 = undefined;
-    const comm_len = comm_file.read(&comm_buf) catch return null;
+    const comm_len = comm_file.read(&comm_buf) catch |err| {
+        log.debug("failed to read {s}: {}", .{ comm_path, err });
+        return null;
+    };
     if (comm_len == 0) return null;
     const end = if (comm_buf[comm_len - 1] == '\n') comm_len - 1 else comm_len;
 

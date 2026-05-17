@@ -17,6 +17,12 @@ fn socketPair() !struct { a: posix.fd_t, b: posix.fd_t } {
     return .{ .a = fds[0], .b = fds[1] };
 }
 
+fn setNonBlocking(fd: posix.fd_t) !void {
+    const O_NONBLOCK: usize = 0o4000;
+    const flags = try posix.fcntl(fd, posix.F.GETFL, 0);
+    _ = try posix.fcntl(fd, posix.F.SETFL, flags | O_NONBLOCK);
+}
+
 test "wire round-trip: empty payload (ping)" {
     const pair = try socketPair();
     defer posix.close(pair.a);
@@ -27,6 +33,15 @@ test "wire round-trip: empty payload (ping)" {
     const hdr = try wire.readControlHeader(pair.b);
     try testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.ping)), hdr.msg_type);
     try testing.expectEqual(@as(u32, 0), hdr.payload_len);
+}
+
+test "wire: server hello validates runtime epoch" {
+    const pair = try socketPair();
+    defer posix.close(pair.a);
+    defer posix.close(pair.b);
+
+    try wire.sendServerHello(pair.a);
+    try wire.readAndValidateServerHello(pair.b);
 }
 
 test "wire round-trip: fixed-size struct (PaneUuid)" {
@@ -124,6 +139,22 @@ test "wire: oversize payload header trips MAX_PAYLOAD_LEN check" {
 
     const hdr = try wire.readControlHeader(pair.b);
     try testing.expect(hdr.payload_len > wire.MAX_PAYLOAD_LEN);
+}
+
+test "wire: timeout-bounded header read rejects partial nonblocking frame" {
+    const pair = try socketPair();
+    defer posix.close(pair.a);
+    defer posix.close(pair.b);
+    try setNonBlocking(pair.b);
+
+    try wire.writeAll(pair.a, &[_]u8{0x01});
+    try testing.expectError(error.Timeout, wire.readControlHeaderTimeout(pair.b, 10));
+}
+
+test "wire: protocol version 2 is minimum supported" {
+    try testing.expect(!wire.isProtocolVersionSupported(1));
+    try testing.expect(wire.isProtocolVersionSupported(2));
+    try testing.expect(!wire.isProtocolVersionDeprecated(1));
 }
 
 test "wire round-trip: Error payload + trail" {

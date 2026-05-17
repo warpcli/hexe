@@ -31,8 +31,15 @@ const OverlayManager = pop.overlay.OverlayManager;
 
 const Pane = @import("pane.zig").Pane;
 const VtWriteQueue = @import("vt_write_queue.zig").Queue;
+const helpers = @import("helpers.zig");
 
 const BindKey = core.Config.BindKey;
+
+fn writeControlLogged(fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8, comptime context: []const u8) void {
+    wire.writeControl(fd, msg_type, payload) catch |err| {
+        core.logging.logError("terminal", context, err);
+    };
+}
 const BindAction = core.Config.BindAction;
 /// Simple focus context for timer storage (float vs split).
 pub const FocusContext = enum { split, float };
@@ -84,13 +91,46 @@ pub const ResolvedFloatVisuals = struct {
     float_style: ?*const core.FloatStyle = null,
 };
 
+const ReplacementNewPaneRollback = enum {
+    kill_new_pane,
+    orphan_new_pane,
+};
+
+const adhoc_title_outputs = [_]core.OutputDef{
+    .{ .style = "bg:1 fg:0", .format = " $output " },
+};
+
+const adhoc_title_segment = core.Segment{
+    .name = "title",
+    .kind = .builtin,
+    .builtin = "title",
+    .outputs = adhoc_title_outputs[0..],
+};
+
+const adhoc_title_style = core.FloatStyle{
+    .position = .bottomright,
+    .module = adhoc_title_segment,
+};
+
 pub const State = struct {
+    fn floatStyleShowsTitle(style: ?*const core.FloatStyle) bool {
+        const value = style orelse return false;
+        if (value.position == null) return false;
+        return value.module != null or value.title_segments.len > 0;
+    }
+
     fn titleMatchesPattern(self: *const State, pattern: []const u8, title: ?[]const u8) bool {
         const title_text = title orelse return false;
         if (pattern.len == 0 or title_text.len == 0) return false;
-        const pattern_z = self.allocator.dupeZ(u8, pattern) catch return false;
+        const pattern_z = self.allocator.dupeZ(u8, pattern) catch |err| {
+            core.logging.logError("terminal", "failed to allocate float match pattern", err);
+            return false;
+        };
         defer self.allocator.free(pattern_z);
-        const title_z = self.allocator.dupeZ(u8, title_text) catch return false;
+        const title_z = self.allocator.dupeZ(u8, title_text) catch |err| {
+            core.logging.logError("terminal", "failed to allocate float title match text", err);
+            return false;
+        };
         defer self.allocator.free(title_z);
 
         const holder = cregex.hexe_regex_create() orelse return false;
@@ -129,6 +169,18 @@ pub const State = struct {
         for (self.config.float_match_rules) |*rule| {
             if (!self.titleMatchesPattern(rule.pattern, title)) continue;
             applyFloatMatchRule(&result, &rule.visual);
+        }
+
+        if (kind == .adhoc and !floatStyleShowsTitle(result.float_style)) {
+            if (title) |value| {
+                if (value.len > 0) {
+                    if (floatStyleShowsTitle(if (self.config.float_named_defaults.style) |*style| style else null)) {
+                        result.float_style = if (self.config.float_named_defaults.style) |*style| style else null;
+                    } else {
+                        result.float_style = &adhoc_title_style;
+                    }
+                }
+            }
         }
 
         return result;
@@ -428,7 +480,13 @@ pub const State = struct {
 
         const cap: usize = 64;
         const slice = title[0..@min(title.len, cap)];
-        self.float_rename_buf.appendSlice(self.allocator, slice) catch {};
+        self.float_rename_buf.appendSlice(self.allocator, slice) catch |err| {
+            core.logging.logError("terminal", "failed to initialize float rename buffer", err);
+            self.float_rename_uuid = null;
+            self.notifications.show("Rename failed");
+            self.needs_render = true;
+            return;
+        };
         self.needs_render = true;
     }
 
@@ -471,7 +529,7 @@ pub const State = struct {
                             .response_type = 0,
                             .selected_idx = 0,
                         };
-                        wire.writeControl(fd, .pop_response, std.mem.asBytes(&resp)) catch {};
+                        writeControlLogged(fd, .pop_response, std.mem.asBytes(&resp), "failed to send pane pop cancel response");
                     }
                 }
             }
@@ -554,14 +612,51 @@ pub const State = struct {
         };
 
         const new_title = std.mem.trim(u8, self.float_rename_buf.items, " \t\r\n");
-        _ = self.setPaneFloatTitle(pane.uuid, if (new_title.len > 0) new_title else null);
+        if (!self.setPaneFloatTitle(pane.uuid, if (new_title.len > 0) new_title else null)) {
+            self.notifications.show("Rename failed");
+            self.needs_render = true;
+            return;
+        }
 
         // Keep the pod's pane name separate from the float title.
 
         self.clearFloatRename();
         self.renderer.invalidate();
         self.force_full_render = true;
-        self.syncSessionFloat(pane, self.activeFloatingIndex() != null);
+        if (!self.syncSessionFloatChecked(pane, self.activeFloatingIndex() != null)) {
+            self.notifications.show("Rename failed: session sync rejected update");
+        }
+    }
+
+    pub fn showConfirmOrNotify(self: *State, pending_action: PendingAction, message: []const u8) bool {
+        self.pending_action = pending_action;
+        self.popups.showConfirm(message, .{}) catch |err| {
+            core.logging.logError("terminal", "failed to show confirmation popup", err);
+            self.pending_action = null;
+            self.notifications.show("Confirmation failed");
+            self.needs_render = true;
+            return false;
+        };
+        self.needs_render = true;
+        return true;
+    }
+
+    pub fn showPickerOrNotify(
+        self: *State,
+        pending_action: PendingAction,
+        labels: []const []const u8,
+        title: []const u8,
+    ) bool {
+        self.popups.showPickerOwned(labels, .{ .title = title }) catch |err| {
+            core.logging.logError("terminal", "failed to show picker popup", err);
+            self.pending_action = null;
+            self.notifications.show("Picker failed");
+            self.needs_render = true;
+            return false;
+        };
+        self.pending_action = pending_action;
+        self.needs_render = true;
+        return true;
     }
 
     pub fn deinit(self: *State) void {
@@ -607,8 +702,12 @@ pub const State = struct {
     }
 
     pub fn enqueueOscReplyTarget(self: *State, uuid: [32]u8) void {
-        self.osc_reply_targets.append(self.allocator, uuid) catch {};
-        self.osc_reply_target_enqueued_ms.append(self.allocator, std.time.milliTimestamp()) catch {
+        self.osc_reply_targets.append(self.allocator, uuid) catch |err| {
+            core.logging.logError("terminal", "failed to enqueue OSC reply target", err);
+            return;
+        };
+        self.osc_reply_target_enqueued_ms.append(self.allocator, std.time.milliTimestamp()) catch |err| {
+            core.logging.logError("terminal", "failed to timestamp OSC reply target", err);
             if (self.osc_reply_targets.items.len > 0) {
                 _ = self.osc_reply_targets.pop();
             }
@@ -636,8 +735,12 @@ pub const State = struct {
     }
 
     pub fn enqueueCsiReplyTarget(self: *State, uuid: [32]u8) void {
-        self.csi_reply_targets.append(self.allocator, uuid) catch {};
-        self.csi_reply_target_enqueued_ms.append(self.allocator, std.time.milliTimestamp()) catch {
+        self.csi_reply_targets.append(self.allocator, uuid) catch |err| {
+            core.logging.logError("terminal", "failed to enqueue CSI reply target", err);
+            return;
+        };
+        self.csi_reply_target_enqueued_ms.append(self.allocator, std.time.milliTimestamp()) catch |err| {
+            core.logging.logError("terminal", "failed to timestamp CSI reply target", err);
             if (self.csi_reply_targets.items.len > 0) {
                 _ = self.csi_reply_targets.pop();
             }
@@ -678,7 +781,12 @@ pub const State = struct {
     }
 
     pub fn flushPendingMuxVtWrites(self: *State) void {
-        const fd = self.runtime.getVtFd() orelse return;
+        const fd = self.runtime.getVtFd() orelse {
+            if (self.mux_vt_write_queue.queuedBytes() > 0) {
+                core.logging.warn("terminal", "pending pane input cannot flush: SES VT channel is unavailable", .{});
+            }
+            return;
+        };
         self.mux_vt_write_queue.flushToFd(fd) catch {
             self.handleMuxVtWriteFailure(fd);
             return;
@@ -865,47 +973,330 @@ pub const State = struct {
         return state_session.replaceWithSessionConfig(self, config, tab_filter);
     }
 
-    pub fn syncSessionTabAdded(self: *State, tab_uuid: [32]u8, name: []const u8, pane_uuid: [32]u8) void {
-        return state_sync.syncSessionTabAdded(self, tab_uuid, name, pane_uuid);
+    pub fn syncSessionTabAddedChecked(self: *State, tab_uuid: [32]u8, name: []const u8, pane_uuid: [32]u8) bool {
+        if (!self.runtime.isConnected()) return true;
+        self.runtime.sessionAddTab(tab_uuid, pane_uuid, self.activeTabIndex(), name) catch |err| {
+            core.logging.logError("terminal", "failed sessionAddTab IPC", err);
+            return false;
+        };
+        return true;
     }
 
-    pub fn syncSessionTabRemoved(self: *State, tab_uuid: [32]u8) void {
-        return state_sync.syncSessionTabRemoved(self, tab_uuid);
+    pub fn syncSessionTabRemovedChecked(self: *State, tab_uuid: [32]u8, active_tab: ?usize) bool {
+        if (!self.runtime.isConnected()) return true;
+        self.runtime.sessionRemoveTab(tab_uuid, active_tab) catch |err| {
+            core.logging.logError("terminal", "failed sessionRemoveTab IPC", err);
+            return false;
+        };
+        return true;
     }
 
-    pub fn syncSessionFloat(self: *State, pane: *Pane, active: bool) void {
-        return state_sync.syncSessionFloat(self, pane, active);
+    pub fn syncSessionFloatChecked(self: *State, pane: *Pane, active: bool) bool {
+        if (!self.runtime.isConnected()) return true;
+        if (pane.uuid[0] == 0) return true;
+
+        return self.syncSessionFloatUuid(pane.uuid, pane, active, "failed sessionSyncFloat IPC");
     }
 
-    pub fn syncSessionFloatRemoved(self: *State, pane_uuid: [32]u8) void {
-        return state_sync.syncSessionFloatRemoved(self, pane_uuid);
+    fn syncSessionFloatUuid(
+        self: *State,
+        pane_uuid: [32]u8,
+        pane: *Pane,
+        active: bool,
+        comptime context: []const u8,
+    ) bool {
+        self.runtime.sessionSyncFloat(
+            pane_uuid,
+            self.activeTabIndex(),
+            self.paneParentTab(pane),
+            if (self.paneFloatState(pane)) |float_state| float_state.visible else true,
+            if (self.paneFloatState(pane)) |float_state| float_state.tab_visible else 0,
+            self.paneSticky(pane),
+            self.paneIsPwd(pane),
+            self.paneFloatKey(pane),
+            self.paneFloatWidthPct(pane),
+            self.paneFloatHeightPct(pane),
+            self.paneFloatPosXPct(pane),
+            self.paneFloatPosYPct(pane),
+            self.paneFloatPadX(pane),
+            self.paneFloatPadY(pane),
+            active,
+        ) catch |err| {
+            core.logging.logError("terminal", context, err);
+            return false;
+        };
+        return true;
     }
 
-    pub fn syncSessionSplitPane(
+    pub fn syncSessionSplitPaneChecked(
         self: *State,
         source_pane_uuid: [32]u8,
         new_pane_uuid: [32]u8,
         dir: layout_mod.SplitDir,
         focused_pane_uuid: ?[32]u8,
-    ) void {
-        return state_sync.syncSessionSplitPane(self, source_pane_uuid, new_pane_uuid, dir, focused_pane_uuid);
+    ) bool {
+        if (!self.runtime.isConnected()) return true;
+        const tab_uuid = self.runtime.tabUuid(self.activeTabIndex()) orelse {
+            core.logging.warn("terminal", "session split-pane sync skipped: active tab has no session UUID", .{});
+            return false;
+        };
+        self.runtime.sessionSplitPane(
+            tab_uuid,
+            source_pane_uuid,
+            new_pane_uuid,
+            self.activeTabIndex(),
+            focused_pane_uuid,
+            switch (dir) {
+                .horizontal => .horizontal,
+                .vertical => .vertical,
+            },
+        ) catch |err| {
+            core.logging.logError("terminal", "failed sessionSplitPane IPC", err);
+            return false;
+        };
+        return true;
     }
 
-    pub fn syncSessionCloseSplitPane(
-        self: *State,
-        pane_uuid: [32]u8,
-        focused_pane_uuid: ?[32]u8,
-    ) void {
-        return state_sync.syncSessionCloseSplitPane(self, pane_uuid, focused_pane_uuid);
-    }
-
-    pub fn syncSessionReplaceSplitPane(
+    pub fn syncSessionPaneUuidReplacement(
         self: *State,
         old_pane_uuid: [32]u8,
         new_pane_uuid: [32]u8,
-        focused_pane_uuid: ?[32]u8,
+        pane: *Pane,
+        active_float: bool,
+    ) bool {
+        if (!self.runtime.isConnected()) return true;
+
+        if (self.paneIsFloating(pane)) {
+            self.runtime.sessionRemoveFloat(old_pane_uuid) catch |err| {
+                core.logging.logError("terminal", "failed sessionRemoveFloat IPC during pane replacement", err);
+                return false;
+            };
+            if (!self.syncSessionFloatUuid(
+                new_pane_uuid,
+                pane,
+                active_float,
+                "failed sessionSyncFloat IPC during pane replacement",
+            )) {
+                _ = self.syncSessionFloatUuid(
+                    old_pane_uuid,
+                    pane,
+                    active_float,
+                    "failed sessionSyncFloat rollback during pane replacement",
+                );
+                return false;
+            }
+        } else {
+            const tab_uuid = self.runtime.tabUuid(self.activeTabIndex()) orelse {
+                core.logging.warn("terminal", "session split-pane replacement skipped: active tab has no session UUID", .{});
+                return false;
+            };
+            self.runtime.sessionReplaceSplitPane(
+                tab_uuid,
+                old_pane_uuid,
+                new_pane_uuid,
+                self.activeTabIndex(),
+                if (pane.focused) new_pane_uuid else null,
+            ) catch |err| {
+                core.logging.logError("terminal", "failed sessionReplaceSplitPane IPC during pane replacement", err);
+                return false;
+            };
+        }
+        return true;
+    }
+
+    pub fn rollbackSessionPaneUuidReplacement(
+        self: *State,
+        old_pane_uuid: [32]u8,
+        new_pane_uuid: [32]u8,
+        pane: *Pane,
+        active_float: bool,
     ) void {
-        return state_sync.syncSessionReplaceSplitPane(self, old_pane_uuid, new_pane_uuid, focused_pane_uuid);
+        if (!self.runtime.isConnected()) return;
+
+        if (self.paneIsFloating(pane)) {
+            self.runtime.sessionRemoveFloat(new_pane_uuid) catch |err| {
+                core.logging.logError("terminal", "failed sessionRemoveFloat rollback IPC", err);
+            };
+            _ = self.syncSessionFloatUuid(
+                old_pane_uuid,
+                pane,
+                active_float,
+                "failed sessionSyncFloat rollback IPC",
+            );
+        } else {
+            const tab_uuid = self.runtime.tabUuid(self.activeTabIndex()) orelse {
+                core.logging.warn("terminal", "session split-pane replacement rollback skipped: active tab has no session UUID", .{});
+                return;
+            };
+            self.runtime.sessionReplaceSplitPane(
+                tab_uuid,
+                new_pane_uuid,
+                old_pane_uuid,
+                self.activeTabIndex(),
+                if (pane.focused) old_pane_uuid else null,
+            ) catch |err| {
+                core.logging.logError("terminal", "failed sessionReplaceSplitPane rollback IPC", err);
+            };
+        }
+    }
+
+    fn rollbackNewReplacementPane(
+        self: *State,
+        new_pane_uuid: [32]u8,
+        rollback: ReplacementNewPaneRollback,
+        comptime context: []const u8,
+    ) void {
+        switch (rollback) {
+            .kill_new_pane => self.runtime.killPane(new_pane_uuid) catch |err| {
+                core.logging.logError("terminal", context, err);
+            },
+            .orphan_new_pane => self.runtime.orphanPane(new_pane_uuid) catch |err| {
+                core.logging.logError("terminal", context, err);
+            },
+        }
+    }
+
+    pub fn replacePaneWithPodSynced(
+        self: *State,
+        old_pane_uuid: [32]u8,
+        new_pane_uuid: [32]u8,
+        pane_id: u16,
+        vt_fd: posix.fd_t,
+        pane: *Pane,
+        active_float: bool,
+        rollback: ReplacementNewPaneRollback,
+        comptime rollback_context: []const u8,
+    ) bool {
+        if (!self.syncSessionPaneUuidReplacement(old_pane_uuid, new_pane_uuid, pane, active_float)) {
+            self.rollbackNewReplacementPane(new_pane_uuid, rollback, rollback_context);
+            return false;
+        }
+
+        pane.replaceWithPod(pane_id, vt_fd, new_pane_uuid) catch |err| {
+            core.logging.logError("terminal", "replacePaneWithPodSynced replaceWithPod failed", err);
+            self.rollbackSessionPaneUuidReplacement(old_pane_uuid, new_pane_uuid, pane, active_float);
+            self.rollbackNewReplacementPane(new_pane_uuid, rollback, rollback_context);
+            return false;
+        };
+
+        return true;
+    }
+
+    pub fn respawnFocusedPaneAfterShellDeath(self: *State) bool {
+        if (self.view.tab_views.items.len == 0) {
+            core.logging.warn("terminal", "respawn shell death: no local tabs remain; creating replacement tab", .{});
+            self.createTab() catch |err| {
+                core.logging.logError("terminal", "respawn dead pane: failed to create replacement tab", err);
+                self.notifications.show("Respawn failed");
+                return false;
+            };
+            self.skip_dead_check = true;
+            self.needs_render = true;
+            return true;
+        }
+
+        const pane = self.currentLayout().getFocusedPane() orelse return false;
+        const old_uuid = pane.uuid;
+        if (!pane.isAlive() and self.currentLayout().splitCount() <= 1) {
+            core.logging.warn("terminal", "respawn shell death: replacing last dead split with fresh tab", .{});
+            self.runtime.killPane(old_uuid) catch |err| {
+                core.logging.logError("terminal", "respawn dead pane: kill old pane failed", err);
+            };
+            self.clearTransientPaneState(pane);
+            while (self.view.tab_views.items.len > 0) {
+                const tab_opt = self.view.tab_views.pop();
+                if (tab_opt) |tab_const| {
+                    var tab = tab_const;
+                    tab.deinit();
+                }
+            }
+            self.runtime.clearTabMeta();
+            self.runtime.clearTabFocusMemory();
+            self.setActiveTabIndex(0);
+            self.runtime.setFocusedPaneUuid(null);
+            self.createTab() catch |err| {
+                core.logging.logError("terminal", "respawn dead pane: failed to create replacement tab after clearing dead split", err);
+                self.notifications.show("Respawn failed");
+                return false;
+            };
+            self.skip_dead_check = true;
+            self.needs_render = true;
+            return true;
+        }
+
+        var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+        var cwd = self.getReliableCwd(pane);
+        if (cwd == null) {
+            cwd = std.posix.getcwd(&cwd_buf) catch |err| blk: {
+                core.logging.logError("terminal", "respawn dead pane: failed to get fallback cwd", err);
+                break :blk null;
+            };
+        }
+        const old_aux = self.runtime.getPaneAux(pane.uuid) catch FrontendRuntime.PaneAuxInfo{
+            .created_from = null,
+            .focused_from = null,
+        };
+        const result = self.runtime.createPane(null, cwd, null, null, null, null, null) catch {
+            self.notifications.show("Respawn failed");
+            return false;
+        };
+        const vt_fd = self.runtime.getVtFd() orelse {
+            self.runtime.killPane(result.uuid) catch {};
+            self.notifications.show("Respawn failed: no VT channel");
+            return false;
+        };
+
+        const active_float = self.paneIsFloating(pane);
+        if (!self.replacePaneWithPodSynced(
+            old_uuid,
+            result.uuid,
+            result.pane_id,
+            vt_fd,
+            pane,
+            active_float,
+            .kill_new_pane,
+            "respawn dead pane: rollback killPane failed after replacement error",
+        )) {
+            self.notifications.show("Respawn failed");
+            return false;
+        }
+
+        self.runtime.killPane(old_uuid) catch {};
+        const pane_type: FrontendRuntime.PaneType = if (self.paneIsFloating(pane)) .float else .split;
+        const cursor = pane.getCursorPos();
+        const cursor_style = pane.vt.getCursorStyle();
+        const cursor_visible = pane.vt.isCursorVisible();
+        const alt_screen = pane.vt.inAltScreen();
+        const layout_path = helpers.getLayoutPath(self, pane) catch |err| blk: {
+            core.logging.logError("terminal", "respawn dead pane: failed to resolve layout path", err);
+            break :blk null;
+        };
+        defer if (layout_path) |path| self.allocator.free(path);
+        self.runtime.updatePaneAux(
+            pane.uuid,
+            self.activeTabIndex(),
+            self.paneIsFloating(pane),
+            self.paneIsFocused(pane),
+            pane_type,
+            old_aux.created_from,
+            old_aux.focused_from,
+            .{ .x = cursor.x, .y = cursor.y },
+            cursor_style,
+            cursor_visible,
+            alt_screen,
+            .{ .cols = pane.width, .rows = pane.height },
+            pane.getPwd(),
+            null,
+            null,
+            layout_path,
+        ) catch |err| {
+            core.logging.logError("terminal", "respawn dead pane: updatePaneAux failed after replacement", err);
+            self.notifications.show("Respawn metadata sync failed");
+        };
+
+        self.skip_dead_check = true;
+        self.needs_render = true;
+        return true;
     }
 
     pub fn syncSessionSplitRatio(
@@ -973,7 +1364,9 @@ pub const State = struct {
         }
 
         self.resizeFloatingPanes();
-        self.renderer.resize(cols, rows) catch {};
+        self.renderer.resize(cols, rows) catch |err| {
+            core.logging.logError("terminal", "renderer resize failed after terminal resize", err);
+        };
         self.renderer.invalidate();
         self.needs_render = true;
         self.force_full_render = true;
@@ -1085,7 +1478,10 @@ pub const State = struct {
     }
 
     pub fn ensureFloatUi(self: *State, pane_uuid: [32]u8) ?*FloatUiState {
-        const entry = self.float_ui.getOrPut(pane_uuid) catch return null;
+        const entry = self.float_ui.getOrPut(pane_uuid) catch |err| {
+            core.logging.logError("terminal", "failed to allocate float UI state", err);
+            return null;
+        };
         if (!entry.found_existing) {
             entry.value_ptr.* = .{};
         }
@@ -1106,9 +1502,7 @@ pub const State = struct {
     }
 
     pub fn setPaneFloatUi(self: *State, pane_uuid: [32]u8, cfg: PaneFloatUiConfig) bool {
-        const ui = self.ensureFloatUi(pane_uuid) orelse return false;
-        ui.deinit(self.allocator);
-        ui.* = .{
+        var next = FloatUiState{
             .border_x = cfg.border_x,
             .border_y = cfg.border_y,
             .border_w = cfg.border_w,
@@ -1127,14 +1521,32 @@ pub const State = struct {
             .float_style = cfg.float_style,
         };
         if (cfg.pwd_dir) |dir| {
-            ui.pwd_dir = self.allocator.dupe(u8, dir) catch null;
+            next.pwd_dir = self.allocator.dupe(u8, dir) catch {
+                core.logging.logError("terminal", "failed to allocate float pwd dir", error.OutOfMemory);
+                next.deinit(self.allocator);
+                return false;
+            };
         }
         if (cfg.exit_key) |key| {
-            ui.exit_key = self.allocator.dupe(u8, key) catch null;
+            next.exit_key = self.allocator.dupe(u8, key) catch {
+                core.logging.logError("terminal", "failed to allocate float exit key", error.OutOfMemory);
+                next.deinit(self.allocator);
+                return false;
+            };
         }
         if (cfg.float_title) |title| {
-            ui.float_title = self.allocator.dupe(u8, title) catch null;
+            next.float_title = self.allocator.dupe(u8, title) catch {
+                core.logging.logError("terminal", "failed to allocate float title", error.OutOfMemory);
+                next.deinit(self.allocator);
+                return false;
+            };
         }
+        const ui = self.ensureFloatUi(pane_uuid) orelse {
+            next.deinit(self.allocator);
+            return false;
+        };
+        ui.deinit(self.allocator);
+        ui.* = next;
         return true;
     }
 
@@ -1177,8 +1589,14 @@ pub const State = struct {
     }
 
     pub fn swapPaneFloatUi(self: *State, a_uuid: [32]u8, b_uuid: [32]u8) void {
-        const a = self.float_ui.getPtr(a_uuid) orelse return;
-        const b = self.float_ui.getPtr(b_uuid) orelse return;
+        const a = self.float_ui.getPtr(a_uuid) orelse {
+            core.logging.warn("terminal", "swapPaneFloatUi skipped: first pane has no float UI state", .{});
+            return;
+        };
+        const b = self.float_ui.getPtr(b_uuid) orelse {
+            core.logging.warn("terminal", "swapPaneFloatUi skipped: second pane has no float UI state", .{});
+            return;
+        };
 
         std.mem.swap(u16, &a.border_x, &b.border_x);
         std.mem.swap(u16, &a.border_y, &b.border_y);
@@ -1229,20 +1647,109 @@ pub const State = struct {
         return false;
     }
 
+    pub const FloatUsableArea = struct {
+        w: u16,
+        h: u16,
+    };
+
+    pub const FloatFrame = struct {
+        usable_w: u16,
+        usable_h: u16,
+        outer_x: u16,
+        outer_y: u16,
+        outer_w: u16,
+        outer_h: u16,
+        content_x: u16,
+        content_y: u16,
+        content_w: u16,
+        content_h: u16,
+        max_x: u16,
+        max_y: u16,
+    };
+
+    pub fn floatUsableArea(self: *const State, shadow_enabled: bool) FloatUsableArea {
+        const avail_h: u16 = self.term_height - self.status_height;
+        return .{
+            .w = if (shadow_enabled) (self.term_width -| 1) else self.term_width,
+            .h = if (shadow_enabled and self.status_height == 0) (avail_h -| 1) else avail_h,
+        };
+    }
+
+    pub fn floatFrameFromValues(
+        self: *const State,
+        width_pct: u16,
+        height_pct: u16,
+        pos_x_pct: u16,
+        pos_y_pct: u16,
+        pad_x_cfg: u16,
+        pad_y_cfg: u16,
+        shadow_enabled: bool,
+    ) FloatFrame {
+        const usable = self.floatUsableArea(shadow_enabled);
+        const width = @min(width_pct, 100);
+        const height = @min(height_pct, 100);
+        const pos_x = @min(pos_x_pct, 100);
+        const pos_y = @min(pos_y_pct, 100);
+
+        const outer_w: u16 = usable.w * width / 100;
+        const outer_h: u16 = usable.h * height / 100;
+        const max_x: u16 = usable.w -| outer_w;
+        const max_y: u16 = usable.h -| outer_h;
+        const outer_x: u16 = max_x * pos_x / 100;
+        const outer_y: u16 = max_y * pos_y / 100;
+        const pad_x: u16 = 1 + pad_x_cfg;
+        const pad_y: u16 = 1 + pad_y_cfg;
+
+        return .{
+            .usable_w = usable.w,
+            .usable_h = usable.h,
+            .outer_x = outer_x,
+            .outer_y = outer_y,
+            .outer_w = outer_w,
+            .outer_h = outer_h,
+            .content_x = outer_x + pad_x,
+            .content_y = outer_y + pad_y,
+            .content_w = outer_w -| (pad_x * 2),
+            .content_h = outer_h -| (pad_y * 2),
+            .max_x = max_x,
+            .max_y = max_y,
+        };
+    }
+
+    pub fn floatFrameForPane(self: *const State, pane: *const Pane) FloatFrame {
+        return self.floatFrameFromValues(
+            self.paneFloatWidthPct(pane),
+            self.paneFloatHeightPct(pane),
+            self.paneFloatPosXPct(pane),
+            self.paneFloatPosYPct(pane),
+            self.paneFloatPadX(pane),
+            self.paneFloatPadY(pane),
+            self.paneFloatHasShadow(pane),
+        );
+    }
+
     pub fn paneFloatTitle(self: *const State, pane: *const Pane) ?[]const u8 {
         if (self.floatUiConst(pane)) |ui| return ui.float_title;
         return null;
     }
 
     pub fn setPaneFloatTitle(self: *State, pane_uuid: [32]u8, title: ?[]const u8) bool {
-        const ui = self.ensureFloatUi(pane_uuid) orelse return false;
+        const ui = self.ensureFloatUi(pane_uuid) orelse {
+            core.logging.warn("terminal", "setPaneFloatTitle skipped: failed to ensure float UI state", .{});
+            return false;
+        };
+        const next_title = if (title) |value|
+            self.allocator.dupe(u8, value) catch |err| {
+                core.logging.logError("terminal", "failed to allocate pane float title", err);
+                return false;
+            }
+        else
+            null;
         if (ui.float_title) |old| {
             self.allocator.free(old);
             ui.float_title = null;
         }
-        if (title) |value| {
-            ui.float_title = self.allocator.dupe(u8, value) catch null;
-        }
+        ui.float_title = next_title;
         return true;
     }
 
@@ -1356,6 +1863,10 @@ pub const State = struct {
             .pad_x = pad_x,
             .pad_y = pad_y,
         }, active);
+    }
+
+    pub fn clearLocalFloatState(self: *State, pane_uuid: [32]u8) void {
+        self.runtime.removeLocalFloatState(pane_uuid);
     }
 
     pub fn setPaneVisibleOnTab(self: *State, pane: *const Pane, tab: usize, visible: bool) void {

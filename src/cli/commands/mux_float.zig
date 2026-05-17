@@ -109,7 +109,10 @@ pub fn runMuxFloat(
     const fd = client.fd;
 
     // Send versioned CLI handshake.
-    wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch return;
+    wire.sendCliHandshake(fd) catch |err| {
+        print("Error: failed to handshake with ses: {s}\n", .{@errorName(err)});
+        return;
+    };
 
     // Determine result path for wait_for_exit.
     var owned_result_path: ?[]u8 = null;
@@ -168,7 +171,10 @@ pub fn runMuxFloat(
     }
 
     // Send the float_request message.
-    wire.writeControlWithTrail(fd, .float_request, std.mem.asBytes(&req), trail.items) catch return;
+    wire.writeControlWithTrail(fd, .float_request, std.mem.asBytes(&req), trail.items) catch |err| {
+        print("Error: failed to send float request: {s}\n", .{@errorName(err)});
+        return;
+    };
 
     // Wait for response (FloatCreated for immediate, FloatResult for wait).
     const hdr = wire.readControlHeader(fd) catch {
@@ -197,8 +203,12 @@ pub fn runMuxFloat(
                 };
                 // Only output if not cancelled via exit key (130 = exit key pressed)
                 if (output.len > 0 and exit_code != 130) {
-                    _ = posix.write(posix.STDOUT_FILENO, output) catch {};
-                    _ = posix.write(posix.STDOUT_FILENO, "\n") catch {};
+                    _ = posix.write(posix.STDOUT_FILENO, output) catch |err| {
+                        core.logging.logError("mux_float", "failed to write float output", err);
+                    };
+                    _ = posix.write(posix.STDOUT_FILENO, "\n") catch |err| {
+                        core.logging.logError("mux_float", "failed to write float output newline", err);
+                    };
                 }
             }
             std.process.exit(exit_code);
@@ -207,7 +217,10 @@ pub fn runMuxFloat(
             // Read error message.
             if (hdr.payload_len > 0 and hdr.payload_len <= 1024) {
                 var err_buf: [1024]u8 = undefined;
-                wire.readExact(fd, err_buf[0..hdr.payload_len]) catch return;
+                wire.readExact(fd, err_buf[0..hdr.payload_len]) catch |err| {
+                    print("Error reading float error response: {s}\n", .{@errorName(err)});
+                    return;
+                };
                 print("Error: {s}\n", .{err_buf[0..hdr.payload_len]});
             } else {
                 print("Error from ses\n", .{});

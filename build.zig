@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const runtime_epoch = computeRuntimeEpoch(b);
 
     // Get ghostty-vt module from dependency
     const ghostty_vt_mod = if (b.lazyDependency("ghostty", .{
@@ -56,6 +57,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
         .link_libc = true,
     });
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "runtime_epoch", runtime_epoch);
+    core_module.addOptions("build_options", build_options);
     if (ghostty_vt_mod) |vt| {
         core_module.addImport("ghostty-vt", vt);
     }
@@ -167,6 +171,23 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run hexe");
     run_step.dependOn(&run_hexe.step);
 
+    // Optional runtime smoke: expects a SES daemon to be running for the
+    // current HEXE_INSTANCE and drives register/create/detach/reattach/adopt.
+    const session_protocol_smoke_module = b.createModule(.{
+        .root_source_file = b.path("src/tools/session_protocol_smoke.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    session_protocol_smoke_module.addImport("core", core_module);
+    const session_protocol_smoke_exe = b.addExecutable(.{
+        .name = "hexe-session-protocol-smoke",
+        .root_module = session_protocol_smoke_module,
+    });
+    const run_session_protocol_smoke = b.addRunArtifact(session_protocol_smoke_exe);
+    const session_protocol_smoke_step = b.step("session-protocol-smoke", "Run SES protocol detach/reattach smoke against an already-running daemon");
+    session_protocol_smoke_step.dependOn(&run_session_protocol_smoke.step);
+
     // Test step for session module error handling tests
     const ses_test_module = b.createModule(.{
         .root_source_file = b.path("src/modules/session/state_test.zig"),
@@ -181,6 +202,23 @@ pub fn build(b: *std.Build) void {
 
     const run_ses_tests = b.addRunArtifact(ses_tests);
 
+    const ses_server_test_module = b.createModule(.{
+        .root_source_file = b.path("src/modules/session/server.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    ses_server_test_module.addImport("core", core_module);
+    ses_server_test_module.addImport("xev", xev_mod);
+    if (libvoid_mod) |vb| {
+        ses_server_test_module.addImport("libvoid", vb);
+    }
+
+    const ses_server_tests = b.addTest(.{
+        .root_module = ses_server_test_module,
+    });
+    const run_ses_server_tests = b.addRunArtifact(ses_server_tests);
+
     // Wire protocol round-trip tests.
     const wire_test_module = b.createModule(.{
         .root_source_file = b.path("src/core/wire_test.zig"),
@@ -193,6 +231,19 @@ pub fn build(b: *std.Build) void {
         .root_module = wire_test_module,
     });
     const run_wire_tests = b.addRunArtifact(wire_tests);
+
+    // Core VT behavior tests.
+    const vt_test_module = b.createModule(.{
+        .root_source_file = b.path("src/core/vt_test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    vt_test_module.addImport("core", core_module);
+
+    const vt_tests = b.addTest(.{
+        .root_module = vt_test_module,
+    });
+    const run_vt_tests = b.addRunArtifact(vt_tests);
 
     // Terminal frontend fast-path encoding regression tests.
     const fast_path_test_module = b.createModule(.{
@@ -209,6 +260,54 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run hexe test suites");
     test_step.dependOn(&run_ses_tests.step);
+    test_step.dependOn(&run_ses_server_tests.step);
     test_step.dependOn(&run_wire_tests.step);
+    test_step.dependOn(&run_vt_tests.step);
     test_step.dependOn(&run_fast_path_tests.step);
+}
+
+fn computeRuntimeEpoch(b: *std.Build) []const u8 {
+    var hasher = std.crypto.hash.sha2.Sha256.init(.{});
+
+    hashFile(b, &hasher, "build.zig");
+    hashFile(b, &hasher, "build.zig.zon");
+    hashFile(b, &hasher, "Makefile");
+    hashDirRecursive(b, &hasher, "src");
+
+    var digest: [32]u8 = undefined;
+    hasher.final(&digest);
+    const hex = std.fmt.bytesToHex(digest[0..16].*, .lower);
+    return std.fmt.allocPrint(b.allocator, "{s}", .{&hex}) catch @panic("failed to allocate runtime epoch");
+}
+
+fn hashFile(b: *std.Build, hasher: anytype, path: []const u8) void {
+    const data = std.fs.cwd().readFileAlloc(b.allocator, path, 64 * 1024 * 1024) catch return;
+    defer b.allocator.free(data);
+    hasher.update(path);
+    hasher.update(&[_]u8{0});
+    hasher.update(data);
+    hasher.update(&[_]u8{0});
+}
+
+fn hashDirRecursive(b: *std.Build, hasher: anytype, root_path: []const u8) void {
+    var dir = std.fs.cwd().openDir(root_path, .{ .iterate = true }) catch return;
+    defer dir.close();
+
+    var walker = dir.walk(b.allocator) catch return;
+    defer walker.deinit();
+
+    while (walker.next() catch null) |entry| {
+        if (entry.kind != .file) continue;
+        if (!hasRuntimeEpochExtension(entry.path)) continue;
+
+        const path = std.fs.path.join(b.allocator, &.{ root_path, entry.path }) catch continue;
+        defer b.allocator.free(path);
+        hashFile(b, hasher, path);
+    }
+}
+
+fn hasRuntimeEpochExtension(path: []const u8) bool {
+    return std.mem.endsWith(u8, path, ".zig") or
+        std.mem.endsWith(u8, path, ".c") or
+        std.mem.endsWith(u8, path, ".h");
 }

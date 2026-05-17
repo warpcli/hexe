@@ -59,11 +59,78 @@ fn notifySessionNameChange(state: *State, change: *FrontendAttach.SessionNameCha
         state.allocator,
         "Session name changed: '{s}' -> '{s}' (collision)",
         .{ change.previous_name, change.resolved_name },
-    ) catch null;
+    ) catch |err| blk: {
+        core.logging.logError("terminal", "failed to allocate session-name change notification", err);
+        break :blk null;
+    };
     if (msg) |owned| {
         state.notifications.showFor(owned, 4000);
         state.allocator.free(owned);
     }
+}
+
+const ResolvedAttachTarget = struct {
+    target: []const u8,
+    owned: ?[]u8 = null,
+
+    pub fn deinit(self: *ResolvedAttachTarget, allocator: std.mem.Allocator) void {
+        if (self.owned) |owned| allocator.free(owned);
+        self.* = undefined;
+    }
+};
+
+fn readAttachSelection(max: usize) ?usize {
+    var in_buf: [64]u8 = undefined;
+    var stdin = std.fs.File.stdin().reader(&in_buf);
+    const line = stdin.interface.takeDelimiterExclusive('\n') catch return null;
+    const trimmed = std.mem.trim(u8, line, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    const choice = std.fmt.parseInt(usize, trimmed, 10) catch return null;
+    if (choice == 0 or choice > max) return null;
+    return choice - 1;
+}
+
+fn resolveDotAttachTarget(allocator: std.mem.Allocator, runtime: *FrontendRuntime, original: []const u8) !ResolvedAttachTarget {
+    if (!std.mem.eql(u8, original, ".")) return .{ .target = original };
+
+    const cwd = try std.fs.cwd().realpathAlloc(allocator, ".");
+    defer allocator.free(cwd);
+
+    var sessions: [64]DetachedSessionInfo = undefined;
+    const count = try runtime.listSessions(&sessions);
+
+    var matches: [64]usize = undefined;
+    var match_count: usize = 0;
+    for (sessions[0..count], 0..) |session, idx| {
+        const base_root = session.base_root[0..session.base_root_len];
+        if (base_root.len > 0 and std.mem.eql(u8, base_root, cwd)) {
+            matches[match_count] = idx;
+            match_count += 1;
+        }
+    }
+
+    if (match_count == 0) {
+        std.debug.print("No detached session rooted at: {s}\n", .{cwd});
+        return error.SessionNotFound;
+    }
+
+    if (match_count == 1) {
+        const session = sessions[matches[0]];
+        const target = try allocator.dupe(u8, session.session_id[0..8]);
+        return .{ .target = target, .owned = target };
+    }
+
+    std.debug.print("Detached sessions rooted at {s}:\n", .{cwd});
+    for (matches[0..match_count], 0..) |session_idx, display_idx| {
+        const session = sessions[session_idx];
+        const name = session.session_name[0..session.session_name_len];
+        std.debug.print("  {d}) [{s}] {s} ({d} panes)\n", .{ display_idx + 1, session.session_id[0..8], name, session.pane_count });
+    }
+    std.debug.print("Select session [1-{d}]: ", .{match_count});
+    const selected = readAttachSelection(match_count) orelse return error.InvalidSelection;
+    const session = sessions[matches[selected]];
+    const target = try allocator.dupe(u8, session.session_id[0..8]);
+    return .{ .target = target, .owned = target };
 }
 
 /// Arguments for terminal frontend commands.
@@ -100,23 +167,30 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
         // List detached sessions.
         var sessions: [16]DetachedSessionInfo = undefined;
-        const sess_count = runtime.listSessions(&sessions) catch 0;
+        var list_failed = false;
+        const sess_count = runtime.listSessions(&sessions) catch |err| blk: {
+            list_failed = true;
+            core.logging.logError("terminal", "failed to list detached sessions", err);
+            std.debug.print("Warning: failed to list detached sessions: {s}\n", .{@errorName(err)});
+            break :blk 0;
+        };
         if (sess_count > 0) {
             std.debug.print("Detached sessions (attach by name or UUID prefix):\n", .{});
             const instance = std.posix.getenv("HEXE_INSTANCE");
             for (sessions[0..sess_count]) |s| {
                 const name = s.session_name[0..s.session_name_len];
+                const base_root = s.base_root[0..s.base_root_len];
                 const uuid_prefix = s.session_id[0..8];
                 if (instance) |inst| {
                     if (inst.len > 0) {
-                        std.debug.print("  [{s}] {s:<12} ({d} tabs)\n", .{ uuid_prefix, name, s.pane_count });
+                        std.debug.print("  [{s}] {s:<12} ({d} tabs) {s}\n", .{ uuid_prefix, name, s.pane_count, base_root });
                         std.debug.print("    → hexe terminal attach --instance {s} {s}\n", .{ inst, uuid_prefix });
                     } else {
-                        std.debug.print("  [{s}] {s:<12} ({d} tabs)\n", .{ uuid_prefix, name, s.pane_count });
+                        std.debug.print("  [{s}] {s:<12} ({d} tabs) {s}\n", .{ uuid_prefix, name, s.pane_count, base_root });
                         std.debug.print("    → hexe terminal attach {s}\n", .{uuid_prefix});
                     }
                 } else {
-                    std.debug.print("  [{s}] {s:<12} ({d} tabs)\n", .{ uuid_prefix, name, s.pane_count });
+                    std.debug.print("  [{s}] {s:<12} ({d} tabs) {s}\n", .{ uuid_prefix, name, s.pane_count, base_root });
                     std.debug.print("    → hexe terminal attach {s}\n", .{uuid_prefix});
                 }
             }
@@ -124,15 +198,21 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
         // List orphaned panes.
         var tabs: [32]OrphanedPaneInfo = undefined;
-        const count = runtime.listOrphanedPanes(&tabs) catch 0;
-        if (count > 0) {
+        const orphan_count = runtime.listOrphanedPanes(&tabs) catch |err| blk: {
+            list_failed = true;
+            core.logging.logError("terminal", "failed to list orphaned panes", err);
+            std.debug.print("Warning: failed to list orphaned panes: {s}\n", .{@errorName(err)});
+            break :blk 0;
+        };
+        if (orphan_count > 0) {
             std.debug.print("Orphaned panes (disowned):\n", .{});
-            for (tabs[0..count]) |p| {
-                std.debug.print("  [{s}] pid={d}\n", .{ p.uuid[0..8], p.pid });
+            for (tabs[0..orphan_count]) |p| {
+                const name = if (p.name_len > 0) p.nameSlice() else "-";
+                std.debug.print("  [{s}] {s} pid={d}\n", .{ p.uuid[0..8], name, p.pid });
             }
         }
 
-        if (sess_count == 0 and count == 0) {
+        if (!list_failed and sess_count == 0 and orphan_count == 0) {
             std.debug.print("No detached sessions or orphaned panes\n", .{});
         }
         return;
@@ -140,7 +220,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
     // Handle --attach: attach to detached session by name or UUID prefix.
     if (terminal_args.attach) |uuid_arg| {
-        if (uuid_arg.len < 3) {
+        if (uuid_arg.len < 3 and !std.mem.eql(u8, uuid_arg, ".")) {
             std.debug.print("Session name/UUID too short (need at least 3 chars)\n", .{});
             return;
         }
@@ -181,7 +261,10 @@ pub fn run(terminal_args: TerminalArgs) !void {
     const effective_log: ?[]const u8 = if (terminal_args.log_file) |p|
         (if (p.len > 0) p else null)
     else if (terminal_args.log_level != null) blk: {
-        default_log_path = core.ipc.getLogPath(allocator) catch null;
+        default_log_path = core.ipc.getLogPath(allocator) catch |err| path_blk: {
+            core.logging.logError("terminal", "failed to allocate default terminal log path", err);
+            break :path_blk null;
+        };
         break :blk default_log_path;
     } else null;
     redirectStderr(effective_log);
@@ -219,7 +302,10 @@ pub fn run(terminal_args: TerminalArgs) !void {
         .missing => state.notifications.showFor("Config not found (~/.config/hexe/init.lua), using defaults", 5000),
         .@"error" => {
             if (state.config.status_message) |msg| {
-                const err_msg = std.fmt.allocPrint(allocator, "Config error: {s}", .{msg}) catch null;
+                const err_msg = std.fmt.allocPrint(allocator, "Config error: {s}", .{msg}) catch |err| err_blk: {
+                    core.logging.logError("terminal", "failed to allocate config error notification", err);
+                    break :err_blk null;
+                };
                 if (err_msg) |m| {
                     state.notifications.showFor(m, 8000);
                     allocator.free(m);
@@ -271,21 +357,30 @@ pub fn run(terminal_args: TerminalArgs) !void {
 
     // Handle --attach: try session first, then orphaned pane.
     if (terminal_args.attach) |uuid_prefix| {
-        debugLog("attach: trying to reattach with prefix={s}", .{uuid_prefix});
-        if (state.reattachSession(uuid_prefix)) {
+        var resolved_attach = resolveDotAttachTarget(allocator, state.runtime, uuid_prefix) catch |err| {
+            debugLog("attach: failed to resolve target {s}: {s}", .{ uuid_prefix, @errorName(err) });
+            if (err == error.InvalidSelection) {
+                std.debug.print("Invalid selection\n", .{});
+            }
+            return;
+        };
+        defer resolved_attach.deinit(allocator);
+
+        debugLog("attach: trying to reattach with prefix={s}", .{resolved_attach.target});
+        if (state.reattachSession(resolved_attach.target)) {
             debugLog("attach: reattachSession succeeded", .{});
             state.notifications.show("Session reattached");
             // Reattach may change state.uuid — update env for subsequent panes.
             const reattached_uuid = state.runtime.sessionUuid();
             @memcpy(session_id_z[0..32], &reattached_uuid);
             _ = c.setenv("HEXE_SESSION", &session_id_z, 1);
-        } else if (state.attachOrphanedPane(uuid_prefix)) {
+        } else if (state.attachOrphanedPane(resolved_attach.target)) {
             debugLog("attach: attachOrphanedPane succeeded", .{});
             state.notifications.show("Attached to orphaned pane");
         } else {
             // Session/pane not found - EXIT with error, don't create new session
             debugLog("attach: both reattach methods failed, exiting", .{});
-            std.debug.print("Session or pane '{s}' not found\n", .{uuid_prefix});
+            std.debug.print("Session or pane '{s}' not found\n", .{resolved_attach.target});
             std.debug.print("Use 'hexe terminal list' to see available sessions\n", .{});
             return; // Exit without entering main loop
         }
@@ -310,7 +405,11 @@ pub fn run(terminal_args: TerminalArgs) !void {
         // Prefer layout-config name when provided.
         if (config.name) |loaded_name| {
             if (state.runtime.setSessionName(loaded_name)) {
-                if (state.runtime.syncSessionIdentity() catch null) |change| {
+                const identity_change = state.runtime.syncSessionIdentity() catch |err| blk: {
+                    core.logging.logError("terminal", "startup: failed to sync layout-config session identity", err);
+                    break :blk null;
+                };
+                if (identity_change) |change| {
                     var owned_change = change;
                     defer owned_change.deinit(allocator);
                 }
@@ -403,7 +502,10 @@ fn redirectStderr(log_file: ?[]const u8) void {
     var redirected = false;
     if (log_file) |path| {
         if (path.len > 0) {
-            const logfd = posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch null;
+            const logfd = posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch |err| fd_blk: {
+                core.logging.logError("terminal", "failed to open terminal log file", err);
+                break :fd_blk null;
+            };
             if (logfd) |fd| {
                 posix.dup2(fd, posix.STDERR_FILENO) catch |err| {
                     core.logging.logError("terminal", "failed to dup2 stderr for logging", err);
@@ -416,7 +518,10 @@ fn redirectStderr(log_file: ?[]const u8) void {
 
     if (redirected) return;
 
-    const devnull = std.fs.openFileAbsolute("/dev/null", .{ .mode = .write_only }) catch return;
+    const devnull = std.fs.openFileAbsolute("/dev/null", .{ .mode = .write_only }) catch |err| {
+        core.logging.logError("terminal", "failed to open /dev/null for stderr redirection", err);
+        return;
+    };
     posix.dup2(devnull.handle, posix.STDERR_FILENO) catch |err| {
         core.logging.logError("terminal", "failed to redirect stderr to /dev/null", err);
     };

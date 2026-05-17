@@ -20,7 +20,10 @@ fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: core.style.Color, b
             break :blk 1;
         }]
     else blk: {
-        const n = std.unicode.utf8Encode(cp, &buf) catch return;
+        const n = std.unicode.utf8Encode(cp, &buf) catch |err| {
+            core.logging.logError("terminal", "overlay glyph encode failed", err);
+            return;
+        };
         break :blk buf[0..n];
     };
 
@@ -176,7 +179,10 @@ fn renderResizeInfo(renderer: *Renderer, overlays: *OverlayManager) void {
         overlays.resize_info_height,
         overlays.resize_info_x,
         overlays.resize_info_y,
-    }) catch return;
+    }) catch |err| {
+        core.logging.logError("terminal", "resize overlay format failed", err);
+        return;
+    };
 
     const text_len: u16 = statusbar.measureText(text);
     const padding: u16 = 1;

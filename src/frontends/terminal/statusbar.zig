@@ -4,6 +4,7 @@ const shp = @import("shp");
 const vaxis = @import("vaxis");
 const animations = core.segments.animations;
 const randomdo_mod = core.segments.randomdo;
+const log = std.log.scoped(.terminal_statusbar);
 
 const LuaRuntime = core.LuaRuntime;
 
@@ -41,7 +42,10 @@ fn traceLuaEval(scope: []const u8, code: []const u8, ok: bool, start_ms: i64) vo
 
 fn callbackIdFromCode(code: []const u8) ?i32 {
     if (!std.mem.startsWith(u8, code, CALLBACK_REF_PREFIX)) return null;
-    return std.fmt.parseInt(i32, code[CALLBACK_REF_PREFIX.len..], 10) catch null;
+    return std.fmt.parseInt(i32, code[CALLBACK_REF_PREFIX.len..], 10) catch |err| {
+        log.warn("failed to parse statusbar callback id: {}", .{err});
+        return null;
+    };
 }
 
 const LuaEvalMode = enum { chunk, callback };
@@ -60,10 +64,16 @@ fn beginLuaEval(rt: *LuaRuntime, code: []const u8) ?LuaEvalMode {
         return .callback;
     }
 
-    const code_z = rt.allocator.dupeZ(u8, code) catch return null;
+    const code_z = rt.allocator.dupeZ(u8, code) catch |err| {
+        core.logging.logError("terminal", "failed to allocate statusbar Lua snippet", err);
+        return null;
+    };
     defer rt.allocator.free(code_z);
 
-    rt.lua.loadString(code_z) catch return null;
+    rt.lua.loadString(code_z) catch |err| {
+        core.logging.logError("terminal", "failed to load statusbar Lua snippet", err);
+        return null;
+    };
     rt.lua.protectedCall(.{ .args = 0, .results = 1 }) catch {
         rt.lua.pop(1);
         return null;
@@ -204,9 +214,9 @@ fn isButtonActive(mod: *const core.Segment, ctx: *shp.Context) bool {
 
 fn isHoveredRange(start_x: u16, width: u16, y: u16) bool {
     if (hover_x == null or hover_y == null) return false;
-    const hx = hover_x.?;
-    const hy = hover_y.?;
-    return hy == y and hx >= start_x and hx < start_x +| width;
+    const hover_col = hover_x.?;
+    const hover_row = hover_y.?;
+    return hover_row == y and hover_col >= start_x and hover_col < start_x +| width;
 }
 
 fn spinnerAsciiFrame(now_ms: u64, started_at_ms: u64, step_ms: u64) []const u8 {
@@ -314,7 +324,9 @@ fn toggleClickedButton(mod: *const core.Segment, button: u8) void {
         }
         return;
     }
-    map.put(key, button) catch {};
+    map.put(key, button) catch |err| {
+        core.logging.logError("terminal", "failed to record statusbar button click", err);
+    };
 }
 
 fn clickedButtonStyle(mod: *const core.Segment, clicked_button: u8) ?shp.Style {
@@ -343,7 +355,9 @@ fn randomdoTextFor(ctx: *shp.Context, mod: *const core.config.Segment, visible: 
 
     var entry = map.getPtr(key);
     if (entry == null) {
-        map.put(key, .{ .active = false, .idx = 0 }) catch {};
+        map.put(key, .{ .active = false, .idx = 0 }) catch |err| {
+            core.logging.logError("terminal", "failed to initialize randomdo statusbar state", err);
+        };
         entry = map.getPtr(key);
     }
     if (entry) |st| {
@@ -418,10 +432,18 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     // Export a few useful ctx vars.
     var env_map = std.process.EnvMap.init(std.heap.page_allocator);
     defer env_map.deinit();
-    env_map.put("HEXE_STATUS_PROCESS_RUNNING", if (ctx.shell_running) "1" else "0") catch {};
-    env_map.put("HEXE_STATUS_ALT_SCREEN", if (ctx.alt_screen) "1" else "0") catch {};
-    if (ctx.last_command) |c| env_map.put("HEXE_STATUS_LAST_CMD", c) catch {};
-    if (ctx.cwd.len > 0) env_map.put("HEXE_STATUS_CWD", ctx.cwd) catch {};
+    env_map.put("HEXE_STATUS_PROCESS_RUNNING", if (ctx.shell_running) "1" else "0") catch |err| {
+        core.logging.logError("terminal", "failed to set statusbar bash env process flag", err);
+    };
+    env_map.put("HEXE_STATUS_ALT_SCREEN", if (ctx.alt_screen) "1" else "0") catch |err| {
+        core.logging.logError("terminal", "failed to set statusbar bash env alt-screen flag", err);
+    };
+    if (ctx.last_command) |c| env_map.put("HEXE_STATUS_LAST_CMD", c) catch |err| {
+        core.logging.logError("terminal", "failed to set statusbar bash env last command", err);
+    };
+    if (ctx.cwd.len > 0) env_map.put("HEXE_STATUS_CWD", ctx.cwd) catch |err| {
+        core.logging.logError("terminal", "failed to set statusbar bash env cwd", err);
+    };
 
     // Spawn process with timeout support
     var child = std.process.Child.init(&.{ "/bin/bash", "-c", code }, std.heap.page_allocator);
@@ -431,7 +453,9 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     child.stderr_behavior = .Ignore;
 
     child.spawn() catch {
-        map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
+        map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch |err| {
+            core.logging.logError("terminal", "failed to cache statusbar bash spawn failure", err);
+        };
         return false;
     };
 
@@ -444,7 +468,9 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
         if (wait_res.pid == child.id) {
             child.id = undefined;
             const ok = std.posix.W.IFEXITED(wait_res.status) and std.posix.W.EXITSTATUS(wait_res.status) == 0;
-            map.put(key, .{ .last_eval_ms = now, .last_result = ok }) catch {};
+            map.put(key, .{ .last_eval_ms = now, .last_result = ok }) catch |err| {
+                core.logging.logError("terminal", "failed to cache statusbar bash condition result", err);
+            };
             return ok;
         }
 
@@ -452,8 +478,12 @@ fn evalBashWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     }
 
     // Timeout - kill the process
-    _ = child.kill() catch {};
-    map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
+    _ = child.kill() catch |err| {
+        core.logging.logError("terminal", "failed to kill timed-out statusbar bash condition", err);
+    };
+    map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch |err| {
+        core.logging.logError("terminal", "failed to cache statusbar bash timeout", err);
+    };
     return false;
 }
 
@@ -629,7 +659,10 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
     rt.lua.pushInteger(@intCast(ctx.now_ms));
     rt.lua.setField(-2, "now_ms");
 
-    var env_map_opt = std.process.getEnvMap(rt.allocator) catch null;
+    var env_map_opt = std.process.getEnvMap(rt.allocator) catch |err| blk: {
+        core.logging.logError("terminal", "statusbar Lua query failed to copy environment", err);
+        break :blk null;
+    };
     if (env_map_opt) |*env_map| {
         defer env_map.deinit();
         rt.lua.createTable(0, @intCast(env_map.count()));
@@ -765,6 +798,17 @@ fn populateLuaContext(rt: *LuaRuntime, ctx: *shp.Context) void {
     rt.lua.setGlobal("ctx");
 }
 
+fn getStatusbarLuaRuntime(comptime context: []const u8) ?*LuaRuntime {
+    if (callback_lua_rt) |cb| return cb;
+    if (when_lua_rt == null) {
+        when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch |err| {
+            core.logging.logError("terminal", context, err);
+            return null;
+        };
+    }
+    return &when_lua_rt.?;
+}
+
 fn evalLuaWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
     const trace_start_ms = std.time.milliTimestamp();
     const now = ctx.now_ms;
@@ -774,25 +818,20 @@ fn evalLuaWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
         if (now - e.last_eval_ms < ttl_ms) return e.last_result;
     }
 
-    var rt: *LuaRuntime = undefined;
-    if (callback_lua_rt) |cb| {
-        rt = cb;
-    } else {
-        if (when_lua_rt == null) {
-            when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch null;
-            if (when_lua_rt == null) {
-                map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
-                return false;
-            }
-        }
-        rt = &when_lua_rt.?;
-    }
+    const rt = getStatusbarLuaRuntime("failed to initialize statusbar Lua runtime for condition") orelse {
+        map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch |err| {
+            core.logging.logError("terminal", "failed to cache statusbar Lua init failure", err);
+        };
+        return false;
+    };
 
     populateLuaContext(rt, ctx);
 
     const mode = beginLuaEval(rt, code) orelse {
         traceLuaEval("statusbar.when", code, false, trace_start_ms);
-        map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch {};
+        map.put(key, .{ .last_eval_ms = now, .last_result = false }) catch |err| {
+            core.logging.logError("terminal", "failed to cache statusbar Lua eval failure", err);
+        };
         return false;
     };
     defer endLuaEval(rt, mode);
@@ -804,7 +843,9 @@ fn evalLuaWhen(code: []const u8, ctx: *shp.Context, ttl_ms: u64) bool {
         else => false,
     };
     traceLuaEval("statusbar.when", code, true, trace_start_ms);
-    map.put(key, .{ .last_eval_ms = now, .last_result = ok }) catch {};
+    map.put(key, .{ .last_eval_ms = now, .last_result = ok }) catch |err| {
+        core.logging.logError("terminal", "failed to cache statusbar Lua condition result", err);
+    };
     return ok;
 }
 
@@ -873,23 +914,16 @@ fn evalLuaCommandCached(code: []const u8, ctx: *shp.Context) LuaEval {
     if (cache.get(key)) |entry| return entry.eval;
 
     const eval = evalLuaCommand(code, ctx);
-    cache.put(key, .{ .eval = eval }) catch {};
+    cache.put(key, .{ .eval = eval }) catch |err| {
+        core.logging.logError("terminal", "failed to cache statusbar Lua command evaluation", err);
+    };
     return eval;
 }
 
 fn evalLuaCommand(code: []const u8, ctx: *shp.Context) LuaEval {
     var out: LuaEval = .{};
     const trace_start_ms = std.time.milliTimestamp();
-    var rt: *LuaRuntime = undefined;
-    if (callback_lua_rt) |cb| {
-        rt = cb;
-    } else {
-        if (when_lua_rt == null) {
-            when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch null;
-            if (when_lua_rt == null) return out;
-        }
-        rt = &when_lua_rt.?;
-    }
+    const rt = getStatusbarLuaRuntime("failed to initialize statusbar Lua runtime for command") orelse return out;
     populateLuaContext(rt, ctx);
     const mode = beginLuaEval(rt, code) orelse {
         traceLuaEval("statusbar.value", code, false, trace_start_ms);
@@ -900,14 +934,20 @@ fn evalLuaCommand(code: []const u8, ctx: *shp.Context) LuaEval {
 
     switch (rt.lua.typeOf(-1)) {
         .string => {
-            const s = rt.lua.toString(-1) catch return out;
+            const s = rt.lua.toString(-1) catch |err| {
+                core.logging.logError("terminal", "failed to read statusbar Lua string output", err);
+                return out;
+            };
             const n = @min(s.len, out.text.len);
             @memcpy(out.text[0..n], s[0..n]);
             out.text_len = n;
             return out;
         },
         .number => {
-            const n = rt.lua.toNumber(-1) catch return out;
+            const n = rt.lua.toNumber(-1) catch |err| {
+                core.logging.logError("terminal", "failed to read statusbar Lua numeric output", err);
+                return out;
+            };
             const rendered = std.fmt.bufPrint(out.text[0..], "{d}", .{n}) catch "";
             out.text_len = rendered.len;
             return out;
@@ -1054,23 +1094,16 @@ fn evalLuaBuiltinDescCached(code: []const u8, ctx: *shp.Context) BuiltinDesc {
     if (cache.get(key)) |entry| return entry.desc;
 
     const desc = evalLuaBuiltinDesc(code, ctx);
-    cache.put(key, .{ .desc = desc }) catch {};
+    cache.put(key, .{ .desc = desc }) catch |err| {
+        core.logging.logError("terminal", "failed to cache statusbar builtin description", err);
+    };
     return desc;
 }
 
 fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
     var desc: BuiltinDesc = .{};
     const trace_start_ms = std.time.milliTimestamp();
-    var rt: *LuaRuntime = undefined;
-    if (callback_lua_rt) |cb| {
-        rt = cb;
-    } else {
-        if (when_lua_rt == null) {
-            when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch null;
-            if (when_lua_rt == null) return desc;
-        }
-        rt = &when_lua_rt.?;
-    }
+    const rt = getStatusbarLuaRuntime("failed to initialize statusbar Lua runtime for builtin description") orelse return desc;
     populateLuaContext(rt, ctx);
     const mode = beginLuaEval(rt, code) orelse {
         traceLuaEval("statusbar.builtin", code, false, trace_start_ms);
@@ -1081,7 +1114,10 @@ fn evalLuaBuiltinDesc(code: []const u8, ctx: *shp.Context) BuiltinDesc {
 
     switch (rt.lua.typeOf(-1)) {
         .string => {
-            const s = rt.lua.toString(-1) catch return desc;
+            const s = rt.lua.toString(-1) catch |err| {
+                core.logging.logError("terminal", "failed to read statusbar builtin description", err);
+                return desc;
+            };
             const t = std.mem.trim(u8, s, " \t\r\n");
             if (t.len > 0) {
                 const n = @min(t.len, desc.name_buf.len);
@@ -1421,7 +1457,10 @@ pub fn runSegment(module: *const core.Segment, buf: []u8) ![]const u8 {
         const result = std.process.Child.run(.{
             .allocator = std.heap.page_allocator,
             .argv = &.{ "/bin/sh", "-c", cmd },
-        }) catch return "";
+        }) catch |err| {
+            core.logging.logError("terminal", "failed to run statusbar shell segment", err);
+            return "";
+        };
         defer std.heap.page_allocator.free(result.stdout);
         defer std.heap.page_allocator.free(result.stderr);
 
@@ -1839,7 +1878,10 @@ fn evalLuaClickCommand(code: []const u8, ctx: *shp.Context) ?[]const u8 {
         rt_ptr = existing;
     } else {
         if (when_lua_rt == null) {
-            when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch return null;
+            when_lua_rt = LuaRuntime.init(std.heap.page_allocator) catch |err| {
+                core.logging.logError("terminal", "failed to initialize statusbar click Lua runtime", err);
+                return null;
+            };
         }
         rt_ptr = &when_lua_rt.?;
     }
@@ -1849,7 +1891,10 @@ fn evalLuaClickCommand(code: []const u8, ctx: *shp.Context) ?[]const u8 {
     defer endLuaEval(rt_ptr, mode);
 
     if (rt_ptr.lua.typeOf(-1) == .string) {
-        const s = rt_ptr.lua.toString(-1) catch return null;
+        const s = rt_ptr.lua.toString(-1) catch |err| {
+            core.logging.logError("terminal", "failed to read statusbar click Lua command", err);
+            return null;
+        };
         const n = @min(s.len, click_command_buf.len);
         @memcpy(click_command_buf[0..n], s[0..n]);
         return click_command_buf[0..n];
@@ -2275,7 +2320,9 @@ pub fn drawModule(renderer: *Renderer, ctx: *shp.Context, query: *const core.Pan
                             var buf: [256]u8 = [_]u8{0} ** 256;
                             const n = @min(command_output.len, buf.len);
                             @memcpy(buf[0..n], command_output[0..n]);
-                            cache.put(key, .{ .last_eval_ms = ctx.now_ms, .text = buf, .len = n }) catch {};
+                            cache.put(key, .{ .last_eval_ms = ctx.now_ms, .text = buf, .len = n }) catch |err| {
+                                core.logging.logError("terminal", "failed to cache left statusbar command output", err);
+                            };
                         }
                     } else {
                         command_eval = evalLuaCommandCached(cmd, ctx);
@@ -2360,7 +2407,9 @@ pub fn drawFormatted(renderer: *Renderer, ctx: *shp.Context, start_x: u16, y: u1
     };
 
     var state: DrawState = .{ .renderer = renderer, .ctx = ctx, .x = start_x, .y = y };
-    segment_render.forEachFormattedRun(DrawState, &state, format, output, output_segs, style, DrawState.resolve, DrawState.emit) catch {};
+    segment_render.forEachFormattedRun(DrawState, &state, format, output, output_segs, style, DrawState.resolve, DrawState.emit) catch |err| {
+        core.logging.logError("terminal", "failed to draw formatted statusbar run", err);
+    };
     return state.x;
 }
 
@@ -2506,7 +2555,9 @@ pub fn calcModuleWidth(ctx: *shp.Context, query: *const core.PaneQuery, mod: *co
                             var buf: [256]u8 = [_]u8{0} ** 256;
                             const n = @min(command_output.len, buf.len);
                             @memcpy(buf[0..n], command_output[0..n]);
-                            cache.put(key, .{ .last_eval_ms = ctx.now_ms, .text = buf, .len = n }) catch {};
+                            cache.put(key, .{ .last_eval_ms = ctx.now_ms, .text = buf, .len = n }) catch |err| {
+                                core.logging.logError("terminal", "failed to cache right statusbar command output", err);
+                            };
                         }
                     } else {
                         command_eval = evalLuaCommandCached(cmd, ctx);
@@ -2590,7 +2641,9 @@ pub fn calcFormattedWidth(ctx: *shp.Context, format: []const u8, output: []const
     };
 
     var state: WidthState = .{ .ctx = ctx };
-    segment_render.forEachFormattedRun(WidthState, &state, format, output, output_segs, .{}, WidthState.resolve, WidthState.emit) catch {};
+    segment_render.forEachFormattedRun(WidthState, &state, format, output, output_segs, .{}, WidthState.resolve, WidthState.emit) catch |err| {
+        core.logging.logError("terminal", "failed to measure formatted statusbar run", err);
+    };
     return state.width;
 }
 

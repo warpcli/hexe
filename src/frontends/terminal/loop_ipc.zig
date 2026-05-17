@@ -14,6 +14,40 @@ const layout_mod = @import("layout.zig");
 const focus_move = @import("focus_move.zig");
 const lua_events = @import("lua_events.zig");
 
+fn writeControlLogged(fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8, comptime context: []const u8) void {
+    wire.writeControl(fd, msg_type, payload) catch |err| {
+        core.logging.logError("terminal", context, err);
+    };
+}
+
+fn readStructLogged(comptime T: type, fd: posix.fd_t, comptime context: []const u8) ?T {
+    return wire.readStruct(T, fd) catch |err| {
+        core.logging.logError("terminal", context, err);
+        return null;
+    };
+}
+
+fn readExactLogged(fd: posix.fd_t, dest: []u8, comptime context: []const u8) bool {
+    wire.readExact(fd, dest) catch |err| {
+        core.logging.logError("terminal", context, err);
+        return false;
+    };
+    return true;
+}
+
+fn sendFailedFloatResult(state: *State, exit_code: i32, comptime context: []const u8) void {
+    const ctl_fd = state.runtime.getCtlFd() orelse {
+        core.logging.warn("terminal", context ++ ": SES CTL channel is unavailable", .{});
+        return;
+    };
+    const result = wire.FloatResult{
+        .uuid = .{0} ** 32,
+        .exit_code = exit_code,
+        .output_len = 0,
+    };
+    writeControlLogged(ctl_fd, .float_result, std.mem.asBytes(&result), context);
+}
+
 /// Handle binary control messages from the SES control channel.
 /// Reads all available messages (CTL fd is non-blocking).
 pub fn handleSesMessage(state: *State, buffer: []u8) void {
@@ -22,7 +56,16 @@ pub fn handleSesMessage(state: *State, buffer: []u8) void {
     // Process all available messages (fire-and-forget responses may accumulate).
     var msgs: usize = 0;
     while (msgs < 32) : (msgs += 1) {
-        const hdr = wire.tryReadControlHeader(fd) catch break;
+        const hdr = wire.tryReadControlHeader(fd) catch |err| switch (err) {
+            error.WouldBlock => break,
+            else => {
+                core.logging.logError("terminal", "failed to read SES control header", err);
+                if (state.runtime.closeCtlFdIf(fd)) {
+                    state.notifications.showFor("Warning: Lost connection to ses daemon (CTL channel)", 5000);
+                }
+                break;
+            },
+        };
         const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         terminal_main.debugLog("ses msg: type=0x{x:0>4} len={d}", .{ hdr.msg_type, hdr.payload_len });
 
@@ -43,7 +86,7 @@ pub fn handleSesMessage(state: *State, buffer: []u8) void {
                 handleShellEvent(state, fd, hdr.payload_len, buffer);
             },
             .send_keys => {
-                handleSendKeys(state, fd, buffer);
+                handleSendKeys(state, fd, hdr.payload_len, buffer);
             },
             .focus_move => {
                 handleFocusMove(state, fd, hdr.payload_len, buffer);
@@ -101,7 +144,7 @@ fn handleSessionState(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         return;
     };
     defer state.allocator.free(session_json);
-    wire.readExact(fd, session_json) catch return;
+    if (!readExactLogged(fd, session_json, "failed to read session_state payload")) return;
 
     terminal_main.debugLog("handleSessionState: payload_len={d} (queued)", .{payload_len});
     state.runtime.queueSessionStateJson(session_json);
@@ -112,13 +155,18 @@ fn handleNotify(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) v
         skipPayload(fd, payload_len, buffer);
         return;
     }
-    const notify = wire.readStruct(wire.Notify, fd) catch return;
-    if (notify.msg_len == 0 or notify.msg_len > buffer.len) {
+    const notify = readStructLogged(wire.Notify, fd, "failed to read notify payload") orelse return;
+    const remaining = payload_len - @sizeOf(wire.Notify);
+    if (notify.msg_len == 0 or notify.msg_len > buffer.len or notify.msg_len != remaining) {
         skipPayload(fd, payload_len - @sizeOf(wire.Notify), buffer);
+        terminal_main.debugLog("notify: malformed message length", .{});
         return;
     }
-    wire.readExact(fd, buffer[0..notify.msg_len]) catch return;
-    const msg_copy = state.allocator.dupe(u8, buffer[0..notify.msg_len]) catch return;
+    if (!readExactLogged(fd, buffer[0..notify.msg_len], "failed to read notify message")) return;
+    const msg_copy = state.allocator.dupe(u8, buffer[0..notify.msg_len]) catch |err| {
+        core.logging.logError("terminal", "failed to allocate notify message", err);
+        return;
+    };
     state.notifications.showWithOptions(msg_copy, .{
         .duration_ms = state.notifications.default_duration_ms,
         .style = state.notifications.default_style,
@@ -132,13 +180,18 @@ fn handleTargetedNotify(state: *State, fd: posix.fd_t, payload_len: u32, buffer:
         skipPayload(fd, payload_len, buffer);
         return;
     }
-    const notify = wire.readStruct(wire.TargetedNotify, fd) catch return;
-    if (notify.msg_len == 0 or notify.msg_len > buffer.len) {
+    const notify = readStructLogged(wire.TargetedNotify, fd, "failed to read targeted_notify payload") orelse return;
+    const remaining = payload_len - @sizeOf(wire.TargetedNotify);
+    if (notify.msg_len == 0 or notify.msg_len > buffer.len or notify.msg_len != remaining) {
         skipPayload(fd, payload_len - @sizeOf(wire.TargetedNotify), buffer);
+        terminal_main.debugLog("targeted_notify: malformed message length", .{});
         return;
     }
-    wire.readExact(fd, buffer[0..notify.msg_len]) catch return;
-    const msg_copy = state.allocator.dupe(u8, buffer[0..notify.msg_len]) catch return;
+    if (!readExactLogged(fd, buffer[0..notify.msg_len], "failed to read targeted_notify message")) return;
+    const msg_copy = state.allocator.dupe(u8, buffer[0..notify.msg_len]) catch |err| {
+        core.logging.logError("terminal", "failed to allocate targeted_notify message", err);
+        return;
+    };
     const duration: i64 = if (notify.timeout_ms > 0) @as(i64, notify.timeout_ms) else 0;
 
     // Try to find pane with this UUID.
@@ -178,12 +231,14 @@ fn handlePopConfirm(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
         skipPayload(fd, payload_len, buffer);
         return;
     }
-    const pc = wire.readStruct(wire.PopConfirm, fd) catch return;
-    if (pc.msg_len == 0 or pc.msg_len > buffer.len) {
+    const pc = readStructLogged(wire.PopConfirm, fd, "failed to read pop_confirm payload") orelse return;
+    const remaining = payload_len - @sizeOf(wire.PopConfirm);
+    if (pc.msg_len == 0 or pc.msg_len > buffer.len or pc.msg_len != remaining) {
         skipPayload(fd, payload_len - @sizeOf(wire.PopConfirm), buffer);
+        terminal_main.debugLog("pop_confirm: malformed message length", .{});
         return;
     }
-    wire.readExact(fd, buffer[0..pc.msg_len]) catch return;
+    if (!readExactLogged(fd, buffer[0..pc.msg_len], "failed to read pop_confirm message")) return;
     const msg = buffer[0..pc.msg_len];
     const timeout_ms: ?i64 = if (pc.timeout_ms > 0) @as(i64, pc.timeout_ms) else null;
     const target = resolvePopupTarget(state, pc.uuid);
@@ -197,7 +252,12 @@ fn handlePopConfirm(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
         .yes_label = confirm_cfg.yes_label,
         .no_label = confirm_cfg.no_label,
     };
-    target.manager.showConfirmOwned(msg, opts) catch return;
+    target.manager.showConfirmOwned(msg, opts) catch |err| {
+        core.logging.logError("terminal", "failed to show IPC confirmation popup", err);
+        state.notifications.show("Popup failed");
+        state.needs_render = true;
+        return;
+    };
     setPendingPopupTarget(state, target);
     state.needs_render = true;
 }
@@ -207,33 +267,69 @@ fn handlePopChoose(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8
         skipPayload(fd, payload_len, buffer);
         return;
     }
-    const pc = wire.readStruct(wire.PopChoose, fd) catch return;
+    const pc = readStructLogged(wire.PopChoose, fd, "failed to read pop_choose payload") orelse return;
+    const remaining_payload = payload_len - @sizeOf(wire.PopChoose);
     const timeout_ms: ?i64 = if (pc.timeout_ms > 0) @as(i64, pc.timeout_ms) else null;
 
     // Read title.
     var title: ?[]const u8 = null;
-    if (pc.title_len > 0 and pc.title_len <= buffer.len) {
-        wire.readExact(fd, buffer[0..pc.title_len]) catch return;
+    if (pc.title_len > buffer.len or pc.title_len > remaining_payload) {
+        skipPayload(fd, remaining_payload, buffer);
+        terminal_main.debugLog("pop_choose: malformed title length", .{});
+        return;
+    }
+    if (pc.title_len > 0) {
+        if (!readExactLogged(fd, buffer[0..pc.title_len], "failed to read pop_choose title")) return;
         title = buffer[0..pc.title_len];
     }
+    var consumed: u32 = pc.title_len;
 
     // Read items.
     var items_list: std.ArrayList([]const u8) = .empty;
     defer items_list.deinit(state.allocator);
 
     for (0..pc.item_count) |_| {
-        const item_len_buf = wire.readStruct(extern struct { len: u16 align(1) }, fd) catch break;
-        const item_len: usize = item_len_buf.len;
-        if (item_len == 0 or item_len > buffer.len) {
-            skipPayload(fd, @intCast(item_len), buffer);
-            continue;
+        if (remaining_payload - consumed < 2) {
+            terminal_main.debugLog("pop_choose: truncated item header", .{});
+            for (items_list.items) |item| state.allocator.free(item);
+            return;
         }
-        wire.readExact(fd, buffer[0..item_len]) catch break;
-        const duped = state.allocator.dupe(u8, buffer[0..item_len]) catch continue;
-        items_list.append(state.allocator, duped) catch {
-            state.allocator.free(duped);
-            continue;
+        const item_len_buf = wire.readStruct(extern struct { len: u16 align(1) }, fd) catch |err| {
+            terminal_main.debugLog("pop_choose: failed to read item header: {s}", .{@errorName(err)});
+            for (items_list.items) |item| state.allocator.free(item);
+            return;
         };
+        consumed += 2;
+        const item_len: usize = item_len_buf.len;
+        if (item_len == 0 or item_len > buffer.len or item_len > remaining_payload - consumed) {
+            skipPayload(fd, remaining_payload - consumed, buffer);
+            terminal_main.debugLog("pop_choose: malformed item length", .{});
+            for (items_list.items) |item| state.allocator.free(item);
+            return;
+        }
+        wire.readExact(fd, buffer[0..item_len]) catch |err| {
+            terminal_main.debugLog("pop_choose: failed to read item body: {s}", .{@errorName(err)});
+            for (items_list.items) |item| state.allocator.free(item);
+            return;
+        };
+        consumed += @intCast(item_len);
+        const duped = state.allocator.dupe(u8, buffer[0..item_len]) catch |err| {
+            terminal_main.debugLog("pop_choose: failed to copy item: {s}", .{@errorName(err)});
+            for (items_list.items) |item| state.allocator.free(item);
+            return;
+        };
+        items_list.append(state.allocator, duped) catch |err| {
+            terminal_main.debugLog("pop_choose: failed to append item: {s}", .{@errorName(err)});
+            state.allocator.free(duped);
+            for (items_list.items) |item| state.allocator.free(item);
+            return;
+        };
+    }
+    if (consumed != remaining_payload) {
+        skipPayload(fd, remaining_payload - consumed, buffer);
+        terminal_main.debugLog("pop_choose: trailing payload length mismatch", .{});
+        for (items_list.items) |item| state.allocator.free(item);
+        return;
     }
 
     if (items_list.items.len == 0) return;
@@ -248,10 +344,14 @@ fn handlePopChoose(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8
         .timeout_ms = timeout_ms,
         .visible_count = choose_cfg.visible_count,
     };
-    target.manager.showPickerOwned(items_list.items, opts) catch {
+    target.manager.showPickerOwned(items_list.items, opts) catch |err| {
+        core.logging.logError("terminal", "failed to show IPC picker popup", err);
         for (items_list.items) |item| state.allocator.free(item);
+        state.notifications.show("Popup failed");
+        state.needs_render = true;
         return;
     };
+    for (items_list.items) |item| state.allocator.free(item);
     setPendingPopupTarget(state, target);
     state.needs_render = true;
 }
@@ -302,7 +402,7 @@ fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
         skipPayload(fd, payload_len, buffer);
         return;
     }
-    const ev = wire.readStruct(wire.ForwardedShellEvent, fd) catch return;
+    const ev = readStructLogged(wire.ForwardedShellEvent, fd, "failed to read shell_event payload") orelse return;
     const remaining = payload_len - @sizeOf(wire.ForwardedShellEvent);
 
     // Read trailing cmd + cwd.
@@ -310,16 +410,22 @@ fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
     var cwd: ?[]const u8 = null;
     var trail_offset: usize = 0;
     if (remaining > 0 and remaining <= buffer.len) {
-        wire.readExact(fd, buffer[0..remaining]) catch return;
-        if (ev.cmd_len > 0 and ev.cmd_len <= remaining) {
+        if (!readExactLogged(fd, buffer[0..remaining], "failed to read shell_event trail")) return;
+        if (@as(usize, ev.cmd_len) + @as(usize, ev.cwd_len) > remaining) {
+            terminal_main.debugLogUuid(&ev.uuid, "shell_event: malformed trail lengths", .{});
+            return;
+        }
+        if (ev.cmd_len > 0) {
             cmd = buffer[0..ev.cmd_len];
             trail_offset = ev.cmd_len;
         }
-        if (ev.cwd_len > 0 and trail_offset + ev.cwd_len <= remaining) {
+        if (ev.cwd_len > 0) {
             cwd = buffer[trail_offset .. trail_offset + ev.cwd_len];
         }
     } else if (remaining > buffer.len) {
         skipPayload(fd, remaining, buffer);
+        terminal_main.debugLogUuid(&ev.uuid, "shell_event: trail too large", .{});
+        return;
     }
 
     const uuid = ev.uuid;
@@ -337,7 +443,10 @@ fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
         if (old_jobs) |old| {
             if (old == 0 and new_jobs > 0) {
                 var msg_buf: [64]u8 = undefined;
-                const notify_msg = std.fmt.bufPrint(&msg_buf, "Background jobs: {d}", .{new_jobs}) catch null;
+                const notify_msg = std.fmt.bufPrint(&msg_buf, "Background jobs: {d}", .{new_jobs}) catch |err| blk: {
+                    core.logging.logError("terminal", "failed to format background jobs notification", err);
+                    break :blk null;
+                };
                 if (notify_msg) |m| {
                     state.notifications.show(m);
                 }
@@ -462,20 +571,19 @@ fn handleShellEvent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
     state.needs_render = true;
 }
 
-fn handleSendKeys(state: *State, fd: posix.fd_t, buffer: []u8) void {
-    const sk = wire.readStruct(wire.SendKeys, fd) catch return;
-    if (sk.data_len == 0 or sk.data_len > buffer.len) {
-        if (sk.data_len > 0) {
-            var remaining: usize = sk.data_len;
-            while (remaining > 0) {
-                const chunk = @min(remaining, buffer.len);
-                wire.readExact(fd, buffer[0..chunk]) catch return;
-                remaining -= chunk;
-            }
-        }
+fn handleSendKeys(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
+    if (payload_len < @sizeOf(wire.SendKeys)) {
+        skipPayload(fd, payload_len, buffer);
         return;
     }
-    wire.readExact(fd, buffer[0..sk.data_len]) catch return;
+    const sk = readStructLogged(wire.SendKeys, fd, "failed to read send_keys payload") orelse return;
+    const remaining = payload_len - @sizeOf(wire.SendKeys);
+    if (sk.data_len == 0 or sk.data_len > buffer.len or sk.data_len != remaining) {
+        skipPayload(fd, remaining, buffer);
+        terminal_main.debugLogUuid(&sk.uuid, "send_keys: malformed data length", .{});
+        return;
+    }
+    if (!readExactLogged(fd, buffer[0..sk.data_len], "failed to read send_keys data")) return;
 
     const zero_uuid: [32]u8 = .{0} ** 32;
     if (std.mem.eql(u8, &sk.uuid, &zero_uuid)) {
@@ -483,11 +591,15 @@ fn handleSendKeys(state: *State, fd: posix.fd_t, buffer: []u8) void {
         for (state.view.tab_views.items) |*tab| {
             var it = tab.layout.splits.valueIterator();
             while (it.next()) |pane_ptr| {
-                pane_ptr.*.write(buffer[0..sk.data_len]) catch {};
+                pane_ptr.*.write(buffer[0..sk.data_len]) catch |err| {
+                    terminal_main.debugLogUuid(&pane_ptr.*.uuid, "send_keys broadcast write failed: {s}", .{@errorName(err)});
+                };
             }
         }
     } else if (state.findPaneByUuid(sk.uuid)) |pane| {
-        pane.write(buffer[0..sk.data_len]) catch {};
+        pane.write(buffer[0..sk.data_len]) catch |err| {
+            terminal_main.debugLogUuid(&pane.uuid, "send_keys targeted write failed: {s}", .{@errorName(err)});
+        };
     }
 }
 
@@ -496,7 +608,10 @@ pub fn sendPopResponse(state: *State) void {
     if (!state.pending_pop_response) return;
     state.pending_pop_response = false;
 
-    const fd = state.runtime.getCtlFd() orelse return;
+    const fd = state.runtime.getCtlFd() orelse {
+        core.logging.warn("terminal", "sendPopResponse skipped: SES CTL channel is unavailable", .{});
+        return;
+    };
 
     // Get the correct PopupManager based on scope.
     const popups: *pop.PopupManager = switch (state.pending_pop_scope) {
@@ -513,7 +628,7 @@ pub fn sendPopResponse(state: *State) void {
     // Try to get confirm result.
     if (popups.getConfirmResult()) |confirmed| {
         resp.response_type = if (confirmed) 1 else 0;
-        wire.writeControl(fd, .pop_response, std.mem.asBytes(&resp)) catch {};
+        writeControlLogged(fd, .pop_response, std.mem.asBytes(&resp), "failed to send pop confirm response");
         popups.clearResults();
         return;
     }
@@ -522,13 +637,13 @@ pub fn sendPopResponse(state: *State) void {
     if (popups.getPickerResult()) |selected| {
         resp.response_type = 2;
         resp.selected_idx = @intCast(selected);
-        wire.writeControl(fd, .pop_response, std.mem.asBytes(&resp)) catch {};
+        writeControlLogged(fd, .pop_response, std.mem.asBytes(&resp), "failed to send pop picker response");
         popups.clearResults();
         return;
     }
 
     // Cancelled.
-    wire.writeControl(fd, .pop_response, std.mem.asBytes(&resp)) catch {};
+    writeControlLogged(fd, .pop_response, std.mem.asBytes(&resp), "failed to send pop cancel response");
     popups.clearResults();
 }
 
@@ -537,7 +652,7 @@ fn handleFocusMove(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8
         skipPayload(fd, payload_len, buffer);
         return;
     }
-    const fm = wire.readStruct(wire.FocusMove, fd) catch return;
+    const fm = readStructLogged(wire.FocusMove, fd, "failed to read focus_move payload") orelse return;
     const remaining = payload_len - @sizeOf(wire.FocusMove);
     if (remaining > 0) skipPayload(fd, remaining, buffer);
 
@@ -559,7 +674,7 @@ fn handleExitIntent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
         skipPayload(fd, payload_len, buffer);
         return;
     }
-    _ = wire.readStruct(wire.ExitIntent, fd) catch return;
+    _ = readStructLogged(wire.ExitIntent, fd, "failed to read exit_intent payload") orelse return;
     const remaining = payload_len - @sizeOf(wire.ExitIntent);
     if (remaining > 0) skipPayload(fd, remaining, buffer);
 
@@ -584,19 +699,25 @@ fn handleExitIntent(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
     state.pending_action = .exit_intent;
     // Mark that we have a pending exit_intent (no longer an fd, use sentinel).
     state.pending_exit_intent = true;
-    state.popups.showConfirm("Exit terminal session?", .{}) catch {
+    state.popups.showConfirm("Exit terminal session?", .{}) catch |err| {
+        core.logging.logError("terminal", "failed to show exit-intent confirmation popup", err);
+        state.notifications.show("Confirmation failed");
         state.pending_action = null;
         state.pending_exit_intent = false;
         sendExitIntentResultPub(state, true);
+        state.needs_render = true;
         return;
     };
     state.needs_render = true;
 }
 
 pub fn sendExitIntentResultPub(state: *State, allow: bool) void {
-    const ctl_fd = state.runtime.getCtlFd() orelse return;
+    const ctl_fd = state.runtime.getCtlFd() orelse {
+        core.logging.warn("terminal", "sendExitIntentResult skipped: SES CTL channel is unavailable", .{});
+        return;
+    };
     const result = wire.ExitIntentResult{ .allow = if (allow) 1 else 0 };
-    wire.writeControl(ctl_fd, .exit_intent_result, std.mem.asBytes(&result)) catch {};
+    writeControlLogged(ctl_fd, .exit_intent_result, std.mem.asBytes(&result), "failed to send exit intent result");
 }
 
 fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u8) void {
@@ -604,7 +725,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         skipPayload(fd, payload_len, buffer);
         return;
     }
-    const fr = wire.readStruct(wire.FloatRequest, fd) catch return;
+    const fr = readStructLogged(wire.FloatRequest, fd, "failed to read float_request payload") orelse return;
     const trail_len = payload_len - @sizeOf(wire.FloatRequest);
 
     // Read trailing data.
@@ -612,17 +733,25 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         skipPayload(fd, trail_len, buffer);
         return;
     }
-    wire.readExact(fd, buffer[0..trail_len]) catch return;
+    if (!readExactLogged(fd, buffer[0..trail_len], "failed to read float_request trail")) return;
 
     // Parse trailing: cmd + title + cwd + result_path + env entries.
     var offset: usize = 0;
-    const cmd = if (fr.cmd_len > 0 and offset + fr.cmd_len <= trail_len) blk: {
+    const cmd = if (fr.cmd_len > 0) blk: {
+        if (offset + fr.cmd_len > trail_len) {
+            terminal_main.debugLog("handleFloatRequest: malformed command trail", .{});
+            return;
+        }
         const s = buffer[offset .. offset + fr.cmd_len];
         offset += fr.cmd_len;
         break :blk s;
     } else return;
 
-    const title_slice = if (fr.title_len > 0 and offset + fr.title_len <= trail_len) blk: {
+    const title_slice = if (fr.title_len > 0) blk: {
+        if (offset + fr.title_len > trail_len) {
+            terminal_main.debugLog("handleFloatRequest: malformed title trail", .{});
+            return;
+        }
         const s = buffer[offset .. offset + fr.title_len];
         offset += fr.title_len;
         break :blk s;
@@ -630,7 +759,11 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         break :blk @as([]const u8, "");
     };
 
-    const cwd_slice = if (fr.cwd_len > 0 and offset + fr.cwd_len <= trail_len) blk: {
+    const cwd_slice = if (fr.cwd_len > 0) blk: {
+        if (offset + fr.cwd_len > trail_len) {
+            terminal_main.debugLog("handleFloatRequest: malformed cwd trail", .{});
+            return;
+        }
         const s = buffer[offset .. offset + fr.cwd_len];
         offset += fr.cwd_len;
         break :blk s;
@@ -639,19 +772,31 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
     };
 
     var result_path_slice: []const u8 = "";
-    if (fr.result_path_len > 0 and offset + fr.result_path_len <= trail_len) {
+    if (fr.result_path_len > 0) {
+        if (offset + fr.result_path_len > trail_len) {
+            terminal_main.debugLog("handleFloatRequest: malformed result-path trail", .{});
+            return;
+        }
         result_path_slice = buffer[offset .. offset + fr.result_path_len];
         offset += fr.result_path_len;
     }
 
     var exit_key_slice: []const u8 = "";
-    if (fr.exit_key_len > 0 and offset + fr.exit_key_len <= trail_len) {
+    if (fr.exit_key_len > 0) {
+        if (offset + fr.exit_key_len > trail_len) {
+            terminal_main.debugLog("handleFloatRequest: malformed exit-key trail", .{});
+            return;
+        }
         exit_key_slice = buffer[offset .. offset + fr.exit_key_len];
         offset += fr.exit_key_len;
     }
 
     var isolation_profile_slice: []const u8 = "";
-    if (fr.isolation_profile_len > 0 and offset + fr.isolation_profile_len <= trail_len) {
+    if (fr.isolation_profile_len > 0) {
+        if (offset + fr.isolation_profile_len > trail_len) {
+            terminal_main.debugLog("handleFloatRequest: malformed isolation-profile trail", .{});
+            return;
+        }
         isolation_profile_slice = buffer[offset .. offset + fr.isolation_profile_len];
         offset += fr.isolation_profile_len;
     }
@@ -660,12 +805,25 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
     var env_list: std.ArrayList([]const u8) = .empty;
     defer env_list.deinit(state.allocator);
     for (0..fr.env_count) |_| {
-        if (offset + 2 > trail_len) break;
+        if (offset + 2 > trail_len) {
+            terminal_main.debugLog("handleFloatRequest: malformed env entry header", .{});
+            return;
+        }
         const entry_len = std.mem.readInt(u16, buffer[offset..][0..2], .little);
         offset += 2;
-        if (offset + entry_len > trail_len) break;
-        env_list.append(state.allocator, buffer[offset .. offset + entry_len]) catch break;
+        if (offset + entry_len > trail_len) {
+            terminal_main.debugLog("handleFloatRequest: malformed env entry body", .{});
+            return;
+        }
+        env_list.append(state.allocator, buffer[offset .. offset + entry_len]) catch |err| {
+            terminal_main.debugLog("handleFloatRequest: failed to append env entry: {s}", .{@errorName(err)});
+            return;
+        };
         offset += entry_len;
+    }
+    if (offset != trail_len) {
+        terminal_main.debugLog("handleFloatRequest: trailing payload length mismatch", .{});
+        return;
     }
 
     const wait_for_exit = (fr.flags & 1) != 0;
@@ -680,18 +838,34 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         owned_extra.deinit(state.allocator);
     }
     if (isolated) {
-        const entry = state.allocator.dupe(u8, "HEXE_POD_ISOLATE=1") catch null;
-        if (entry) |e| {
-            owned_extra.append(state.allocator, e) catch {};
-            extra_env_list.append(state.allocator, e) catch {};
-        }
+        const entry = state.allocator.dupe(u8, "HEXE_POD_ISOLATE=1") catch |err| {
+            core.logging.logError("terminal", "handleFloatRequest failed to allocate isolated env entry", err);
+            return;
+        };
+        owned_extra.append(state.allocator, entry) catch |err| {
+            terminal_main.debugLog("handleFloatRequest: failed to track isolated env entry: {s}", .{@errorName(err)});
+            state.allocator.free(entry);
+            return;
+        };
+        extra_env_list.append(state.allocator, entry) catch |err| {
+            core.logging.logError("terminal", "handleFloatRequest failed to append isolated env entry", err);
+            return;
+        };
     }
     if (wait_for_exit and result_path_slice.len > 0) {
-        const entry = std.fmt.allocPrint(state.allocator, "HEXE_FLOAT_RESULT_FILE={s}", .{result_path_slice}) catch null;
-        if (entry) |e| {
-            owned_extra.append(state.allocator, e) catch {};
-            extra_env_list.append(state.allocator, e) catch {};
-        }
+        const entry = std.fmt.allocPrint(state.allocator, "HEXE_FLOAT_RESULT_FILE={s}", .{result_path_slice}) catch |err| {
+            core.logging.logError("terminal", "handleFloatRequest failed to allocate result-file env entry", err);
+            return;
+        };
+        owned_extra.append(state.allocator, entry) catch |err| {
+            terminal_main.debugLog("handleFloatRequest: failed to track result-file env entry: {s}", .{@errorName(err)});
+            state.allocator.free(entry);
+            return;
+        };
+        extra_env_list.append(state.allocator, entry) catch |err| {
+            core.logging.logError("terminal", "handleFloatRequest failed to append result-file env entry", err);
+            return;
+        };
     }
 
     // Determine spawn cwd - use explicit cwd if provided, else try focused pane, else the terminal process cwd.
@@ -709,7 +883,10 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         }
         // Fallback to the terminal process CWD.
         if (spawn_cwd == null) {
-            spawn_cwd = std.posix.getcwd(&mux_cwd_buf) catch null;
+            spawn_cwd = std.posix.getcwd(&mux_cwd_buf) catch |err| blk: {
+                core.logging.logError("terminal", "handleFloatRequest failed to get fallback cwd", err);
+                break :blk null;
+            };
         }
     }
 
@@ -750,7 +927,15 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
 
     terminal_main.debugLog("handleFloatRequest: wait_for_exit={} isolation_profile={s} use_pod={}", .{ wait_for_exit, isolation_profile orelse "", use_pod });
 
-    const command = state.allocator.dupe(u8, cmd) catch return;
+    const command = state.allocator.dupe(u8, cmd) catch |err| {
+        core.logging.logError("terminal", "failed to allocate float command", err);
+        state.notifications.show("Float failed");
+        state.needs_render = true;
+        if (wait_for_exit) {
+            sendFailedFloatResult(state, 127, "failed to send failed float result after command allocation failure");
+        }
+        return;
+    };
     defer state.allocator.free(command);
 
     const float_size = actions.FloatSize{
@@ -763,13 +948,7 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
     const new_uuid = actions.createAdhocFloatWithSize(state, command, title, spawn_cwd, env_items, extra_items, use_pod, float_size, isolation_profile) catch {
         // Spawn failed — if wait_for_exit, send error result so CLI doesn't hang.
         if (wait_for_exit) {
-            const ctl_fd = state.runtime.getCtlFd() orelse return;
-            const result = wire.FloatResult{
-                .uuid = .{0} ** 32,
-                .exit_code = 127, // command not found
-                .output_len = 0,
-            };
-            wire.writeControl(ctl_fd, .float_result, std.mem.asBytes(&result)) catch {};
+            sendFailedFloatResult(state, 127, "failed to send failed float result");
         }
         return;
     };
@@ -784,11 +963,22 @@ fn handleFloatRequest(state: *State, fd: posix.fd_t, payload_len: u32, buffer: [
         if (state.view.float_views.items.len > 0) {
             state.setPaneCaptureOutput(state.view.float_views.items[state.view.float_views.items.len - 1].uuid, true);
         }
-        const stored_path = if (result_path_slice.len > 0) state.allocator.dupe(u8, result_path_slice) catch null else null;
+        const stored_path = if (result_path_slice.len > 0)
+            state.allocator.dupe(u8, result_path_slice) catch |err| blk: {
+                core.logging.logError("terminal", "failed to allocate float result path", err);
+                break :blk null;
+            }
+        else
+            null;
         state.pending_float_requests.put(new_uuid, .{
             .result_path = stored_path,
             .cursor_snapshot = cursor_snapshot,
-        }) catch {};
+        }) catch |err| {
+            core.logging.logError("terminal", "failed to track pending float request", err);
+            if (stored_path) |path| state.allocator.free(path);
+            state.notifications.show("Float result tracking failed");
+            sendFailedFloatResult(state, 127, "failed to send failed float result after tracking failure");
+        };
     }
 }
 
@@ -797,7 +987,9 @@ fn handlePaneExited(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []u
         skipPayload(fd, payload_len, buffer);
         return;
     }
-    const pu = wire.readStruct(wire.PaneUuid, fd) catch return;
+    const pu = readStructLogged(wire.PaneUuid, fd, "failed to read pane_exited payload") orelse return;
+    const remaining = payload_len - @sizeOf(wire.PaneUuid);
+    if (remaining > 0) skipPayload(fd, remaining, buffer);
     terminal_main.debugLogUuid(&pu.uuid, "pane_exited received from SES", .{});
 
     // Mark the pane as dead in all tabs and floats.
@@ -823,21 +1015,21 @@ fn handleCwdResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffer: []
         skipPayload(fd, payload_len, buffer);
         return;
     }
-    const resp = wire.readStruct(wire.PaneCwd, fd) catch return;
-    const uuid = state.runtime.takePendingCwdUuid() orelse {
-        // No pending request — skip trailing data.
-        if (resp.cwd_len > 0) skipPayload(fd, resp.cwd_len, buffer);
-        return;
-    };
+    const resp = readStructLogged(wire.PaneCwd, fd, "failed to read pane cwd response") orelse return;
+    const remaining = payload_len - @sizeOf(wire.PaneCwd);
 
-    if (resp.cwd_len == 0) return;
-    if (resp.cwd_len > buffer.len) {
-        skipPayload(fd, resp.cwd_len, buffer);
+    if (resp.cwd_len == 0) {
+        if (remaining > 0) skipPayload(fd, remaining, buffer);
         return;
     }
-    wire.readExact(fd, buffer[0..resp.cwd_len]) catch return;
+    if (resp.cwd_len > buffer.len or resp.cwd_len != remaining) {
+        skipPayload(fd, remaining, buffer);
+        terminal_main.debugLogUuid(&resp.uuid, "pane cwd response: malformed cwd length", .{});
+        return;
+    }
+    if (!readExactLogged(fd, buffer[0..resp.cwd_len], "failed to read pane cwd response trail")) return;
 
-    state.setPaneShell(uuid, null, buffer[0..resp.cwd_len], null, null, null);
+    state.setPaneShell(resp.uuid, null, buffer[0..resp.cwd_len], null, null, null);
 }
 
 /// Handle async pane_info response (updates fg_process cache).
@@ -846,7 +1038,8 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
         skipPayload(fd, payload_len, buffer);
         return;
     }
-    const resp = wire.readStruct(wire.PaneInfoResp, fd) catch return;
+    const resp = readStructLogged(wire.PaneInfoResp, fd, "failed to read pane_info response") orelse return;
+    const remaining_payload = payload_len - @sizeOf(wire.PaneInfoResp);
 
     // Calculate total trailing bytes.
     const trail_total: usize = @as(usize, resp.name_len) + @as(usize, resp.fg_len) +
@@ -854,12 +1047,20 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
         @as(usize, resp.socket_path_len) + @as(usize, resp.session_name_len) +
         @as(usize, resp.layout_path_len) + @as(usize, resp.last_cmd_len) +
         @as(usize, resp.base_process_len) + @as(usize, resp.sticky_pwd_len);
+    if (trail_total != remaining_payload) {
+        skipPayload(fd, remaining_payload, buffer);
+        terminal_main.debugLogUuid(&resp.uuid, "pane_info response: malformed trail length", .{});
+        return;
+    }
 
     // Read and store pane name (Pokemon name).
     if (resp.name_len > 0) {
         if (resp.name_len <= buffer.len) {
-            wire.readExact(fd, buffer[0..resp.name_len]) catch return;
-            const pane_name = state.allocator.dupe(u8, buffer[0..resp.name_len]) catch null;
+            if (!readExactLogged(fd, buffer[0..resp.name_len], "failed to read pane_info name")) return;
+            const pane_name = state.allocator.dupe(u8, buffer[0..resp.name_len]) catch |err| blk: {
+                core.logging.logError("terminal", "failed to copy pane_info pane name", err);
+                break :blk null;
+            };
             if (pane_name) |name| {
                 state.setPaneNameOwned(resp.uuid, name);
 
@@ -873,7 +1074,9 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
                         if (uuid_match and pane.pokemon_initialized and
                             !pane.pokemon_state.manually_toggled and pane.pokemon_state.sprite_content == null)
                         {
-                            pane.pokemon_state.loadSprite(name, false) catch {};
+                            pane.pokemon_state.loadSprite(name, false) catch |err| {
+                                core.logging.logError("terminal", "failed to load float sprite after pane-name update", err);
+                            };
                         }
                     }
                     // Check splits
@@ -882,7 +1085,9 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
                         if (std.mem.eql(u8, pane.*.uuid[0..], resp.uuid[0..]) and pane.*.pokemon_initialized and
                             !pane.*.pokemon_state.manually_toggled and pane.*.pokemon_state.sprite_content == null)
                         {
-                            pane.*.pokemon_state.loadSprite(name, false) catch {};
+                            pane.*.pokemon_state.loadSprite(name, false) catch |err| {
+                                core.logging.logError("terminal", "failed to load split sprite after pane-name update", err);
+                            };
                         }
                     }
                     state.needs_render = true;
@@ -896,8 +1101,11 @@ fn handlePaneInfoResponse(state: *State, fd: posix.fd_t, payload_len: u32, buffe
     // Read fg_process.
     var fg_name: ?[]u8 = null;
     if (resp.fg_len > 0 and resp.fg_len <= buffer.len) {
-        wire.readExact(fd, buffer[0..resp.fg_len]) catch return;
-        fg_name = state.allocator.dupe(u8, buffer[0..resp.fg_len]) catch null;
+        if (!readExactLogged(fd, buffer[0..resp.fg_len], "failed to read pane_info fg process")) return;
+        fg_name = state.allocator.dupe(u8, buffer[0..resp.fg_len]) catch |err| blk: {
+            core.logging.logError("terminal", "failed to copy pane_info fg process", err);
+            break :blk null;
+        };
     } else if (resp.fg_len > 0) {
         skipPayload(fd, resp.fg_len, buffer);
     }
@@ -920,7 +1128,7 @@ fn skipPayload(fd: posix.fd_t, len: u32, buffer: []u8) void {
     var remaining: usize = len;
     while (remaining > 0) {
         const chunk = @min(remaining, buffer.len);
-        wire.readExact(fd, buffer[0..chunk]) catch return;
+        if (!readExactLogged(fd, buffer[0..chunk], "failed to skip IPC payload")) return;
         remaining -= chunk;
     }
 }

@@ -54,6 +54,7 @@ pub const Pane = struct {
     focused: bool = false,
     // Tracks whether we saw a clear-screen sequence in the last output.
     did_clear: bool = false,
+    last_reported_password_input: bool = false,
     // Keep last bytes so we can detect escape sequences across boundaries.
     esc_tail: [3]u8 = .{ 0, 0, 0 },
     esc_tail_len: u8 = 0,
@@ -144,6 +145,7 @@ pub const Pane = struct {
         try self.vt.init(self.allocator, self.width, self.height);
 
         self.did_clear = false;
+        self.last_reported_password_input = false;
         self.esc_tail = .{ 0, 0, 0 };
         self.esc_tail_len = 0;
         self.osc_in_progress = false;
@@ -163,14 +165,22 @@ pub const Pane = struct {
     pub fn feedPodOutput(self: *Pane, data: []const u8) void {
         self.did_clear = false;
         pane_output.processOutput(self, data);
-        self.vt.feed(data) catch {};
+        self.vt.feed(data) catch |err| {
+            core.logging.logError("terminal", "pane VT feed failed", err);
+            return;
+        };
+        const password_input = self.vt.terminal.flags.password_input;
+        if (password_input != self.last_reported_password_input) {
+            self.sendPasswordModeToPod(password_input);
+            self.last_reported_password_input = password_input;
+        }
     }
 
     /// Write input to backend.
     pub fn write(self: *Pane, data: []const u8) !void {
         const pod = self.backend.pod;
         const frame_type = @intFromEnum(pod_protocol.FrameType.input);
-        wire.writeMuxVt(pod.vt_fd, pod.pane_id, frame_type, data) catch {};
+        try wire.writeMuxVt(pod.vt_fd, pod.pane_id, frame_type, data);
     }
 
     pub fn resize(self: *Pane, x: u16, y: u16, width: u16, height: u16) !void {
@@ -238,25 +248,33 @@ pub const Pane = struct {
 
     /// Scroll up by given number of lines
     pub fn scrollUp(self: *Pane, lines: u32) void {
-        self.vt.terminal.scrollViewport(.{ .delta = -@as(isize, @intCast(lines)) }) catch {};
+        self.vt.terminal.scrollViewport(.{ .delta = -@as(isize, @intCast(lines)) }) catch |err| {
+            core.logging.logError("terminal", "scroll up failed", err);
+        };
         self.vt.invalidateRenderState();
     }
 
     /// Scroll down by given number of lines
     pub fn scrollDown(self: *Pane, lines: u32) void {
-        self.vt.terminal.scrollViewport(.{ .delta = @as(isize, @intCast(lines)) }) catch {};
+        self.vt.terminal.scrollViewport(.{ .delta = @as(isize, @intCast(lines)) }) catch |err| {
+            core.logging.logError("terminal", "scroll down failed", err);
+        };
         self.vt.invalidateRenderState();
     }
 
     /// Scroll to top of history
     pub fn scrollToTop(self: *Pane) void {
-        self.vt.terminal.scrollViewport(.top) catch {};
+        self.vt.terminal.scrollViewport(.top) catch |err| {
+            core.logging.logError("terminal", "scroll to top failed", err);
+        };
         self.vt.invalidateRenderState();
     }
 
     /// Scroll to bottom (current output)
     pub fn scrollToBottom(self: *Pane) void {
-        self.vt.terminal.scrollViewport(.bottom) catch {};
+        self.vt.terminal.scrollViewport(.bottom) catch |err| {
+            core.logging.logError("terminal", "scroll to bottom failed", err);
+        };
         self.vt.invalidateRenderState();
     }
 
@@ -324,6 +342,17 @@ pub const Pane = struct {
         std.mem.writeInt(u16, payload[0..2], cols, .big);
         std.mem.writeInt(u16, payload[2..4], rows, .big);
         const frame_type = @intFromEnum(pod_protocol.FrameType.resize);
-        wire.writeMuxVt(pod.vt_fd, pod.pane_id, frame_type, &payload) catch {};
+        wire.writeMuxVt(pod.vt_fd, pod.pane_id, frame_type, &payload) catch |err| {
+            core.logging.logError("terminal", "pane resize mux write failed", err);
+        };
+    }
+
+    fn sendPasswordModeToPod(self: *Pane, enabled: bool) void {
+        const pod = self.backend.pod;
+        const payload = [_]u8{@intFromBool(enabled)};
+        const frame_type = @intFromEnum(pod_protocol.FrameType.password_mode);
+        wire.writeMuxVt(pod.vt_fd, pod.pane_id, frame_type, &payload) catch |err| {
+            core.logging.logError("terminal", "pane password-mode mux write failed", err);
+        };
     }
 };

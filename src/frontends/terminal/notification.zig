@@ -14,7 +14,10 @@ fn putChar(renderer: *Renderer, x: u16, y: u16, cp: u21, fg: ?Color, bg: ?Color,
             break :blk 1;
         }]
     else blk: {
-        const n = std.unicode.utf8Encode(cp, &buf) catch return;
+        const n = std.unicode.utf8Encode(cp, &buf) catch |err| {
+            core.logging.logError("terminal", "notification glyph encode failed", err);
+            return;
+        };
         break :blk buf[0..n];
     };
 

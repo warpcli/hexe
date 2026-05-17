@@ -1,296 +1,576 @@
-# Hexe Hardening Plan
+# Hexe Lua Config Redesign Plan
 
-Replaces the prior UI/SES separation plan (which is complete).
+## Goal
 
-This plan consolidates findings from a five-agent audit (dead code, stubs,
-implementation bugs, architecture, security) into a prioritized, sequenced work
-list. Each phase is independently shippable — don't merge later phases before
-earlier ones land.
+Make Hexe configuration a coherent Lua API instead of a collection of unrelated
+builder calls, section parsers, and special cases. The end state is:
 
-Completion is not claimed until every checkbox in a phase is done AND the
-phase's exit criteria hold.
+- one public namespace: `hexe`
+- one canonical entrypoint: `return hexe.setup({...})`
+- normal Lua composition through `require`
+- prompt and statusbar sharing one segment model
+- global and project layouts sharing one layout schema
+- strict validation with useful error paths
+- no backwards compatibility burden
 
----
+The repo `./config` directory is the live user config source. It is linked to
+`/home/bresilla/.config/hexe`, so implementation work must keep `./config`
+updated as runtime behavior changes.
 
-## Phase 1 — Memory-safety fixes (mechanical, shippable as one PR)
+## Non-Goals
 
-Small, isolated fixes for confirmed memory-safety bugs. No design work, no
-refactors.
+- Do not preserve old config shapes.
+- Do not keep compatibility wrappers for removed APIs.
+- Do not support shorthand public namespaces; the public API is always `hexe`.
+- Do not keep both `cmd` and `command`; use `command`.
+- Do not keep misspelled keybinding fields; use `keybindings`.
+- Do not keep both `split` and `root` as tab roots; use `root`.
+- Do not keep hidden builder state as the main config mechanism.
 
-- [x] **P1.1** — `src/core/ipc.zig:147` — `Client.connect()` now clamps the
-      socket path copy via `@min(path.len, addr.path.len - 1)`, matching the
-      pattern at `:40` and `:77`.
-- [~] **P1.2** — `src/modules/pod/buffering.zig:40-47` — **false positive**.
-      Line 32 early-returns when `data.len >= self.buf.len`, so the remaining
-      path is reached only with `data.len < cap`. That invariant makes
-      `drop = self.len + data.len - cap < self.len`, so the `self.len -= drop`
-      at line 47 cannot underflow. Skipped.
-- [x] **P1.3** — `src/frontends/terminal/state.zig:272` — `stdin_tail_len`
-      widened from `u8` to `u16`. The `@intCast(tail.len)` at
-      `loop_input.zig:130` is bounded by `stdin_tail.len == 256`, which fits.
-- [x] **P1.4** — `src/core/pty.zig:272` — `closeExtraFds` fallback now walks
-      up to `getrlimit(RLIMIT_NOFILE).cur` instead of 1024. `close_range` is
-      still the primary path.
+## Target Shape
 
-**Exit criteria:** `zig build` clean. ✅
+```lua
+local hexe = require("hexe")
 
----
+return hexe.setup({
+  theme = require("themes.default"),
+  keys = require("keys.default"),
+  mux = require("mux.default"),
+  status = require("status.default"),
+  prompt = require("prompt.default"),
+  pop = require("pop.default"),
+  ses = {
+    layouts = {
+      require("layouts.default"),
+    },
+  },
+})
+```
 
-## Phase 2 — Silent-failure cleanup (one-shot refactor)
+The live repo config should stay simple: `./config/init.lua` for settings and
+`./config/layout.lua` for the global layout. Project config can use the same
+layout API from `.hexe.lua`.
 
-Retire the ~250 `catch {}` patterns on wire writes by routing them through a
-single helper that logs and marks the client connection broken.
+## Public Lua API
 
-- [x] **P2.1** — Added `Server.replyOrClose` and `Server.replyOrCloseWithTrail`
-      helpers in `src/modules/session/server.zig`. Both log at warn level and
-      queue the fd for close via the existing `queueCtlClose` pending path,
-      which triggers `removeClientWithWatcherCleanup` on the next poll tick.
-- [~] **P2.2** — No separate "broken" flag needed. `queueCtlClose` already
-      feeds into the unified cleanup path used by EPIPE/ECONNRESET handling,
-      so we reuse it directly. Rejected as redundant.
-- [x] **P2.3** — All 50 `wire.writeControl(...) catch {}` sites in
-      `server.zig` migrated to `self.replyOrClose(...)`.
-- [x] **P2.4** — All 18 `wire.writeControlWithTrail(...) catch {}` sites in
-      `server.zig` migrated to `self.replyOrCloseWithTrail(...)`. Also
-      migrated the one `writeControlMsg(...) catch {}` at `:2283` inline
-      (no helper added for a single call site).
-- [x] **P2.5** — `src/core/frontend_client.zig` had two swallows: the
-      shutdown `disconnect` notify (now logs at debug level — there's
-      nothing else to do mid-shutdown) and `update_pane_aux` (now logs and
-      nulls `self.ctl_fd` so subsequent ops fail fast).
-      `frontend_liblink_transport.zig` has no `wire.writeControl.*catch {}`
-      patterns.
+### Config
 
-**Exit criteria:** `grep -rn "wire\.writeControl.*catch {}" src/` returns
-zero. ✅ Build clean. ✅
+- `hexe.setup(spec) -> normalized_config`
+- `hexe.validate(spec) -> normalized_config`
 
----
+`hexe.setup` validates the whole config and returns the normalized table that
+Zig consumes. It must not depend on hidden global builder mutation.
 
-## Phase 3 — Protocol input validation (payload caps)
+### Keymaps
 
-Every control-message read path must enforce `wire.MAX_PAYLOAD_LEN` before
-allocating.
+- `hexe.key(keys, action, opts?)`
+- `hexe.keymap.set(keys, action, opts?)`
+- `hexe.action.quit()`
+- `hexe.action.detach()`
+- `hexe.action.pane.disown()`
+- `hexe.action.pane.adopt()`
+- `hexe.action.pane.close()`
+- `hexe.action.pane.select()`
+- `hexe.action.tab.new()`
+- `hexe.action.tab.close()`
+- `hexe.action.tab.next()`
+- `hexe.action.tab.prev()`
+- `hexe.action.float.toggle(key)`
+- `hexe.action.float.nudge(direction)`
+- `hexe.action.focus.move(direction)`
+- `hexe.action.split.horizontal()`
+- `hexe.action.split.vertical()`
+- `hexe.action.split.resize(direction)`
+- `hexe.action.clipboard.copy()`
+- `hexe.action.clipboard.request()`
+- `hexe.action.overlay.keycast_toggle()`
+- `hexe.action.overlay.sprite_toggle()`
+- `hexe.action.system.notify()`
 
-- [~] **P3.1** — Skipped in favor of an inline check at the single control
-      entry point. A full `readControlFrame` helper would have required
-      changing every handler signature; the inline cap at
-      `handleBinaryCtlMessage` gets the same DoS-protection win without the
-      churn.
-- [x] **P3.2** — Inline `hdr.payload_len > wire.MAX_PAYLOAD_LEN` check at
-      the top of `Server.handleBinaryCtlMessage` (closes the connection
-      with a warn log). Same pattern added to all three
-      `session_state` allocation sites in `src/core/frontend_client.zig`.
-      Terminal frontend (`loop_ipc.zig`) already had the cap.
-- [~] **P3.3** — Deferred. The poll loop only dispatches
-      `handleBinaryCtlMessage` after `readable` fires, so the header read
-      is non-blocking in practice. Payload reads can still hang on a slow
-      adversarial client; that's worth a dedicated follow-up pass with a
-      per-frame timeout, but it's independent of the P3.2 DoS cap. Tracked
-      in the Phase 8 follow-ups list.
-- [x] **P3.4** — `src/modules/session/persist.zig`:
-      - Added `MAX_SOCKET_PATH=256`, `MAX_STICKY_PWD=4096`,
-        `MAX_PANES_PER_SESSION=1024` caps. Each is checked during load;
-        overflowing entries are skipped.
-      - Added `std.posix.fsync(dir.fd)` on the parent directory after
-        `renameAbsolute`.
-      - `src/modules/session/txlog.zig`: added `MAX_REPLAY_BYTES=10MB` cap
-        on `readAll`. Replay stops cleanly at the cap, preserving
-        already-parsed entries.
+Canonical config uses:
 
-**Exit criteria:** a malicious ctl message with `payload_len=u32_max` closes
-the connection instead of allocating. A corrupted session file with a 2GB
-`sticky_pwd` field skips that pane and moves on. ✅ Build clean. ✅
+```lua
+return {
+  hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.q }, hexe.action.quit()),
+  hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.up }, nil, {
+    when = function(ctx)
+      local pane = ctx:pane("focused")
+      return pane and pane.process_name == "nvim"
+    end,
+    mode = hexe.mode.passthrough_only,
+  }),
+}
+```
 
----
+### Segments
 
-## Phase 4 — Privacy fixes (file perms + password mode)
+- `hexe.segment(spec)`
+- `hexe.segment.time(opts?)`
+- `hexe.segment.session(opts?)`
+- `hexe.segment.tabs(opts?)`
+- `hexe.segment.directory(opts?)`
+- `hexe.segment.git_branch(opts?)`
+- `hexe.segment.battery(opts?)`
+- `hexe.segment.duration(opts?)`
+- `hexe.segment.spinner(opts?)`
+- `hexe.segment.title(ctx_or_opts?)`
 
-- [x] **P4.1** — `src/modules/pod/main.zig:238` — pod metadata sidecar now
-      created with `0o600`.
-- [x] **P4.2** — `src/core/recording/asciicast.zig:21` — recording files
-      now created with `0o600`.
-- [~] **P4.3** — Deferred. The `pane.flags.password_input` bit lives on
-      the frontend's ghostty VT instance, but backlog buffering happens in
-      the POD process and recording happens in separate CLI tools — neither
-      parses the VT stream. Gating these requires a new control message
-      ("enter/exit password mode") that the frontend emits when it observes
-      the flag change, routed through SES → POD and also to any attached
-      recorders. That's a non-trivial protocol addition; tracked as a
-      Phase 8 follow-up under "protocol additions".
-- [x] **P4.4** — Confirmed. `loop_input_keys.zig:26` already calls
-      `isFocusedPaneInPasswordMode(state)` before emitting keycast events.
-      `state.overlays.recordKeypress` is only reached from that one call
-      site, so no additional guards needed.
+One segment object should work in both prompt and statusbar unless a field is
+explicitly unsupported by the renderer.
 
-**Exit criteria (partial):** new asciicast and pod metadata files are
-`-rw-------`. ✅ Password-mode backlog skip still pending P4.3's protocol
-work.
+Canonical segment:
 
----
+```lua
+hexe.segment({
+  id = "git.branch",
+  priority = 40,
+  render = function(ctx)
+    return {
+      { text = " main ", style = "git.branch" },
+    }
+  end,
+  when = function(ctx)
+    return ctx.cwd ~= nil
+  end,
+  update = {
+    interval_ms = 500,
+    cache_ms = 1000,
+  },
+  actions = {
+    left_click = function(ctx)
+      return hexe.command("lazygit", { cwd = ctx.cwd })
+    end,
+  },
+})
+```
 
-## Phase 5 — Peer authentication for frontends
+### Layouts
 
-- [x] **P5.1** — Added `ipc.PeerCredentials`, `ipc.getPeerCredentials`, and
-      `ipc.verifyPeerUid` in `src/core/ipc.zig`. POD's
-      `verifyPeerCredentials` is now a one-line wrapper around the shared
-      helper.
-- [x] **P5.2** — `Server.dispatchNewConnection` calls `ipc.verifyPeerUid`
-      first thing. Cross-UID peers get a warn log and their fd closed
-      before any handshake bytes are read.
-- [x] **P5.3** — `HEXE_ALLOW_CROSS_UID=1` environment variable bypasses
-      the check inside `verifyPeerUid` itself, so both SES and POD honor
-      it consistently.
+- `hexe.layout(name, spec)`
+- `hexe.tab(name, spec)`
+- `hexe.split(direction, children, opts?)`
+- `hexe.pane(spec?)`
+- `hexe.float(name, spec)`
 
-**Exit criteria:** a process running as a different UID cannot connect to
-SES — the connection is closed pre-handshake with a log line. ✅
+Use only these canonical fields:
 
----
+- `root`
+- `command`
+- `keybindings`
+- `attrs`
+- `cwd`
+- `env`
+- `isolation`
+- `position`
+- `size`
+- `padding`
+- `style`
 
-## Phase 6 — Clean up stubs, dead code, and half-wired features
+Example:
 
-Small individually but they add up to significant clarity improvements.
+```lua
+return hexe.layout("default", {
+  enabled = true,
+  root = ".",
+  tabs = {
+    hexe.tab("main", {
+      root = hexe.split("horizontal", {
+        hexe.pane({ cwd = "." }),
+        hexe.pane({ command = "nvim" }),
+      }, { ratio = 0.5 }),
+    }),
+  },
+  floats = {
+    hexe.float("codex", {
+      key = "3",
+      title = "codex",
+      command = "codex",
+      attrs = { per_cwd = true, inherit_env = true },
+    }),
+  },
+})
+```
 
-- [x] **P6.1** —
-      - `src/modules/session/main.zig` — stub `printLayoutTree()` deleted.
-      - `src/frontends/terminal/mouse_selection.zig` — **false positive**.
-        `EdgeScroll.up/down` are actually consumed at
-        `loop_core.zig:607-611` (real `p.scrollUp(1)` / `p.scrollDown(1)`
-        calls). Kept.
-      - `src/frontends/terminal/keybinds.zig:694` — **false positive**. The
-        enclosing `if (t.kind == .hold) { ...; continue; }` at `:663` already
-        handles the `.hold` case with an early `continue`, so the inner
-        switch arm is genuinely unreachable. The `unreachable` is correct.
-      - `src/modules/session/state.zig:2016` — **false positive**.
-        `removeDetachedSession` still exists at `:2074`. Comment is
-        accurate.
-- [x] **P6.2** — `listStatus(full_mode)` param deleted along with the
-      unused `SesArgs.full` field and the `--full`/`-f` flag parsing. The
-      four allocator-ignoring signatures now carry doc comments that
-      explain the post-fork invariant; call sites (especially tests passing
-      `testing.allocator`) keep working unchanged.
-- [x] **P6.3** — Deleted five dead `MsgType` variants (`title_changed`,
-      `query_state`, `pod_register`, `shp_prompt_req`, `shp_prompt_resp`)
-      from `src/core/wire.zig`. Left reservation comments on the wire
-      numbers so the values don't silently get reused with different
-      semantics.
-- [~] **P6.4** — TODOs kept but expanded into `TODO(lua-api)` comments that
-      describe exactly what's dropped and confirm the primary config path
-      (top-level Lua table → `parseConfig`) is unaffected. Full
-      implementation belongs in the out-of-scope "Lua API completeness"
-      pass, not here.
-- [x] **P6.5** — **False positive**, resolved differently than planned.
-      `MuxConfigBuilder.build()`, `SesConfigBuilder.build()` are real and
-      called from `config.zig`. `ShpConfigBuilder` is consumed field-by-
-      field in `shell/main.zig:395`. `PopConfigBuilder` is consumed via
-      `config.applyBuilder(pop_builder)` in `popup/config.zig:113,143`.
-      Only the top-level aggregator `ConfigBuilder.build()` was a stub with
-      zero callers — deleted, with a comment explaining how the sections
-      are actually consumed.
+### Theme
 
-**Exit criteria:** all false positives documented so they don't come back
-in the next audit. Real dead code is gone. ✅ Build clean. ✅
+- `hexe.theme(spec)`
 
----
+Styles should be symbolic and reusable:
 
-## Phase 7 — Test coverage (blocking for Phase 8)
+```lua
+return hexe.theme({
+  colors = {
+    bg = 237,
+    fg = 250,
+    accent = 1,
+    good = 2,
+    warn = 3,
+  },
+  styles = {
+    ["status.active"] = "bg:1 fg:0 bold",
+    ["git.branch"] = "bg:2 fg:0",
+  },
+  chars = {
+    split_vertical = "│",
+    split_horizontal = "─",
+  },
+})
+```
 
-Before touching architecture, lay down a safety net so refactors don't break
-silently.
+### Execution
 
-- [x] **P7.1** — `src/core/wire_test.zig` — 6 round-trip tests: ping
-      (empty payload), `PaneUuid` (fixed struct), `Notify` (struct + trail),
-      `SessionSyncFloat` (dense struct with many fields), oversize-header
-      `MAX_PAYLOAD_LEN` trip, and `Error`/trail. Good enough to catch
-      byte-layout drift without writing one test per `MsgType`.
-- [x] **P7.2** — `src/frontends/terminal/fast_path_test.zig` — 11 tests
-      pinning `fast_path.fastPathBytes` behavior: bare space, letters,
-      Alt-prefixed, Ctrl+letter → C0, Ctrl+space fall-through, Super
-      fall-through, arrow keys, char-without-codepoint, multi-byte UTF-8.
-      Required a small extraction: `fastPathBytes` now lives in
-      `src/frontends/terminal/fast_path.zig` (dependency-light, just `std`
-      + `core.Config`) so tests don't drag in the full frontend. The
-      explicit `bare space → 0x20` case is the direct regression guard for
-      the space-key bug.
-- [~] **P7.3** — Deferred. Snapshot-mutation coverage for
-      `removePaneFromSessionSnapshot` is still valuable, but it's a
-      standalone test-writing task that doesn't gate Phase 8's architectural
-      work the same way P7.1/P7.2 do. Tracked for follow-up.
-- [x] **P7.4** — Extended `state_test.zig` with two corruption tests:
-      `TxLog: readAll stops cleanly on truncated trailing entry` and
-      `TxLog: readAll rejects per-entry payload_len over 1MB cap`. Both
-      verify the replay terminates cleanly with the prefix preserved.
-      Also fixed two pre-existing failing `findStickyPaneWithAffinity`
-      tests that used dead `child_pid`s; they now use `std.os.linux.getpid()`
-      so the `isPidAlive` filter doesn't reject the synthetic panes.
+Expose one command execution helper:
 
-**Exit criteria:** `zig build test` → 52/52 tests pass. The fast-path
-suite has an explicit `bare space → 0x20` regression test. ✅
+```lua
+local result = hexe.exec("git branch --show-current", {
+  cwd = ctx.cwd,
+  timeout_ms = 80,
+  cache_ms = 1000,
+})
+```
 
----
+Return shape:
 
-## Phase 8 — Architectural fixes (requires Phase 7 safety net)
+```lua
+{
+  ok = true,
+  code = 0,
+  stdout = "...",
+  stderr = "...",
+  timeout = false,
+  cached = true,
+  elapsed_ms = 12,
+}
+```
 
-These are the cross-cutting fixes that need tests in place first.
+Expose one command action descriptor for click handlers and key actions that
+need to launch a command instead of running it synchronously during config
+evaluation:
 
-- [ ] **P8.1** — Kill state duplication in `SessionProjection`.
-      `src/core/session_projection.zig` — remove the shadow maps
-      (`local_floats`, `pane_shell`, `pane_proc`, `pane_names`,
-      `active_float_uuid`, `focused_pane_uuid`, `active_tab`). Make every
-      getter compute derived state from `attached_snapshot` on demand. Adjust
-      `syncFloatState` to be a single write into the snapshot rather than 2–3
-      parallel writes.
-- [ ] **P8.2** — Enforce pane ownership in `session_*` handlers.
-      `src/modules/session/server.zig` — every handler that takes a
-      `pane_uuid` or `tab_uuid` must look it up via
-      `client.session_panes.contains(uuid)` (or equivalent) before mutating.
-      Reject with `error` reply on mismatch. Include test coverage for the
-      rejection path.
-- [ ] **P8.3** — Split `SesState`.
-      `src/modules/session/state.zig` — extract:
-      - `SessionStore` (panes, clients, detached_sessions, session ownership)
-      - `Persistence` (txlog + session file I/O)
-      - `PollingState` (pending_poll_fds, pending_remove_poll_fds)
-      - `SessionLocks` (mutation serialization)
-      Keep `SesState` as a thin composition struct that owns the four
-      substructs. Don't change external APIs in this phase; only internal
-      structure.
+```lua
+return hexe.command("lazygit", { cwd = ctx.cwd })
+```
 
-**Exit criteria:** `SessionProjection` has no fields that shadow
-`attached_snapshot`. Every `session_*` handler has a test proving it rejects
-a pane_uuid the client doesn't own. `SesState` is < 150 LOC after the split.
+## Module Loading
 
----
+Add these paths to `package.path`:
 
-## Out of scope (for now)
+- `~/.config/hexe/lua/?.lua`
+- `~/.config/hexe/lua/?/init.lua`
+- `./.hexe/lua/?.lua`
+- `./.hexe/lua/?/init.lua`
 
-These showed up in the audit but aren't on the plan. Revisit after Phase 8:
+Do not invent a custom module system. Use normal Lua `require` so more complex
+configs can be split into reusable external modules.
 
-- **Liblink transport polishing** — the remote transport is untested; either
-  drop it or write an integration test harness. Not urgent until a user
-  actually needs remote attach.
-- **Config hot reload** — nice-to-have but requires runtime config diffing
-  and keybind rebuild. Too big for this pass.
-- **`MuxConfigBuilder` TODO items** (`:802` empty `hx.shp.segment` table) —
-  belongs to a separate "Lua API completeness" pass once `shp` is actually
-  consumed anywhere.
-- **Orphan PTY reaping on SES crash** — needs a supervisor model. Deferrable.
-- **Landlock isolation rules** — the constants are defined but unused.
-  They're load-bearing for future work; leave them.
+Target live config structure:
 
----
+```text
+config/
+  init.lua
+  layout.lua
+```
 
-## Working order
+## Unified Context
 
-1. Phase 1 (memory safety) — can ship today, no dependencies.
-2. Phase 2 (silent failure cleanup) — ship after Phase 1 so broken-client
-   handling doesn't collide with the ipc fix.
-3. Phase 3 (input validation) — independent of Phase 2; can be parallel if
-   someone else is on P2.
-4. Phase 4 (privacy) — independent; small PR on its own.
-5. Phase 5 (peer auth) — small, independent.
-6. Phase 6 (dead code / stubs) — independent; fine to interleave as cleanup
-   commits alongside earlier phases.
-7. Phase 7 (tests) — must be done before Phase 8.
-8. Phase 8 (architecture) — final, after the safety net is in place.
+Every callback should receive the same `ctx` model:
 
-Phases 1–6 are shippable as individual PRs. Phase 7 unblocks Phase 8.
+```lua
+ctx = {
+  cwd = "...",
+  session = { name = "...", uuid = "..." },
+  tab = { name = "...", index = 1, count = 3 },
+  pane = {
+    uuid = "...",
+    kind = "split",
+    title = "...",
+    process_name = "nvim",
+    cwd = "...",
+    alt_screen = false,
+    shell_running = false,
+  },
+  float = {
+    active = false,
+    key = nil,
+    sticky = false,
+  },
+  host = {
+    hostname = "...",
+    os = "linux",
+  },
+}
+```
+
+Helper methods should be consistent:
+
+- `ctx:pane("focused")`
+- `ctx:pane(0)`
+- `ctx:tab("active")`
+- `ctx:float("active")`
+
+Use this context for:
+
+- segment render callbacks
+- segment `when`
+- keymap `when`
+- click actions
+- autocmds and events
+
+## Validation
+
+Validation must be strict:
+
+- unknown top-level sections are errors
+- unknown fields inside known sections are errors unless explicitly allowed
+- wrong field types are errors
+- unsupported segment fields in a target are errors
+- missing required fields are errors
+- malformed actions are errors
+- malformed key specs are errors
+- malformed layouts are errors
+- no silent fallback for bad config
+
+Error messages must include paths:
+
+```text
+config error: status.right[3].render must be function
+config error: ses.layouts[1].tabs[2].root must be pane or split
+config error: keys[5].action is required unless mode is passthrough_only
+```
+
+## Config CLI
+
+Keep these commands as the main verification surface:
+
+- `hexe config check`
+- `hexe config dump`
+- `hexe config paths`
+
+`dump` should print the normalized config after Lua evaluation, not the raw Lua
+source.
+
+## Implementation Phases
+
+### Phase 1: New Config AST
+
+Create one normalized config model in Zig.
+
+Files likely involved:
+
+- `src/core/config.zig`
+- `src/core/config_v2.zig`
+- `src/core/session_config.zig`
+- `src/core/lua_runtime.zig`
+- `src/core/api_bridge.zig`
+
+Deliverables:
+
+- root `HexeConfigV2` model or equivalent
+- typed sections for theme, keys, mux, floats, status, prompt, pop, and ses
+- path-aware validation helpers
+- test coverage for minimal and full config shapes
+- no user-visible behavior change required yet
+
+### Phase 2: New Public Lua Surface
+
+Expose the canonical API through `require("hexe")`.
+
+Deliverables:
+
+- `hexe.setup`
+- `hexe.validate`
+- key/action constructors
+- segment constructors
+- layout constructors
+- theme constructor
+- module search paths for user and project modules
+- public table contains only intended public names
+
+Old builder functions may exist internally during the transition, but live
+config must stop calling them.
+
+### Phase 3: Migrate Live Config Files
+
+Edit `./config` in lockstep with the runtime.
+
+Deliverables:
+
+- `config/init.lua` contains settings
+- `config/layout.lua` contains the global layout
+- no `config/lua` module tree for live user config
+- `.hexe.lua` migrated to the same shape as global config
+- no shorthand namespace usage
+- no removed spellings or fields
+
+This phase should happen continuously, not as a final cleanup.
+
+### Phase 4: Apply Mux, Pop, And Session Scalars From AST
+
+Move data-only sections out of Lua bridge calls and into Zig-side AST
+application.
+
+Deliverables:
+
+- mux confirmations from `mux.confirm`
+- mouse selection override from `mux.mouse`
+- split styles from `mux.splits`
+- pop notify/confirm/choose/widgets from `pop`
+- session isolation from `ses.isolation`
+- tests proving config loads without public bridge calls
+
+### Phase 5: Port Keymaps
+
+Make `keys = { ... }` the only keymap source.
+
+Deliverables:
+
+- Zig consumes normalized key objects from returned config
+- callback `when` functions are retained safely
+- passthrough-only bindings can omit action
+- malformed keys/actions fail with path-aware errors
+- hidden `mux.keymap.set` bridge removed
+
+Implementation warning:
+
+- Do not call Lua `raiseError` from unprotected Zig config application paths.
+- Prefer parser functions that return Zig errors and attach config paths.
+- Avoid loop-scoped `defer` stack cleanup in key parsers; pop explicitly per
+  iteration.
+
+### Phase 6: Port Floats
+
+Make `mux.floats` and layout floats consume the same normalized float style and
+attribute model.
+
+Deliverables:
+
+- defaults, adhoc config, and match rules parsed from returned config
+- border, title, padding, size, color, and attributes preserved
+- float title render callbacks supported through unified segments/context
+- hidden float config bridge removed
+
+### Phase 7: Unified Segments
+
+Make prompt and statusbar consume the same segment object.
+
+Files likely involved:
+
+- `src/frontends/terminal/statusbar.zig`
+- prompt rendering paths
+- `src/core/lua_runtime.zig`
+- `src/core/api_bridge.zig`
+
+Deliverables:
+
+- `status.left`, `status.center`, `status.right` use segment arrays
+- `prompt.left`, `prompt.right` use segment arrays
+- builtins exposed through `hexe.segment.*`
+- render callbacks use unified `ctx`
+- update/cache metadata shared where possible
+- unsupported target features rejected clearly
+- old prompt/status builder calls removed
+
+### Phase 8: Unified Layout Parser
+
+Replace separate session layout parsing with `ses.layouts` from `hexe.setup`.
+
+Files likely involved:
+
+- `src/core/session_config.zig`
+- `src/frontends/terminal/state_session.zig`
+- `src/cli/commands/ses_open.zig`
+- `src/cli/commands/ses_freeze.zig`
+- `src/cli/commands/com.zig`
+
+Deliverables:
+
+- one layout schema everywhere
+- tabs use `root`
+- panes and floats use `command`
+- pane-local bindings use `keybindings`
+- `hexe ses open <target>` reads the same config shape
+- project `.hexe.lua` reads the same config shape
+- freeze writes the new shape
+- old layout definition bridge removed
+
+### Phase 9: Remove Old APIs And Parsers
+
+Delete the obsolete public and hidden config mechanisms once each section has
+moved.
+
+Remove:
+
+- old statusbar builder calls
+- old prompt builder calls
+- old session layout builder calls
+- old section-gated builder behavior
+- old returned-table project parser shape
+- old keybinding spellings
+- old command spellings
+- old tab root schema
+- old direct mux input binding parser if superseded
+
+### Phase 10: Tests And Verification
+
+Add focused tests for:
+
+- module search paths
+- minimal config
+- full modular live config
+- public API shape
+- hidden old APIs unavailable publicly
+- keymap validation
+- segment validation
+- float validation
+- layout validation
+- theme style resolution
+- `hexe config check`
+- `hexe config dump`
+- `hexe config paths`
+- `hexe ses open` with new layout schema
+- local `.hexe.lua` project config
+
+Use project commands:
+
+- `make test`
+- `make build`
+- `./zig-out/bin/hexe config check`
+- `./zig-out/bin/hexe config dump`
+
+Do not use raw compiler commands when the Makefile target exists.
+
+## Migration Order
+
+1. Add the normalized AST and validation scaffolding.
+2. Add `hexe.setup`, `hexe.validate`, and constructors.
+3. Add normal Lua module search paths.
+4. Rewrite `./config/init.lua` and `./config/layout.lua`.
+5. Rewrite `.hexe.lua` project config to the same schema.
+6. Move data-only mux config to Zig-side AST application.
+7. Move pop config to Zig-side AST application.
+8. Move session isolation to Zig-side AST application.
+9. Port keymaps.
+10. Port floats.
+11. Port statusbar segments.
+12. Port prompt segments.
+13. Port session layouts.
+14. Delete old public and hidden builder APIs.
+15. Update docs.
+16. Run `make test`, `make build`, `hexe config check`, and `hexe config dump`.
+
+## Acceptance Criteria
+
+- Public Lua API is consistently under `hexe`.
+- `./config` is the live config source and remains usable during migration.
+- `config/init.lua` uses `local hexe = require("hexe")`.
+- External modules load through normal Lua `require`.
+- Prompt and statusbar share one segment schema.
+- Keymaps use one schema everywhere.
+- Layouts use one schema everywhere.
+- Floats use one config shape for defaults, match rules, and layout floats.
+- Removed field spellings are absent from config and docs.
+- Config validation fails loudly with path-aware errors.
+- `hexe config check` passes for repo config.
+- `hexe config dump` shows the normalized config.
+- `make test` passes.
+- `make build` passes.

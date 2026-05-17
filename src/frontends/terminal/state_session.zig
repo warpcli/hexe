@@ -20,6 +20,21 @@ const LayoutDef = core.LayoutDef;
 const LayoutTabDef = core.LayoutTabDef;
 const LayoutSplitDef = core.LayoutSplitDef;
 
+fn killTabPanes(self: anytype, tab: *TabView) void {
+    var it = tab.layout.splits.valueIterator();
+    while (it.next()) |pane_ptr| {
+        self.runtime.killPane(pane_ptr.*.uuid) catch |e| {
+            terminal_main.debugLogUuid(&pane_ptr.*.uuid, "killTabPanes: killPane failed during tab rollback: {s}", .{@errorName(e)});
+        };
+    }
+}
+
+fn rollbackCanonicalTab(self: anytype, tab_uuid: [32]u8) void {
+    self.runtime.sessionRemoveTab(tab_uuid, null) catch |e| {
+        terminal_main.debugLogUuid(&tab_uuid, "rollbackCanonicalTab: sessionRemoveTab failed: {s}", .{@errorName(e)});
+    };
+}
+
 /// Apply a session config to the terminal frontend state.
 /// Creates tabs with the specified split trees, panes with commands/cwds.
 pub fn applySessionConfig(self: anytype, config: SessionConfig, tab_filter: ?[]const u8) !void {
@@ -149,7 +164,10 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     } else {
         // No split defined — create single default pane
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = std.posix.getcwd(&cwd_buf) catch null;
+        const cwd = std.posix.getcwd(&cwd_buf) catch |err| blk: {
+            core.logging.logError("terminal", "createTabFromConfig: failed to get default pane cwd", err);
+            break :blk null;
+        };
         _ = try tab.layout.createFirstPane(cwd);
     }
 
@@ -167,9 +185,16 @@ fn createTabFromConfig(self: anytype, tab_config: TabConfig) !void {
     self.setActiveTabIndex(self.view.tab_views.items.len - 1);
     const created_tab = &self.view.tab_views.items[self.activeTabIndex()];
     const focused = created_tab.layout.getFocusedPane() orelse return error.InvalidLayout;
-    self.syncSessionTabAdded(tab_uuid, self.runtime.tabName(self.activeTabIndex()) orelse "tab", focused.uuid);
+    if (!self.syncSessionTabAddedChecked(tab_uuid, self.runtime.tabName(self.activeTabIndex()) orelse "tab", focused.uuid)) {
+        killTabPanes(self, created_tab);
+        return error.SesUnavailable;
+    }
     if (created_tab.layout.root) |root| {
-        syncConfigSplitTree(self, &created_tab.layout, root, focused.uuid);
+        if (!syncConfigSplitTree(self, &created_tab.layout, root, focused.uuid)) {
+            killTabPanes(self, created_tab);
+            rollbackCanonicalTab(self, tab_uuid);
+            return error.SesUnavailable;
+        }
     }
 }
 
@@ -196,7 +221,10 @@ fn createTabFromLayoutDef(self: anytype, tab_config: LayoutTabDef) !void {
         tab.layout.recalculateLayout();
     } else {
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const cwd = std.posix.getcwd(&cwd_buf) catch null;
+        const cwd = std.posix.getcwd(&cwd_buf) catch |err| blk: {
+            core.logging.logError("terminal", "createTabFromLayout: failed to get default pane cwd", err);
+            break :blk null;
+        };
         _ = try tab.layout.createFirstPane(cwd);
     }
 
@@ -214,9 +242,16 @@ fn createTabFromLayoutDef(self: anytype, tab_config: LayoutTabDef) !void {
     self.setActiveTabIndex(self.view.tab_views.items.len - 1);
     const created_tab = &self.view.tab_views.items[self.activeTabIndex()];
     const focused = created_tab.layout.getFocusedPane() orelse return error.InvalidLayout;
-    self.syncSessionTabAdded(tab_uuid, self.runtime.tabName(self.activeTabIndex()) orelse "tab", focused.uuid);
+    if (!self.syncSessionTabAddedChecked(tab_uuid, self.runtime.tabName(self.activeTabIndex()) orelse "tab", focused.uuid)) {
+        killTabPanes(self, created_tab);
+        return error.SesUnavailable;
+    }
     if (created_tab.layout.root) |root| {
-        syncConfigSplitTree(self, &created_tab.layout, root, focused.uuid);
+        if (!syncConfigSplitTree(self, &created_tab.layout, root, focused.uuid)) {
+            killTabPanes(self, created_tab);
+            rollbackCanonicalTab(self, tab_uuid);
+            return error.SesUnavailable;
+        }
     }
 }
 
@@ -227,17 +262,24 @@ fn leftmostPaneUuid(layout: *Layout, node: *const LayoutNode) ?[32]u8 {
     };
 }
 
-fn syncConfigSplitTree(self: anytype, layout: *Layout, node: *const LayoutNode, focused_pane_uuid: [32]u8) void {
+fn syncConfigSplitTree(self: anytype, layout: *Layout, node: *const LayoutNode, focused_pane_uuid: [32]u8) bool {
     switch (node.*) {
-        .pane => {},
+        .pane => return true,
         .split => |split| {
-            const source_pane_uuid = leftmostPaneUuid(layout, split.first) orelse return;
-            const new_pane_uuid = leftmostPaneUuid(layout, split.second) orelse return;
+            const source_pane_uuid = leftmostPaneUuid(layout, split.first) orelse {
+                core.logging.warn("terminal", "config split sync failed: first split branch has no pane UUID", .{});
+                return false;
+            };
+            const new_pane_uuid = leftmostPaneUuid(layout, split.second) orelse {
+                core.logging.warn("terminal", "config split sync failed: second split branch has no pane UUID", .{});
+                return false;
+            };
 
-            self.syncSessionSplitPane(source_pane_uuid, new_pane_uuid, split.dir, focused_pane_uuid);
-            syncConfigSplitTree(self, layout, split.first, focused_pane_uuid);
-            syncConfigSplitTree(self, layout, split.second, focused_pane_uuid);
+            if (!self.syncSessionSplitPaneChecked(source_pane_uuid, new_pane_uuid, split.dir, focused_pane_uuid)) return false;
+            if (!syncConfigSplitTree(self, layout, split.first, focused_pane_uuid)) return false;
+            if (!syncConfigSplitTree(self, layout, split.second, focused_pane_uuid)) return false;
             self.syncSessionSplitRatio(source_pane_uuid, new_pane_uuid, split.ratio);
+            return true;
         },
     }
 }
@@ -248,7 +290,7 @@ fn buildSplitTree(self: anytype, layout: *Layout, split_config: SplitConfig) !vo
             // Single pane
             var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
             var resolved_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const cwd = resolvePaneCwd(pane_config.cwd, &resolved_cwd_buf) orelse (std.posix.getcwd(&cwd_buf) catch null);
+            const cwd = resolvePaneCwd(pane_config.cwd, &resolved_cwd_buf) orelse fallbackCwd(&cwd_buf, "buildSplitTree pane");
             const first_pane = try layout.createFirstPane(cwd);
 
             // If cmd is set, type it into the shell
@@ -260,7 +302,7 @@ fn buildSplitTree(self: anytype, layout: *Layout, split_config: SplitConfig) !vo
             // N-child split — need to create panes and build binary tree
             if (split_node.children.len == 0) {
                 var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-                const cwd = std.posix.getcwd(&cwd_buf) catch null;
+                const cwd = fallbackCwd(&cwd_buf, "buildSplitTree empty split");
                 _ = try layout.createFirstPane(cwd);
                 return;
             }
@@ -275,7 +317,7 @@ fn buildSplitTree(self: anytype, layout: *Layout, split_config: SplitConfig) !vo
 
             if (panes.items.len == 0) {
                 var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-                const cwd = std.posix.getcwd(&cwd_buf) catch null;
+                const cwd = fallbackCwd(&cwd_buf, "buildSplitTree no leaf panes");
                 _ = try layout.createFirstPane(cwd);
                 return;
             }
@@ -311,7 +353,7 @@ fn buildLayoutTree(self: anytype, layout: *Layout, split_def: LayoutSplitDef) !*
         .pane => |pane_config| {
             var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
             var resolved_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const cwd = resolvePaneCwd(pane_config.cwd, &resolved_cwd_buf) orelse (std.posix.getcwd(&cwd_buf) catch null);
+            const cwd = resolvePaneCwd(pane_config.cwd, &resolved_cwd_buf) orelse fallbackCwd(&cwd_buf, "buildLayoutTree pane");
             const view_id = layout.next_pane_view_id;
             layout.next_pane_view_id +%= 1;
 
@@ -321,11 +363,17 @@ fn buildLayoutTree(self: anytype, layout: *Layout, split_def: LayoutSplitDef) !*
             const runtime = layout.runtime orelse return error.SesUnavailable;
             if (!runtime.isConnected()) return error.SesUnavailable;
             const result = try runtime.createPane(null, cwd, null, null, null, null, null);
+            var pane_registered = false;
+            errdefer if (!pane_registered) runtime.killPane(result.uuid) catch |e| {
+                terminal_main.debugLogUuid(&result.uuid, "collectLeafPanes rollback killPane failed: {s}", .{@errorName(e)});
+            };
             const vt_fd = runtime.getVtFd() orelse return error.SesUnavailable;
             try pane.initWithPod(self.allocator, view_id, 0, 0, layout.width, layout.height, result.pane_id, vt_fd, result.uuid);
+            errdefer pane.deinit();
 
             layout.configurePaneNotifications(pane);
             try layout.splits.put(pane.uuid, pane);
+            pane_registered = true;
             if (pane_config.command) |cmd| {
                 writePaneCommand(self, pane, cmd);
             }
@@ -370,7 +418,7 @@ fn collectLeafPanes(self: anytype, layout: *Layout, config: SplitConfig, panes: 
         .pane => |pane_config| {
             var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
             var resolved_cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const cwd = resolvePaneCwd(pane_config.cwd, &resolved_cwd_buf) orelse (std.posix.getcwd(&cwd_buf) catch null);
+            const cwd = resolvePaneCwd(pane_config.cwd, &resolved_cwd_buf) orelse fallbackCwd(&cwd_buf, "collectLeafPanes pane");
             const view_id = layout.next_pane_view_id;
             layout.next_pane_view_id +%= 1;
 
@@ -380,13 +428,21 @@ fn collectLeafPanes(self: anytype, layout: *Layout, config: SplitConfig, panes: 
             const runtime = layout.runtime orelse return error.SesUnavailable;
             if (!runtime.isConnected()) return error.SesUnavailable;
             const result = try runtime.createPane(null, cwd, null, null, null, null, null);
+            var pane_registered = false;
+            errdefer if (!pane_registered) runtime.killPane(result.uuid) catch |e| {
+                terminal_main.debugLogUuid(&result.uuid, "buildLayoutTree rollback killPane failed: {s}", .{@errorName(e)});
+            };
             const vt_fd = runtime.getVtFd() orelse return error.SesUnavailable;
             try pane.initWithPod(self.allocator, view_id, 0, 0, layout.width, layout.height, result.pane_id, vt_fd, result.uuid);
+            errdefer pane.deinit();
 
             layout.configurePaneNotifications(pane);
-            try layout.splits.put(pane.uuid, pane);
             try panes.append(self.allocator, pane);
+            errdefer _ = panes.pop();
             try cmds.append(self.allocator, pane_config.cmd);
+            errdefer _ = cmds.pop();
+            try layout.splits.put(pane.uuid, pane);
+            pane_registered = true;
         },
         .split => |split_node| {
             for (split_node.children) |child| {
@@ -509,20 +565,37 @@ fn resolvePaneCwd(cwd: ?[]const u8, out_buf: *[std.fs.max_path_bytes]u8) ?[]cons
     if (cwd) |c| {
         if (std.fs.path.isAbsolute(c)) return c;
         var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const base = std.posix.getcwd(&cwd_buf) catch return null;
+        const base = std.posix.getcwd(&cwd_buf) catch |err| {
+            core.logging.logError("terminal", "failed to resolve relative pane cwd base", err);
+            return null;
+        };
         var fba = std.heap.FixedBufferAllocator.init(out_buf);
-        return std.fs.path.resolve(fba.allocator(), &.{ base, c }) catch null;
+        return std.fs.path.resolve(fba.allocator(), &.{ base, c }) catch |err| {
+            core.logging.logError("terminal", "failed to resolve relative pane cwd", err);
+            return null;
+        };
     }
     return null;
+}
+
+fn fallbackCwd(out_buf: *[std.fs.max_path_bytes]u8, comptime context: []const u8) ?[]const u8 {
+    return std.posix.getcwd(out_buf) catch |err| {
+        core.logging.logError("terminal", context ++ ": failed to get fallback cwd", err);
+        return null;
+    };
 }
 
 fn writePaneCommand(self: anytype, pane: *Pane, cmd: []const u8) void {
     _ = self;
     if (cmd.len == 0) return;
 
-    // Write command + newline to the pane (handles both local and pod backends)
-    pane.write(cmd) catch return;
-    pane.write("\n") catch return;
+    pane.write(cmd) catch |err| {
+        terminal_main.debugLogUuid(&pane.uuid, "layout command write failed: {s}", .{@errorName(err)});
+        return;
+    };
+    pane.write("\n") catch |err| {
+        terminal_main.debugLogUuid(&pane.uuid, "layout command newline write failed: {s}", .{@errorName(err)});
+    };
 }
 
 fn runShellCommand(cmd: []const u8) void {
@@ -530,15 +603,23 @@ fn runShellCommand(cmd: []const u8) void {
 
     // Use page_allocator for a null-terminated copy since this is fire-and-forget
     const allocator = std.heap.page_allocator;
-    const cmd_z = allocator.dupeZ(u8, cmd) catch return;
+    const cmd_z = allocator.dupeZ(u8, cmd) catch |err| {
+        core.logging.logError("terminal", "failed to allocate layout shell command", err);
+        return;
+    };
     defer allocator.free(cmd_z);
 
     const argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null };
-    const pid = std.posix.fork() catch return;
+    const pid = std.posix.fork() catch |err| {
+        core.logging.logError("terminal", "failed to fork layout shell command", err);
+        return;
+    };
     if (pid == 0) {
         // Child
         const envp: [*:null]const ?[*:0]const u8 = @ptrCast(std.c.environ);
-        std.posix.execveZ("/bin/sh", @ptrCast(&argv), envp) catch {};
+        std.posix.execveZ("/bin/sh", @ptrCast(&argv), envp) catch {
+            _ = std.posix.write(std.posix.STDERR_FILENO, "layout shell command exec failed\n") catch 0;
+        };
         std.posix.exit(1);
     }
     // Parent: don't wait — fire and forget

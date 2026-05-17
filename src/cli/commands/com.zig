@@ -68,6 +68,23 @@ fn printTreeNode(prefix: []const u8, symbol: []const u8, type_color: []const u8,
     );
 }
 
+fn sessionStateBaseRoot(allocator: std.mem.Allocator, session_state: []const u8) ?[]u8 {
+    if (session_state.len == 0) return null;
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, session_state, .{}) catch return null;
+    defer parsed.deinit();
+    const root = switch (parsed.value) {
+        .object => |obj| obj,
+        else => return null,
+    };
+    const value = root.get("base_root") orelse return null;
+    const str = switch (value) {
+        .string => |s| s,
+        else => return null,
+    };
+    if (str.len == 0) return null;
+    return allocator.dupe(u8, str) catch null;
+}
+
 pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !void {
     const wire = core.wire;
     const posix = std.posix;
@@ -90,13 +107,23 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
 
     // Send status request with full_mode flag
     const flag: [1]u8 = .{if (details) @as(u8, 1) else @as(u8, 0)};
-    wire.writeControl(fd, .status, &flag) catch return;
+    wire.writeControl(fd, .status, &flag) catch |err| {
+        print("Error: failed to request session status: {s}\n", .{@errorName(err)});
+        return;
+    };
 
     // Read response
-    const hdr = wire.readControlHeader(fd) catch return;
+    const hdr = wire.readControlHeader(fd) catch |err| {
+        print("Error: failed to read session status response: {s}\n", .{@errorName(err)});
+        return;
+    };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type != .status or hdr.payload_len < @sizeOf(wire.StatusResp)) {
         print("Invalid response from daemon\n", .{});
+        return;
+    }
+    if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+        print("Status response too large\n", .{});
         return;
     }
 
@@ -106,7 +133,10 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
         return;
     };
     defer allocator.free(payload);
-    wire.readExact(fd, payload) catch return;
+    wire.readExact(fd, payload) catch |err| {
+        print("Error: failed to read session status payload: {s}\n", .{@errorName(err)});
+        return;
+    };
 
     var off: usize = 0;
 
@@ -117,7 +147,9 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
 
     // JSON output mode - output raw structure
     if (json_output) {
-        outputListJson(allocator, payload, off, status_hdr);
+        outputListJson(allocator, payload, off, status_hdr) catch |err| {
+            print("Error: failed to write JSON status: {s}\n", .{@errorName(err)});
+        };
         return;
     }
 
@@ -150,9 +182,15 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
         var mux_line: [256]u8 = undefined;
         const prefix = std.fmt.bufPrint(&mux_line, "{s}\xe2\x94\x80 ", .{branch}) catch "";
         printTreeNode(prefix, " ", ansi.MUX, "mux", name_str, sid8);
+        if (details) {
+            if (sessionStateBaseRoot(allocator, session_state)) |base_root| {
+                defer allocator.free(base_root);
+                print("{s}root: {s}\n", .{ child_prefix, base_root });
+            }
+        }
 
         // Read pane entries and build name map
-        var pane_names = std.StringHashMap([]const u8).init(allocator);
+        var pane_names = std.AutoHashMap([32]u8, []const u8).init(allocator);
         defer pane_names.deinit();
 
         var pi: u16 = 0;
@@ -168,7 +206,10 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
             off += pe.sticky_pwd_len; // skip sticky_pwd
 
             if (pname.len > 0) {
-                pane_names.put(&pe.uuid, pname) catch {};
+                pane_names.put(pe.uuid, pname) catch |err| {
+                    print("Error: failed to build pane name map: {s}\n", .{@errorName(err)});
+                    return;
+                };
             }
         }
 
@@ -202,6 +243,10 @@ pub fn runList(allocator: std.mem.Allocator, details: bool, json_output: bool) !
 
         // Show UUID prominently as primary identifier
         print("  [{s}] {s:<12} ({d} panes)\n", .{ uuid_prefix, name_str, de.pane_count });
+        if (sessionStateBaseRoot(allocator, session_state)) |base_root| {
+            defer allocator.free(base_root);
+            print("    root: {s}\n", .{base_root});
+        }
 
         if (instance) |instance_name| {
             if (instance_name.len > 0) {
@@ -290,9 +335,9 @@ pub fn runSessionLayoutList(allocator: std.mem.Allocator, json_output: bool) !vo
         for (registry.entries, 0..) |entry, i| {
             if (i > 0) try stdout.writeAll(",");
             try stdout.writeAll("\n  {\"name\":\"");
-            writeJsonStr(stdout, entry.name);
+            try writeJsonStr(stdout, entry.name);
             try stdout.writeAll("\",\"path\":\"");
-            writeJsonStr(stdout, entry.path);
+            try writeJsonStr(stdout, entry.path);
             try stdout.writeAll("\"");
 
             if (std.mem.eql(u8, cwd, entry.path)) {
@@ -304,7 +349,7 @@ pub fn runSessionLayoutList(allocator: std.mem.Allocator, json_output: bool) !vo
                     try stdout.writeAll(",\"details\":{");
                     if (owned_cfg.name) |n| {
                         try stdout.writeAll("\"name\":\"");
-                        writeJsonStr(stdout, n);
+                        try writeJsonStr(stdout, n);
                         try stdout.writeAll("\",");
                     }
                     try stdout.writeAll("\"tabs\":");
@@ -378,10 +423,16 @@ pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator:
 
     var pu: wire.PaneUuid = undefined;
     pu.uuid = target_uuid;
-    wire.writeControl(fd, .pane_info, std.mem.asBytes(&pu)) catch return;
+    wire.writeControl(fd, .pane_info, std.mem.asBytes(&pu)) catch |err| {
+        print("Error: failed to request pane info: {s}\n", .{@errorName(err)});
+        return;
+    };
 
     // Read response
-    const hdr = wire.readControlHeader(fd) catch return;
+    const hdr = wire.readControlHeader(fd) catch |err| {
+        print("Error: failed to read pane info response: {s}\n", .{@errorName(err)});
+        return;
+    };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type == .pane_not_found) {
         print("Pane not found\n", .{});
@@ -392,14 +443,23 @@ pub fn runInfo(allocator: std.mem.Allocator, uuid_arg: []const u8, show_creator:
         return;
     }
 
-    const resp = wire.readStruct(wire.PaneInfoResp, fd) catch return;
+    const resp = wire.readStruct(wire.PaneInfoResp, fd) catch |err| {
+        print("Error: failed to read pane info payload: {s}\n", .{@errorName(err)});
+        return;
+    };
 
     // Read trailing data
     const trail_len = hdr.payload_len - @sizeOf(wire.PaneInfoResp);
     var trail_buf: [8192]u8 = undefined;
-    if (trail_len > trail_buf.len) return;
+    if (trail_len > trail_buf.len) {
+        print("Invalid response from daemon (pane_info payload too large)\n", .{});
+        return;
+    }
     if (trail_len > 0) {
-        wire.readExact(fd, trail_buf[0..trail_len]) catch return;
+        wire.readExact(fd, trail_buf[0..trail_len]) catch |err| {
+            print("Error: failed to read pane info trail: {s}\n", .{@errorName(err)});
+            return;
+        };
     }
 
     // Parse trailing data in order: name, fg, cwd, tty, socket, session_name, layout, last_cmd, base_process, sticky_pwd
@@ -568,10 +628,14 @@ pub fn runNotify(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, 
             .timeout_ms = 0,
             .msg_len = @intCast(message.len),
         };
-        wire.writeControlWithTrail(fd, .targeted_notify, std.mem.asBytes(&tn), message) catch {};
+        wire.writeControlWithTrail(fd, .targeted_notify, std.mem.asBytes(&tn), message) catch |err| {
+            print("Error: failed to send targeted notify: {s}\n", .{@errorName(err)});
+        };
     } else {
         const n = wire.Notify{ .msg_len = @intCast(message.len) };
-        wire.writeControlWithTrail(fd, .broadcast_notify, std.mem.asBytes(&n), message) catch {};
+        wire.writeControlWithTrail(fd, .broadcast_notify, std.mem.asBytes(&n), message) catch |err| {
+            print("Error: failed to send broadcast notify: {s}\n", .{@errorName(err)});
+        };
     }
 }
 
@@ -580,7 +644,10 @@ pub fn runNotify(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, 
 /// Connect to SES with CLI handshake byte. Returns fd on success.
 pub fn connectSesCliChannel(allocator: std.mem.Allocator) ?std.posix.fd_t {
     const wire = core.wire;
-    const socket_path = ipc.getSesSocketPath(allocator) catch return null;
+    const socket_path = ipc.getSesSocketPath(allocator) catch |err| {
+        print("Error: failed to resolve ses socket path: {s}\n", .{@errorName(err)});
+        return null;
+    };
     defer allocator.free(socket_path);
     var client = ipc.Client.connect(socket_path) catch |err| {
         if (err == error.ConnectionRefused or err == error.FileNotFound) {
@@ -593,10 +660,15 @@ pub fn connectSesCliChannel(allocator: std.mem.Allocator) ?std.posix.fd_t {
     // Guard against stale/wrong listeners on ses.sock (e.g. inherited fd bugs).
     // Without read/write timeouts, CLI commands can hang indefinitely.
     const timeout = std.posix.timeval{ .sec = 3, .usec = 0 };
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
-    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch |err| {
+        print("Warning: failed to set ses CLI receive timeout: {s}\n", .{@errorName(err)});
+    };
+    std.posix.setsockopt(fd, std.posix.SOL.SOCKET, std.posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch |err| {
+        print("Warning: failed to set ses CLI send timeout: {s}\n", .{@errorName(err)});
+    };
 
-    wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch {
+    wire.sendCliHandshake(fd) catch |err| {
+        print("Error: failed to handshake with ses daemon: {s}\n", .{@errorName(err)});
         client.close();
         return null;
     };
@@ -620,18 +692,33 @@ fn resolveRelatedPane(allocator: std.mem.Allocator, want_creator: bool) ?[32]u8 
 
     var pu: wire.PaneUuid = undefined;
     pu.uuid = parsed_current;
-    wire.writeControl(fd, .pane_info, std.mem.asBytes(&pu)) catch return null;
+    wire.writeControl(fd, .pane_info, std.mem.asBytes(&pu)) catch |err| {
+        print("Error: failed to request current pane info: {s}\n", .{@errorName(err)});
+        return null;
+    };
 
-    const hdr = wire.readControlHeader(fd) catch return null;
+    const hdr = wire.readControlHeader(fd) catch |err| {
+        print("Error: failed to read current pane info response: {s}\n", .{@errorName(err)});
+        return null;
+    };
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type == .pane_not_found) {
         print("Error: pane not found\n", .{});
         return null;
     }
-    if (msg_type != .pane_info) return null;
-    if (hdr.payload_len < @sizeOf(wire.PaneInfoResp)) return null;
+    if (msg_type != .pane_info) {
+        print("Error: invalid current pane info response\n", .{});
+        return null;
+    }
+    if (hdr.payload_len < @sizeOf(wire.PaneInfoResp)) {
+        print("Error: malformed current pane info response\n", .{});
+        return null;
+    }
 
-    const resp = wire.readStruct(wire.PaneInfoResp, fd) catch return null;
+    const resp = wire.readStruct(wire.PaneInfoResp, fd) catch |err| {
+        print("Error: failed to read current pane info payload: {s}\n", .{@errorName(err)});
+        return null;
+    };
     if (want_creator) {
         if (resp.has_created_from != 0) return resp.created_from;
         print("Error: current pane has no creator\n", .{});
@@ -649,26 +736,32 @@ fn appendSessionLayoutPanes(
     allocator: std.mem.Allocator,
     node: ?*const core.session_model.SessionLayoutNode,
     out: *std.ArrayList([32]u8),
-) void {
+) !void {
     const root = node orelse return;
     switch (root.*) {
-        .pane => |uuid| out.append(allocator, uuid) catch {},
+        .pane => |uuid| try out.append(allocator, uuid),
         .split => |split| {
-            appendSessionLayoutPanes(allocator, split.first, out);
-            appendSessionLayoutPanes(allocator, split.second, out);
+            try appendSessionLayoutPanes(allocator, split.first, out);
+            try appendSessionLayoutPanes(allocator, split.second, out);
         },
     }
 }
 
-pub fn printSessionTree(allocator: std.mem.Allocator, json: []const u8, indent: []const u8, pane_name_map: ?*const std.StringHashMap([]const u8)) void {
-    var snapshot = core.session_model.SessionSnapshot.fromJson(allocator, json) catch return;
+pub fn printSessionTree(allocator: std.mem.Allocator, json: []const u8, indent: []const u8, pane_name_map: ?*const std.AutoHashMap([32]u8, []const u8)) void {
+    var snapshot = core.session_model.SessionSnapshot.fromJson(allocator, json) catch |err| {
+        print("Error: failed to parse session tree snapshot: {s}\n", .{@errorName(err)});
+        return;
+    };
     defer snapshot.deinit();
 
     var global_floats: std.ArrayList(usize) = .empty;
     defer global_floats.deinit(allocator);
     for (snapshot.floats.items, 0..) |float_state, fi| {
         if (float_state.parent_tab == null) {
-            global_floats.append(allocator, fi) catch {};
+            global_floats.append(allocator, fi) catch |err| {
+                print("Error: failed to collect global floats: {s}\n", .{@errorName(err)});
+                return;
+            };
         }
     }
 
@@ -687,7 +780,10 @@ pub fn printSessionTree(allocator: std.mem.Allocator, json: []const u8, indent: 
 
         var split_uuids: std.ArrayList([32]u8) = .empty;
         defer split_uuids.deinit(allocator);
-        appendSessionLayoutPanes(allocator, tab.root, &split_uuids);
+        appendSessionLayoutPanes(allocator, tab.root, &split_uuids) catch |err| {
+            print("Error: failed to collect panes for tab '{s}': {s}\n", .{ tab.name, @errorName(err) });
+            return;
+        };
 
         var children: std.ArrayList(struct {
             kind: enum { split, float },
@@ -696,13 +792,19 @@ pub fn printSessionTree(allocator: std.mem.Allocator, json: []const u8, indent: 
         defer children.deinit(allocator);
 
         for (split_uuids.items) |uuid| {
-            children.append(allocator, .{ .kind = .split, .uuid = uuid }) catch {};
+            children.append(allocator, .{ .kind = .split, .uuid = uuid }) catch |err| {
+                print("Error: failed to render tab '{s}' split list: {s}\n", .{ tab.name, @errorName(err) });
+                return;
+            };
         }
 
         for (snapshot.floats.items) |float_state| {
             if (float_state.parent_tab) |parent_tab| {
                 if (parent_tab == ti) {
-                    children.append(allocator, .{ .kind = .float, .uuid = float_state.pane_uuid }) catch {};
+                    children.append(allocator, .{ .kind = .float, .uuid = float_state.pane_uuid }) catch |err| {
+                        print("Error: failed to render tab '{s}' float list: {s}\n", .{ tab.name, @errorName(err) });
+                        return;
+                    };
                 }
             }
         }
@@ -728,7 +830,7 @@ pub fn printSessionTree(allocator: std.mem.Allocator, json: []const u8, indent: 
                     else
                         " ",
                 };
-                const pname = if (pane_name_map) |m| (m.get(child.uuid[0..]) orelse "-") else "-";
+                const pname = if (pane_name_map) |m| (m.get(child.uuid) orelse "-") else "-";
 
                 switch (child.kind) {
                     .split => printTreeNode(lp, sym, ansi.SPLIT, "split", pname, child.uuid[0..8]),
@@ -746,7 +848,7 @@ pub fn printSessionTree(allocator: std.mem.Allocator, json: []const u8, indent: 
             if (std.mem.eql(u8, &focused_uuid, &float_state.pane_uuid)) ">" else " "
         else
             " ";
-        const pname = if (pane_name_map) |m| (m.get(float_state.pane_uuid[0..]) orelse "-") else "-";
+        const pname = if (pane_name_map) |m| (m.get(float_state.pane_uuid) orelse "-") else "-";
 
         const is_last_top = (top_index + 1 == top_count);
         const branch = if (is_last_top) "└" else "├";
@@ -827,7 +929,9 @@ pub fn runSend(allocator: std.mem.Allocator, uuid: []const u8, creator: bool, la
         .uuid = target_uuid,
         .data_len = @intCast(data_len),
     };
-    wire.writeControlWithTrail(fd, .send_keys, std.mem.asBytes(&sk), data_buf[0..data_len]) catch {};
+    wire.writeControlWithTrail(fd, .send_keys, std.mem.asBytes(&sk), data_buf[0..data_len]) catch |err| {
+        print("Error: failed to send keys: {s}\n", .{@errorName(err)});
+    };
 }
 
 /// Ask the current mux to move focus in the given direction.
@@ -877,7 +981,7 @@ pub fn runFocusMove(allocator: std.mem.Allocator, dir: []const u8) !void {
     };
 
     // Send versioned CLI handshake.
-    wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch {
+    wire.sendCliHandshake(fd) catch {
         print("Error: handshake failed\n", .{});
         return;
     };
@@ -920,7 +1024,7 @@ pub fn runExitIntent(allocator: std.mem.Allocator) !void {
     const fd = client.fd;
 
     // Send versioned CLI handshake.
-    wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI) catch {
+    wire.sendCliHandshake(fd) catch {
         std.process.exit(0);
     };
 
@@ -975,12 +1079,18 @@ pub fn runShellEvent(
 
     const wire = core.wire;
 
-    var client = ipc.Client.connect(pod_socket) catch return;
+    var client = ipc.Client.connect(pod_socket) catch |err| {
+        core.logging.logError("shp", "failed to connect shell event socket", err);
+        return;
+    };
     defer client.close();
     const fd = client.fd;
 
     // Send versioned SHP handshake.
-    wire.sendHandshake(fd, wire.POD_HANDSHAKE_SHP_CTL) catch return;
+    wire.sendHandshake(fd, wire.POD_HANDSHAKE_SHP_CTL) catch |err| {
+        core.logging.logError("shp", "failed to send shell event handshake", err);
+        return;
+    };
 
     // Build ShpShellEvent struct.
     const phase_byte: u8 = if (std.mem.eql(u8, phase, "start")) 1 else 0;
@@ -996,30 +1106,32 @@ pub fn runShellEvent(
     };
 
     // Send as binary control message with trailing cmd + cwd.
-    wire.writeControlMsg(fd, .shp_shell_event, std.mem.asBytes(&evt), &.{ cmd, cwd }) catch return;
+    wire.writeControlMsg(fd, .shp_shell_event, std.mem.asBytes(&evt), &.{ cmd, cwd }) catch |err| {
+        core.logging.logError("shp", "failed to send shell event", err);
+    };
 }
 
-fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: usize, status_hdr: core.wire.StatusResp) void {
+fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: usize, status_hdr: core.wire.StatusResp) !void {
     const wire = core.wire;
     const stdout = std.fs.File.stdout();
     var off = start_off;
     var buf: [256]u8 = undefined;
 
-    stdout.writeAll("{") catch return;
+    try stdout.writeAll("{");
 
     // Instance
     const inst = std.posix.getenv("HEXE_INSTANCE");
-    stdout.writeAll("\"instance\":\"") catch return;
+    try stdout.writeAll("\"instance\":\"");
     if (inst) |name| {
-        if (name.len > 0) writeJsonStr(stdout, name) else stdout.writeAll("default") catch return;
-    } else stdout.writeAll("default") catch return;
-    stdout.writeAll("\",") catch return;
+        if (name.len > 0) try writeJsonStr(stdout, name) else try stdout.writeAll("default");
+    } else try stdout.writeAll("default");
+    try stdout.writeAll("\",");
 
     // Connected muxes
-    stdout.writeAll("\"connected\":[") catch return;
+    try stdout.writeAll("\"connected\":[");
     var ci: u16 = 0;
     while (ci < status_hdr.client_count) : (ci += 1) {
-        if (ci > 0) stdout.writeAll(",") catch return;
+        if (ci > 0) try stdout.writeAll(",");
         if (off + @sizeOf(wire.StatusClient) > payload.len) break;
         const sc = std.mem.bytesToValue(wire.StatusClient, payload[off..][0..@sizeOf(wire.StatusClient)]);
         off += @sizeOf(wire.StatusClient);
@@ -1032,15 +1144,21 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
         const session_state = if (sc.session_state_len > 0) payload[off .. off + sc.session_state_len] else "{}";
         off += sc.session_state_len;
 
-        stdout.writeAll("{\"name\":\"") catch return;
-        writeJsonStr(stdout, name_str);
-        stdout.writeAll("\",\"session_id\":\"") catch return;
-        if (sc.has_session_id != 0) stdout.writeAll(sc.session_id[0..]) catch return;
-        stdout.writeAll("\",\"pane_count\":") catch return;
+        try stdout.writeAll("{\"name\":\"");
+        try writeJsonStr(stdout, name_str);
+        try stdout.writeAll("\",\"session_id\":\"");
+        if (sc.has_session_id != 0) try stdout.writeAll(sc.session_id[0..]);
+        try stdout.writeAll("\",\"pane_count\":");
         const pane_str = std.fmt.bufPrint(&buf, "{d}", .{sc.pane_count}) catch continue;
-        stdout.writeAll(pane_str) catch return;
-        stdout.writeAll(",\"state\":") catch return;
-        stdout.writeAll(session_state) catch return;
+        try stdout.writeAll(pane_str);
+        if (sessionStateBaseRoot(allocator, session_state)) |base_root| {
+            defer allocator.free(base_root);
+            try stdout.writeAll(",\"base_root\":\"");
+            try writeJsonStr(stdout, base_root);
+            try stdout.writeAll("\"");
+        }
+        try stdout.writeAll(",\"state\":");
+        try stdout.writeAll(session_state);
 
         // Skip pane entries
         var pi: u16 = 0;
@@ -1051,15 +1169,15 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
             off += pe.name_len;
             off += pe.sticky_pwd_len;
         }
-        stdout.writeAll("}") catch return;
+        try stdout.writeAll("}");
     }
-    stdout.writeAll("],") catch return;
+    try stdout.writeAll("],");
 
     // Detached sessions
-    stdout.writeAll("\"detached\":[") catch return;
+    try stdout.writeAll("\"detached\":[");
     var di: u16 = 0;
     while (di < status_hdr.detached_count) : (di += 1) {
-        if (di > 0) stdout.writeAll(",") catch return;
+        if (di > 0) try stdout.writeAll(",");
         if (off + @sizeOf(wire.DetachedSessionEntry) > payload.len) break;
         const de = std.mem.bytesToValue(wire.DetachedSessionEntry, payload[off..][0..@sizeOf(wire.DetachedSessionEntry)]);
         off += @sizeOf(wire.DetachedSessionEntry);
@@ -1072,24 +1190,30 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
         const session_state = if (de.session_state_len > 0) payload[off .. off + de.session_state_len] else "{}";
         off += de.session_state_len;
 
-        stdout.writeAll("{\"name\":\"") catch return;
-        writeJsonStr(stdout, name_str);
-        stdout.writeAll("\",\"session_id\":\"") catch return;
-        stdout.writeAll(de.session_id[0..]) catch return;
-        stdout.writeAll("\",\"pane_count\":") catch return;
+        try stdout.writeAll("{\"name\":\"");
+        try writeJsonStr(stdout, name_str);
+        try stdout.writeAll("\",\"session_id\":\"");
+        try stdout.writeAll(de.session_id[0..]);
+        try stdout.writeAll("\",\"pane_count\":");
         const pane_str = std.fmt.bufPrint(&buf, "{d}", .{de.pane_count}) catch continue;
-        stdout.writeAll(pane_str) catch return;
-        stdout.writeAll(",\"state\":") catch return;
-        stdout.writeAll(session_state) catch return;
-        stdout.writeAll("}") catch return;
+        try stdout.writeAll(pane_str);
+        if (sessionStateBaseRoot(allocator, session_state)) |base_root| {
+            defer allocator.free(base_root);
+            try stdout.writeAll(",\"base_root\":\"");
+            try writeJsonStr(stdout, base_root);
+            try stdout.writeAll("\"");
+        }
+        try stdout.writeAll(",\"state\":");
+        try stdout.writeAll(session_state);
+        try stdout.writeAll("}");
     }
-    stdout.writeAll("],") catch return;
+    try stdout.writeAll("],");
 
     // Orphaned panes
-    stdout.writeAll("\"orphaned\":[") catch return;
+    try stdout.writeAll("\"orphaned\":[");
     var oi: u16 = 0;
     while (oi < status_hdr.orphaned_count) : (oi += 1) {
-        if (oi > 0) stdout.writeAll(",") catch return;
+        if (oi > 0) try stdout.writeAll(",");
         if (off + @sizeOf(wire.StatusPaneEntry) > payload.len) break;
         const pe = std.mem.bytesToValue(wire.StatusPaneEntry, payload[off..][0..@sizeOf(wire.StatusPaneEntry)]);
         off += @sizeOf(wire.StatusPaneEntry);
@@ -1099,22 +1223,22 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
         off += pe.name_len;
         off += pe.sticky_pwd_len;
 
-        stdout.writeAll("{\"uuid\":\"") catch return;
-        stdout.writeAll(pe.uuid[0..]) catch return;
-        stdout.writeAll("\",\"name\":\"") catch return;
-        writeJsonStr(stdout, pname);
-        stdout.writeAll("\",\"pid\":") catch return;
+        try stdout.writeAll("{\"uuid\":\"");
+        try stdout.writeAll(pe.uuid[0..]);
+        try stdout.writeAll("\",\"name\":\"");
+        try writeJsonStr(stdout, pname);
+        try stdout.writeAll("\",\"pid\":");
         const pid_str = std.fmt.bufPrint(&buf, "{d}", .{pe.pid}) catch continue;
-        stdout.writeAll(pid_str) catch return;
-        stdout.writeAll("}") catch return;
+        try stdout.writeAll(pid_str);
+        try stdout.writeAll("}");
     }
-    stdout.writeAll("],") catch return;
+    try stdout.writeAll("],");
 
     // Sticky panes
-    stdout.writeAll("\"sticky\":[") catch return;
+    try stdout.writeAll("\"sticky\":[");
     var si: u16 = 0;
     while (si < status_hdr.sticky_count) : (si += 1) {
-        if (si > 0) stdout.writeAll(",") catch return;
+        if (si > 0) try stdout.writeAll(",");
         if (off + @sizeOf(wire.StickyPaneEntry) > payload.len) break;
         const se = std.mem.bytesToValue(wire.StickyPaneEntry, payload[off..][0..@sizeOf(wire.StickyPaneEntry)]);
         off += @sizeOf(wire.StickyPaneEntry);
@@ -1124,39 +1248,38 @@ fn outputListJson(allocator: std.mem.Allocator, payload: []const u8, start_off: 
         const pwd = if (se.pwd_len > 0) payload[off .. off + se.pwd_len] else "";
         off += se.pwd_len;
 
-        stdout.writeAll("{\"uuid\":\"") catch return;
-        stdout.writeAll(se.uuid[0..]) catch return;
-        stdout.writeAll("\",\"pid\":") catch return;
+        try stdout.writeAll("{\"uuid\":\"");
+        try stdout.writeAll(se.uuid[0..]);
+        try stdout.writeAll("\",\"pid\":");
         const pid_str = std.fmt.bufPrint(&buf, "{d}", .{se.pid}) catch continue;
-        stdout.writeAll(pid_str) catch return;
-        stdout.writeAll(",\"pwd\":\"") catch return;
-        writeJsonStr(stdout, pwd);
-        stdout.writeAll("\"") catch return;
+        try stdout.writeAll(pid_str);
+        try stdout.writeAll(",\"pwd\":\"");
+        try writeJsonStr(stdout, pwd);
+        try stdout.writeAll("\"");
         if (se.key != 0) {
-            stdout.writeAll(",\"key\":\"") catch return;
+            try stdout.writeAll(",\"key\":\"");
             const key_buf = [1]u8{se.key};
-            stdout.writeAll(&key_buf) catch return;
-            stdout.writeAll("\"") catch return;
+            try stdout.writeAll(&key_buf);
+            try stdout.writeAll("\"");
         }
-        stdout.writeAll("}") catch return;
+        try stdout.writeAll("}");
     }
-    stdout.writeAll("]") catch return;
+    try stdout.writeAll("]");
 
-    stdout.writeAll("}\n") catch return;
-    _ = allocator;
+    try stdout.writeAll("}\n");
 }
 
-fn writeJsonStr(stdout: std.fs.File, s: []const u8) void {
+fn writeJsonStr(stdout: std.fs.File, s: []const u8) !void {
     for (s) |c| {
         switch (c) {
-            '"' => stdout.writeAll("\\\"") catch return,
-            '\\' => stdout.writeAll("\\\\") catch return,
-            '\n' => stdout.writeAll("\\n") catch return,
-            '\r' => stdout.writeAll("\\r") catch return,
-            '\t' => stdout.writeAll("\\t") catch return,
+            '"' => try stdout.writeAll("\\\""),
+            '\\' => try stdout.writeAll("\\\\"),
+            '\n' => try stdout.writeAll("\\n"),
+            '\r' => try stdout.writeAll("\\r"),
+            '\t' => try stdout.writeAll("\\t"),
             else => {
                 const buf = [1]u8{c};
-                stdout.writeAll(&buf) catch return;
+                try stdout.writeAll(&buf);
             },
         }
     }
@@ -1294,12 +1417,19 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
     const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
     if (msg_type == .@"error") {
         if (hdr.payload_len > 0) {
+            if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+                print("Error response too large\n", .{});
+                return;
+            }
             const err_buf = allocator.alloc(u8, hdr.payload_len) catch {
                 print("Error: server returned error\n", .{});
                 return;
             };
             defer allocator.free(err_buf);
-            wire.readExact(fd, err_buf) catch {};
+            wire.readExact(fd, err_buf) catch |err| {
+                print("Error: failed to read server error response: {s}\n", .{@errorName(err)});
+                return;
+            };
             // Parse error struct to skip msg_len prefix.
             if (err_buf.len >= @sizeOf(wire.Error)) {
                 const err_hdr = std.mem.bytesToValue(wire.Error, err_buf[0..@sizeOf(wire.Error)]);
@@ -1316,6 +1446,10 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
     }
     if (msg_type != .get_layout or hdr.payload_len == 0) {
         print("Error: unexpected response\n", .{});
+        return;
+    }
+    if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+        print("Error: layout response too large\n", .{});
         return;
     }
 
@@ -1404,7 +1538,10 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
                             if (split_obj.get("pwd_dir")) |pwd_val| {
                                 switch (pwd_val) {
                                     .string => |s| {
-                                        cwd_map.put(id, s) catch {};
+                                        cwd_map.put(id, s) catch |err| {
+                                            print("Error: failed to build layout cwd map: {s}\n", .{@errorName(err)});
+                                            return;
+                                        };
                                     },
                                     else => {},
                                 }
@@ -1431,7 +1568,10 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
         print("Error: failed to build layout\n", .{});
         return;
     };
-    writer.writeAll("\n}\n") catch {};
+    writer.writeAll("\n}\n") catch {
+        print("Error: failed to build layout\n", .{});
+        return;
+    };
 
     // Write to file.
     const layout_dir = ipc.getLayoutDir(allocator) catch {
@@ -1452,7 +1592,7 @@ pub fn runLayoutSave(allocator: std.mem.Allocator, name: []const u8) !void {
     };
     defer allocator.free(file_path);
 
-    const file = std.fs.cwd().createFile(file_path, .{}) catch {
+    const file = std.fs.cwd().createFile(file_path, .{ .mode = 0o600 }) catch {
         print("Error: cannot create file: {s}\n", .{file_path});
         return;
     };

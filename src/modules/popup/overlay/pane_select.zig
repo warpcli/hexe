@@ -1,5 +1,7 @@
 const std = @import("std");
 
+const log = std.log.scoped(.pane_select);
+
 /// Pane label for select mode
 pub const PaneLabel = struct {
     uuid: [32]u8,
@@ -52,7 +54,9 @@ pub const PaneSelectState = struct {
             .y = y,
             .width = w,
             .height = h,
-        }) catch {};
+        }) catch |err| {
+            log.warn("failed to add pane-select label '{c}': {}", .{ label, err });
+        };
     }
 
     /// Find pane UUID by label character

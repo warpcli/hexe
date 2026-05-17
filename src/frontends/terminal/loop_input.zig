@@ -2,10 +2,12 @@ const std = @import("std");
 const core = @import("core");
 const ghostty = @import("ghostty-vt");
 const vaxis = @import("vaxis");
+const log = std.log.scoped(.terminal_input);
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
 const input = @import("input.zig");
+const terminal_main = @import("main.zig");
 
 const actions = @import("loop_actions.zig");
 const loop_ipc = @import("loop_ipc.zig");
@@ -26,7 +28,10 @@ const ParsedEventHead = struct {
 };
 
 fn parseEventHead(state: *State, bytes: []const u8) ?ParsedEventHead {
-    const parsed = vaxis_parser.parse(bytes, state.allocator) catch return null;
+    const parsed = vaxis_parser.parse(bytes, state.allocator) catch |err| {
+        log.debug("failed to parse input event head: {}", .{err});
+        return null;
+    };
     if (parsed.n == 0) return null;
     return .{ .n = parsed.n, .event = parsed.event };
 }
@@ -196,7 +201,12 @@ fn sendEncodedPasteToPane(state: *State, pane: *Pane, txt: []const u8) void {
     const opts = ghostty.input.PasteOptions.fromTerminal(&pane.vt.terminal);
     const vecs = ghostty.input.encodePaste(txt, opts) catch |err| switch (err) {
         error.MutableRequired => {
-            const copy = state.allocator.dupe(u8, txt) catch return;
+            const copy = state.allocator.dupe(u8, txt) catch |alloc_err| {
+                core.logging.logError("terminal", "failed to allocate mutable paste buffer", alloc_err);
+                state.notifications.show("Paste failed");
+                state.needs_render = true;
+                return;
+            };
             defer state.allocator.free(copy);
             const parts = ghostty.input.encodePaste(copy, opts);
             for (parts) |part| {
@@ -222,7 +232,14 @@ fn beginBracketedPaste(state: *State) void {
 fn appendBracketedPasteBytes(state: *State, bytes: []const u8) void {
     if (!state.in_bracketed_paste) return;
     if (bytes.len == 0) return;
-    state.bracketed_paste_buf.appendSlice(state.allocator, bytes) catch {};
+    state.bracketed_paste_buf.appendSlice(state.allocator, bytes) catch |err| {
+        core.logging.logError("terminal", "failed to buffer bracketed paste bytes", err);
+        state.bracketed_paste_buf.clearRetainingCapacity();
+        state.bracketed_paste_target_uuid = null;
+        state.in_bracketed_paste = false;
+        state.notifications.show("Paste aborted: out of memory");
+        state.needs_render = true;
+    };
 }
 
 fn finishBracketedPaste(state: *State) void {
@@ -300,7 +317,10 @@ fn runLayoutSaveWithScope(state: *State, scope: []const u8) void {
 }
 
 fn runLayoutOpenDetached(state: *State) void {
-    var env_map_opt = std.process.getEnvMap(state.allocator) catch null;
+    var env_map_opt = std.process.getEnvMap(state.allocator) catch |err| blk: {
+        core.logging.logError("terminal", "layout open helper failed to copy environment", err);
+        break :blk null;
+    };
     defer if (env_map_opt) |*m| m.deinit();
 
     if (env_map_opt) |*env_map| {
@@ -319,7 +339,9 @@ fn runLayoutOpenDetached(state: *State) void {
         state.notifications.showFor("layout open spawn failed", 1400);
         return;
     };
-    _ = child.wait() catch {};
+    _ = child.wait() catch |err| {
+        core.logging.logError("terminal", "layout open helper wait failed", err);
+    };
     actions.performDetach(state);
 }
 
@@ -332,7 +354,11 @@ fn replaceFromLocalLayout(state: *State) void {
 
     if (cfg.name) |desired_name| {
         if (state.runtime.setSessionName(desired_name)) {
-            if (state.runtime.syncSessionIdentity() catch null) |change| {
+            const identity_change = state.runtime.syncSessionIdentity() catch |err| blk: {
+                core.logging.logError("terminal", "replaceFromLocalLayout: failed to sync session identity", err);
+                break :blk null;
+            };
+            if (identity_change) |change| {
                 var owned_change = change;
                 defer owned_change.deinit(state.allocator);
             }
@@ -363,9 +389,10 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                         if (state.runtime.orphanedPaneInfo(selected)) |orphan| {
                             state.runtime.setSelectedOrphanedPaneUuid(orphan.uuid);
                             // Now show confirm dialog
-                            state.pending_action = .adopt_confirm;
                             state.popups.clearResults();
-                            state.popups.showConfirm("Destroy current pane?", .{}) catch {};
+                            if (!state.showConfirmOrNotify(.adopt_confirm, "Destroy current pane?")) {
+                                state.runtime.setSelectedOrphanedPaneUuid(null);
+                            }
                         } else {
                             state.pending_action = null;
                         }
@@ -429,19 +456,26 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                                     if (layout.splitCount() > 1) {
                                         const closing_pane = layout.getFocusedPane().?;
                                         const closing_uuid = closing_pane.uuid;
-                                        state.clearTransientPaneState(closing_pane);
-                                        _ = layout.closePane(closing_uuid);
-                                        const next_focus_uuid = if (layout.getFocusedPane()) |pane| pane.uuid else null;
-                                        state.syncSessionCloseSplitPane(closing_uuid, next_focus_uuid);
-                                        if (layout.getFocusedPane()) |new_pane| {
-                                            state.syncPaneFocus(new_pane, null);
+                                        var killed = true;
+                                        state.runtime.killPane(closing_uuid) catch |err| {
+                                            core.logging.logError("terminal", "killPane failed before split close", err);
+                                            state.notifications.show("Close pane failed: session rejected pane kill");
+                                            state.needs_render = true;
+                                            killed = false;
+                                        };
+                                        if (killed) {
+                                            state.clearTransientPaneState(closing_pane);
+                                            _ = layout.closePaneLocal(closing_uuid);
+                                            if (layout.getFocusedPane()) |new_pane| {
+                                                state.syncPaneFocus(new_pane, null);
+                                            }
                                         }
                                     }
                                 },
                                 else => {},
                             }
                         } else {
-                            // User cancelled - if exit was from shell death, defer respawn
+                            // User cancelled a shell-death exit; keep the session alive.
                             if (action == .exit and state.exit_from_shell_death) {
                                 state.needs_respawn = true;
                             }
@@ -494,7 +528,12 @@ fn appendFloatRenameText(state: *State, text: []const u8) void {
     if (state.float_rename_buf.items.len >= max_len) return;
     const remaining = max_len - state.float_rename_buf.items.len;
     const n = @min(text.len, remaining);
-    state.float_rename_buf.appendSlice(state.allocator, text[0..n]) catch return;
+    state.float_rename_buf.appendSlice(state.allocator, text[0..n]) catch |err| {
+        core.logging.logError("terminal", "failed to append float rename text", err);
+        state.notifications.show("Rename failed");
+        state.needs_render = true;
+        return;
+    };
     state.needs_render = true;
 }
 
@@ -1058,7 +1097,10 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
     const OSC_C1: u8 = 0x9d;
     const ST_C1: u8 = 0x9c;
 
-    const out = state.allocator.alloc(u8, inp.len) catch return .{ .bytes = inp };
+    const out = state.allocator.alloc(u8, inp.len) catch |err| {
+        core.logging.logError("terminal", "failed to allocate OSC reply filter buffer", err);
+        return .{ .bytes = inp };
+    };
     var out_i: usize = 0;
     var consumed_any = false;
 
@@ -1177,7 +1219,8 @@ fn consumeOscReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
         return .{ .bytes = inp };
     }
 
-    const trimmed = state.allocator.alloc(u8, out_i) catch {
+    const trimmed = state.allocator.alloc(u8, out_i) catch |err| {
+        core.logging.logError("terminal", "failed to allocate trimmed OSC reply filter buffer", err);
         state.allocator.free(out);
         return .{ .bytes = inp };
     };
@@ -1194,7 +1237,10 @@ fn consumeCsiReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
     const ESC: u8 = 0x1b;
     const CSI_C1: u8 = 0x9b;
 
-    const out = state.allocator.alloc(u8, inp.len) catch return .{ .bytes = inp };
+    const out = state.allocator.alloc(u8, inp.len) catch |err| {
+        core.logging.logError("terminal", "failed to allocate CSI reply filter buffer", err);
+        return .{ .bytes = inp };
+    };
     var out_i: usize = 0;
     var consumed_any = false;
 
@@ -1208,7 +1254,9 @@ fn consumeCsiReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
                     if (state.paneVisibleOnTab(fp, state.activeTabIndex()) and can_interact) {
                         const n = parseLikelyTerminalCsiReplyLen(inp, i);
                         if (n > 0) {
-                            fp.write(inp[i .. i + n]) catch {};
+                            fp.write(inp[i .. i + n]) catch |err| {
+                                terminal_main.debugLogUuid(&fp.uuid, "CSI reply forwarding write failed: {s}", .{@errorName(err)});
+                            };
                             consumed_any = true;
                             i += n;
                             continue;
@@ -1317,7 +1365,8 @@ fn consumeCsiReplyFromTerminal(state: *State, inp: []const u8) OscConsumeResult 
         return .{ .bytes = inp };
     }
 
-    const trimmed = state.allocator.alloc(u8, out_i) catch {
+    const trimmed = state.allocator.alloc(u8, out_i) catch |err| {
+        core.logging.logError("terminal", "failed to allocate trimmed CSI reply filter buffer", err);
         state.allocator.free(out);
         return .{ .bytes = inp };
     };
@@ -1359,7 +1408,10 @@ fn consumeCprRepliesFromTerminal(state: *State, inp: []const u8) OscConsumeResul
     if (!state.terminal_query_in_flight) return .{ .bytes = inp };
     if (inp.len == 0) return .{ .bytes = inp };
 
-    const out = state.allocator.alloc(u8, inp.len) catch return .{ .bytes = inp };
+    const out = state.allocator.alloc(u8, inp.len) catch |err| {
+        core.logging.logError("terminal", "failed to allocate CPR reply filter buffer", err);
+        return .{ .bytes = inp };
+    };
     var out_i: usize = 0;
     var consumed_any = false;
 
@@ -1385,7 +1437,8 @@ fn consumeCprRepliesFromTerminal(state: *State, inp: []const u8) OscConsumeResul
         return .{ .bytes = &[_]u8{} };
     }
 
-    const trimmed = state.allocator.alloc(u8, out_i) catch {
+    const trimmed = state.allocator.alloc(u8, out_i) catch |err| {
+        core.logging.logError("terminal", "failed to allocate trimmed CPR reply filter buffer", err);
         state.allocator.free(out);
         return .{ .bytes = inp };
     };

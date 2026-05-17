@@ -2,6 +2,7 @@ const std = @import("std");
 const core = @import("core");
 const pop = @import("pop");
 const vaxis = @import("vaxis");
+const log = std.log.scoped(.terminal_focus);
 
 const State = @import("state.zig").State;
 const Pane = @import("pane.zig").Pane;
@@ -94,7 +95,10 @@ const PaneSelectChoice = struct {
 
 fn paneSelectChoiceFromKey(key: vaxis.Key) ?PaneSelectChoice {
     if (key.text) |txt| {
-        var view = std.unicode.Utf8View.init(txt) catch return null;
+        var view = std.unicode.Utf8View.init(txt) catch |err| {
+            log.debug("failed to parse pane-select key text as UTF-8: {}", .{err});
+            return null;
+        };
         var it = view.iterator();
         const cp = it.nextCodepoint() orelse return null;
         if (it.nextCodepoint() != null) return null;
@@ -246,8 +250,12 @@ fn swapFloatPositions(state: *State, a: *Pane, b: *Pane) void {
 
     state.swapPaneFloatUi(a.uuid, b.uuid);
 
-    a.vt.resize(a.width, a.height) catch {};
-    b.vt.resize(b.width, b.height) catch {};
+    a.vt.resize(a.width, a.height) catch |err| {
+        core.logging.logError("terminal", "swap pane VT resize failed", err);
+    };
+    b.vt.resize(b.width, b.height) catch |err| {
+        core.logging.logError("terminal", "swap pane VT resize failed", err);
+    };
 
     a.syncBackendSize();
     b.syncBackendSize();
