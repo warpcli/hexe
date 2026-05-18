@@ -933,6 +933,12 @@ pub const State = struct {
         return state_tabs.adoptStickyPanes(self);
     }
 
+    /// SES-authoritative identity directory for a sticky/per-CWD float.
+    /// Returns the captured `sticky_pwd`, never the float shell's live cwd.
+    pub fn stickyFloatDir(self: *State, pane: *Pane) ?[]const u8 {
+        return state_tabs.ensureStickyFloatDir(self, pane);
+    }
+
     pub fn adoptAsFloat(self: *State, uuid: [32]u8, pane_id: u16, float_def: *const core.LayoutFloatDef, cwd: []const u8) !void {
         return state_tabs.adoptAsFloat(self, uuid, pane_id, float_def, cwd);
     }
@@ -1756,6 +1762,21 @@ pub const State = struct {
     pub fn panePwdDir(self: *const State, pane: *const Pane) ?[]const u8 {
         if (self.floatUiConst(pane)) |ui| return ui.pwd_dir;
         return null;
+    }
+
+    pub fn setPanePwdDir(self: *State, pane_uuid: [32]u8, pwd_dir: ?[]const u8) bool {
+        const ui = self.ensureFloatUi(pane_uuid) orelse return false;
+        if (ui.pwd_dir) |old| {
+            self.allocator.free(old);
+            ui.pwd_dir = null;
+        }
+        if (pwd_dir) |dir| {
+            ui.pwd_dir = self.allocator.dupe(u8, dir) catch {
+                core.logging.logError("terminal", "failed to allocate float pwd dir", error.OutOfMemory);
+                return false;
+            };
+        }
+        return true;
     }
 
     pub fn paneNavigatable(self: *const State, pane: *const Pane) bool {

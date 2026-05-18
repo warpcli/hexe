@@ -1,4 +1,5 @@
 const std = @import("std");
+const snapshot_mod = @import("snapshot.zig");
 const store_mod = @import("store.zig");
 
 pub fn removeDetachedSession(store: *store_mod.SessionStore, session_id: [16]u8) void {
@@ -12,6 +13,47 @@ pub fn removeDetachedSession(store: *store_mod.SessionStore, session_id: [16]u8)
         state.deinit();
         store.dirty = true;
     }
+}
+
+pub fn removePaneFromDetachedSessions(
+    allocator: std.mem.Allocator,
+    store: *store_mod.SessionStore,
+    pane_uuid: [32]u8,
+) void {
+    var sessions_to_remove: std.ArrayList([16]u8) = .empty;
+    defer sessions_to_remove.deinit(allocator);
+
+    var iter = store.detached_sessions.iterator();
+    while (iter.next()) |entry| {
+        var found_idx: ?usize = null;
+        for (entry.value_ptr.pane_uuids, 0..) |uuid, idx| {
+            if (std.mem.eql(u8, &uuid, &pane_uuid)) {
+                found_idx = idx;
+                break;
+            }
+        }
+        const idx = found_idx orelse continue;
+
+        var pane_uuids = std.ArrayList([32]u8).fromOwnedSlice(entry.value_ptr.pane_uuids);
+        _ = pane_uuids.orderedRemove(idx);
+        entry.value_ptr.pane_uuids = pane_uuids.toOwnedSlice(entry.value_ptr.allocator) catch {
+            entry.value_ptr.pane_uuids = pane_uuids.items;
+            continue;
+        };
+        snapshot_mod.removePaneFromSessionSnapshot(allocator, &entry.value_ptr.session_snapshot, pane_uuid);
+
+        if (entry.value_ptr.pane_uuids.len == 0) {
+            sessions_to_remove.append(allocator, entry.key_ptr.*) catch {};
+        }
+    }
+
+    for (sessions_to_remove.items) |session_id| {
+        removeDetachedSession(store, session_id);
+    }
+    if (store.panes.getPtr(pane_uuid)) |pane| {
+        pane.session_id = null;
+    }
+    store.dirty = true;
 }
 
 pub fn listDetachedSessions(

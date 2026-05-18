@@ -49,6 +49,31 @@ fn applyDeferredPaneExits(self: anytype) void {
     }
 }
 
+fn syncRestoredPaneBackendSizes(self: anytype, comptime context: []const u8) void {
+    var split_count: usize = 0;
+    for (self.view.tab_views.items) |*tab| {
+        var it = tab.layout.splits.valueIterator();
+        while (it.next()) |pane_ptr| {
+            const pane = pane_ptr.*;
+            if (!pane.isAlive()) continue;
+            pane.syncBackendSize();
+            split_count += 1;
+        }
+    }
+
+    var float_count: usize = 0;
+    for (self.view.float_views.items) |pane| {
+        if (!pane.isAlive()) continue;
+        pane.syncBackendSize();
+        float_count += 1;
+    }
+
+    terminal_main.debugLog(
+        "{s}: synced backend sizes for restored panes splits={d} floats={d} layout={d}x{d}",
+        .{ context, split_count, float_count, self.layout_width, self.layout_height },
+    );
+}
+
 fn normalizeRestoredSessionName(name: []const u8) []const u8 {
     if (name.len >= 3) {
         const last_char = name[name.len - 1];
@@ -178,7 +203,7 @@ fn recyclePaneForFloat(self: anytype, pane: *Pane, float_state: SessionFloat, ac
     pane.backend.pod.dead = false;
 }
 
-fn hydratePaneMetadata(self: anytype, _: *Pane, uuid: [32]u8) void {
+fn hydratePaneMetadata(self: anytype, _: *Pane, uuid: [32]u8) ?[]u8 {
     if (self.runtime.getPaneInfoSnapshot(uuid)) |snap| {
         defer if (snap.cwd) |cwd| self.allocator.free(cwd);
         defer if (snap.fg_name) |s| self.allocator.free(s);
@@ -189,9 +214,11 @@ fn hydratePaneMetadata(self: anytype, _: *Pane, uuid: [32]u8) void {
             self.setPaneShell(uuid, null, cwd, null, null, null);
         }
         self.setPaneProc(uuid, snap.fg_name, snap.fg_pid);
+        return snap.sticky_pwd;
     } else {
         self.runtime.requestPaneProcess(uuid);
         self.runtime.requestPaneCwd(uuid);
+        return null;
     }
 }
 
@@ -237,6 +264,7 @@ fn ensureAdoptInfo(
         if (self.runtime.getPaneInfoSnapshot(uuid)) |snap| {
             defer if (snap.name) |s| self.allocator.free(s);
             defer if (snap.cwd) |s| self.allocator.free(s);
+            defer if (snap.sticky_pwd) |s| self.allocator.free(s);
             defer if (snap.fg_name) |s| self.allocator.free(s);
             if (snap.pane_id) |pane_id| {
                 const info = AdoptInfo{ .pane_id = pane_id };
@@ -322,7 +350,9 @@ fn ensureSplitPaneView(
         break :blk pane;
     };
 
-    hydratePaneMetadata(self, pane, pane_uuid);
+    if (hydratePaneMetadata(self, pane, pane_uuid)) |sticky_pwd| {
+        self.allocator.free(sticky_pwd);
+    }
 
     tab.layout.splits.put(pane_uuid, pane) catch {
         terminal_main.debugLogUuid(&pane_uuid, "ensureSplitPaneView: failed to insert split pane", .{});
@@ -487,7 +517,18 @@ fn restoreFloatPane(
     pane.id = @intCast(100 + self.view.float_views.items.len);
     pane.uuid = float_state.pane_uuid;
     recyclePaneForFloat(self, pane, float_state, actual_focus_uuid);
-    hydratePaneMetadata(self, pane, float_state.pane_uuid);
+    const restored_sticky_pwd = hydratePaneMetadata(self, pane, float_state.pane_uuid);
+    defer if (restored_sticky_pwd) |pwd| self.allocator.free(pwd);
+    if (float_state.is_pwd) {
+        if (restored_sticky_pwd) |pwd| {
+            _ = self.setPanePwdDir(float_state.pane_uuid, pwd);
+        }
+        // No live-cwd fallback: a per-CWD float's identity is the SES
+        // sticky_pwd. If SES has not reported it during this hydration pass,
+        // leave pwd_dir empty so it is re-resolved authoritatively on the next
+        // toggle/adoption instead of being silently pinned to the float
+        // shell's (possibly cd'd) working directory.
+    }
 
     const restored_title = blk: {
         if (float_state.float_key != 0) {
@@ -671,7 +712,11 @@ fn applySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) b
         updateFloatPresentation(self, self.view.float_views.items[idx], float_state, snapshot.focused_pane_uuid);
     }
 
+    for (self.view.tab_views.items) |*tab| {
+        tab.layout.resize(self.layout_width, self.layout_height);
+    }
     self.resizeFloatingPanes();
+    syncRestoredPaneBackendSizes(self, "applySessionSnapshot");
 
     if (self.view.tab_views.items.len > 0) {
         self.setActiveTabIndex(@min(snapshot.active_tab, self.view.tab_views.items.len - 1));
@@ -959,6 +1004,7 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
 
     // Recalculate floating pane positions.
     self.resizeFloatingPanes();
+    syncRestoredPaneBackendSizes(self, "reattachSession");
 
     // Apply restored active indices now that all state is present.
     if (self.view.tab_views.items.len > 0) {
@@ -1023,6 +1069,14 @@ pub fn reattachSession(self: anytype, session_id_prefix: []const u8) bool {
         core.logging.logError("terminal", "completeReattach failed in restoreLayout", e);
         terminal_main.debugLog("reattachSession: completeReattach FAILED: {s}", .{@errorName(e)});
     }
+
+    // Snapshot restore is only the session's last known view. Per-CWD sticky
+    // floats are stronger than that: they are global process identities keyed
+    // by cwd+key. Another session can touch/steal them and make them disappear
+    // from this session snapshot, so reconcile the restored view against all
+    // CWDs present in the restored panes before the user toggles a missing key
+    // and accidentally spawns a duplicate.
+    self.adoptStickyPanes();
 
     // Sync-phase reads can consume async pane_exited messages before the IPC
     // loop starts. Apply those exits now so dead panes/floats are not kept
@@ -1144,6 +1198,7 @@ pub fn applySessionSnapshot(self: anytype) bool {
 
     _ = self.normalizeFloatParentTabs(self.view.tab_views.items.len);
     self.resizeFloatingPanes();
+    syncRestoredPaneBackendSizes(self, "applySessionSnapshot");
 
     if (self.view.tab_views.items.len > 0) {
         self.setActiveTabIndex(@min(wanted_active_tab, self.view.tab_views.items.len - 1));
@@ -1236,6 +1291,7 @@ pub fn attachOrphanedPane(self: anytype, uuid_prefix: []const u8) bool {
 
             if (self.runtime.getPaneInfoSnapshot(result.uuid)) |snap| {
                 defer if (snap.cwd) |cwd| self.allocator.free(cwd);
+                defer if (snap.sticky_pwd) |pwd| self.allocator.free(pwd);
                 defer if (snap.fg_name) |s| self.allocator.free(s);
                 if (snap.name) |name| {
                     self.setPaneNameOwned(result.uuid, name);

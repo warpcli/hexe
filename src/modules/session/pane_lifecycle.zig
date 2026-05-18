@@ -27,6 +27,45 @@ fn removePaneFromClientList(client: *store_mod.Client, uuid: [32]u8) void {
     }
 }
 
+fn notifyPaneExitedBestEffort(fd: posix.fd_t, uuid: [32]u8) void {
+    var msg: wire.PaneUuid = .{ .uuid = uuid };
+    var hdr: wire.ControlHeader = .{
+        .msg_type = @intFromEnum(wire.MsgType.pane_exited),
+        .payload_len = @sizeOf(wire.PaneUuid),
+    };
+
+    var buf: [@sizeOf(wire.ControlHeader) + @sizeOf(wire.PaneUuid)]u8 = undefined;
+    const hdr_bytes = std.mem.asBytes(&hdr);
+    const msg_bytes = std.mem.asBytes(&msg);
+    @memcpy(buf[0..hdr_bytes.len], hdr_bytes);
+    @memcpy(buf[hdr_bytes.len .. hdr_bytes.len + msg_bytes.len], msg_bytes);
+
+    // This write targets a different frontend while SES is handling the new
+    // owner's synchronous find_sticky/create_pane request. Never wait here:
+    // a slow/wedged old frontend must not stall handoff for every other CWD
+    // float. Also avoid writeAllTimeout because a timed-out partial frame would
+    // corrupt the old client's control stream.
+    var fds = [_]posix.pollfd{
+        .{ .fd = fd, .events = posix.POLL.OUT, .revents = 0 },
+    };
+    const ready = posix.poll(&fds, 0) catch |err| {
+        core.logging.logError("ses", "best-effort pane_exited notify poll failed during pane takeover", err);
+        return;
+    };
+    if (ready == 0 or (fds[0].revents & posix.POLL.OUT) == 0) {
+        core.logging.warn("ses", "best-effort pane_exited notify skipped: old mux ctl fd not writable", .{});
+        return;
+    }
+
+    const n = posix.write(fd, &buf) catch |err| {
+        core.logging.logError("ses", "best-effort pane_exited notify write failed during pane takeover", err);
+        return;
+    };
+    if (n != buf.len) {
+        core.logging.warn("ses", "best-effort pane_exited notify wrote partial frame during pane takeover", .{});
+    }
+}
+
 fn prunePaneFromClientSnapshot(allocator: std.mem.Allocator, client: *store_mod.Client, pane_uuid: [32]u8) void {
     if (client.session_snapshot) |*snapshot| {
         snapshot_mod.removePaneFromSessionSnapshot(allocator, snapshot, pane_uuid);
@@ -75,10 +114,7 @@ pub fn stealAttachedPane(self: anytype, uuid: [32]u8, new_client_id: usize) bool
 
     if (self.getClient(old_client_id)) |old_client| {
         if (old_client.mux_ctl_fd) |ctl_fd| {
-            var msg: wire.PaneUuid = .{ .uuid = uuid };
-            wire.writeControl(ctl_fd, .pane_exited, std.mem.asBytes(&msg)) catch |err| {
-                core.logging.logError("ses", "failed to notify previous owner pane exited", err);
-            };
+            notifyPaneExitedBestEffort(ctl_fd, uuid);
         }
 
         removePaneFromClientList(old_client, uuid);
@@ -105,11 +141,21 @@ pub fn attachPane(self: anytype, uuid: [32]u8, client_id: usize) !*store_mod.Pan
     });
 
     if (pane.state == .attached) {
-        return error.PaneAlreadyAttached;
-    }
+        if (pane.attached_to) |owner_id| {
+            // Defensive: if ownership is still set, do not steal silently.
+            if (owner_id != client_id) return error.PaneAlreadyAttached;
+            return pane;
+        }
 
-    // Defensive: if ownership is still set, do not steal silently.
-    if (pane.attached_to != null and pane.attached_to.? != client_id) {
+        // Persisted state deliberately does not store clients, so after a SES
+        // restart a live pane can come back as `.attached` with no owner. That
+        // is not actually attached to any mux; let the new client claim it so
+        // every sticky/per-CWD float for the directory is reusable after a
+        // daemon restart instead of only the panes that happened to be
+        // converted to `.sticky` before persistence.
+        ses.debugLog("attachPane: recovering no-owner attached pane uuid={s}", .{uuid[0..8]});
+    } else if (pane.attached_to != null and pane.attached_to.? != client_id) {
+        // Defensive: if ownership is still set, do not steal silently.
         return error.PaneAlreadyAttached;
     }
 

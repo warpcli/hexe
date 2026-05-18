@@ -234,34 +234,144 @@ pub fn closeCurrentTab(self: anytype) bool {
     return true;
 }
 
-/// Adopt sticky panes from ses on startup.
-/// Finds sticky panes matching current directory and configured sticky floats.
+/// Adopt sticky/per-CWD panes from ses on startup.
+/// Finds reusable panes matching current directory and configured sticky or per-CWD floats.
+fn addCwdCandidate(self: anytype, cwd_set: *std.StringHashMap(void), cwd: ?[]const u8) void {
+    const value = cwd orelse return;
+    if (value.len == 0) return;
+    if (cwd_set.contains(value)) return;
+
+    const owned = self.allocator.dupe(u8, value) catch |err| {
+        core.logging.logError("terminal", "failed to store cwd candidate for sticky adoption", err);
+        return;
+    };
+    cwd_set.put(owned, {}) catch |err| {
+        self.allocator.free(owned);
+        core.logging.logError("terminal", "failed to insert cwd candidate for sticky adoption", err);
+    };
+}
+
+fn deinitCwdCandidates(self: anytype, cwd_set: *std.StringHashMap(void)) void {
+    var it = cwd_set.keyIterator();
+    while (it.next()) |key| {
+        self.allocator.free(key.*);
+    }
+    cwd_set.deinit();
+}
+
+fn collectStickyAdoptionCwds(self: anytype, cwd_set: *std.StringHashMap(void)) void {
+    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+    addCwdCandidate(self, cwd_set, std.posix.getcwd(&cwd_buf) catch |err| blk: {
+        core.logging.logError("terminal", "failed to get process cwd for sticky pane adoption", err);
+        break :blk null;
+    });
+
+    // The session base root is an authoritative directory for this session even
+    // when no live pane currently reports it: a per-CWD float created in the
+    // base dir whose shell later cd'd away would otherwise be undiscoverable.
+    if (self.runtime.attachedSnapshot()) |snapshot| {
+        addCwdCandidate(self, cwd_set, snapshot.base_root);
+    }
+
+    for (self.view.tab_views.items) |*tab| {
+        var it = tab.layout.splits.valueIterator();
+        while (it.next()) |pane_ptr| {
+            addCwdCandidate(self, cwd_set, self.paneRealCwd(pane_ptr.*));
+        }
+    }
+
+    for (self.view.float_views.items) |pane| {
+        // For per-CWD floats use the SES-derived sticky identity; for other
+        // floats their live cwd is fine here — this is directory *discovery*,
+        // not identity matching.
+        if (self.paneIsPwd(pane)) {
+            addCwdCandidate(self, cwd_set, ensureStickyFloatDir(self, pane));
+            continue;
+        }
+        addCwdCandidate(self, cwd_set, self.paneRealCwd(pane));
+    }
+}
+
+/// Resolve a sticky/per-CWD float's identity directory.
+///
+/// Identity is the `sticky_pwd` SES captured when the float was created — never
+/// the float shell's live cwd, which may have `cd`'d away. The local `pwd_dir`
+/// slot is only ever a cache of that SES value; when it is empty we re-fetch it
+/// authoritatively from SES. Returns null only when SES has no sticky identity
+/// for the pane (e.g. a plain adhoc float).
+pub fn ensureStickyFloatDir(self: anytype, pane: *Pane) ?[]const u8 {
+    if (self.panePwdDir(pane)) |dir| return dir;
+
+    if (self.runtime.getPaneInfoSnapshot(pane.uuid)) |info| {
+        defer {
+            if (info.name) |s| self.allocator.free(s);
+            if (info.cwd) |s| self.allocator.free(s);
+            if (info.sticky_pwd) |s| self.allocator.free(s);
+            if (info.fg_name) |s| self.allocator.free(s);
+        }
+        if (info.sticky_pwd) |sticky_pwd| {
+            if (self.setPanePwdDir(pane.uuid, sticky_pwd)) {
+                return self.panePwdDir(pane);
+            }
+        }
+    }
+
+    return null;
+}
+
+fn hasLocalCwdFloat(self: anytype, key: u8, cwd: []const u8) bool {
+    for (self.view.float_views.items) |pane| {
+        if (self.paneFloatKey(pane) != key) continue;
+        // Match strictly on the SES-derived sticky identity, never on the
+        // float shell's live cwd: that is what makes a key reuse its pane.
+        if (ensureStickyFloatDir(self, pane)) |dir| {
+            if (std.mem.eql(u8, dir, cwd)) return true;
+        }
+    }
+    return false;
+}
+
 pub fn adoptStickyPanes(self: anytype) void {
     if (!self.runtime.isConnected()) return;
 
-    // Get current working directory.
-    var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const cwd = std.posix.getcwd(&cwd_buf) catch |err| {
-        core.logging.logError("terminal", "failed to get cwd for sticky pane adoption", err);
-        return;
-    };
+    var cwd_set = std.StringHashMap(void).init(self.allocator);
+    defer deinitCwdCandidates(self, &cwd_set);
+    collectStickyAdoptionCwds(self, &cwd_set);
 
-    // Check each float definition for sticky floats.
-    for (self.active_layout_floats) |*float_def| {
-        if (!float_def.attributes.sticky) continue;
+    // Check each float definition for sticky/per-CWD floats. Per-CWD floats
+    // are backed by the same SES sticky lookup metadata (pwd + key), even when
+    // the config attr is `per_cwd` rather than explicit `sticky`.
+    var cwd_it = cwd_set.keyIterator();
+    while (cwd_it.next()) |cwd_ptr| {
+        const cwd = cwd_ptr.*;
+        for (self.active_layout_floats) |*float_def| {
+            if (!float_def.attributes.sticky and !float_def.attributes.per_cwd) continue;
+            if (hasLocalCwdFloat(self, float_def.key, cwd)) continue;
 
-        // Try to find a sticky pane in ses matching this directory + key.
-        const result = self.runtime.findStickyPane(cwd, float_def.key) catch |err| {
-            core.logging.logError("terminal", "failed to query sticky pane for layout float", err);
-            continue;
-        };
-        if (result) |r| {
-            // Found a sticky pane - adopt it as a float.
-            self.adoptAsFloat(r.uuid, r.pane_id, float_def, cwd) catch |err| {
-                core.logging.logError("terminal", "failed to adopt sticky pane as float", err);
+            // Try to find a sticky pane in ses matching this directory + key.
+            const result = self.runtime.findStickyPane(cwd, float_def.key) catch |err| {
+                core.logging.logError("terminal", "failed to query sticky pane for layout float", err);
                 continue;
             };
-            self.notifications.showFor("Sticky float restored", 2000);
+            if (result) |r| {
+                if (self.findPaneByUuid(r.uuid)) |existing| {
+                    if (float_def.attributes.per_cwd and self.panePwdDir(existing) == null) {
+                        _ = self.setPanePwdDir(r.uuid, cwd);
+                    }
+                    continue;
+                }
+
+                // Found a sticky pane - adopt it as a float.
+                self.adoptAsFloat(r.uuid, r.pane_id, float_def, cwd) catch |err| {
+                    core.logging.logError("terminal", "failed to adopt sticky pane as float", err);
+                    continue;
+                };
+                if (float_def.attributes.per_cwd) {
+                    self.notifications.showFor("CWD float restored", 2000);
+                } else {
+                    self.notifications.showFor("Sticky float restored", 2000);
+                }
+            }
         }
     }
 }
@@ -300,6 +410,7 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
 
     if (self.runtime.getPaneInfoSnapshot(uuid)) |snap| {
         defer if (snap.cwd) |snap_cwd| self.allocator.free(snap_cwd);
+        defer if (snap.sticky_pwd) |pwd| self.allocator.free(pwd);
         defer if (snap.fg_name) |s| self.allocator.free(s);
         if (snap.name) |name| {
             self.setPaneNameOwned(uuid, name);
@@ -362,6 +473,9 @@ pub fn adoptAsFloat(self: anytype, uuid: [32]u8, pane_id: u16, float_def: *const
         @intCast(pad_y_cfg),
         false,
     );
+    if (!self.syncSessionFloatChecked(pane, false)) {
+        self.notifications.show("Sticky float session sync failed");
+    }
     // Don't set active_floating here - let user toggle it manually.
     pane_registered = true;
 }

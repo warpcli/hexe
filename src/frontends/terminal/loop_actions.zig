@@ -33,6 +33,18 @@ pub fn hideOrDestroyFloat(state: *State, pane: *Pane, tab: usize) void {
         const was_visible = state.paneVisibleOnTab(pane, tab);
         state.setPaneVisibleOnTab(pane, tab, false);
         if (!state.syncSessionFloatChecked(pane, false)) {
+            // Sticky/per-CWD floats may be visible in more than one mux/session,
+            // but SES only allows the current live owner to update the canonical
+            // snapshot. A non-owner hide is still a valid local UI action, so do
+            // not undo it or warn the user with a scary false failure.
+            if (state.paneSticky(pane) or state.paneIsPwd(pane)) {
+                terminal_main.debugLogUuid(
+                    &pane.uuid,
+                    "hideOrDestroyFloat: session sync rejected for shared sticky/per-CWD float; kept local hide",
+                    .{},
+                );
+                return;
+            }
             state.setPaneVisibleOnTab(pane, tab, was_visible);
             state.notifications.show("Hide float failed: session sync rejected update");
         }
@@ -255,6 +267,7 @@ fn syncEnvIntoExistingFloat(state: *State, pane: *Pane, parent_uuid: [32]u8) voi
         defer {
             if (info.name) |s| state.allocator.free(s);
             if (info.cwd) |s| state.allocator.free(s);
+            if (info.sticky_pwd) |s| state.allocator.free(s);
             if (info.fg_name) |s| state.allocator.free(s);
         }
         if (info.fg_pid) |pid| {
@@ -308,6 +321,7 @@ fn paneExistsInSes(state: *State, uuid: [32]u8) bool {
         defer {
             if (info.name) |s| state.allocator.free(s);
             if (info.cwd) |s| state.allocator.free(s);
+            if (info.sticky_pwd) |s| state.allocator.free(s);
             if (info.fg_name) |s| state.allocator.free(s);
         }
         if (info.pid) |pid| {
@@ -631,15 +645,55 @@ pub fn performAdopt(state: *State, orphan_uuid: [32]u8, destroy_current: bool) v
     state.needs_render = true;
 }
 
+/// Apply the `exclusive` attribute: hide every float whose key differs from the
+/// just-shown float's key. Must be called on *every* path that shows an
+/// exclusive float — including the per-CWD/sticky handoff paths that go through
+/// createNamedFloat — otherwise re-showing a hidden exclusive float leaves the
+/// other floats visible.
+fn applyFloatExclusivity(state: *State, float_def: *const core.LayoutFloatDef) void {
+    if (!float_def.attributes.exclusive) return;
+
+    var to_hide: std.ArrayList([32]u8) = .empty;
+    defer to_hide.deinit(state.allocator);
+
+    for (state.view.float_views.items) |other| {
+        if (state.paneFloatKey(other) != float_def.key) {
+            to_hide.append(state.allocator, other.uuid) catch |err| {
+                terminal_main.debugLogUuid(&other.uuid, "applyFloatExclusivity: failed to queue exclusive float hide: {s}", .{@errorName(err)});
+                state.notifications.show("Float exclusivity incomplete: couldn't queue hide");
+            };
+        }
+    }
+
+    for (to_hide.items) |target_uuid| {
+        for (state.view.float_views.items) |candidate| {
+            if (std.mem.eql(u8, &candidate.uuid, &target_uuid)) {
+                hideOrDestroyFloat(state, candidate, state.activeTabIndex());
+                break;
+            }
+        }
+    }
+}
+
 pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) void {
     // Get current directory from ACTUALLY focused pane (float or split).
-    // IMPORTANT: Use getCurrentFocusedPane() which checks active_floating first -
-    // if user is focused on a float, we want THAT float's CWD for per_cwd floats.
-    // Uses getReliableCwd which tries multiple sources, then falls back to the terminal process CWD.
+    // For per-CWD floats, an already-focused float carries the *origin* CWD
+    // in its float UI state. Use that before asking the shell/process for CWD:
+    // the float's shell may have cd'd elsewhere, but its sticky identity must
+    // remain the directory that created/restored it.
     var current_dir: ?[]const u8 = null;
     var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
     if (getCurrentFocusedPane(state)) |focused| {
-        current_dir = state.getReliableCwd(focused);
+        // A per-CWD float's identity is the SES sticky_pwd captured when it was
+        // created — not its shell's live cwd. Resolve it authoritatively first.
+        // getReliableCwd is only correct as the *origin* cwd when launching a
+        // fresh per-CWD float from a non per-CWD pane.
+        if (float_def.attributes.per_cwd and state.paneIsPwd(focused)) {
+            current_dir = state.stickyFloatDir(focused);
+        }
+        if (current_dir == null) {
+            current_dir = state.getReliableCwd(focused);
+        }
     }
     // Fallback to the terminal process CWD if pane CWD is unavailable.
     if (current_dir == null) {
@@ -671,8 +725,9 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
 
             // For per_cwd floats, also check directory match.
             if (float_def.attributes.per_cwd and state.paneIsPwd(pane)) {
-                // Both dirs must exist and match, or both be null.
-                const pane_dir_opt = state.panePwdDir(pane) orelse state.paneRealCwd(pane);
+                // Both dirs must exist and match, or both be null. Identity is
+                // the SES sticky_pwd, never the float shell's live cwd.
+                const pane_dir_opt = state.stickyFloatDir(pane);
                 const dirs_match = if (pane_dir_opt) |pane_dir| blk: {
                     if (current_dir) |curr| {
                         break :blk std.mem.eql(u8, pane_dir, curr);
@@ -686,10 +741,31 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 }
             }
 
+            const was_visible_on_tab = state.paneVisibleOnTab(pane, state.activeTabIndex());
+            const was_active = if (state.activeFloatingIndex()) |af| af == existing_idx else false;
+
+            if ((state.paneSticky(pane) or state.paneIsPwd(pane)) and !was_visible_on_tab and !was_active) {
+                // Opening a hidden shared sticky/per-CWD float is an ownership
+                // handoff, not a local toggle. Go straight to find_sticky
+                // takeover instead of first issuing session_sync_float against
+                // a pane that may currently be owned by another mux. That old
+                // path could wait for sync timeouts before the real handoff.
+                if (createNamedFloat(state, float_def, current_dir, state.getCurrentFocusedUuid())) |_| {
+                    applyFloatExclusivity(state, float_def);
+                } else |err| {
+                    terminal_main.debugLogUuid(
+                        &pane.uuid,
+                        "toggleNamedFloat: hidden shared float handoff failed: {s}",
+                        .{@errorName(err)},
+                    );
+                    state.notifications.show("Float handoff failed");
+                    state.needs_render = true;
+                }
+                return;
+            }
+
             const missing_in_ses = !paneExistsInSes(state, pane.uuid);
             if (!pane.isAlive() or missing_in_ses) {
-                const was_visible_on_tab = state.paneVisibleOnTab(pane, state.activeTabIndex());
-                const was_active = if (state.activeFloatingIndex()) |af| af == existing_idx else false;
                 const old_uuid = state.getCurrentFocusedUuid();
                 if (was_active) {
                     state.syncPaneUnfocus(pane);
@@ -745,28 +821,7 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 state.setActiveFloatingIndex(existing_idx);
                 state.syncPaneFocus(pane, old_uuid);
                 // If alone mode, hide all other floats on this tab.
-                if (float_def.attributes.exclusive) {
-                    var to_hide: std.ArrayList([32]u8) = .empty;
-                    defer to_hide.deinit(state.allocator);
-
-                    for (state.view.float_views.items) |other| {
-                        if (state.paneFloatKey(other) != float_def.key) {
-                            to_hide.append(state.allocator, other.uuid) catch |err| {
-                                terminal_main.debugLogUuid(&other.uuid, "toggleNamedFloat: failed to queue exclusive float hide: {s}", .{@errorName(err)});
-                                state.notifications.show("Float exclusivity incomplete: couldn't queue hide");
-                            };
-                        }
-                    }
-
-                    for (to_hide.items) |target_uuid| {
-                        for (state.view.float_views.items) |candidate| {
-                            if (std.mem.eql(u8, &candidate.uuid, &target_uuid)) {
-                                hideOrDestroyFloat(state, candidate, state.activeTabIndex());
-                                break;
-                            }
-                        }
-                    }
-                }
+                applyFloatExclusivity(state, float_def);
             } else {
                 // Float was hidden. If it had focus, return focus to tiled pane.
                 if (state.activeFloatingIndex()) |afi| {
@@ -781,6 +836,34 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
             }
 
             if (!state.syncSessionFloatChecked(pane, state.activeFloatingIndex() == existing_idx and state.paneVisibleOnTab(pane, state.activeTabIndex()))) {
+                if (state.paneSticky(pane) or state.paneIsPwd(pane)) {
+                    terminal_main.debugLogUuid(
+                        &pane.uuid,
+                        "toggleNamedFloat: shared sticky/per-CWD float sync rejected; attempting ownership handoff",
+                        .{},
+                    );
+                    if (current_dir != null) {
+                        if (createNamedFloat(state, float_def, current_dir, old_uuid)) |_| {
+                            applyFloatExclusivity(state, float_def);
+                        } else |err| {
+                            terminal_main.debugLogUuid(
+                                &pane.uuid,
+                                "toggleNamedFloat: ownership handoff failed after sync rejection: {s}",
+                                .{@errorName(err)},
+                            );
+                            state.notifications.show("Float handoff failed");
+                            state.renderer.invalidate();
+                            state.force_full_render = true;
+                            state.needs_render = true;
+                            return;
+                        }
+                        return;
+                    }
+                    state.renderer.invalidate();
+                    state.force_full_render = true;
+                    state.needs_render = true;
+                    return;
+                }
                 state.notifications.show("Toggle float failed: session sync rejected update");
             }
 
@@ -809,28 +892,8 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
     };
 
     // If alone mode, hide all other floats on this tab.
-    if (float_def.attributes.exclusive) {
-        var to_hide: std.ArrayList([32]u8) = .empty;
-        defer to_hide.deinit(state.allocator);
+    applyFloatExclusivity(state, float_def);
 
-        for (state.view.float_views.items) |pane| {
-            if (state.paneFloatKey(pane) != float_def.key) {
-                to_hide.append(state.allocator, pane.uuid) catch |err| {
-                    terminal_main.debugLogUuid(&pane.uuid, "toggleNamedFloat: failed to queue exclusive float hide: {s}", .{@errorName(err)});
-                    state.notifications.show("Float exclusivity incomplete: couldn't queue hide");
-                };
-            }
-        }
-
-        for (to_hide.items) |target_uuid| {
-            for (state.view.float_views.items) |candidate| {
-                if (std.mem.eql(u8, &candidate.uuid, &target_uuid)) {
-                    hideOrDestroyFloat(state, candidate, state.activeTabIndex());
-                    break;
-                }
-            }
-        }
-    }
     // For pwd floats, hide other instances of same float (different dirs) on this tab.
     if (float_def.attributes.per_cwd) {
         const new_idx = state.view.float_views.items.len - 1;
@@ -1041,40 +1104,147 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
         float_def.key
     else
         null;
+    // For global/per-CWD floats, visibility is per tab. Tab-bound floats use
+    // their parent_tab and simple visible flag.
+    const parent_tab: ?usize = if (!float_def.attributes.global and !float_def.attributes.per_cwd)
+        state.activeTabIndex()
+    else
+        null;
+    const active_tab_bit: u64 = if (state.activeTabIndex() < 64)
+        (@as(u64, 1) << @intCast(state.activeTabIndex()))
+    else
+        0;
+    const tab_visible: u64 = if (parent_tab == null) active_tab_bit else 0;
 
     if (!state.runtime.isConnected()) return error.SesUnavailable;
     const env_parent = if (float_def.attributes.inherit_env) parent_uuid else null;
-    const result = try state.runtime.createPane(float_def.command, current_dir, sticky_pwd, sticky_key, null, isolation_profile, env_parent);
+    const NamedFloatPaneResult = struct {
+        uuid: [32]u8,
+        pane_id: u16,
+        pid: posix.pid_t,
+        reused: bool,
+    };
+    const result: NamedFloatPaneResult = blk: {
+        if (sticky_pwd) |pwd| {
+            if (sticky_key) |key| {
+                if (state.runtime.findStickyPane(pwd, key)) |found_opt| {
+                    if (found_opt) |found| {
+                        terminal_main.debugLogUuid(&found.uuid, "createNamedFloat: reusing sticky/per-CWD pane before spawn", .{});
+                        break :blk .{
+                            .uuid = found.uuid,
+                            .pane_id = found.pane_id,
+                            .pid = found.pid,
+                            .reused = true,
+                        };
+                    }
+                } else |err| {
+                    terminal_main.debugLog("createNamedFloat: sticky lookup failed before spawn: {s}", .{@errorName(err)});
+                }
+            }
+        }
+        const created = try state.runtime.createPane(float_def.command, current_dir, sticky_pwd, sticky_key, null, isolation_profile, env_parent);
+        break :blk .{
+            .uuid = created.uuid,
+            .pane_id = created.pane_id,
+            .pid = created.pid,
+            .reused = false,
+        };
+    };
     var pane_registered = false;
-    errdefer if (!pane_registered) state.runtime.killPane(result.uuid) catch |e| {
+    errdefer if (!pane_registered and !result.reused) state.runtime.killPane(result.uuid) catch |e| {
         terminal_main.debugLogUuid(&result.uuid, "createNamedFloat rollback killPane failed: {s}", .{@errorName(e)});
     };
+
+    if (state.findPaneByUuid(result.uuid)) |existing| {
+        // SES can return an already-attached sticky/per-CWD pane when the
+        // frontend lost enough local pwd_dir metadata after reattach that the
+        // normal pre-create lookup missed it. Do not append a second Pane with
+        // the same UUID; repair the local float state and focus the existing one.
+        pane_registered = true;
+        state.allocator.destroy(pane);
+
+        const old_uuid = state.getCurrentFocusedUuid();
+        if (state.activeFloatingIndex()) |afi| {
+            if (afi < state.view.float_views.items.len and state.view.float_views.items[afi] != existing) {
+                state.syncPaneUnfocus(state.view.float_views.items[afi]);
+            }
+        } else if (state.currentLayout().getFocusedPane()) |tiled| {
+            if (tiled != existing) state.syncPaneUnfocus(tiled);
+        }
+
+        const next_tab_visible = if (parent_tab == null) blk: {
+            const old_mask = if (state.paneFloatState(existing)) |float_state| float_state.tab_visible else 0;
+            break :blk old_mask | active_tab_bit;
+        } else 0;
+
+        if (!state.setPaneFloatUi(result.uuid, .{
+            .border_x = frame.outer_x,
+            .border_y = frame.outer_y,
+            .border_w = frame.outer_w,
+            .border_h = frame.outer_h,
+            .border_color = border_color,
+            .width_pct = width_pct_u8,
+            .height_pct = height_pct_u8,
+            .pos_x_pct = pos_x_pct_u8,
+            .pos_y_pct = pos_y_pct_u8,
+            .pad_x = @intCast(pad_x_cfg),
+            .pad_y = @intCast(pad_y_cfg),
+            .pwd_dir = if (float_def.attributes.per_cwd) current_dir else null,
+            .navigatable = float_def.attributes.navigatable,
+            .float_style = style,
+            .float_title = float_def.title,
+        })) return error.OutOfMemory;
+        state.setLocalFloatState(
+            result.uuid,
+            parent_tab,
+            true,
+            next_tab_visible,
+            float_def.attributes.sticky,
+            float_def.attributes.per_cwd,
+            float_def.key,
+            width_pct_u8,
+            height_pct_u8,
+            pos_x_pct_u8,
+            pos_y_pct_u8,
+            @intCast(pad_x_cfg),
+            @intCast(pad_y_cfg),
+            true,
+        );
+
+        for (state.view.float_views.items, 0..) |candidate, idx| {
+            if (candidate == existing or std.mem.eql(u8, &candidate.uuid, &result.uuid)) {
+                state.setActiveFloatingIndex(idx);
+                break;
+            }
+        }
+        state.syncPaneFocus(existing, old_uuid);
+        state.syncPaneAux(existing, parent_uuid);
+        if (!state.syncSessionFloatChecked(existing, true)) {
+            terminal_main.debugLogUuid(&result.uuid, "createNamedFloat reused sticky/per-CWD pane but session sync was rejected", .{});
+        }
+        state.renderer.invalidate();
+        state.force_full_render = true;
+        state.needs_render = true;
+        return;
+    }
+
     const vt_fd = state.runtime.getVtFd() orelse return error.SesUnavailable;
     try pane.initWithPod(state.allocator, id, frame.content_x, frame.content_y, frame.content_w, frame.content_h, result.pane_id, vt_fd, result.uuid);
 
     // Persist sticky affinity metadata for better reclaim preference.
-    if (sticky_pwd) |pwd| {
-        if (sticky_key) |key| {
-            state.runtime.setSticky(result.uuid, pwd, key) catch |err| {
-                terminal_main.debugLogUuid(&result.uuid, "createNamedFloat setSticky failed: {s}", .{@errorName(err)});
-                state.notifications.show("Sticky float sync failed");
-            };
+    if (!result.reused) {
+        if (sticky_pwd) |pwd| {
+            if (sticky_key) |key| {
+                state.runtime.setSticky(result.uuid, pwd, key) catch |err| {
+                    terminal_main.debugLogUuid(&result.uuid, "createNamedFloat setSticky failed: {s}", .{@errorName(err)});
+                    state.notifications.show("Sticky float sync failed");
+                };
+            }
         }
     }
 
     pane.focused = true;
 
-    // Keep the pod's pane name separate from the float title.
-    // For global floats (special or pwd), set per-tab visibility.
-    // For tab-bound floats, use simple visible field.
-    const parent_tab: ?usize = if (!float_def.attributes.global and !float_def.attributes.per_cwd)
-        state.activeTabIndex()
-    else
-        null;
-    const tab_visible: u64 = if (parent_tab == null and state.activeTabIndex() < 64)
-        (@as(u64, 1) << @intCast(state.activeTabIndex()))
-    else
-        0;
     if (!state.setPaneFloatUi(result.uuid, .{
         .border_x = frame.outer_x,
         .border_y = frame.outer_y,

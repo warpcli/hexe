@@ -944,6 +944,7 @@ pub const SesClient = struct {
         pid: ?i32,
         name: ?[]u8,
         cwd: ?[]u8,
+        sticky_pwd: ?[]u8,
         fg_name: ?[]u8,
         fg_pid: ?i32,
     };
@@ -1099,6 +1100,7 @@ pub const SesClient = struct {
         var name: ?[]u8 = null;
         var fg_name: ?[]u8 = null;
         var cwd: ?[]u8 = null;
+        var sticky_pwd: ?[]u8 = null;
 
         if (resp.name_len > 0) {
             const n = @as(usize, resp.name_len);
@@ -1169,6 +1171,41 @@ pub const SesClient = struct {
             consumed += n;
         }
 
+        const before_sticky_len: usize = @as(usize, resp.tty_len) + @as(usize, resp.socket_path_len) +
+            @as(usize, resp.session_name_len) + @as(usize, resp.layout_path_len) +
+            @as(usize, resp.last_cmd_len) + @as(usize, resp.base_process_len);
+        if (before_sticky_len > 0) {
+            self.skipPayload(fd, @intCast(before_sticky_len));
+            consumed += before_sticky_len;
+        }
+
+        if (resp.sticky_pwd_len > 0) {
+            const n = @as(usize, resp.sticky_pwd_len);
+            if (n <= 64 * 1024) {
+                const buf = self.allocator.alloc(u8, n) catch |err| {
+                    logging.logError("frontend-client", "failed to allocate pane info sticky pwd", err);
+                    self.skipPayload(fd, @intCast(trail_total - consumed));
+                    if (name) |s| self.allocator.free(s);
+                    if (fg_name) |s| self.allocator.free(s);
+                    if (cwd) |s| self.allocator.free(s);
+                    return null;
+                };
+                wire.readExact(fd, buf) catch |err| {
+                    logging.logError("frontend-client", "failed to read pane info sticky pwd payload", err);
+                    if (self.ctl_fd == fd) self.ctl_fd = null;
+                    self.allocator.free(buf);
+                    if (name) |s| self.allocator.free(s);
+                    if (fg_name) |s| self.allocator.free(s);
+                    if (cwd) |s| self.allocator.free(s);
+                    return null;
+                };
+                sticky_pwd = buf;
+            } else {
+                self.skipPayloadU32(fd, resp.sticky_pwd_len);
+            }
+            consumed += n;
+        }
+
         const remaining = trail_total -| consumed;
         if (remaining > 0) self.skipPayload(fd, @intCast(remaining));
 
@@ -1177,6 +1214,7 @@ pub const SesClient = struct {
             .pid = if (resp.pid != 0) resp.pid else null,
             .name = name,
             .cwd = cwd,
+            .sticky_pwd = sticky_pwd,
             .fg_name = fg_name,
             .fg_pid = if (resp.fg_pid != 0) resp.fg_pid else null,
         };

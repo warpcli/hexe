@@ -133,6 +133,10 @@ pub fn removeDetachedSession(self: anytype, session_id: [16]u8) void {
     detached_sessions.removeDetachedSession(&self.store, session_id);
 }
 
+pub fn removePaneFromDetachedSessions(self: anytype, pane_uuid: [32]u8) void {
+    detached_sessions.removePaneFromDetachedSessions(self.allocator, &self.store, pane_uuid);
+}
+
 pub fn listDetachedSessions(self: anytype, allocator: std.mem.Allocator) ![]store_mod.DetachedSession {
     return detached_sessions.listDetachedSessions(allocator, &self.store);
 }

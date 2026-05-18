@@ -260,7 +260,6 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
             }
 
             const state_str = jsonString(obj.get("state") orelse continue) orelse continue;
-            const pane_state: state.PaneState = if (std.mem.eql(u8, state_str, "attached")) .attached else if (std.mem.eql(u8, state_str, "detached")) .detached else if (std.mem.eql(u8, state_str, "sticky")) .sticky else .orphaned;
 
             const owned_socket = try ses_state.allocator.dupe(u8, socket_str);
 
@@ -272,6 +271,12 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
             else
                 null;
             const sticky_key: ?u8 = if (obj.get("sticky_key")) |k| jsonU8(k) else null;
+
+            const stored_state: state.PaneState = if (std.mem.eql(u8, state_str, "attached")) .attached else if (std.mem.eql(u8, state_str, "detached")) .detached else if (std.mem.eql(u8, state_str, "sticky")) .sticky else .orphaned;
+            const pane_state: state.PaneState = if (stored_state == .attached)
+                if (sticky_pwd != null and sticky_key != null) .sticky else .orphaned
+            else
+                stored_state;
 
             // Intentionally do not load pane.name.
             const name: ?[]const u8 = null;

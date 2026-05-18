@@ -2050,6 +2050,9 @@ pub const Server = struct {
                     null;
 
                 if (self.ses_state.findStickyPaneWithAffinity(pwd, key, preferred_session)) |existing| {
+                    if (existing.state == .detached) {
+                        self.ses_state.removePaneFromDetachedSessions(existing.uuid);
+                    }
                     if (existing.attached_to) |owner_id| {
                         if (owner_id != client_id) {
                             _ = self.ses_state.stealAttachedPane(existing.uuid, client_id);
@@ -2071,6 +2074,7 @@ pub const Server = struct {
                     if (self.ses_state.getPane(existing.uuid)) |p| {
                         p.needs_backlog_replay = true;
                     }
+                    self.replayPaneBacklogNow(existing.uuid);
 
                     self.ses_state.markDirty();
                     var existing_resp = wire.PaneCreated{
@@ -2101,6 +2105,32 @@ pub const Server = struct {
             .socket_path_len = @intCast(pane.pod_socket_path.len),
         };
         self.replyOrCloseWithTrail(fd, .pane_created, std.mem.asBytes(&resp), pane.pod_socket_path);
+    }
+
+    fn replayPaneBacklogNow(self: *Server, uuid: [32]u8) void {
+        const pane = self.ses_state.getPane(uuid) orelse return;
+        const owner_id = pane.attached_to orelse {
+            pane.needs_backlog_replay = true;
+            return;
+        };
+        const owner = self.ses_state.getClient(owner_id) orelse {
+            pane.needs_backlog_replay = true;
+            return;
+        };
+        if (owner.mux_vt_fd == null) {
+            pane.needs_backlog_replay = true;
+            return;
+        }
+
+        const pane_id = pane.pane_id;
+        const pod_socket_path = pane.pod_socket_path;
+        if (self.ses_state.connectPodVt(uuid, pod_socket_path, pane_id)) {
+            if (self.ses_state.getPane(uuid)) |updated| {
+                updated.needs_backlog_replay = false;
+            }
+        } else if (self.ses_state.getPane(uuid)) |updated| {
+            updated.needs_backlog_replay = true;
+        }
     }
 
     fn handleBinaryFindSticky(self: *Server, fd: posix.fd_t, payload_len: u32, buf: []u8) void {
@@ -2140,25 +2170,35 @@ pub const Server = struct {
             null;
 
         if (self.ses_state.findStickyPaneWithAffinity(pwd, fs.key, preferred_session)) |pane| {
+            if (pane.state == .detached) {
+                self.ses_state.removePaneFromDetachedSessions(pane.uuid);
+            }
+            var already_attached_to_client = false;
             if (pane.attached_to) |owner_id| {
                 if (owner_id != client_id) {
                     _ = self.ses_state.stealAttachedPane(pane.uuid, client_id);
+                } else {
+                    already_attached_to_client = true;
                 }
             }
 
-            _ = self.ses_state.attachPane(pane.uuid, client_id) catch |err| {
-                core.logging.logError("ses", "find_sticky failed to attach sticky pane", err);
-                self.replyOrClose(fd, .pane_not_found, &.{});
-                return;
-            };
+            if (!already_attached_to_client) {
+                _ = self.ses_state.attachPane(pane.uuid, client_id) catch |err| {
+                    core.logging.logError("ses", "find_sticky failed to attach sticky pane", err);
+                    self.replyOrClose(fd, .pane_not_found, &.{});
+                    return;
+                };
+            }
 
             // New mux needs a full screen restore for sticky adoption/takeover.
-            // Queue it for the periodic worker instead of reconnecting POD VT
-            // inline from the CTL handler, which can make attach feel hung.
+            // Try the VT replay immediately so cross-session CWD-float handoff
+            // feels instant; keep needs_backlog_replay set if the mux VT/pod VT
+            // endpoint is not ready yet so the periodic worker can retry.
             if (self.ses_state.getPane(pane.uuid)) |p| {
                 p.needs_backlog_replay = true;
             }
-            ses.debugLog("find_sticky: queued deferred backlog replay for uuid={s}", .{pane.uuid[0..8]});
+            self.replayPaneBacklogNow(pane.uuid);
+            ses.debugLog("find_sticky: requested immediate backlog replay for uuid={s}", .{pane.uuid[0..8]});
 
             var resp = wire.PaneFound{
                 .uuid = pane.uuid,

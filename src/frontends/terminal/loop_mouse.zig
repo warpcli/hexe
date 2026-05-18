@@ -644,6 +644,14 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                 state.mouse_drag = .none;
                 if (state.findPaneByUuid(d.uuid)) |pane| {
                     if (!state.syncSessionFloatChecked(pane, state.activeFloatingIndex() != null and state.view.float_views.items[state.activeFloatingIndex().?] == pane)) {
+                        if (state.paneSticky(pane) or state.paneIsPwd(pane)) {
+                            terminal_main.debugLogUuid(
+                                &pane.uuid,
+                                "float move: session sync rejected for shared sticky/per-CWD float; kept local geometry",
+                                .{},
+                            );
+                            return true;
+                        }
                         state.notifications.show("Move float failed: session sync rejected update");
                     }
                 }
@@ -663,6 +671,14 @@ pub fn handle(state: *State, mouse: vaxis.Mouse) bool {
                 state.needs_render = true;
                 if (state.findPaneByUuid(d.uuid)) |pane| {
                     if (!state.syncSessionFloatChecked(pane, state.activeFloatingIndex() != null and state.view.float_views.items[state.activeFloatingIndex().?] == pane)) {
+                        if (state.paneSticky(pane) or state.paneIsPwd(pane)) {
+                            terminal_main.debugLogUuid(
+                                &pane.uuid,
+                                "float resize: session sync rejected for shared sticky/per-CWD float; kept local geometry",
+                                .{},
+                            );
+                            return true;
+                        }
                         state.notifications.show("Resize float failed: session sync rejected update");
                     }
                 }

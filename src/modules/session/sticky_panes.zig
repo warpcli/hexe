@@ -35,9 +35,12 @@ pub fn findStickyPaneWithAffinity(
 
     var iter = store.panes.valueIterator();
     while (iter.next()) |pane| {
-        // Sticky candidates can be idle (.sticky) or currently active
-        // (.attached). Active ones may be taken over by another mux.
-        if (pane.state == .sticky or pane.state == .attached) {
+        // Sticky candidates can be idle (.sticky), currently active
+        // (.attached), or parked inside a detached session (.detached).
+        // Per-CWD sticky floats are globally keyed by pwd+key, so launching
+        // one after reattach must reuse the existing detached pod instead of
+        // spawning a duplicate just because it is not currently attached.
+        if (pane.state == .sticky or pane.state == .attached or pane.state == .detached) {
             if (!isPidAlive(pane.child_pid)) continue;
             if (pane.sticky_pwd) |spwd| {
                 if (pane.sticky_key) |skey| {

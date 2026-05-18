@@ -1852,6 +1852,151 @@ test "findStickyPaneWithAffinity: fallback when no affinity match" {
     }
 }
 
+test "findStickyPaneWithAffinity: finds detached per-cwd sticky pane" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const pwd = "/home/test";
+    const key: u8 = '2';
+    const live_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
+    const session_id = [_]u8{9} ** 16;
+    const uuid = [_]u8{3} ** 32;
+
+    const pane = state.Pane{
+        .uuid = uuid,
+        .name = try testing.allocator.dupe(u8, "detached-cwd-float"),
+        .pod_pid = live_pid,
+        .pod_socket_path = try testing.allocator.dupe(u8, "/tmp/detached-cwd-float"),
+        .child_pid = live_pid,
+        .state = .detached,
+        .sticky_pwd = try testing.allocator.dupe(u8, pwd),
+        .sticky_key = key,
+        .sticky_session_name = try testing.allocator.dupe(u8, "alpha"),
+        .attached_to = null,
+        .session_id = session_id,
+        .created_at = 0,
+        .orphaned_at = std.time.timestamp(),
+        .allocator = testing.allocator,
+    };
+    try ses_state.store.panes.put(uuid, pane);
+
+    const found = ses_state.findStickyPaneWithAffinity(pwd, key, "alpha");
+    try testing.expect(found != null);
+    try testing.expectEqualSlices(u8, &uuid, &found.?.uuid);
+}
+
+test "per-CWD sticky floats: keys 1/2/3 in one pwd resolve independently" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const pwd = "/home/test/proj";
+    const live_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
+    const keys = [_]u8{ '1', '2', '3' };
+    const uuids = [_][32]u8{
+        [_]u8{0x41} ** 32,
+        [_]u8{0x42} ** 32,
+        [_]u8{0x43} ** 32,
+    };
+
+    for (keys, uuids) |key, uuid| {
+        var sock_buf: [64]u8 = undefined;
+        const sock = try std.fmt.bufPrint(&sock_buf, "/tmp/hexe-cwdfloat-{c}", .{key});
+        try ses_state.store.panes.put(uuid, .{
+            .uuid = uuid,
+            .name = try testing.allocator.dupe(u8, "cwd-float"),
+            .pod_pid = live_pid,
+            .pod_socket_path = try testing.allocator.dupe(u8, sock),
+            .child_pid = live_pid,
+            .state = .sticky,
+            .sticky_pwd = try testing.allocator.dupe(u8, pwd),
+            .sticky_key = key,
+            .attached_to = null,
+            .session_id = null,
+            .created_at = 0,
+            .orphaned_at = std.time.timestamp(),
+            .allocator = testing.allocator,
+        });
+    }
+
+    // Each (pwd, key) identity resolves to its own distinct pane.
+    for (keys, uuids) |key, uuid| {
+        const found = ses_state.findStickyPaneWithAffinity(pwd, key, null);
+        try testing.expect(found != null);
+        try testing.expectEqualSlices(u8, &uuid, &found.?.uuid);
+    }
+
+    // A key with no sticky pane does not collide with the populated pwd.
+    try testing.expect(ses_state.findStickyPaneWithAffinity(pwd, '9', null) == null);
+}
+
+test "per-CWD sticky float takeover transfers ownership without spawning" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const pwd = "/home/test/proj";
+    const live_pid: std.posix.pid_t = @intCast(std.os.linux.getpid());
+    const keys = [_]u8{ '1', '2', '3' };
+    const uuids = [_][32]u8{
+        [_]u8{0x51} ** 32,
+        [_]u8{0x52} ** 32,
+        [_]u8{0x53} ** 32,
+    };
+
+    for (keys, uuids) |key, uuid| {
+        var sock_buf: [64]u8 = undefined;
+        const sock = try std.fmt.bufPrint(&sock_buf, "/tmp/hexe-takeover-{c}", .{key});
+        try ses_state.store.panes.put(uuid, .{
+            .uuid = uuid,
+            .name = try testing.allocator.dupe(u8, "cwd-float"),
+            .pod_pid = live_pid,
+            .pod_socket_path = try testing.allocator.dupe(u8, sock),
+            .child_pid = live_pid,
+            .state = .sticky,
+            .sticky_pwd = try testing.allocator.dupe(u8, pwd),
+            .sticky_key = key,
+            .attached_to = null,
+            .session_id = null,
+            .created_at = 0,
+            .orphaned_at = std.time.timestamp(),
+            .allocator = testing.allocator,
+        });
+    }
+
+    // Client A adopts all three per-CWD floats.
+    const client_a = try ses_state.addClient(101);
+    for (uuids) |uuid| {
+        _ = try ses_state.attachPane(uuid, client_a);
+    }
+    try testing.expectEqual(@as(usize, 3), ses_state.getClient(client_a).?.pane_uuids.items.len);
+
+    // Client B takes over key '2' only.
+    const client_b = try ses_state.addClient(102);
+    const target = uuids[1];
+    try testing.expect(ses_state.stealAttachedPane(target, client_b));
+    const taken = try ses_state.attachPane(target, client_b);
+
+    // Takeover returns the original pane UUID — no duplicate pane spawned.
+    try testing.expectEqualSlices(u8, &target, &taken.uuid);
+    try testing.expectEqual(@as(usize, 3), ses_state.store.panes.count());
+
+    // Ownership moved from A to B for key '2' only.
+    try testing.expectEqual(client_b, taken.attached_to.?);
+    const a_panes = ses_state.getClient(client_a).?.pane_uuids;
+    try testing.expectEqual(@as(usize, 2), a_panes.items.len);
+    for (a_panes.items) |uuid| {
+        try testing.expect(!std.mem.eql(u8, &uuid, &target));
+    }
+    const b_panes = ses_state.getClient(client_b).?.pane_uuids;
+    try testing.expectEqual(@as(usize, 1), b_panes.items.len);
+    try testing.expectEqualSlices(u8, &target, &b_panes.items[0]);
+
+    // Keys '1' and '3' still belong to client A and not client B.
+    for ([_]usize{ 0, 2 }) |i| {
+        try testing.expect(ses_state.paneAttachedToClient(uuids[i], client_a));
+        try testing.expect(!ses_state.paneAttachedToClient(uuids[i], client_b));
+    }
+}
+
 // ============================================================================
 // SessionSnapshot mutation tests (P7.3)
 //
@@ -2087,6 +2232,36 @@ test "attachPane: missing client leaves pane adoptable" {
     try testing.expect(pane.attached_to == null);
     try testing.expectEqual(@as(?i64, 123), pane.orphaned_at);
     try testing.expect(!pane.needs_backlog_replay);
+}
+
+test "attachPane: recovers persisted attached pane with no owner" {
+    var ses_state = state.SesState.init(testing.allocator);
+    defer ses_state.deinit();
+
+    const client_id = try ses_state.addClient(99);
+    const pane_uuid = [_]u8{'r'} ** 32;
+    try ses_state.store.panes.put(pane_uuid, .{
+        .uuid = pane_uuid,
+        .pod_pid = 1001,
+        .pod_socket_path = try ses_state.allocator.dupe(u8, "/tmp/hexe-pane-attached-no-owner"),
+        .child_pid = 2001,
+        .state = .attached,
+        .sticky_pwd = try ses_state.allocator.dupe(u8, "/home/test"),
+        .sticky_key = '2',
+        .attached_to = null,
+        .session_id = null,
+        .created_at = 0,
+        .orphaned_at = null,
+        .allocator = ses_state.allocator,
+    });
+
+    const pane = try ses_state.attachPane(pane_uuid, client_id);
+    try testing.expectEqual(state.PaneState.attached, pane.state);
+    try testing.expectEqual(client_id, pane.attached_to.?);
+
+    const client = ses_state.getClient(client_id).?;
+    try testing.expectEqual(@as(usize, 1), client.pane_uuids.items.len);
+    try testing.expectEqualSlices(u8, &pane_uuid, &client.pane_uuids.items[0]);
 }
 
 test "paneAttachedToClient: requires live attached ownership" {
