@@ -14,6 +14,17 @@ const terminal = @import("terminal.zig");
 
 const TERMINAL_QUERY_TIMEOUT_MS: i64 = 1200;
 
+fn setCellMouseMode(state: *State, tty: anytype) !void {
+    // Hexe hit-tests mouse events in terminal cells. Kitty supports SGR-pixel
+    // mouse mode (1016), and vaxis enables it when caps.sgr_pixels is true,
+    // but this frontend does not keep vaxis' pixel screen size populated.
+    // Force normal SGR cell mouse mode until the renderer owns real pixel
+    // dimensions end-to-end.
+    state.renderer.vx.state.mouse = true;
+    state.renderer.vx.state.pixel_mouse = false;
+    try tty.writeAll("\x1b[?1016l\x1b[?1002;1003;1004;1006h");
+}
+
 fn connectionLost(state: *State) void {
     state.runtime.requestFrontendDisconnectStop();
 }
@@ -40,9 +51,10 @@ fn applyPostQueryFeatureModes(state: *State) void {
         state.renderer.vx.screen.width_method = .unicode;
     }
 
-    // Re-apply mouse mode after capability discovery so terminals with
-    // SGR-pixels support get upgraded from cell-coordinates to pixel mode.
-    state.renderer.vx.setMouseMode(&tty.interface, true) catch |err| {
+    // Re-apply mouse mode after capability discovery, but keep cell
+    // coordinates. See setCellMouseMode above: Kitty pixel mouse breaks Hexe
+    // pane hit-testing unless pixel dimensions are tracked consistently.
+    setCellMouseMode(state, &tty.interface) catch |err| {
         core.logging.logError("terminal", "failed to set mouse mode after capability query", err);
     };
 

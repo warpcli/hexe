@@ -329,6 +329,7 @@ const QueuedVtFrame = struct {
 const MuxVtQueue = struct {
     frames: std.ArrayList(QueuedVtFrame) = .empty,
     bytes: usize = 0,
+    head: usize = 0,
 
     fn frameHeader(frame: QueuedVtFrame) ?wire.MuxVtHeader {
         if (frame.bytes.len < @sizeOf(wire.MuxVtHeader)) return null;
@@ -337,8 +338,33 @@ const MuxVtQueue = struct {
         return std.mem.bytesToValue(wire.MuxVtHeader, &hdr_buf);
     }
 
+    fn pendingLen(self: *const MuxVtQueue) usize {
+        if (self.head >= self.frames.items.len) return 0;
+        return self.frames.items.len - self.head;
+    }
+
+    fn compactConsumed(self: *MuxVtQueue) void {
+        if (self.head == 0) return;
+        if (self.head >= self.frames.items.len) {
+            self.frames.clearRetainingCapacity();
+            self.head = 0;
+            return;
+        }
+        if (self.head < 64 and self.head * 2 < self.frames.items.len) return;
+
+        const remaining = self.frames.items.len - self.head;
+        std.mem.copyForwards(
+            QueuedVtFrame,
+            self.frames.items[0..remaining],
+            self.frames.items[self.head..],
+        );
+        self.frames.shrinkRetainingCapacity(remaining);
+        self.head = 0;
+    }
+
     fn removeUnwrittenFrameTypeForPane(self: *MuxVtQueue, allocator: std.mem.Allocator, pane_id: u16, frame_type: u8) void {
-        var i: usize = 0;
+        self.compactConsumed();
+        var i: usize = self.head;
         while (i < self.frames.items.len) {
             const frame = self.frames.items[i];
             const hdr = frameHeader(frame) orelse {
@@ -356,7 +382,10 @@ const MuxVtQueue = struct {
     }
 
     fn deinit(self: *MuxVtQueue, allocator: std.mem.Allocator) void {
-        for (self.frames.items) |frame| allocator.free(frame.bytes);
+        var i: usize = self.head;
+        while (i < self.frames.items.len) : (i += 1) {
+            allocator.free(self.frames.items[i].bytes);
+        }
         self.frames.deinit(allocator);
         self.* = .{};
     }
@@ -425,6 +454,39 @@ test "MuxVtQueue coalesces only configured low-value frame types" {
     try std.testing.expect(MuxVtQueue.frameTypeIsLowValueCoalescible(VT_FRAME_TYPE_BACKLOG_END));
     try std.testing.expect(MuxVtQueue.frameTypeIsLowValueCoalescible(VT_FRAME_TYPE_PASSWORD_MODE));
     try std.testing.expect(!MuxVtQueue.frameTypeIsLowValueCoalescible(@intFromEnum(core.pod_protocol.FrameType.output)));
+}
+
+test "MuxVtQueue compacts consumed frames without freeing active frames" {
+    const allocator = std.testing.allocator;
+    var queue = MuxVtQueue{};
+    defer queue.deinit(allocator);
+
+    const frame_len = @sizeOf(wire.MuxVtHeader);
+    var i: usize = 0;
+    while (i < 80) : (i += 1) {
+        try queue.frames.append(allocator, try testQueuedMuxFrame(
+            allocator,
+            @intCast(i + 1),
+            @intFromEnum(core.pod_protocol.FrameType.output),
+            0,
+        ));
+        queue.bytes += frame_len;
+    }
+
+    i = 0;
+    while (i < 70) : (i += 1) {
+        queue.bytes -= queue.frames.items[queue.head].bytes.len;
+        allocator.free(queue.frames.items[queue.head].bytes);
+        queue.head += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 10), queue.pendingLen());
+    queue.compactConsumed();
+
+    try std.testing.expectEqual(@as(usize, 0), queue.head);
+    try std.testing.expectEqual(@as(usize, 10), queue.frames.items.len);
+    try std.testing.expectEqual(@as(usize, frame_len * 10), queue.bytes);
+    try std.testing.expectEqual(@as(u16, 71), MuxVtQueue.frameHeader(queue.frames.items[0]).?.pane_id);
 }
 
 /// Server that handles mux connections
@@ -1283,13 +1345,15 @@ pub const Server = struct {
 
     fn muxVtQueueHasPending(self: *Server, mux_vt_fd: posix.fd_t) bool {
         const queue = self.mux_vt_queues.getPtr(mux_vt_fd) orelse return false;
-        return queue.frames.items.len > 0;
+        return queue.pendingLen() > 0;
     }
 
     fn flushMuxVtQueue(self: *Server, mux_vt_fd: posix.fd_t) bool {
         var queue = self.mux_vt_queues.getPtr(mux_vt_fd) orelse return true;
-        while (queue.frames.items.len > 0) {
-            var frame = &queue.frames.items[0];
+        defer queue.compactConsumed();
+
+        while (queue.pendingLen() > 0) {
+            var frame = &queue.frames.items[queue.head];
             const n = posix.write(mux_vt_fd, frame.bytes[frame.written..]) catch |err| {
                 switch (err) {
                     error.WouldBlock => {},
@@ -1306,7 +1370,7 @@ pub const Server = struct {
 
             queue.bytes -= frame.bytes.len;
             self.allocator.free(frame.bytes);
-            _ = queue.frames.orderedRemove(0);
+            queue.head += 1;
         }
         return true;
     }
@@ -1369,6 +1433,9 @@ pub const Server = struct {
             self.queueVtClose(mux_vt_fd, null);
             return true;
         };
+        if (!self.flushMuxVtQueue(mux_vt_fd)) {
+            self.queueVtClose(mux_vt_fd, null);
+        }
         return true;
     }
 

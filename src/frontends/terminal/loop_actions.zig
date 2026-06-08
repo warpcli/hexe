@@ -684,6 +684,14 @@ fn applyFloatExclusivity(state: *State, float_def: *const core.LayoutFloatDef) v
 }
 
 pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) void {
+    // Float/workspace toggles change the visible/focused pane surface just like
+    // tab switches do. Any in-mux mouse selection is tied to the old pane
+    // geometry/viewport and can render as a bogus long highlight after the
+    // float is opened/hidden, so drop transient interaction state first.
+    state.mouse_selection.clear();
+    state.clearFloatRename();
+    state.mouse_drag = .none;
+
     // Get current directory from ACTUALLY focused pane (float or split).
     // For per-CWD floats, an already-focused float carries the *origin* CWD
     // in its float UI state. Use that before asking the shell/process for CWD:
