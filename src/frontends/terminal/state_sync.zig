@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const core = @import("core");
+const frontend_core = @import("frontend_core");
 
 const FrontendRuntime = core.FrontendRuntime;
 const Pane = @import("pane.zig").Pane;
@@ -47,7 +48,10 @@ pub fn syncSessionSplitRatio(
     second_anchor_uuid: [32]u8,
     ratio: f32,
 ) void {
-    if (!self.runtime.isConnected()) return;
+    if (!self.runtime.isConnected()) {
+        self.applyFrontendSplitRatio(first_anchor_uuid, second_anchor_uuid, ratio);
+        return;
+    }
     const tab_uuid = self.runtime.tabUuid(self.activeTabIndex()) orelse {
         core.logging.warn("terminal", "session split ratio sync skipped: active tab has no session UUID", .{});
         return;
@@ -60,7 +64,9 @@ pub fn syncSessionSplitRatio(
         ratio,
     ) catch |err| {
         core.logging.logError("terminal", "failed sessionSetSplitRatio IPC", err);
+        return;
     };
+    self.applyFrontendSplitRatio(first_anchor_uuid, second_anchor_uuid, ratio);
 }
 
 pub fn getCurrentFocusedUuid(self: anytype) ?[32]u8 {
@@ -209,6 +215,21 @@ pub fn syncPaneFocus(self: anytype, pane: *Pane, focused_from: ?[32]u8) void {
         self.setActiveFloatingIndex(null);
     }
     self.runtime.setFocusedPaneUuid(pane.uuid);
+    if (self.frontend_view) |*view| {
+        _ = frontend_core.applyViewActionWithContext(view, .focus_set, .{
+            .focus_target_uuid = pane.uuid,
+        }) catch |err| {
+            core.logging.logError("terminal", "failed to mirror focused pane into shared frontend view", err);
+        };
+        if (!self.paneIsFloating(pane)) {
+            _ = frontend_core.applyViewActionWithContext(view, .tab_focus_set, .{
+                .focus_tab_idx = self.activeTabIndex(),
+                .focus_target_uuid = pane.uuid,
+            }) catch |err| {
+                core.logging.logError("terminal", "failed to mirror tab focused pane into shared frontend view", err);
+            };
+        }
+    }
 
     if (!self.runtime.isConnected()) return;
     if (pane.uuid[0] == 0) return;
@@ -268,6 +289,13 @@ pub fn syncPaneUnfocus(self: anytype, pane: *Pane) void {
     if (self.runtime.focusedPaneUuid()) |uuid| {
         if (std.mem.eql(u8, &uuid, &pane.uuid)) {
             self.runtime.setFocusedPaneUuid(null);
+            if (self.frontend_view) |*view| {
+                _ = frontend_core.applyViewActionWithContext(view, .focus_set, .{
+                    .clear_focus = true,
+                }) catch |err| {
+                    core.logging.logError("terminal", "failed to clear shared frontend focused pane", err);
+                };
+            }
         }
     }
     if (self.paneIsFloating(pane)) {

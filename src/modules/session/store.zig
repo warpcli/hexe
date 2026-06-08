@@ -387,6 +387,9 @@ pub const Client = struct {
     session_name: ?[]const u8,
     base_root: ?[]const u8,
     session_snapshot: ?session_model.SessionSnapshot,
+    frontend_kind: u8 = 0,
+    transport_kind: u8 = 0,
+    capability_flags: u32 = 0,
 
     mux_ctl_fd: ?posix.fd_t = null,
     mux_vt_fd: ?posix.fd_t = null,

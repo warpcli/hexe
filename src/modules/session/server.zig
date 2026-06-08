@@ -11,6 +11,9 @@ const xev = @import("xev").Dynamic;
 // peer dies mid-frame on stream sockets.
 const VT_ROUTE_IO_TIMEOUT_MS: i32 = 2000;
 const CTL_FRAME_IO_TIMEOUT_MS: i32 = 2000;
+const MUX_VT_QUEUE_MAX_BYTES: usize = 4 * 1024 * 1024;
+const VT_FRAME_TYPE_BACKLOG_END: u8 = @intFromEnum(core.pod_protocol.FrameType.backlog_end);
+const VT_FRAME_TYPE_PASSWORD_MODE: u8 = @intFromEnum(core.pod_protocol.FrameType.password_mode);
 
 /// Maximum number of concurrent client connections (MUX instances).
 const MAX_CLIENTS: usize = core.constants.Limits.max_clients;
@@ -51,6 +54,7 @@ fn testServer(allocator: std.mem.Allocator) Server {
         .pending_ctl_close_fds = .empty,
         .vt_watchers = std.AutoHashMap(posix.fd_t, *VtWatcher).init(allocator),
         .pending_vt_close_fds = .empty,
+        .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(allocator),
         .deferred_destroy_ctl = .empty,
         .deferred_destroy_vt = .empty,
         .pending_float_cli_fds = std.AutoHashMap([32]u8, posix.fd_t).init(allocator),
@@ -72,6 +76,9 @@ fn deinitTestServer(server: *Server) void {
     server.pending_ctl_close_fds.deinit(server.allocator);
     server.vt_watchers.deinit();
     server.pending_vt_close_fds.deinit(server.allocator);
+    var mux_queue_it = server.mux_vt_queues.iterator();
+    while (mux_queue_it.next()) |entry| entry.value_ptr.deinit(server.allocator);
+    server.mux_vt_queues.deinit();
     server.deferred_destroy_ctl.deinit(server.allocator);
     server.deferred_destroy_vt.deinit(server.allocator);
     server.binary_ctl_fds.deinit();
@@ -116,6 +123,30 @@ test "Server.requireSnapshotPane rejects unknown pane with binary error" {
 
     try std.testing.expect(!server.requireSnapshotPane(pair.a, &client, [_]u8{'u'} ** 32, "test_op"));
     try expectBinaryError(pair.b, "unknown pane uuid");
+}
+
+test "Server replies echo request id only to current request fd" {
+    const allocator = std.testing.allocator;
+    const request_pair = try testSocketPair();
+    defer posix.close(request_pair.a);
+    defer posix.close(request_pair.b);
+    const other_pair = try testSocketPair();
+    defer posix.close(other_pair.a);
+    defer posix.close(other_pair.b);
+
+    var server = testServer(allocator);
+    defer deinitTestServer(&server);
+    server.current_ctl_request_fd = request_pair.a;
+    server.current_ctl_request_id = 77;
+
+    server.replyOrClose(request_pair.a, .ok, &.{});
+    server.replyOrClose(other_pair.a, .ok, &.{});
+
+    const request_hdr = try wire.readControlHeader(request_pair.b);
+    try std.testing.expectEqual(@as(u32, 77), request_hdr.request_id);
+
+    const other_hdr = try wire.readControlHeader(other_pair.b);
+    try std.testing.expectEqual(@as(u32, 0), other_hdr.request_id);
 }
 
 test "Server.requireSnapshotTab rejects unknown tab with binary error" {
@@ -290,6 +321,112 @@ const PendingVtClose = struct {
     watcher: ?*VtWatcher,
 };
 
+const QueuedVtFrame = struct {
+    bytes: []u8,
+    written: usize = 0,
+};
+
+const MuxVtQueue = struct {
+    frames: std.ArrayList(QueuedVtFrame) = .empty,
+    bytes: usize = 0,
+
+    fn frameHeader(frame: QueuedVtFrame) ?wire.MuxVtHeader {
+        if (frame.bytes.len < @sizeOf(wire.MuxVtHeader)) return null;
+        var hdr_buf: [@sizeOf(wire.MuxVtHeader)]u8 = undefined;
+        @memcpy(&hdr_buf, frame.bytes[0..@sizeOf(wire.MuxVtHeader)]);
+        return std.mem.bytesToValue(wire.MuxVtHeader, &hdr_buf);
+    }
+
+    fn removeUnwrittenFrameTypeForPane(self: *MuxVtQueue, allocator: std.mem.Allocator, pane_id: u16, frame_type: u8) void {
+        var i: usize = 0;
+        while (i < self.frames.items.len) {
+            const frame = self.frames.items[i];
+            const hdr = frameHeader(frame) orelse {
+                i += 1;
+                continue;
+            };
+            if (frame.written == 0 and hdr.pane_id == pane_id and hdr.frame_type == frame_type) {
+                self.bytes -= frame.bytes.len;
+                allocator.free(frame.bytes);
+                _ = self.frames.orderedRemove(i);
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    fn deinit(self: *MuxVtQueue, allocator: std.mem.Allocator) void {
+        for (self.frames.items) |frame| allocator.free(frame.bytes);
+        self.frames.deinit(allocator);
+        self.* = .{};
+    }
+
+    fn frameTypeIsLowValueCoalescible(frame_type: u8) bool {
+        return frame_type == VT_FRAME_TYPE_BACKLOG_END or frame_type == VT_FRAME_TYPE_PASSWORD_MODE;
+    }
+};
+
+fn testQueuedMuxFrame(allocator: std.mem.Allocator, pane_id: u16, frame_type: u8, written: usize) !QueuedVtFrame {
+    const bytes = try allocator.alloc(u8, @sizeOf(wire.MuxVtHeader));
+    const hdr = wire.MuxVtHeader{
+        .pane_id = pane_id,
+        .frame_type = frame_type,
+        .len = 0,
+    };
+    @memcpy(bytes, std.mem.asBytes(&hdr));
+    return .{ .bytes = bytes, .written = written };
+}
+
+test "MuxVtQueue coalesces only unwritten backlog_end frames for the same pane" {
+    const allocator = std.testing.allocator;
+    var queue = MuxVtQueue{};
+    defer queue.deinit(allocator);
+
+    const frame_len = @sizeOf(wire.MuxVtHeader);
+    try queue.frames.append(allocator, try testQueuedMuxFrame(allocator, 1, VT_FRAME_TYPE_BACKLOG_END, 0));
+    queue.bytes += frame_len;
+    try queue.frames.append(allocator, try testQueuedMuxFrame(allocator, 2, VT_FRAME_TYPE_BACKLOG_END, 0));
+    queue.bytes += frame_len;
+    try queue.frames.append(allocator, try testQueuedMuxFrame(allocator, 1, @intFromEnum(core.pod_protocol.FrameType.output), 0));
+    queue.bytes += frame_len;
+    try queue.frames.append(allocator, try testQueuedMuxFrame(allocator, 1, VT_FRAME_TYPE_BACKLOG_END, 1));
+    queue.bytes += frame_len;
+
+    queue.removeUnwrittenFrameTypeForPane(allocator, 1, VT_FRAME_TYPE_BACKLOG_END);
+
+    try std.testing.expectEqual(@as(usize, 3), queue.frames.items.len);
+    try std.testing.expectEqual(@as(usize, frame_len * 3), queue.bytes);
+    try std.testing.expectEqual(@as(u16, 2), MuxVtQueue.frameHeader(queue.frames.items[0]).?.pane_id);
+    try std.testing.expectEqual(@intFromEnum(core.pod_protocol.FrameType.output), MuxVtQueue.frameHeader(queue.frames.items[1]).?.frame_type);
+    try std.testing.expectEqual(@as(usize, 1), queue.frames.items[2].written);
+}
+
+test "MuxVtQueue coalesces only configured low-value frame types" {
+    const allocator = std.testing.allocator;
+    var queue = MuxVtQueue{};
+    defer queue.deinit(allocator);
+
+    const frame_len = @sizeOf(wire.MuxVtHeader);
+    try queue.frames.append(allocator, try testQueuedMuxFrame(allocator, 1, VT_FRAME_TYPE_PASSWORD_MODE, 0));
+    queue.bytes += frame_len;
+    try queue.frames.append(allocator, try testQueuedMuxFrame(allocator, 1, VT_FRAME_TYPE_PASSWORD_MODE, 1));
+    queue.bytes += frame_len;
+    try queue.frames.append(allocator, try testQueuedMuxFrame(allocator, 1, @intFromEnum(core.pod_protocol.FrameType.output), 0));
+    queue.bytes += frame_len;
+
+    queue.removeUnwrittenFrameTypeForPane(allocator, 1, VT_FRAME_TYPE_PASSWORD_MODE);
+
+    try std.testing.expectEqual(@as(usize, 2), queue.frames.items.len);
+    try std.testing.expectEqual(@as(usize, frame_len * 2), queue.bytes);
+    try std.testing.expectEqual(VT_FRAME_TYPE_PASSWORD_MODE, MuxVtQueue.frameHeader(queue.frames.items[0]).?.frame_type);
+    try std.testing.expectEqual(@as(usize, 1), queue.frames.items[0].written);
+    try std.testing.expectEqual(@intFromEnum(core.pod_protocol.FrameType.output), MuxVtQueue.frameHeader(queue.frames.items[1]).?.frame_type);
+
+    try std.testing.expect(MuxVtQueue.frameTypeIsLowValueCoalescible(VT_FRAME_TYPE_BACKLOG_END));
+    try std.testing.expect(MuxVtQueue.frameTypeIsLowValueCoalescible(VT_FRAME_TYPE_PASSWORD_MODE));
+    try std.testing.expect(!MuxVtQueue.frameTypeIsLowValueCoalescible(@intFromEnum(core.pod_protocol.FrameType.output)));
+}
+
 /// Server that handles mux connections
 /// Note: Uses page_allocator internally to avoid GPA issues after fork/daemonization
 pub const Server = struct {
@@ -305,6 +442,7 @@ pub const Server = struct {
     pending_ctl_close_fds: std.ArrayList(PendingCtlClose),
     vt_watchers: std.AutoHashMap(posix.fd_t, *VtWatcher),
     pending_vt_close_fds: std.ArrayList(PendingVtClose),
+    mux_vt_queues: std.AutoHashMap(posix.fd_t, MuxVtQueue),
     // Deferred watcher destruction: nodes are kept alive for one loop iteration
     // after disarm so xev can finish processing their completions. Freeing
     // immediately causes use-after-free in ReleaseFast (xev still holds refs).
@@ -315,6 +453,8 @@ pub const Server = struct {
     pending_exit_intent_cli_fd: ?posix.fd_t = null,
     // CLI fds waiting for float result, keyed by float pane UUID.
     pending_float_cli_fds: std.AutoHashMap([32]u8, posix.fd_t),
+    current_ctl_request_fd: ?posix.fd_t = null,
+    current_ctl_request_id: u32 = 0,
 
     // Resource monitoring and limits
     resource_monitor: core.resource_limits.ResourceMonitor,
@@ -342,6 +482,7 @@ pub const Server = struct {
             .pending_ctl_close_fds = .empty,
             .vt_watchers = std.AutoHashMap(posix.fd_t, *VtWatcher).init(page_alloc),
             .pending_vt_close_fds = .empty,
+            .mux_vt_queues = std.AutoHashMap(posix.fd_t, MuxVtQueue).init(page_alloc),
             .deferred_destroy_ctl = .empty,
             .deferred_destroy_vt = .empty,
             .pending_float_cli_fds = std.AutoHashMap([32]u8, posix.fd_t).init(page_alloc),
@@ -369,6 +510,9 @@ pub const Server = struct {
         }
         self.vt_watchers.deinit();
         self.pending_vt_close_fds.deinit(self.allocator);
+        var mux_queue_it = self.mux_vt_queues.iterator();
+        while (mux_queue_it.next()) |entry| entry.value_ptr.deinit(self.allocator);
+        self.mux_vt_queues.deinit();
         self.flushDeferredDestroys();
         self.deferred_destroy_ctl.deinit(self.allocator);
         self.deferred_destroy_vt.deinit(self.allocator);
@@ -498,6 +642,10 @@ pub const Server = struct {
                 ses.debugLog("processPendingVtCloses: fd={d} removing MUX VT", .{pending.fd});
                 self.removeMuxVtFd(pending.fd);
             }
+            if (self.mux_vt_queues.fetchRemove(pending.fd)) |entry| {
+                var queue = entry.value;
+                queue.deinit(self.allocator);
+            }
 
             posix.close(pending.fd);
             ses.debugLog("processPendingVtCloses: fd={d} closed", .{pending.fd});
@@ -526,7 +674,7 @@ pub const Server = struct {
     /// Write a control reply to a client fd; on failure log and queue the
     /// connection for close so stale fds don't accumulate.
     fn replyOrClose(self: *Server, fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8) void {
-        wire.writeControl(fd, msg_type, payload) catch |err| {
+        wire.writeControlWithRequestId(fd, msg_type, self.responseRequestIdForFd(fd), payload) catch |err| {
             core.logging.warnWithSource("ses", "reply failed: fd={d} type={s} err={s}", .{ fd, @tagName(msg_type), @errorName(err) }, @src());
             self.queueCtlClose(fd, null);
         };
@@ -540,10 +688,17 @@ pub const Server = struct {
         payload: []const u8,
         trail: []const u8,
     ) void {
-        wire.writeControlWithTrail(fd, msg_type, payload, trail) catch |err| {
+        wire.writeControlWithTrailAndRequestId(fd, msg_type, self.responseRequestIdForFd(fd), payload, trail) catch |err| {
             core.logging.warnWithSource("ses", "reply-with-trail failed: fd={d} type={s} err={s}", .{ fd, @tagName(msg_type), @errorName(err) }, @src());
             self.queueCtlClose(fd, null);
         };
+    }
+
+    fn responseRequestIdForFd(self: *const Server, fd: posix.fd_t) u32 {
+        if (self.current_ctl_request_fd) |request_fd| {
+            if (request_fd == fd) return self.current_ctl_request_id;
+        }
+        return 0;
     }
 
     /// Assert that `client` owns `tab_uuid` in its canonical snapshot. If
@@ -826,6 +981,8 @@ pub const Server = struct {
 
         const now_ms = std.time.milliTimestamp();
 
+        periodic.server.flushMuxVtQueues();
+
         if (periodic.server.ses_state.store.dirty and now_ms - periodic.last_save >= 1000) {
             @import("persist.zig").save(periodic.server.allocator, periodic.server.ses_state) catch |e| {
                 core.logging.logError("ses", "persist.save failed", e);
@@ -1097,6 +1254,70 @@ pub const Server = struct {
     /// This avoids emitting a header with missing payload when POD exits
     /// mid-frame (which would desync MUX VT parser and drop the whole channel).
     /// Returns false if the connection should be removed.
+    fn enqueueMuxVtFrame(self: *Server, mux_vt_fd: posix.fd_t, pane_id: u16, frame_type: u8, payload: []const u8) !void {
+        const frame_len = @sizeOf(wire.MuxVtHeader) + payload.len;
+        var entry = try self.mux_vt_queues.getOrPut(mux_vt_fd);
+        if (!entry.found_existing) entry.value_ptr.* = .{};
+        if (MuxVtQueue.frameTypeIsLowValueCoalescible(frame_type)) {
+            entry.value_ptr.removeUnwrittenFrameTypeForPane(self.allocator, pane_id, frame_type);
+        }
+        if (entry.value_ptr.bytes + frame_len > MUX_VT_QUEUE_MAX_BYTES) {
+            if (MuxVtQueue.frameTypeIsLowValueCoalescible(frame_type)) return;
+            return error.QueueFull;
+        }
+
+        const frame = try self.allocator.alloc(u8, frame_len);
+        errdefer self.allocator.free(frame);
+        const mux_hdr = wire.MuxVtHeader{
+            .pane_id = pane_id,
+            .frame_type = frame_type,
+            .len = @intCast(payload.len),
+        };
+        @memcpy(frame[0..@sizeOf(wire.MuxVtHeader)], std.mem.asBytes(&mux_hdr));
+        if (payload.len > 0) {
+            @memcpy(frame[@sizeOf(wire.MuxVtHeader)..], payload);
+        }
+        try entry.value_ptr.frames.append(self.allocator, .{ .bytes = frame });
+        entry.value_ptr.bytes += frame_len;
+    }
+
+    fn muxVtQueueHasPending(self: *Server, mux_vt_fd: posix.fd_t) bool {
+        const queue = self.mux_vt_queues.getPtr(mux_vt_fd) orelse return false;
+        return queue.frames.items.len > 0;
+    }
+
+    fn flushMuxVtQueue(self: *Server, mux_vt_fd: posix.fd_t) bool {
+        var queue = self.mux_vt_queues.getPtr(mux_vt_fd) orelse return true;
+        while (queue.frames.items.len > 0) {
+            var frame = &queue.frames.items[0];
+            const n = posix.write(mux_vt_fd, frame.bytes[frame.written..]) catch |err| {
+                switch (err) {
+                    error.WouldBlock => {},
+                    else => {
+                        ses.debugLog("vt pod->mux: queued write failed fd={d}: {s}", .{ mux_vt_fd, @errorName(err) });
+                        return false;
+                    },
+                }
+                break;
+            };
+            if (n == 0) return false;
+            frame.written += n;
+            if (frame.written < frame.bytes.len) break;
+
+            queue.bytes -= frame.bytes.len;
+            self.allocator.free(frame.bytes);
+            _ = queue.frames.orderedRemove(0);
+        }
+        return true;
+    }
+
+    fn flushMuxVtQueues(self: *Server) void {
+        var it = self.mux_vt_queues.iterator();
+        while (it.next()) |entry| {
+            _ = self.flushMuxVtQueue(entry.key_ptr.*);
+        }
+    }
+
     fn routePodToMux(self: *Server, pod_vt_fd: posix.fd_t) bool {
         // Read 5-byte pod_protocol header (type:u8 + len:u32 big-endian).
         var hdr: [5]u8 = undefined;
@@ -1143,27 +1364,9 @@ pub const Server = struct {
             return true;
         };
 
-        // Write 7-byte MuxVtHeader to MUX.
-        var mux_hdr: wire.MuxVtHeader = .{
-            .pane_id = pane_id,
-            .frame_type = frame_type,
-            .len = payload_len,
-        };
-        wire.writeAllTimeout(mux_vt_fd, std.mem.asBytes(&mux_hdr), VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
-            ses.debugLog("vt pod->mux: mux header write failed: {s}", .{@errorName(err)});
-            switch (err) {
-                error.ConnectionClosed, error.BrokenPipe => self.queueVtClose(mux_vt_fd, null),
-                else => {},
-            }
-            return true;
-        };
-
-        wire.writeAllTimeout(mux_vt_fd, payload, VT_ROUTE_IO_TIMEOUT_MS) catch |err| {
-            ses.debugLog("vt pod->mux: mux payload write failed: {s}", .{@errorName(err)});
-            switch (err) {
-                error.ConnectionClosed, error.BrokenPipe => self.queueVtClose(mux_vt_fd, null),
-                else => {},
-            }
+        self.enqueueMuxVtFrame(mux_vt_fd, pane_id, frame_type, payload) catch |err| {
+            core.logging.logError("ses", "failed to queue MUX VT frame", err);
+            self.queueVtClose(mux_vt_fd, null);
             return true;
         };
         return true;
@@ -1349,6 +1552,14 @@ pub const Server = struct {
         const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         ses.debugLog("ctl msg: type=0x{x:0>4} len={d} fd={d}", .{ hdr.msg_type, hdr.payload_len, fd });
         var buf: [65536]u8 = undefined;
+        const prev_request_fd = self.current_ctl_request_fd;
+        const prev_request_id = self.current_ctl_request_id;
+        self.current_ctl_request_fd = fd;
+        self.current_ctl_request_id = hdr.request_id;
+        defer {
+            self.current_ctl_request_fd = prev_request_fd;
+            self.current_ctl_request_id = prev_request_id;
+        }
 
         switch (msg_type) {
             .ping => {
@@ -1568,6 +1779,9 @@ pub const Server = struct {
             client.session_id = session_id;
             client.pending_reattach_session_id = null;
             client.mux_ctl_fd = fd;
+            client.frontend_kind = reg.frontend_kind;
+            client.transport_kind = reg.transport_kind;
+            client.capability_flags = reg.capability_flags;
             if (base_root_slice.len > 0) {
                 const owned_root = client.allocator.dupe(u8, base_root_slice) catch |err| {
                     core.logging.logError("ses", "failed to store frontend base root", err);
@@ -1614,7 +1828,15 @@ pub const Server = struct {
         self.ses_state.releaseSessionLock(session_id);
 
         const final_name = resolved_name orelse name_slice;
-        ses.debugLog("registered: session={s} name={s} (requested={s}) client_id={d}", .{ reg.session_id[0..8], final_name, name_slice, client_id });
+        ses.debugLog("registered: session={s} name={s} (requested={s}) client_id={d} frontend_kind={d} transport_kind={d} caps=0x{x}", .{
+            reg.session_id[0..8],
+            final_name,
+            name_slice,
+            client_id,
+            reg.frontend_kind,
+            reg.transport_kind,
+            reg.capability_flags,
+        });
 
         // Send Registered response with resolved name
         const resp = wire.FrontendRegistered{ .name_len = @intCast(final_name.len) };
@@ -2832,6 +3054,7 @@ pub const Server = struct {
 
         var ctrl_hdr: wire.ControlHeader = .{
             .msg_type = @intFromEnum(wire.MsgType.session_reattached),
+            .request_id = self.responseRequestIdForFd(fd),
             .payload_len = @intCast(total_payload),
         };
         ses.debugLog("completeReattach: writing response payload={d}", .{total_payload});
@@ -2877,7 +3100,15 @@ pub const Server = struct {
             return;
         };
 
-        if (dc.mode == 0) { // shutdown
+        const reason = std.meta.intToEnum(wire.DisconnectReason, dc.reason) catch .unspecified;
+        ses.debugLog("disconnect: client={d} mode={d} reason={s} preserve_sticky={}", .{
+            client_id,
+            dc.mode,
+            @tagName(reason),
+            dc.preserve_sticky != 0,
+        });
+
+        if (dc.mode == @intFromEnum(wire.DisconnectMode.shutdown)) {
             self.ses_state.shutdownClient(client_id, dc.preserve_sticky != 0);
         } else {
             self.ses_state.removeClientGraceful(client_id);

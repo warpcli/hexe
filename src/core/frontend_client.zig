@@ -39,6 +39,35 @@ fn deleteSocketPath(path: []const u8) void {
     }
 }
 
+fn defaultCapabilityFlags(frontend_kind: wire.FrontendKind, transport_kind: wire.FrontendTransportKind) u32 {
+    var flags: u32 = wire.FrontendCapabilityFlag.interactive_input | wire.FrontendCapabilityFlag.cell_render;
+    switch (frontend_kind) {
+        .terminal => {
+            flags |= wire.FrontendCapabilityFlag.mouse |
+                wire.FrontendCapabilityFlag.clipboard |
+                wire.FrontendCapabilityFlag.desktop_notify;
+        },
+        .web => {
+            flags |= wire.FrontendCapabilityFlag.pixel_render |
+                wire.FrontendCapabilityFlag.mouse |
+                wire.FrontendCapabilityFlag.clipboard |
+                wire.FrontendCapabilityFlag.desktop_notify |
+                wire.FrontendCapabilityFlag.reconnect;
+        },
+        .desktop => {
+            flags |= wire.FrontendCapabilityFlag.pixel_render |
+                wire.FrontendCapabilityFlag.mouse |
+                wire.FrontendCapabilityFlag.clipboard |
+                wire.FrontendCapabilityFlag.desktop_notify |
+                wire.FrontendCapabilityFlag.reconnect;
+        },
+    }
+    if (transport_kind == .liblink) {
+        flags |= wire.FrontendCapabilityFlag.remote_transport | wire.FrontendCapabilityFlag.reconnect;
+    }
+    return flags;
+}
+
 /// Client for communicating with the ses daemon using binary protocol.
 /// Opens two channels:
 ///   - ctl_fd (handshake 0x01): binary control messages
@@ -58,6 +87,62 @@ pub const SesClient = struct {
             if (self.name) |name| allocator.free(name);
             if (self.fg_name) |fg_name| allocator.free(fg_name);
             self.* = .{ .uuid = .{0} ** 32 };
+        }
+    };
+    pub const PendingControlResponse = struct {
+        request_id: u32,
+        msg_type: wire.MsgType,
+        payload: []u8,
+
+        pub fn deinit(self: *PendingControlResponse, allocator: std.mem.Allocator) void {
+            allocator.free(self.payload);
+            self.* = undefined;
+        }
+    };
+    pub const ControlResponseRead = struct {
+        hdr: wire.ControlHeader,
+        payload: ?[]u8 = null,
+        offset: usize = 0,
+
+        pub fn deinit(self: *ControlResponseRead, allocator: std.mem.Allocator) void {
+            if (self.payload) |payload| allocator.free(payload);
+            self.* = undefined;
+        }
+
+        pub fn msgType(self: *const ControlResponseRead) wire.MsgType {
+            return @enumFromInt(self.hdr.msg_type);
+        }
+
+        pub fn readExact(self: *ControlResponseRead, client: *SesClient, fd: posix.fd_t, dest: []u8) !void {
+            if (self.payload) |payload| {
+                if (self.offset + dest.len > payload.len) return error.UnexpectedResponse;
+                @memcpy(dest, payload[self.offset .. self.offset + dest.len]);
+                self.offset += dest.len;
+                return;
+            }
+            try wire.readExact(fd, dest);
+            _ = client;
+        }
+
+        pub fn readStruct(self: *ControlResponseRead, client: *SesClient, fd: posix.fd_t, comptime T: type) !T {
+            var value: T = undefined;
+            try self.readExact(client, fd, std.mem.asBytes(&value));
+            return value;
+        }
+
+        pub fn skip(self: *ControlResponseRead, client: *SesClient, fd: posix.fd_t, len: usize) void {
+            if (len == 0) return;
+            if (self.payload) |payload| {
+                self.offset = @min(payload.len, self.offset + len);
+                return;
+            }
+            client.skipPayload(fd, @intCast(len));
+        }
+
+        pub fn skipRemaining(self: *ControlResponseRead, client: *SesClient, fd: posix.fd_t) void {
+            const consumed = @min(self.offset, @as(usize, self.hdr.payload_len));
+            const remaining = @as(usize, self.hdr.payload_len) - consumed;
+            self.skip(client, fd, remaining);
         }
     };
 
@@ -87,7 +172,9 @@ pub const SesClient = struct {
     pending_cwd_responses: std.ArrayList(PendingCwdResponse),
     pending_pane_info_responses: std.ArrayList(PendingPaneInfoResponse),
     pending_pane_exits: std.ArrayList([32]u8),
+    pending_control_responses: std.ArrayList(PendingControlResponse),
     pending_session_state: ?[]u8 = null,
+    next_ctl_request_id: u32 = 1,
 
     pub fn init(allocator: std.mem.Allocator, session_id: [32]u8, session_name: []const u8, keepalive: bool, log_level: ?logging.Level, log_file: ?[]const u8) SesClient {
         return initLocalIpc(allocator, session_id, session_name, keepalive, log_level, log_file, .terminal);
@@ -135,6 +222,7 @@ pub const SesClient = struct {
             .pending_cwd_responses = .empty,
             .pending_pane_info_responses = .empty,
             .pending_pane_exits = .empty,
+            .pending_control_responses = .empty,
         };
     }
 
@@ -148,6 +236,8 @@ pub const SesClient = struct {
         for (self.pending_pane_info_responses.items) |*resp| resp.deinit(self.allocator);
         self.pending_pane_info_responses.deinit(self.allocator);
         self.pending_pane_exits.deinit(self.allocator);
+        for (self.pending_control_responses.items) |*resp| resp.deinit(self.allocator);
+        self.pending_control_responses.deinit(self.allocator);
         if (self.pending_session_state) |json| self.allocator.free(json);
         self.ctl_fd = null;
         self.vt_fd = null;
@@ -250,6 +340,25 @@ pub const SesClient = struct {
         return pending;
     }
 
+    fn queuePendingControlResponse(self: *SesClient, response: PendingControlResponse) void {
+        var owned = response;
+        self.pending_control_responses.append(self.allocator, owned) catch |err| {
+            owned.deinit(self.allocator);
+            logging.logError("frontend-client", "failed to queue pending control response", err);
+            return;
+        };
+    }
+
+    fn takePendingControlResponse(self: *SesClient, request_id: u32) ?PendingControlResponse {
+        if (request_id == 0) return null;
+        for (self.pending_control_responses.items, 0..) |resp, i| {
+            if (resp.request_id == request_id) {
+                return self.pending_control_responses.orderedRemove(i);
+            }
+        }
+        return null;
+    }
+
     pub fn takeResolvedNameOwned(self: *SesClient) ?[]u8 {
         const resolved = self.resolved_name orelse return null;
         self.resolved_name = null;
@@ -264,6 +373,31 @@ pub const SesClient = struct {
             .liblink => |transport| try self.connectLiblink(transport),
             .preconnected => |transport| try self.connectPreconnected(transport),
         }
+    }
+
+    fn allocateCtlRequestId(self: *SesClient) u32 {
+        const id = self.next_ctl_request_id;
+        self.next_ctl_request_id +%= 1;
+        if (self.next_ctl_request_id == 0) self.next_ctl_request_id = 1;
+        return id;
+    }
+
+    fn writeControlRequest(self: *SesClient, fd: posix.fd_t, msg_type: wire.MsgType, payload: []const u8) !u32 {
+        const request_id = self.allocateCtlRequestId();
+        try wire.writeControlWithRequestId(fd, msg_type, request_id, payload);
+        return request_id;
+    }
+
+    fn writeControlTrailRequest(self: *SesClient, fd: posix.fd_t, msg_type: wire.MsgType, fixed: []const u8, trail: []const u8) !u32 {
+        const request_id = self.allocateCtlRequestId();
+        try wire.writeControlWithTrailAndRequestId(fd, msg_type, request_id, fixed, trail);
+        return request_id;
+    }
+
+    fn writeControlMsgRequest(self: *SesClient, fd: posix.fd_t, msg_type: wire.MsgType, fixed: []const u8, trails: []const []const u8) !u32 {
+        const request_id = self.allocateCtlRequestId();
+        try wire.writeControlMsgWithRequestId(fd, msg_type, request_id, fixed, trails);
+        return request_id;
     }
 
     fn connectLiblink(self: *SesClient, transport: LiblinkTransport) !void {
@@ -479,27 +613,30 @@ pub const SesClient = struct {
             .keepalive = if (self.keepalive) 1 else 0,
             .frontend_kind = @intFromEnum(self.frontend_kind),
             .transport_kind = @intFromEnum(self.transportKind()),
+            .capability_flags = defaultCapabilityFlags(self.frontend_kind, self.transportKind()),
             .name_len = @intCast(self.session_name.len),
             .base_root_len = @intCast(@min(self.base_root.len, std.math.maxInt(u16))),
         };
         const trails: []const []const u8 = &.{ self.session_name, self.base_root[0..reg.base_root_len] };
-        try wire.writeControlMsg(fd, .register, std.mem.asBytes(&reg), trails);
+        const request_id = try self.writeControlMsgRequest(fd, .register, std.mem.asBytes(&reg), trails);
 
         // Wait for registered response.
-        const hdr = try self.readSyncResponse(fd);
+        var read = try self.readSyncResponseForRequest(fd, request_id);
+        defer read.deinit(self.allocator);
+        const hdr = read.hdr;
         const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (msg_type == .@"error") {
-            self.skipPayload(fd, hdr.payload_len);
+            read.skipRemaining(self, fd);
             return error.RegistrationFailed;
         }
         if (msg_type != .registered) {
-            self.skipPayload(fd, hdr.payload_len);
+            read.skipRemaining(self, fd);
             return error.UnexpectedResponse;
         }
 
         // Read the Registered response with resolved name
         if (hdr.payload_len >= @sizeOf(wire.FrontendRegistered)) {
-            const resp = try wire.readStruct(wire.FrontendRegistered, fd);
+            const resp = try read.readStruct(self, fd, wire.FrontendRegistered);
             const remaining = hdr.payload_len - @sizeOf(wire.FrontendRegistered);
 
             // Read resolved name if present
@@ -511,10 +648,10 @@ pub const SesClient = struct {
                 }
 
                 const name_buf = self.allocator.alloc(u8, resp.name_len) catch {
-                    self.skipPayload(fd, remaining);
+                    read.skip(self, fd, remaining);
                     return;
                 };
-                wire.readExact(fd, name_buf) catch {
+                read.readExact(self, fd, name_buf) catch {
                     self.allocator.free(name_buf);
                     return;
                 };
@@ -523,13 +660,13 @@ pub const SesClient = struct {
 
                 // Skip any remaining payload
                 if (remaining > resp.name_len) {
-                    self.skipPayload(fd, remaining - resp.name_len);
+                    read.skip(self, fd, remaining - resp.name_len);
                 }
             } else if (remaining > 0) {
-                self.skipPayload(fd, remaining);
+                read.skip(self, fd, remaining);
             }
         } else if (hdr.payload_len > 0) {
-            self.skipPayload(fd, hdr.payload_len);
+            read.skipRemaining(self, fd);
         }
     }
 
@@ -542,13 +679,21 @@ pub const SesClient = struct {
 
     /// Tell ses this mux is exiting normally, then close connections.
     pub fn shutdown(self: *SesClient, preserve_sticky: bool) !void {
+        try self.shutdownWithReason(preserve_sticky, .user_exit);
+    }
+
+    /// Tell ses this frontend is exiting with an explicit reason, then close
+    /// connections. Best effort: if the notify fails, local fd cleanup still
+    /// happens.
+    pub fn shutdownWithReason(self: *SesClient, preserve_sticky: bool, reason: wire.DisconnectReason) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
         var msg: wire.Disconnect = .{
-            .mode = 0, // shutdown
+            .mode = @intFromEnum(wire.DisconnectMode.shutdown),
             .preserve_sticky = if (preserve_sticky) 1 else 0,
+            .reason = @intFromEnum(reason),
         };
         // Best-effort: don't block on a reply.
-        wire.writeControl(fd, .disconnect, std.mem.asBytes(&msg)) catch |err| {
+        _ = self.writeControlRequest(fd, .disconnect, std.mem.asBytes(&msg)) catch |err| {
             self.debugLog("disconnect notify write failed: {s}", .{@errorName(err)});
         };
         // Close fds after notifying
@@ -573,8 +718,8 @@ pub const SesClient = struct {
             .name_len = @intCast(name.len),
         };
         self.drainQueuedControlResponses(fd);
-        try wire.writeControlWithTrail(fd, .session_add_tab, std.mem.asBytes(&msg), name);
-        try self.readCommandAck(fd);
+        const request_id = try self.writeControlTrailRequest(fd, .session_add_tab, std.mem.asBytes(&msg), name);
+        try self.readCommandAckForRequest(fd, request_id);
     }
 
     pub fn sessionRemoveTab(self: *SesClient, tab_uuid: [32]u8, active_tab: ?usize) !void {
@@ -585,8 +730,8 @@ pub const SesClient = struct {
             .has_active_tab = if (active_tab != null) 1 else 0,
         };
         self.drainQueuedControlResponses(fd);
-        try wire.writeControl(fd, .session_remove_tab, std.mem.asBytes(&msg));
-        try self.readCommandAck(fd);
+        const request_id = try self.writeControlRequest(fd, .session_remove_tab, std.mem.asBytes(&msg));
+        try self.readCommandAckForRequest(fd, request_id);
     }
 
     pub fn sessionSyncFloat(
@@ -628,16 +773,16 @@ pub const SesClient = struct {
             .active = @intFromBool(active),
         };
         self.drainQueuedControlResponses(fd);
-        try wire.writeControl(fd, .session_sync_float, std.mem.asBytes(&msg));
-        try self.readCommandAck(fd);
+        const request_id = try self.writeControlRequest(fd, .session_sync_float, std.mem.asBytes(&msg));
+        try self.readCommandAckForRequest(fd, request_id);
     }
 
     pub fn sessionRemoveFloat(self: *SesClient, pane_uuid: [32]u8) !void {
         const fd = self.ctl_fd orelse return error.NotConnected;
         var msg: wire.SessionRemoveFloat = .{ .pane_uuid = pane_uuid };
         self.drainQueuedControlResponses(fd);
-        try wire.writeControl(fd, .session_remove_float, std.mem.asBytes(&msg));
-        try self.readCommandAck(fd);
+        const request_id = try self.writeControlRequest(fd, .session_remove_float, std.mem.asBytes(&msg));
+        try self.readCommandAckForRequest(fd, request_id);
     }
 
     pub fn sessionSplitPane(
@@ -663,8 +808,8 @@ pub const SesClient = struct {
             .has_focused_pane = if (focused_pane_uuid != null) 1 else 0,
         };
         self.drainQueuedControlResponses(fd);
-        try wire.writeControl(fd, .session_split_pane, std.mem.asBytes(&msg));
-        try self.readCommandAck(fd);
+        const request_id = try self.writeControlRequest(fd, .session_split_pane, std.mem.asBytes(&msg));
+        try self.readCommandAckForRequest(fd, request_id);
     }
 
     pub fn sessionReplaceSplitPane(
@@ -685,8 +830,8 @@ pub const SesClient = struct {
             .has_focused_pane = if (focused_pane_uuid != null) 1 else 0,
         };
         self.drainQueuedControlResponses(fd);
-        try wire.writeControl(fd, .session_replace_split_pane, std.mem.asBytes(&msg));
-        try self.readCommandAck(fd);
+        const request_id = try self.writeControlRequest(fd, .session_replace_split_pane, std.mem.asBytes(&msg));
+        try self.readCommandAckForRequest(fd, request_id);
     }
 
     pub fn sessionSetSplitRatio(
@@ -706,8 +851,8 @@ pub const SesClient = struct {
             .ratio = ratio,
         };
         self.drainQueuedControlResponses(fd);
-        try wire.writeControl(fd, .session_set_split_ratio, std.mem.asBytes(&msg));
-        try self.readCommandAck(fd);
+        const request_id = try self.writeControlRequest(fd, .session_set_split_ratio, std.mem.asBytes(&msg));
+        try self.readCommandAckForRequest(fd, request_id);
     }
 
     /// Create a new pane via ses.
@@ -757,24 +902,26 @@ pub const SesClient = struct {
             .env_count = @intCast(env_items.len),
         };
         self.debugLog("createPane: shell={s} cwd={s} isolation={s}", .{ shell_bytes, cwd_bytes, isolation_profile_bytes });
-        try wire.writeControlWithTrail(fd, .create_pane, std.mem.asBytes(&msg), trail.items);
+        const request_id = try self.writeControlTrailRequest(fd, .create_pane, std.mem.asBytes(&msg), trail.items);
 
         // Read response.
-        const hdr = try self.readSyncResponse(fd);
+        var read = try self.readSyncResponseForRequest(fd, request_id);
+        defer read.deinit(self.allocator);
+        const hdr = read.hdr;
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type == .@"error") {
-            self.skipPayload(fd, hdr.payload_len);
+            read.skipRemaining(self, fd);
             return error.SesError;
         }
         if (resp_type != .pane_created) {
-            self.skipPayload(fd, hdr.payload_len);
+            read.skipRemaining(self, fd);
             return error.UnexpectedResponse;
         }
 
-        const resp = try wire.readStruct(wire.PaneCreated, fd);
+        const resp = try read.readStruct(self, fd, wire.PaneCreated);
         // Skip socket_path (we don't need it — VT goes through SES).
         if (resp.socket_path_len > 0) {
-            self.skipPayloadU16(fd, resp.socket_path_len);
+            read.skip(self, fd, resp.socket_path_len);
         }
 
         self.debugLog("pane created: uuid={s} pane_id={d} pid={d}", .{ resp.uuid[0..8], resp.pane_id, resp.pid });
@@ -793,23 +940,25 @@ pub const SesClient = struct {
             .key = key,
             .pwd_len = @intCast(pwd.len),
         };
-        try wire.writeControlWithTrail(fd, .find_sticky, std.mem.asBytes(&msg), pwd);
+        const request_id = try self.writeControlTrailRequest(fd, .find_sticky, std.mem.asBytes(&msg), pwd);
 
-        const hdr = try self.readSyncResponse(fd);
+        var read = try self.readSyncResponseForRequest(fd, request_id);
+        defer read.deinit(self.allocator);
+        const hdr = read.hdr;
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type == .pane_not_found) {
-            self.skipPayload(fd, hdr.payload_len);
+            read.skipRemaining(self, fd);
             return null;
         }
         if (resp_type != .pane_found) {
-            self.skipPayload(fd, hdr.payload_len);
+            read.skipRemaining(self, fd);
             return error.UnexpectedResponse;
         }
 
-        const resp = try wire.readStruct(wire.PaneFound, fd);
+        const resp = try read.readStruct(self, fd, wire.PaneFound);
         // Skip socket_path.
         if (resp.socket_path_len > 0) {
-            self.skipPayloadU16(fd, resp.socket_path_len);
+            read.skip(self, fd, resp.socket_path_len);
         }
 
         return .{ .uuid = resp.uuid, .pane_id = resp.pane_id, .pid = resp.pid };
@@ -820,8 +969,8 @@ pub const SesClient = struct {
         const fd = self.ctl_fd orelse return error.NotConnected;
         self.drainQueuedControlResponses(fd);
         var msg: wire.PaneUuid = .{ .uuid = uuid };
-        try wire.writeControl(fd, .orphan_pane, std.mem.asBytes(&msg));
-        try self.readCommandAck(fd);
+        const request_id = try self.writeControlRequest(fd, .orphan_pane, std.mem.asBytes(&msg));
+        try self.readCommandAckForRequest(fd, request_id);
     }
 
     /// Set sticky info on a pane.
@@ -833,8 +982,8 @@ pub const SesClient = struct {
             .pwd_len = @intCast(pwd.len),
         };
         self.drainQueuedControlResponses(fd);
-        try wire.writeControlWithTrail(fd, .set_sticky, std.mem.asBytes(&msg), pwd);
-        try self.readCommandAck(fd);
+        const request_id = try self.writeControlTrailRequest(fd, .set_sticky, std.mem.asBytes(&msg), pwd);
+        try self.readCommandAckForRequest(fd, request_id);
     }
 
     /// Kill a pane.
@@ -843,8 +992,8 @@ pub const SesClient = struct {
         self.debugLogUuid(&uuid, "killPane: sending to SES ctl_fd={d} vt_fd={?d}", .{ fd, self.vt_fd });
         self.drainQueuedControlResponses(fd);
         var msg: wire.PaneUuid = .{ .uuid = uuid };
-        try wire.writeControl(fd, .kill_pane, std.mem.asBytes(&msg));
-        try self.readCommandAck(fd);
+        const request_id = try self.writeControlRequest(fd, .kill_pane, std.mem.asBytes(&msg));
+        try self.readCommandAckForRequest(fd, request_id);
         self.debugLogUuid(&uuid, "killPane: acknowledged by SES", .{});
     }
 
@@ -852,7 +1001,7 @@ pub const SesClient = struct {
     pub fn requestPaneCwd(self: *SesClient, uuid: [32]u8) void {
         const fd = self.ctl_fd orelse return;
         var msg: wire.GetPaneCwd = .{ .uuid = uuid };
-        wire.writeControl(fd, .get_pane_cwd, std.mem.asBytes(&msg)) catch |err| {
+        _ = self.writeControlRequest(fd, .get_pane_cwd, std.mem.asBytes(&msg)) catch |err| {
             logging.logError("frontend-client", "failed to request pane cwd", err);
             if (self.ctl_fd == fd) self.ctl_fd = null;
         };
@@ -863,40 +1012,38 @@ pub const SesClient = struct {
     pub fn getPaneCwdSync(self: *SesClient, uuid: [32]u8) ?[]const u8 {
         const fd = self.ctl_fd orelse return null;
         var msg: wire.GetPaneCwd = .{ .uuid = uuid };
-        wire.writeControl(fd, .get_pane_cwd, std.mem.asBytes(&msg)) catch |err| {
+        const request_id = self.writeControlRequest(fd, .get_pane_cwd, std.mem.asBytes(&msg)) catch |err| {
             logging.logError("frontend-client", "failed to request sync pane cwd", err);
             if (self.ctl_fd == fd) self.ctl_fd = null;
             return null;
         };
 
-        const resp = self.readExpectedPaneCwdResponse(fd, uuid) catch |err| {
+        var resp = self.readExpectedPaneCwdResponse(fd, uuid, request_id) catch |err| {
             logging.logError("frontend-client", "failed to read sync pane cwd response", err);
             return null;
         };
-        if (resp.cwd_len == 0) return null;
-        if (resp.cwd_len > sync_cwd_buf.len) {
-            self.skipPayload(fd, resp.cwd_len);
+        defer resp.deinit(self.allocator);
+        if (resp.cwd.len == 0) return null;
+        if (resp.cwd.len > sync_cwd_buf.len) {
             return null;
         }
-        wire.readExact(fd, sync_cwd_buf[0..resp.cwd_len]) catch |err| {
-            logging.logError("frontend-client", "failed to read sync pane cwd payload", err);
-            if (self.ctl_fd == fd) self.ctl_fd = null;
-            return null;
-        };
-        return sync_cwd_buf[0..resp.cwd_len];
+        @memcpy(sync_cwd_buf[0..resp.cwd.len], resp.cwd);
+        return sync_cwd_buf[0..resp.cwd.len];
     }
 
     /// Ping ses to check if it's alive.
     pub fn ping(self: *SesClient) !bool {
         const fd = self.ctl_fd orelse return false;
-        try wire.writeControl(fd, .ping, &.{});
+        const request_id = try self.writeControlRequest(fd, .ping, &.{});
 
-        const hdr = self.readSyncResponse(fd) catch |err| {
+        var read = self.readSyncResponseForRequest(fd, request_id) catch |err| {
             logging.logError("frontend-client", "failed to read ping response", err);
             if (self.ctl_fd == fd) self.ctl_fd = null;
             return false;
         };
-        self.skipPayload(fd, hdr.payload_len);
+        defer read.deinit(self.allocator);
+        const hdr = read.hdr;
+        read.skipRemaining(self, fd);
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         return resp_type == .pong;
     }
@@ -910,8 +1057,8 @@ pub const SesClient = struct {
             .name_len = @intCast(name_bytes.len),
         };
         self.drainQueuedControlResponses(fd);
-        try wire.writeControlWithTrail(fd, .update_pane_name, std.mem.asBytes(&msg), name_bytes);
-        try self.readCommandAck(fd);
+        const request_id = try self.writeControlTrailRequest(fd, .update_pane_name, std.mem.asBytes(&msg), name_bytes);
+        try self.readCommandAckForRequest(fd, request_id);
     }
 
     /// Update shell-provided pane metadata and consume its acknowledgement.
@@ -932,8 +1079,8 @@ pub const SesClient = struct {
         };
         const trails: []const []const u8 = &.{ cmd_bytes, cwd_bytes };
         self.drainQueuedControlResponses(fd);
-        try wire.writeControlMsg(fd, .update_pane_shell, std.mem.asBytes(&msg), trails);
-        try self.readCommandAck(fd);
+        const request_id = try self.writeControlMsgRequest(fd, .update_pane_shell, std.mem.asBytes(&msg), trails);
+        try self.readCommandAckForRequest(fd, request_id);
     }
 
     /// Pane type enum for auxiliary info.
@@ -952,6 +1099,44 @@ pub const SesClient = struct {
     const PaneInfoRead = struct {
         hdr: wire.ControlHeader,
         resp: wire.PaneInfoResp,
+        trail: ?[]u8 = null,
+        offset: usize = 0,
+
+        fn deinit(self: *PaneInfoRead, allocator: std.mem.Allocator) void {
+            if (self.trail) |trail| allocator.free(trail);
+            self.* = undefined;
+        }
+
+        fn readExact(self: *PaneInfoRead, client: *SesClient, fd: posix.fd_t, dest: []u8) !void {
+            if (self.trail) |trail| {
+                if (self.offset + dest.len > trail.len) return error.EndOfStream;
+                @memcpy(dest, trail[self.offset .. self.offset + dest.len]);
+                self.offset += dest.len;
+                return;
+            }
+            try wire.readExact(fd, dest);
+            self.offset += dest.len;
+            _ = client;
+        }
+
+        fn skip(self: *PaneInfoRead, client: *SesClient, fd: posix.fd_t, len: usize) void {
+            if (len == 0) return;
+            if (self.trail) |trail| {
+                self.offset = @min(trail.len, self.offset + len);
+                return;
+            }
+            client.skipPayload(fd, @intCast(len));
+            self.offset += len;
+        }
+    };
+    const PaneCwdRead = struct {
+        uuid: [32]u8,
+        cwd: []const u8,
+
+        fn deinit(self: *PaneCwdRead, allocator: std.mem.Allocator) void {
+            if (self.cwd.len > 0) allocator.free(self.cwd);
+            self.* = undefined;
+        }
     };
 
     /// Update auxiliary pane info (synced from mux to ses).
@@ -987,29 +1172,30 @@ pub const SesClient = struct {
             .is_focused = if (is_focused) 1 else 0,
         };
         self.drainQueuedControlResponses(fd);
-        try wire.writeControl(fd, .update_pane_aux, std.mem.asBytes(&msg));
-        try self.readCommandAck(fd);
+        const request_id = try self.writeControlRequest(fd, .update_pane_aux, std.mem.asBytes(&msg));
+        try self.readCommandAckForRequest(fd, request_id);
     }
 
     /// Get auxiliary pane info — queries SES for created_from/focused_from.
     pub fn getPaneAux(self: *SesClient, uuid: [32]u8) !PaneAuxInfo {
         const fd = self.ctl_fd orelse return error.NotConnected;
         var msg: wire.PaneUuid = .{ .uuid = uuid };
-        wire.writeControl(fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
+        const request_id = self.writeControlRequest(fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
             logging.logError("frontend-client", "failed to request pane aux", err);
             if (self.ctl_fd == fd) self.ctl_fd = null;
             return error.WriteFailed;
         };
 
-        const read = self.readExpectedPaneInfoResponse(fd, uuid) catch |err| {
+        var read = self.readExpectedPaneInfoResponse(fd, uuid, request_id) catch |err| {
             logging.logError("frontend-client", "failed to read pane aux response", err);
             return err;
         };
+        defer read.deinit(self.allocator);
         const hdr = read.hdr;
         const resp = read.resp;
         // Skip trailing data.
         const trail_len = hdr.payload_len - @sizeOf(wire.PaneInfoResp);
-        if (trail_len > 0) self.skipPayload(fd, @intCast(trail_len));
+        if (trail_len > 0) read.skip(self, fd, trail_len);
 
         return .{
             .created_from = if (resp.has_created_from != 0) resp.created_from else null,
@@ -1021,7 +1207,7 @@ pub const SesClient = struct {
     pub fn requestPaneProcess(self: *SesClient, uuid: [32]u8) void {
         const fd = self.ctl_fd orelse return;
         var msg: wire.PaneUuid = .{ .uuid = uuid };
-        wire.writeControl(fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
+        _ = self.writeControlRequest(fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
             logging.logError("frontend-client", "failed to request pane process info", err);
             if (self.ctl_fd == fd) self.ctl_fd = null;
         };
@@ -1031,16 +1217,17 @@ pub const SesClient = struct {
     pub fn getPaneName(self: *SesClient, uuid: [32]u8) ?[]u8 {
         const fd = self.ctl_fd orelse return null;
         var msg: wire.PaneUuid = .{ .uuid = uuid };
-        wire.writeControl(fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
+        const request_id = self.writeControlRequest(fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
             logging.logError("frontend-client", "failed to request pane name", err);
             if (self.ctl_fd == fd) self.ctl_fd = null;
             return null;
         };
 
-        const read = self.readExpectedPaneInfoResponse(fd, uuid) catch |err| {
+        var read = self.readExpectedPaneInfoResponse(fd, uuid, request_id) catch |err| {
             logging.logError("frontend-client", "failed to read pane name response", err);
             return null;
         };
+        defer read.deinit(self.allocator);
         const resp = read.resp;
         var result: ?[]u8 = null;
 
@@ -1056,7 +1243,7 @@ pub const SesClient = struct {
                 self.skipPayload(fd, @intCast(trail_total));
                 return null;
             };
-            wire.readExact(fd, buf) catch |err| {
+            read.readExact(self, fd, buf) catch |err| {
                 logging.logError("frontend-client", "failed to read pane name payload", err);
                 if (self.ctl_fd == fd) self.ctl_fd = null;
                 self.allocator.free(buf);
@@ -1067,7 +1254,7 @@ pub const SesClient = struct {
         // Skip all remaining trailing bytes.
         const remaining = trail_total - @as(usize, resp.name_len);
         if (remaining > 0) {
-            self.skipPayload(fd, @intCast(remaining));
+            read.skip(self, fd, remaining);
         }
         return result;
     }
@@ -1077,7 +1264,7 @@ pub const SesClient = struct {
     pub fn getPaneInfoSnapshot(self: *SesClient, uuid: [32]u8) ?PaneInfoSnapshot {
         const fd = self.ctl_fd orelse return null;
         var msg: wire.PaneUuid = .{ .uuid = uuid };
-        wire.writeControl(fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
+        const request_id = self.writeControlRequest(fd, .pane_info, std.mem.asBytes(&msg)) catch |err| {
             logging.logError("frontend-client", "failed to request pane info snapshot", err);
             if (self.ctl_fd == fd) self.ctl_fd = null;
             return null;
@@ -1085,10 +1272,11 @@ pub const SesClient = struct {
 
         // Read response directly — do NOT use readSyncResponse which skips
         // large pane_info responses (treating them as async noise).
-        const read = self.readExpectedPaneInfoResponse(fd, uuid) catch |err| {
+        var read = self.readExpectedPaneInfoResponse(fd, uuid, request_id) catch |err| {
             logging.logError("frontend-client", "failed to read pane info snapshot response", err);
             return null;
         };
+        defer read.deinit(self.allocator);
         const resp = read.resp;
         const trail_total: usize = @as(usize, resp.name_len) + @as(usize, resp.fg_len) +
             @as(usize, resp.cwd_len) + @as(usize, resp.tty_len) +
@@ -1107,10 +1295,10 @@ pub const SesClient = struct {
             if (n <= 16 * 1024) {
                 const buf = self.allocator.alloc(u8, n) catch |err| {
                     logging.logError("frontend-client", "failed to allocate pane info name", err);
-                    self.skipPayload(fd, @intCast(trail_total - consumed));
+                    read.skip(self, fd, trail_total - consumed);
                     return null;
                 };
-                wire.readExact(fd, buf) catch |err| {
+                read.readExact(self, fd, buf) catch |err| {
                     logging.logError("frontend-client", "failed to read pane info name payload", err);
                     if (self.ctl_fd == fd) self.ctl_fd = null;
                     self.allocator.free(buf);
@@ -1118,7 +1306,7 @@ pub const SesClient = struct {
                 };
                 name = buf;
             } else {
-                self.skipPayloadU32(fd, resp.name_len);
+                read.skip(self, fd, n);
             }
             consumed += n;
         }
@@ -1128,11 +1316,11 @@ pub const SesClient = struct {
             if (n <= 16 * 1024) {
                 const buf = self.allocator.alloc(u8, n) catch |err| {
                     logging.logError("frontend-client", "failed to allocate pane info foreground", err);
-                    self.skipPayload(fd, @intCast(trail_total - consumed));
+                    read.skip(self, fd, trail_total - consumed);
                     if (name) |s| self.allocator.free(s);
                     return null;
                 };
-                wire.readExact(fd, buf) catch |err| {
+                read.readExact(self, fd, buf) catch |err| {
                     logging.logError("frontend-client", "failed to read pane info foreground payload", err);
                     if (self.ctl_fd == fd) self.ctl_fd = null;
                     self.allocator.free(buf);
@@ -1141,7 +1329,7 @@ pub const SesClient = struct {
                 };
                 fg_name = buf;
             } else {
-                self.skipPayloadU32(fd, resp.fg_len);
+                read.skip(self, fd, n);
             }
             consumed += n;
         }
@@ -1151,12 +1339,12 @@ pub const SesClient = struct {
             if (n <= 64 * 1024) {
                 const buf = self.allocator.alloc(u8, n) catch |err| {
                     logging.logError("frontend-client", "failed to allocate pane info cwd", err);
-                    self.skipPayload(fd, @intCast(trail_total - consumed));
+                    read.skip(self, fd, trail_total - consumed);
                     if (name) |s| self.allocator.free(s);
                     if (fg_name) |s| self.allocator.free(s);
                     return null;
                 };
-                wire.readExact(fd, buf) catch |err| {
+                read.readExact(self, fd, buf) catch |err| {
                     logging.logError("frontend-client", "failed to read pane info cwd payload", err);
                     if (self.ctl_fd == fd) self.ctl_fd = null;
                     self.allocator.free(buf);
@@ -1166,7 +1354,7 @@ pub const SesClient = struct {
                 };
                 cwd = buf;
             } else {
-                self.skipPayloadU32(fd, resp.cwd_len);
+                read.skip(self, fd, n);
             }
             consumed += n;
         }
@@ -1175,7 +1363,7 @@ pub const SesClient = struct {
             @as(usize, resp.session_name_len) + @as(usize, resp.layout_path_len) +
             @as(usize, resp.last_cmd_len) + @as(usize, resp.base_process_len);
         if (before_sticky_len > 0) {
-            self.skipPayload(fd, @intCast(before_sticky_len));
+            read.skip(self, fd, before_sticky_len);
             consumed += before_sticky_len;
         }
 
@@ -1184,13 +1372,13 @@ pub const SesClient = struct {
             if (n <= 64 * 1024) {
                 const buf = self.allocator.alloc(u8, n) catch |err| {
                     logging.logError("frontend-client", "failed to allocate pane info sticky pwd", err);
-                    self.skipPayload(fd, @intCast(trail_total - consumed));
+                    read.skip(self, fd, trail_total - consumed);
                     if (name) |s| self.allocator.free(s);
                     if (fg_name) |s| self.allocator.free(s);
                     if (cwd) |s| self.allocator.free(s);
                     return null;
                 };
-                wire.readExact(fd, buf) catch |err| {
+                read.readExact(self, fd, buf) catch |err| {
                     logging.logError("frontend-client", "failed to read pane info sticky pwd payload", err);
                     if (self.ctl_fd == fd) self.ctl_fd = null;
                     self.allocator.free(buf);
@@ -1201,13 +1389,13 @@ pub const SesClient = struct {
                 };
                 sticky_pwd = buf;
             } else {
-                self.skipPayloadU32(fd, resp.sticky_pwd_len);
+                read.skip(self, fd, n);
             }
             consumed += n;
         }
 
         const remaining = trail_total -| consumed;
-        if (remaining > 0) self.skipPayload(fd, @intCast(remaining));
+        if (remaining > 0) read.skip(self, fd, remaining);
 
         return .{
             .pane_id = resp.pane_id,
@@ -1224,22 +1412,24 @@ pub const SesClient = struct {
     pub fn adoptPane(self: *SesClient, uuid: [32]u8) !struct { uuid: [32]u8, pane_id: u16, pid: posix.pid_t } {
         const fd = self.ctl_fd orelse return error.NotConnected;
         var msg: wire.PaneUuid = .{ .uuid = uuid };
-        try wire.writeControl(fd, .adopt_pane, std.mem.asBytes(&msg));
+        const request_id = try self.writeControlRequest(fd, .adopt_pane, std.mem.asBytes(&msg));
 
-        const hdr = try self.readSyncResponse(fd);
+        var read = try self.readSyncResponseForRequest(fd, request_id);
+        defer read.deinit(self.allocator);
+        const hdr = read.hdr;
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type == .@"error") {
-            self.skipPayload(fd, hdr.payload_len);
+            read.skipRemaining(self, fd);
             return error.SesError;
         }
         if (resp_type != .pane_found) {
-            self.skipPayload(fd, hdr.payload_len);
+            read.skipRemaining(self, fd);
             return error.UnexpectedResponse;
         }
 
-        const resp = try wire.readStruct(wire.PaneFound, fd);
+        const resp = try read.readStruct(self, fd, wire.PaneFound);
         if (resp.socket_path_len > 0) {
-            self.skipPayloadU16(fd, resp.socket_path_len);
+            read.skip(self, fd, resp.socket_path_len);
         }
         return .{ .uuid = uuid, .pane_id = resp.pane_id, .pid = resp.pid };
     }
@@ -1247,19 +1437,21 @@ pub const SesClient = struct {
     /// List orphaned panes.
     pub fn listOrphanedPanes(self: *SesClient, out_buf: []OrphanedPaneInfo) !usize {
         const fd = self.ctl_fd orelse return error.NotConnected;
-        try wire.writeControl(fd, .list_orphaned, &.{});
+        const request_id = try self.writeControlRequest(fd, .list_orphaned, &.{});
 
-        const hdr = try self.readSyncResponse(fd);
+        var read = try self.readSyncResponseForRequest(fd, request_id);
+        defer read.deinit(self.allocator);
+        const hdr = read.hdr;
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type != .orphaned_panes) {
-            self.skipPayload(fd, hdr.payload_len);
+            read.skipRemaining(self, fd);
             return error.UnexpectedResponse;
         }
 
-        const resp = try wire.readStruct(wire.OrphanedPanes, fd);
+        const resp = try read.readStruct(self, fd, wire.OrphanedPanes);
         var count: usize = 0;
         for (0..resp.pane_count) |_| {
-            const entry = wire.readStruct(wire.OrphanedPaneEntry, fd) catch |err| {
+            const entry = read.readStruct(self, fd, wire.OrphanedPaneEntry) catch |err| {
                 logging.logError("frontend-client", "failed to read orphaned pane entry", err);
                 if (self.ctl_fd == fd) self.ctl_fd = null;
                 return err;
@@ -1267,14 +1459,14 @@ pub const SesClient = struct {
             var name_buf: [64]u8 = .{0} ** 64;
             const copy_len = @min(@as(usize, entry.name_len), name_buf.len);
             if (copy_len > 0) {
-                wire.readExact(fd, name_buf[0..copy_len]) catch |err| {
+                read.readExact(self, fd, name_buf[0..copy_len]) catch |err| {
                     logging.logError("frontend-client", "failed to read orphaned pane name", err);
                     if (self.ctl_fd == fd) self.ctl_fd = null;
                     return err;
                 };
             }
             if (@as(usize, entry.name_len) > copy_len) {
-                self.skipPayloadU16(fd, entry.name_len - @as(u16, @intCast(copy_len)));
+                read.skip(self, fd, entry.name_len - @as(u16, @intCast(copy_len)));
             }
             if (count < out_buf.len) {
                 out_buf[count] = .{
@@ -1296,15 +1488,17 @@ pub const SesClient = struct {
         const msg: wire.Detach = .{
             .session_id = session_id,
         };
-        try wire.writeControl(fd, .detach, std.mem.asBytes(&msg));
+        const request_id = try self.writeControlRequest(fd, .detach, std.mem.asBytes(&msg));
 
-        const hdr = try self.readSyncResponse(fd);
+        var read = try self.readSyncResponseForRequest(fd, request_id);
+        defer read.deinit(self.allocator);
+        const hdr = read.hdr;
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type == .@"error") {
-            self.skipPayload(fd, hdr.payload_len);
+            read.skipRemaining(self, fd);
             return error.DetachFailed;
         }
-        self.skipPayload(fd, hdr.payload_len);
+        read.skipRemaining(self, fd);
     }
 
     /// Result of reattaching a session.
@@ -1325,7 +1519,7 @@ pub const SesClient = struct {
         var msg: wire.Reattach = .{
             .id_len = @intCast(session_id.len),
         };
-        wire.writeControlWithTrail(fd, .reattach, std.mem.asBytes(&msg), session_id) catch |e| {
+        const request_id = self.writeControlTrailRequest(fd, .reattach, std.mem.asBytes(&msg), session_id) catch |e| {
             self.debugLog("reattachSession: writeControlWithTrail failed: {s}", .{@errorName(e)});
             return e;
         };
@@ -1339,35 +1533,41 @@ pub const SesClient = struct {
         // replies here instead of dropping them.
         self.debugLog("reattachSession: waiting for response...", .{});
         const deadline_ms = std.time.milliTimestamp() + REATTACH_RESPONSE_TIMEOUT_MS;
-        const hdr = blk: {
+        var read = blk: {
             while (true) {
-                const h = self.readSyncResponseUntil(fd, deadline_ms, "reattachSession") catch |e| {
+                var h = self.readSyncResponseUntilForRequest(fd, request_id, deadline_ms, "reattachSession") catch |e| {
                     self.debugLog("reattachSession: readSyncResponse failed: {s}", .{@errorName(e)});
                     return e;
                 };
-                const mt: wire.MsgType = @enumFromInt(h.msg_type);
-                self.debugLog("reattachSession: got msg_type={d} payload_len={d}", .{ h.msg_type, h.payload_len });
+                const mt = h.msgType();
+                self.debugLog("reattachSession: got msg_type={d} payload_len={d}", .{ h.hdr.msg_type, h.hdr.payload_len });
                 if (mt == .ok or mt == .get_pane_cwd or mt == .pane_info or mt == .pane_exited or mt == .session_state) {
-                    self.consumeQueuedControlResponse(fd, h);
+                    if (h.payload != null) {
+                        h.deinit(self.allocator);
+                    } else {
+                        self.consumeQueuedControlResponse(fd, h.hdr);
+                    }
                     continue;
                 }
                 break :blk h;
             }
         };
-        const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+        defer read.deinit(self.allocator);
+        const hdr = read.hdr;
+        const resp_type = read.msgType();
         self.debugLog("reattachSession: final response type={d}", .{hdr.msg_type});
         if (resp_type == .@"error") {
             self.debugLog("reattachSession: server returned error", .{});
-            self.skipPayload(fd, hdr.payload_len);
+            read.skipRemaining(self, fd);
             return null;
         }
         if (resp_type != .session_reattached) {
             self.debugLog("reattachSession: unexpected response type {d}, expected session_reattached", .{hdr.msg_type});
-            self.skipPayload(fd, hdr.payload_len);
+            read.skipRemaining(self, fd);
             return error.UnexpectedResponse;
         }
 
-        const resp = wire.readStruct(wire.SessionReattached, fd) catch |e| {
+        const resp = read.readStruct(self, fd, wire.SessionReattached) catch |e| {
             self.debugLog("reattachSession: failed to read SessionReattached struct: {s}", .{@errorName(e)});
             return e;
         };
@@ -1379,7 +1579,7 @@ pub const SesClient = struct {
             return error.OutOfMemory;
         };
         errdefer self.allocator.free(session_state);
-        wire.readExact(fd, session_state) catch |e| {
+        read.readExact(self, fd, session_state) catch |e| {
             self.debugLog("reattachSession: failed to read session_state_json: {s}", .{@errorName(e)});
             return e;
         };
@@ -1392,7 +1592,7 @@ pub const SesClient = struct {
         };
         errdefer self.allocator.free(pane_uuids);
         for (0..resp.pane_count) |i| {
-            wire.readExact(fd, &pane_uuids[i]) catch |e| {
+            read.readExact(self, fd, &pane_uuids[i]) catch |e| {
                 self.debugLog("reattachSession: failed to read pane uuid {d}: {s}", .{ i, @errorName(e) });
                 return e;
             };
@@ -1408,19 +1608,21 @@ pub const SesClient = struct {
     /// List detached sessions.
     pub fn listSessions(self: *SesClient, out_buf: []DetachedSessionInfo) !usize {
         const fd = self.ctl_fd orelse return error.NotConnected;
-        try wire.writeControl(fd, .list_sessions, &.{});
+        const request_id = try self.writeControlRequest(fd, .list_sessions, &.{});
 
-        const hdr = try self.readSyncResponse(fd);
+        var read = try self.readSyncResponseForRequest(fd, request_id);
+        defer read.deinit(self.allocator);
+        const hdr = read.hdr;
         const resp_type: wire.MsgType = @enumFromInt(hdr.msg_type);
         if (resp_type != .sessions_list) {
-            self.skipPayload(fd, hdr.payload_len);
+            read.skipRemaining(self, fd);
             return error.UnexpectedResponse;
         }
 
-        const resp = try wire.readStruct(wire.SessionsList, fd);
+        const resp = try read.readStruct(self, fd, wire.SessionsList);
         var count: usize = 0;
         for (0..resp.session_count) |_| {
-            const entry = wire.readStruct(wire.SessionEntry, fd) catch |err| {
+            const entry = read.readStruct(self, fd, wire.SessionEntry) catch |err| {
                 logging.logError("frontend-client", "failed to read detached session entry", err);
                 if (self.ctl_fd == fd) self.ctl_fd = null;
                 return err;
@@ -1432,7 +1634,7 @@ pub const SesClient = struct {
             const name_len = @min(@as(usize, entry.name_len), 32);
             if (entry.name_len > 0) {
                 var name_buf: [32]u8 = undefined;
-                wire.readExact(fd, name_buf[0..name_len]) catch |err| {
+                read.readExact(self, fd, name_buf[0..name_len]) catch |err| {
                     logging.logError("frontend-client", "failed to read detached session name", err);
                     if (self.ctl_fd == fd) self.ctl_fd = null;
                     return err;
@@ -1441,11 +1643,7 @@ pub const SesClient = struct {
                 info.session_name_len = name_len;
                 // Skip excess name bytes.
                 if (entry.name_len > 32) {
-                    self.skipPayloadU16Checked(fd, entry.name_len - 32) catch |err| {
-                        logging.logError("frontend-client", "failed to skip detached session name overflow", err);
-                        if (self.ctl_fd == fd) self.ctl_fd = null;
-                        return err;
-                    };
+                    read.skip(self, fd, entry.name_len - 32);
                 }
             } else {
                 info.session_name_len = 0;
@@ -1453,18 +1651,14 @@ pub const SesClient = struct {
 
             const base_root_len = @min(@as(usize, entry.base_root_len), info.base_root.len);
             if (entry.base_root_len > 0) {
-                wire.readExact(fd, info.base_root[0..base_root_len]) catch |err| {
+                read.readExact(self, fd, info.base_root[0..base_root_len]) catch |err| {
                     logging.logError("frontend-client", "failed to read detached session base root", err);
                     if (self.ctl_fd == fd) self.ctl_fd = null;
                     return err;
                 };
                 info.base_root_len = base_root_len;
                 if (entry.base_root_len > info.base_root.len) {
-                    self.skipPayloadU16Checked(fd, entry.base_root_len - @as(u16, @intCast(info.base_root.len))) catch |err| {
-                        logging.logError("frontend-client", "failed to skip detached session base root overflow", err);
-                        if (self.ctl_fd == fd) self.ctl_fd = null;
-                        return err;
-                    };
+                    read.skip(self, fd, entry.base_root_len - @as(u16, @intCast(info.base_root.len)));
                 }
             } else {
                 info.base_root_len = 0;
@@ -1555,12 +1749,29 @@ pub const SesClient = struct {
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    fn readExpectedPaneInfoResponse(self: *SesClient, fd: posix.fd_t, expected_uuid: [32]u8) !PaneInfoRead {
+    fn readExpectedPaneInfoResponse(self: *SesClient, fd: posix.fd_t, expected_uuid: [32]u8, expected_request_id: u32) !PaneInfoRead {
+        if (self.takePendingControlResponse(expected_request_id)) |pending_response| {
+            var pending = pending_response;
+            defer pending.deinit(self.allocator);
+            if (pending.msg_type != .pane_info) return error.UnexpectedResponse;
+            const read = try self.readPaneInfoPendingPayload(pending.payload);
+            if (!std.mem.eql(u8, &read.resp.uuid, &expected_uuid)) {
+                var owned = read;
+                owned.deinit(self.allocator);
+                return error.UnexpectedResponse;
+            }
+            return read;
+        }
+
         while (true) {
             const hdr = try wire.readControlHeader(fd);
             const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
             switch (msg_type) {
                 .ok, .pane_exited, .session_state => {
+                    if (hdr.request_id != 0 and hdr.request_id != expected_request_id) {
+                        self.skipPayload(fd, hdr.payload_len);
+                        return error.UnexpectedResponse;
+                    }
                     self.consumeQueuedControlResponse(fd, hdr);
                     continue;
                 },
@@ -1574,6 +1785,10 @@ pub const SesClient = struct {
                     continue;
                 },
                 .pane_info => {
+                    if (hdr.request_id != 0 and hdr.request_id != expected_request_id) {
+                        try self.queuePendingControlResponseBody(fd, hdr);
+                        continue;
+                    }
                     if (hdr.payload_len < @sizeOf(wire.PaneInfoResp)) {
                         self.skipPayload(fd, hdr.payload_len);
                         logging.logError("frontend-client", "pane_info response too small", error.UnexpectedResponse);
@@ -1586,7 +1801,7 @@ pub const SesClient = struct {
                         if (self.ctl_fd == fd) self.ctl_fd = null;
                         return err;
                     };
-                    if (std.mem.eql(u8, &resp.uuid, &expected_uuid)) {
+                    if (hdr.request_id == expected_request_id and std.mem.eql(u8, &resp.uuid, &expected_uuid)) {
                         return .{ .hdr = hdr, .resp = resp };
                     }
                     self.queuePaneInfoResponseBody(fd, resp);
@@ -1600,23 +1815,45 @@ pub const SesClient = struct {
         }
     }
 
-    fn readExpectedPaneCwdResponse(self: *SesClient, fd: posix.fd_t, expected_uuid: [32]u8) !wire.PaneCwd {
+    fn readExpectedPaneCwdResponse(self: *SesClient, fd: posix.fd_t, expected_uuid: [32]u8, expected_request_id: u32) !PaneCwdRead {
+        if (self.takePendingControlResponse(expected_request_id)) |pending_response| {
+            var pending = pending_response;
+            defer pending.deinit(self.allocator);
+            if (pending.msg_type != .get_pane_cwd) return error.UnexpectedResponse;
+            const read = try self.readPaneCwdPendingPayload(pending.payload);
+            if (!std.mem.eql(u8, &read.uuid, &expected_uuid)) {
+                var owned = read;
+                owned.deinit(self.allocator);
+                return error.UnexpectedResponse;
+            }
+            return read;
+        }
+
         while (true) {
             const hdr = try wire.readControlHeader(fd);
             const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
             switch (msg_type) {
                 .ok, .pane_exited, .session_state, .pane_info => {
+                    if (hdr.request_id != 0 and hdr.request_id != expected_request_id and msg_type != .pane_info) {
+                        self.skipPayload(fd, hdr.payload_len);
+                        return error.UnexpectedResponse;
+                    }
                     self.consumeQueuedControlResponse(fd, hdr);
                     continue;
                 },
                 .get_pane_cwd => {
-                    const resp = self.readPaneCwdBody(fd, hdr) catch |err| {
+                    if (hdr.request_id != 0 and hdr.request_id != expected_request_id) {
+                        try self.queuePendingControlResponseBody(fd, hdr);
+                        continue;
+                    }
+                    var resp = self.readPaneCwdBodyOwned(fd, hdr) catch |err| {
                         logging.logError("frontend-client", "failed to read pane cwd response", err);
                         if (self.ctl_fd == fd) self.ctl_fd = null;
                         return err;
                     };
-                    if (std.mem.eql(u8, &resp.uuid, &expected_uuid)) return resp;
-                    self.queuePendingPaneCwdBody(fd, resp);
+                    if (hdr.request_id == expected_request_id and std.mem.eql(u8, &resp.uuid, &expected_uuid)) return resp;
+                    self.queuePendingCwdResponse(resp.uuid, resp.cwd);
+                    resp.deinit(self.allocator);
                     continue;
                 },
                 else => {
@@ -1633,35 +1870,60 @@ pub const SesClient = struct {
         return @intCast(@min(remaining, @as(i64, std.math.maxInt(i32))));
     }
 
-    fn readSyncResponse(self: *SesClient, fd: posix.fd_t) !wire.ControlHeader {
-        return self.readSyncResponseUntil(fd, std.time.milliTimestamp() + SYNC_RESPONSE_TIMEOUT_MS, "sync response");
+    fn readSyncResponseForRequest(self: *SesClient, fd: posix.fd_t, expected_request_id: u32) !ControlResponseRead {
+        return self.readSyncResponseUntilForRequest(fd, expected_request_id, std.time.milliTimestamp() + SYNC_RESPONSE_TIMEOUT_MS, "sync response");
     }
 
-    fn readSyncResponseUntil(self: *SesClient, fd: posix.fd_t, deadline_ms: i64, comptime context: []const u8) !wire.ControlHeader {
+    fn readSyncResponseUntilForRequest(self: *SesClient, fd: posix.fd_t, expected_request_id: u32, deadline_ms: i64, comptime context: []const u8) !ControlResponseRead {
+        if (self.takePendingControlResponse(expected_request_id)) |pending_response| {
+            return .{
+                .hdr = .{
+                    .msg_type = @intFromEnum(pending_response.msg_type),
+                    .request_id = pending_response.request_id,
+                    .payload_len = @intCast(pending_response.payload.len),
+                },
+                .payload = pending_response.payload,
+            };
+        }
+
         while (true) {
             const hdr = wire.readControlHeaderTimeout(fd, try remainingDeadlineMs(deadline_ms)) catch |err| {
                 self.debugLog("{s}: timed out/failed waiting for control header: {s}", .{ context, @errorName(err) });
                 return err;
             };
             const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+            const matches_request = hdr.request_id == expected_request_id;
             switch (msg_type) {
                 // Stale acks from older commands without dedicated responses.
                 .ok => {
+                    if (matches_request) return .{ .hdr = hdr };
+                    if (hdr.request_id != 0) {
+                        try self.queuePendingControlResponseBody(fd, hdr);
+                        continue;
+                    }
                     self.consumeQueuedControlResponse(fd, hdr);
                     continue;
                 },
                 // Async get_pane_cwd response.
                 .get_pane_cwd => {
+                    if (hdr.request_id != 0 and hdr.request_id != expected_request_id) {
+                        try self.queuePendingControlResponseBody(fd, hdr);
+                        continue;
+                    }
                     self.consumeQueuedControlResponse(fd, hdr);
                     continue;
                 },
                 // Async pane_info response (large payload = response, not request).
                 .pane_info => {
-                    if (hdr.payload_len >= @sizeOf(wire.PaneInfoResp)) {
+                    if (hdr.payload_len >= @sizeOf(wire.PaneInfoResp) and hdr.request_id == 0) {
                         self.consumeQueuedControlResponse(fd, hdr);
                         continue;
                     }
-                    return hdr;
+                    if (!matches_request and hdr.request_id != 0) {
+                        try self.queuePendingControlResponseBody(fd, hdr);
+                        continue;
+                    }
+                    return .{ .hdr = hdr };
                 },
                 .pane_exited => {
                     self.consumeQueuedControlResponse(fd, hdr);
@@ -1671,7 +1933,17 @@ pub const SesClient = struct {
                     self.consumeQueuedControlResponse(fd, hdr);
                     continue;
                 },
-                else => return hdr,
+                else => {
+                    if (!matches_request) {
+                        if (hdr.request_id != 0) {
+                            try self.queuePendingControlResponseBody(fd, hdr);
+                            continue;
+                        }
+                        self.skipPayload(fd, hdr.payload_len);
+                        return error.UnexpectedResponse;
+                    }
+                    return .{ .hdr = hdr };
+                },
             }
         }
     }
@@ -1697,23 +1969,50 @@ pub const SesClient = struct {
         }
     }
 
-    fn readCommandAck(self: *SesClient, fd: posix.fd_t) !void {
-        return self.readCommandAckUntil(fd, std.time.milliTimestamp() + COMMAND_ACK_TIMEOUT_MS, "command ack");
+    fn readCommandAckForRequest(self: *SesClient, fd: posix.fd_t, expected_request_id: u32) !void {
+        return self.readCommandAckUntilForRequest(fd, expected_request_id, std.time.milliTimestamp() + COMMAND_ACK_TIMEOUT_MS, "command ack");
     }
 
-    fn readCommandAckUntil(self: *SesClient, fd: posix.fd_t, deadline_ms: i64, comptime context: []const u8) !void {
+    fn readCommandAckUntilForRequest(self: *SesClient, fd: posix.fd_t, expected_request_id: u32, deadline_ms: i64, comptime context: []const u8) !void {
+        if (self.takePendingControlResponse(expected_request_id)) |pending_response| {
+            var pending = pending_response;
+            defer pending.deinit(self.allocator);
+            switch (pending.msg_type) {
+                .ok => return,
+                .@"error" => return error.SesError,
+                else => return error.UnexpectedResponse,
+            }
+        }
+
         while (true) {
             const hdr = wire.readControlHeaderTimeout(fd, try remainingDeadlineMs(deadline_ms)) catch |err| {
                 self.debugLog("{s}: timed out/failed waiting for ack header: {s}", .{ context, @errorName(err) });
                 return err;
             };
             const msg_type: wire.MsgType = @enumFromInt(hdr.msg_type);
+            const matches_request = hdr.request_id == expected_request_id;
             switch (msg_type) {
                 .ok => {
+                    if (!matches_request) {
+                        if (hdr.request_id == 0) {
+                            self.skipPayload(fd, hdr.payload_len);
+                            continue;
+                        }
+                        try self.queuePendingControlResponseBody(fd, hdr);
+                        continue;
+                    }
                     self.skipPayload(fd, hdr.payload_len);
                     return;
                 },
                 .@"error" => {
+                    if (!matches_request) {
+                        if (hdr.request_id == 0) {
+                            self.skipPayload(fd, hdr.payload_len);
+                            continue;
+                        }
+                        try self.queuePendingControlResponseBody(fd, hdr);
+                        continue;
+                    }
                     self.skipPayload(fd, hdr.payload_len);
                     return error.SesError;
                 },
@@ -1727,6 +2026,27 @@ pub const SesClient = struct {
                 },
             }
         }
+    }
+
+    fn queuePendingControlResponseBody(self: *SesClient, fd: posix.fd_t, hdr: wire.ControlHeader) !void {
+        if (hdr.request_id == 0) {
+            self.skipPayload(fd, hdr.payload_len);
+            return;
+        }
+        if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+            self.skipPayload(fd, hdr.payload_len);
+            return error.UnexpectedResponse;
+        }
+        const payload = try self.allocator.alloc(u8, hdr.payload_len);
+        errdefer self.allocator.free(payload);
+        if (hdr.payload_len > 0) {
+            try wire.readExact(fd, payload);
+        }
+        self.queuePendingControlResponse(.{
+            .request_id = hdr.request_id,
+            .msg_type = @enumFromInt(hdr.msg_type),
+            .payload = payload,
+        });
     }
 
     fn consumeQueuedControlResponse(self: *SesClient, fd: posix.fd_t, hdr: wire.ControlHeader) void {
@@ -1796,6 +2116,33 @@ pub const SesClient = struct {
         return wire.readStruct(wire.PaneCwd, fd);
     }
 
+    fn readPaneCwdBodyOwned(self: *SesClient, fd: posix.fd_t, hdr: wire.ControlHeader) !PaneCwdRead {
+        const resp = try self.readPaneCwdBody(fd, hdr);
+        const body_len = hdr.payload_len - @sizeOf(wire.PaneCwd);
+        if (resp.cwd_len == 0) {
+            if (body_len > 0) self.skipPayload(fd, body_len);
+            return .{ .uuid = resp.uuid, .cwd = &.{} };
+        }
+        if (resp.cwd_len != body_len or resp.cwd_len > wire.MAX_PAYLOAD_LEN) {
+            self.skipPayload(fd, body_len);
+            return error.UnexpectedResponse;
+        }
+        const cwd = try self.allocator.alloc(u8, resp.cwd_len);
+        errdefer self.allocator.free(cwd);
+        try wire.readExact(fd, cwd);
+        return .{ .uuid = resp.uuid, .cwd = cwd };
+    }
+
+    fn readPaneCwdPendingPayload(self: *SesClient, payload: []const u8) !PaneCwdRead {
+        if (payload.len < @sizeOf(wire.PaneCwd)) return error.UnexpectedResponse;
+        const resp = wire.bytesToStruct(wire.PaneCwd, payload[0..@sizeOf(wire.PaneCwd)]) orelse return error.UnexpectedResponse;
+        const body = payload[@sizeOf(wire.PaneCwd)..];
+        if (resp.cwd_len == 0) return .{ .uuid = resp.uuid, .cwd = &.{} };
+        if (resp.cwd_len != body.len or resp.cwd_len > wire.MAX_PAYLOAD_LEN) return error.UnexpectedResponse;
+        const cwd = try self.allocator.dupe(u8, body);
+        return .{ .uuid = resp.uuid, .cwd = cwd };
+    }
+
     fn queuePendingPaneCwdBody(self: *SesClient, fd: posix.fd_t, resp: wire.PaneCwd) void {
         if (resp.cwd_len == 0) return;
         if (resp.cwd_len > wire.MAX_PAYLOAD_LEN) {
@@ -1815,6 +2162,29 @@ pub const SesClient = struct {
             return;
         };
         self.queuePendingCwdResponse(resp.uuid, cwd);
+    }
+
+    fn readPaneInfoPendingPayload(self: *SesClient, payload: []const u8) !PaneInfoRead {
+        if (payload.len < @sizeOf(wire.PaneInfoResp)) return error.UnexpectedResponse;
+        const resp = wire.bytesToStruct(wire.PaneInfoResp, payload[0..@sizeOf(wire.PaneInfoResp)]) orelse return error.UnexpectedResponse;
+        const trail = payload[@sizeOf(wire.PaneInfoResp)..];
+        const expected_trail_len: usize = @as(usize, resp.name_len) + @as(usize, resp.fg_len) +
+            @as(usize, resp.cwd_len) + @as(usize, resp.tty_len) +
+            @as(usize, resp.socket_path_len) + @as(usize, resp.session_name_len) +
+            @as(usize, resp.layout_path_len) + @as(usize, resp.last_cmd_len) +
+            @as(usize, resp.base_process_len) + @as(usize, resp.sticky_pwd_len);
+        if (expected_trail_len != trail.len) return error.UnexpectedResponse;
+
+        const owned_trail = try self.allocator.dupe(u8, trail);
+        return .{
+            .hdr = .{
+                .msg_type = @intFromEnum(wire.MsgType.pane_info),
+                .request_id = 0,
+                .payload_len = @intCast(payload.len),
+            },
+            .resp = resp,
+            .trail = owned_trail,
+        };
     }
 
     fn queuePaneInfoResponseBody(self: *SesClient, fd: posix.fd_t, resp: wire.PaneInfoResp) void {
@@ -1905,7 +2275,7 @@ pub const SesClient = struct {
     /// Returns true if pong received, false if connection appears dead.
     pub fn sendPing(self: *SesClient) bool {
         const fd = self.ctl_fd orelse return false;
-        wire.writeControl(fd, .ping, &.{}) catch |err| {
+        _ = self.writeControlRequest(fd, .ping, &.{}) catch |err| {
             logging.logError("frontend-client", "failed to send ping", err);
             if (self.ctl_fd == fd) self.ctl_fd = null;
             return false;
@@ -1921,8 +2291,8 @@ pub const SesClient = struct {
         const fd = self.ctl_fd orelse return error.NotConnected;
         self.debugLog("requestBacklogReplay: sending replay_backlogs", .{});
         self.drainQueuedControlResponses(fd);
-        try wire.writeControl(fd, .replay_backlogs, &.{});
-        try self.readCommandAck(fd);
+        const request_id = try self.writeControlRequest(fd, .replay_backlogs, &.{});
+        try self.readCommandAckForRequest(fd, request_id);
         self.debugLog("requestBacklogReplay: acknowledged by SES", .{});
     }
 };
@@ -2003,4 +2373,133 @@ test "SesClient: queues multiple pending pane-info responses FIFO" {
     try std.testing.expectEqual(@as(?i32, 22), second.fg_pid);
 
     try std.testing.expect(client.drainPendingPaneInfoResponse() == null);
+}
+
+test "SesClient: pending control responses are retrieved by request id" {
+    var client = SesClient.init(std.testing.allocator, [_]u8{'s'} ** 32, "test", false, null, null);
+    defer client.deinit();
+
+    client.queuePendingControlResponse(.{
+        .request_id = 10,
+        .msg_type = .ok,
+        .payload = try std.testing.allocator.dupe(u8, ""),
+    });
+    client.queuePendingControlResponse(.{
+        .request_id = 20,
+        .msg_type = .@"error",
+        .payload = try std.testing.allocator.dupe(u8, "bad"),
+    });
+
+    var second = client.takePendingControlResponse(20).?;
+    defer second.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 20), second.request_id);
+    try std.testing.expectEqual(wire.MsgType.@"error", second.msg_type);
+    try std.testing.expectEqualStrings("bad", second.payload);
+
+    var first = client.takePendingControlResponse(10).?;
+    defer first.deinit(std.testing.allocator);
+    try std.testing.expectEqual(@as(u32, 10), first.request_id);
+    try std.testing.expectEqual(wire.MsgType.ok, first.msg_type);
+    try std.testing.expectEqualStrings("", first.payload);
+
+    try std.testing.expect(client.takePendingControlResponse(20) == null);
+}
+
+test "SesClient: command ack reader queues out-of-order request ids" {
+    var pipe_fds: [2]posix.fd_t = undefined;
+    try posix.pipe(&pipe_fds);
+    defer posix.close(pipe_fds[0]);
+    defer posix.close(pipe_fds[1]);
+
+    try wire.writeControlWithRequestId(pipe_fds[1], .ok, 20, &.{});
+    try wire.writeControlWithRequestId(pipe_fds[1], .ok, 10, &.{});
+
+    var client = SesClient.init(std.testing.allocator, [_]u8{'s'} ** 32, "test", false, null, null);
+    defer client.deinit();
+
+    try client.readCommandAckForRequest(pipe_fds[0], 10);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_control_responses.items.len);
+    try std.testing.expectEqual(@as(u32, 20), client.pending_control_responses.items[0].request_id);
+
+    try client.readCommandAckForRequest(pipe_fds[0], 20);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_control_responses.items.len);
+}
+
+test "SesClient: sync response reader queues and replays out-of-order direct payloads" {
+    var pipe_fds: [2]posix.fd_t = undefined;
+    try posix.pipe(&pipe_fds);
+    defer posix.close(pipe_fds[0]);
+    defer posix.close(pipe_fds[1]);
+
+    const first_body = wire.PaneFound{
+        .uuid = [_]u8{'a'} ** 32,
+        .pid = 11,
+        .pane_id = 1,
+        .socket_path_len = 0,
+    };
+    const second_body = wire.PaneFound{
+        .uuid = [_]u8{'b'} ** 32,
+        .pid = 22,
+        .pane_id = 2,
+        .socket_path_len = 0,
+    };
+
+    try wire.writeControlWithRequestId(pipe_fds[1], .pane_found, 20, std.mem.asBytes(&second_body));
+    try wire.writeControlWithRequestId(pipe_fds[1], .pane_found, 10, std.mem.asBytes(&first_body));
+
+    var client = SesClient.init(std.testing.allocator, [_]u8{'s'} ** 32, "test", false, null, null);
+    defer client.deinit();
+
+    var first = try client.readSyncResponseForRequest(pipe_fds[0], 10);
+    defer first.deinit(std.testing.allocator);
+    try std.testing.expectEqual(wire.MsgType.pane_found, first.msgType());
+    const first_resp = try first.readStruct(&client, pipe_fds[0], wire.PaneFound);
+    try std.testing.expectEqual(@as(i32, 11), first_resp.pid);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_control_responses.items.len);
+    try std.testing.expectEqual(@as(u32, 20), client.pending_control_responses.items[0].request_id);
+
+    var second = try client.readSyncResponseForRequest(pipe_fds[0], 20);
+    defer second.deinit(std.testing.allocator);
+    try std.testing.expectEqual(wire.MsgType.pane_found, second.msgType());
+    const second_resp = try second.readStruct(&client, pipe_fds[0], wire.PaneFound);
+    try std.testing.expectEqual(@as(i32, 22), second_resp.pid);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_control_responses.items.len);
+}
+
+test "SesClient: sync pane cwd reader replays queued payload-bearing response" {
+    var pipe_fds: [2]posix.fd_t = undefined;
+    try posix.pipe(&pipe_fds);
+    defer posix.close(pipe_fds[0]);
+    defer posix.close(pipe_fds[1]);
+
+    const first_uuid = [_]u8{'a'} ** 32;
+    const second_uuid = [_]u8{'b'} ** 32;
+    const first_cwd = "/tmp/first";
+    const second_cwd = "/tmp/second";
+    const first_body = wire.PaneCwd{
+        .uuid = first_uuid,
+        .cwd_len = @intCast(first_cwd.len),
+    };
+    const second_body = wire.PaneCwd{
+        .uuid = second_uuid,
+        .cwd_len = @intCast(second_cwd.len),
+    };
+
+    try wire.writeControlWithTrailAndRequestId(pipe_fds[1], .get_pane_cwd, 20, std.mem.asBytes(&second_body), second_cwd);
+    try wire.writeControlWithTrailAndRequestId(pipe_fds[1], .get_pane_cwd, 10, std.mem.asBytes(&first_body), first_cwd);
+
+    var client = SesClient.init(std.testing.allocator, [_]u8{'s'} ** 32, "test", false, null, null);
+    defer client.deinit();
+
+    var first = try client.readExpectedPaneCwdResponse(pipe_fds[0], first_uuid, 10);
+    defer first.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, &first_uuid, &first.uuid);
+    try std.testing.expectEqualStrings(first_cwd, first.cwd);
+    try std.testing.expectEqual(@as(usize, 1), client.pending_control_responses.items.len);
+
+    var second = try client.readExpectedPaneCwdResponse(pipe_fds[0], second_uuid, 20);
+    defer second.deinit(std.testing.allocator);
+    try std.testing.expectEqualSlices(u8, &second_uuid, &second.uuid);
+    try std.testing.expectEqualStrings(second_cwd, second.cwd);
+    try std.testing.expectEqual(@as(usize, 0), client.pending_control_responses.items.len);
 }

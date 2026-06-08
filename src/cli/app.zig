@@ -1,8 +1,11 @@
 const std = @import("std");
 const yazap = @import("yazap");
 const core = @import("core");
+const frontend_core = @import("frontend_core");
 const ipc = core.ipc;
 const terminal = @import("terminal");
+const web_frontend = @import("web");
+const syslink_frontend = @import("syslink");
 const ses = @import("ses");
 const pod = @import("pod");
 const shp = @import("shp");
@@ -86,6 +89,206 @@ fn parseCliLogLevel(value: ?[]const u8) !?core.logging.Level {
     return null;
 }
 
+fn printFrontendViewSummary(kind: []const u8, view: *const frontend_core.SessionView) void {
+    print("{s} frontend snapshot\n", .{kind});
+    print("  session: {s} name={s}\n", .{ view.session_uuid[0..8], view.session_name });
+    if (view.base_root) |root| {
+        print("  base_root: {s}\n", .{root});
+    } else {
+        print("  base_root: -\n", .{});
+    }
+    print("  active_tab: {d}\n", .{view.active_tab});
+    print("  tabs: {d}\n", .{view.tabs.items.len});
+    print("  panes: {d}\n", .{view.panes.items.len});
+    print("  floats: {d}\n", .{view.floats.items.len});
+    for (view.tabs.items, 0..) |tab, idx| {
+        print("    tab[{d}]: {s} name={s} layout={}\n", .{ idx, tab.uuid[0..8], tab.name, tab.hasLayout() });
+    }
+    for (view.panes.items, 0..) |pane, idx| {
+        print("    pane[{d}]: {s} kind={s} parent_tab={?d} sticky={} pwd={} key={d}\n", .{
+            idx,
+            pane.uuid[0..8],
+            @tagName(pane.kind),
+            pane.parent_tab,
+            pane.sticky,
+            pane.is_pwd,
+            pane.float_key,
+        });
+    }
+}
+
+fn runWebInspectSnapshot(allocator: std.mem.Allocator, snapshot_path: []const u8) !void {
+    if (snapshot_path.len == 0) {
+        print("Error: snapshot path is required\n", .{});
+        return error.InvalidArgument;
+    }
+    const json = try std.fs.cwd().readFileAlloc(allocator, snapshot_path, 16 * 1024 * 1024);
+    defer allocator.free(json);
+
+    var host = web_frontend.WebHost.init(allocator);
+    defer host.deinit();
+    try host.applySessionStateJson(json);
+    printFrontendViewSummary("web", &host.current_view.?);
+}
+
+fn printFrontendProbeSummary(kind: []const u8, caps: frontend_core.HostCapabilities, runtime: *core.FrontendRuntime) void {
+    print("{s} frontend probe\n", .{kind});
+    print("  session: {s} name={s}\n", .{ runtime.sessionUuid()[0..8], runtime.sessionName() });
+    print("  base_root: {s}\n", .{runtime.baseRoot()});
+    print("  capabilities:\n", .{});
+    print("    cell_render: {}\n", .{caps.cell_render});
+    print("    pixel_render: {}\n", .{caps.pixel_render});
+    print("    mouse: {}\n", .{caps.mouse});
+    print("    clipboard: {}\n", .{caps.clipboard});
+    print("    reconnect: {}\n", .{caps.reconnect});
+    print("    remote_transport: {}\n", .{caps.remote_transport});
+}
+
+fn runFrontendServe(
+    allocator: std.mem.Allocator,
+    kind: []const u8,
+    frontend_kind: core.FrontendKind,
+    caps: frontend_core.HostCapabilities,
+    socket_path: []const u8,
+    no_autostart_ses: bool,
+) !void {
+    var session = try frontend_core.FrontendHostSession.create(
+        allocator,
+        core.ipc.generateUuid(),
+        kind,
+        frontend_kind,
+        core.FrontendTransportHelpers.resolveTransport(.{
+            .socket_path = if (socket_path.len > 0) socket_path else null,
+            .autostart_ses = !no_autostart_ses,
+        }),
+    );
+    defer session.deinit();
+
+    var startup_attach = try session.attach();
+    defer startup_attach.deinit(allocator);
+
+    print("{s} frontend serve ready\n", .{kind});
+    printFrontendProbeSummary(kind, caps, session.runtime);
+    if (session.view) |*view| printFrontendViewSummary(kind, view);
+    print("{s} host protocol: tick | render | resize <cols> <rows> | close | disconnect | exit\n", .{kind});
+
+    var in_buf: [4096]u8 = undefined;
+    var stdin = std.fs.File.stdin().reader(&in_buf);
+    while (true) {
+        const line = stdin.interface.takeDelimiterExclusive('\n') catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        const action = frontend_core.parseHostProtocolLine(line) catch |err| {
+            print("{s} protocol error: {s}\n", .{ kind, @errorName(err) });
+            continue;
+        };
+        switch (action) {
+            .host_event => |event| {
+                try session.applyHostEvent(event);
+                if (session.takeStopRequest()) |stop| {
+                    print("{s} stop: {s} detach={}\n", .{ kind, @tagName(stop.kind), stop.detach });
+                    break;
+                }
+            },
+            .render => {
+                try session.refreshViewFromRuntime();
+                if (session.view) |*view| printFrontendViewSummary(kind, view);
+            },
+            .exit => break,
+        }
+    }
+}
+
+fn runWebProbe(allocator: std.mem.Allocator, socket_path: []const u8, no_autostart_ses: bool) !void {
+    var host = web_frontend.WebHost.init(allocator);
+    defer host.deinit();
+
+    var session = try frontend_core.FrontendHostSession.create(
+        allocator,
+        core.ipc.generateUuid(),
+        "web",
+        .web,
+        core.FrontendTransportHelpers.resolveTransport(.{
+            .socket_path = if (socket_path.len > 0) socket_path else null,
+            .autostart_ses = !no_autostart_ses,
+        }),
+    );
+    defer session.deinit();
+
+    var startup_attach = try session.attach();
+    defer startup_attach.deinit(allocator);
+    if (session.view) |*view| {
+        host.current_view = try frontend_core.SessionView.fromRuntime(allocator, session.runtime);
+        _ = view;
+    }
+    printFrontendProbeSummary("web", web_frontend.WebHost.capabilities(), session.runtime);
+    if (host.current_view) |*view| printFrontendViewSummary("web", view);
+}
+
+fn runWebServe(allocator: std.mem.Allocator, socket_path: []const u8, no_autostart_ses: bool) !void {
+    try runFrontendServe(
+        allocator,
+        "web",
+        .web,
+        web_frontend.WebHost.capabilities(),
+        socket_path,
+        no_autostart_ses,
+    );
+}
+
+fn runSyslinkInspectSnapshot(allocator: std.mem.Allocator, snapshot_path: []const u8) !void {
+    if (snapshot_path.len == 0) {
+        print("Error: snapshot path is required\n", .{});
+        return error.InvalidArgument;
+    }
+    const json = try std.fs.cwd().readFileAlloc(allocator, snapshot_path, 16 * 1024 * 1024);
+    defer allocator.free(json);
+
+    var host = syslink_frontend.SyslinkHost.init(allocator);
+    defer host.deinit();
+    try host.applySessionStateJson(json);
+    printFrontendViewSummary("syslink", &host.current_view.?);
+}
+
+fn runSyslinkProbe(allocator: std.mem.Allocator, socket_path: []const u8, no_autostart_ses: bool) !void {
+    var host = syslink_frontend.SyslinkHost.init(allocator);
+    defer host.deinit();
+
+    var session = try frontend_core.FrontendHostSession.create(
+        allocator,
+        core.ipc.generateUuid(),
+        "syslink",
+        .desktop,
+        core.FrontendTransportHelpers.resolveTransport(.{
+            .socket_path = if (socket_path.len > 0) socket_path else null,
+            .autostart_ses = !no_autostart_ses,
+        }),
+    );
+    defer session.deinit();
+
+    var startup_attach = try session.attach();
+    defer startup_attach.deinit(allocator);
+    if (session.view) |*view| {
+        host.current_view = try frontend_core.SessionView.fromRuntime(allocator, session.runtime);
+        _ = view;
+    }
+    printFrontendProbeSummary("syslink", syslink_frontend.SyslinkHost.capabilities(), session.runtime);
+    if (host.current_view) |*view| printFrontendViewSummary("syslink", view);
+}
+
+fn runSyslinkServe(allocator: std.mem.Allocator, socket_path: []const u8, no_autostart_ses: bool) !void {
+    try runFrontendServe(
+        allocator,
+        "syslink",
+        .desktop,
+        syslink_frontend.SyslinkHost.capabilities(),
+        socket_path,
+        no_autostart_ses,
+    );
+}
+
+
 fn normalizeTopLevelCommand(command: []const u8) []const u8 {
     if (std.mem.eql(u8, command, "ses")) return "session";
     if (std.mem.eql(u8, command, "lay")) return "layout";
@@ -134,6 +337,12 @@ pub fn main() !void {
 
     var terminal_cmd = app.createCommand("terminal", "Terminal frontend");
     terminal_cmd.setProperty(.help_on_empty_args);
+
+    var web_cmd = app.createCommand("web", "Web frontend adapter");
+    web_cmd.setProperty(.help_on_empty_args);
+
+    var syslink_cmd = app.createCommand("syslink", "Syslink remote frontend adapter");
+    syslink_cmd.setProperty(.help_on_empty_args);
 
     var shp_cmd = app.createCommand("shell", "Shell prompt renderer");
     shp_cmd.setProperty(.help_on_empty_args);
@@ -354,6 +563,26 @@ pub fn main() !void {
 
     try terminal_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_record, mux_float, mux_notify, mux_send, mux_info, mux_layout, mux_focus });
 
+    var web_inspect = app.createCommand("inspect-snapshot", "Load a session snapshot through the web adapter");
+    try web_inspect.addArg(Arg.positional("snapshot", null, null));
+    var web_probe = app.createCommand("probe", "Start the web adapter against SES and print frontend state");
+    try web_probe.addArg(Arg.singleValueOption("ses-socket", 0, "Path to SES socket"));
+    try web_probe.addArg(Arg.booleanOption("no-autostart-ses", 0, "Do not start SES automatically"));
+    var web_serve = app.createCommand("serve", "Run the web adapter host-protocol serving loop");
+    try web_serve.addArg(Arg.singleValueOption("ses-socket", 0, "Path to SES socket"));
+    try web_serve.addArg(Arg.booleanOption("no-autostart-ses", 0, "Do not start SES automatically"));
+    try web_cmd.addSubcommands(&[_]yazap.Command{ web_inspect, web_probe, web_serve });
+
+    var syslink_inspect = app.createCommand("inspect-snapshot", "Load a session snapshot through the syslink adapter");
+    try syslink_inspect.addArg(Arg.positional("snapshot", null, null));
+    var syslink_probe = app.createCommand("probe", "Start the syslink adapter against SES and print frontend state");
+    try syslink_probe.addArg(Arg.singleValueOption("ses-socket", 0, "Path to SES socket"));
+    try syslink_probe.addArg(Arg.booleanOption("no-autostart-ses", 0, "Do not start SES automatically"));
+    var syslink_serve = app.createCommand("serve", "Run the syslink adapter host-protocol serving loop");
+    try syslink_serve.addArg(Arg.singleValueOption("ses-socket", 0, "Path to SES socket"));
+    try syslink_serve.addArg(Arg.booleanOption("no-autostart-ses", 0, "Do not start SES automatically"));
+    try syslink_cmd.addSubcommands(&[_]yazap.Command{ syslink_inspect, syslink_probe, syslink_serve });
+
     // SHP subcommands
     var shp_prompt = app.createCommand("prompt", "Render shell prompt");
     try shp_prompt.addArg(Arg.singleValueOption("status", 's', null));
@@ -437,7 +666,7 @@ pub fn main() !void {
     try record_toggle.addArg(Arg.booleanOption("capture-input", null, null));
     try record_cmd.addSubcommands(&[_]yazap.Command{ record_start, record_stop, record_status, record_toggle });
 
-    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd });
+    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd });
     ensureArgDescriptions(root);
 
     const raw_args = try std.process.argsAlloc(allocator);
@@ -788,6 +1017,48 @@ pub fn main() !void {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runInfo(allocator, m.getSingleValue("uuid") orelse "", m.containsArg("creator"), m.containsArg("last"));
+            return;
+        }
+    } else if (matches.subcommandMatches("web")) |web_matches| {
+        if (web_matches.subcommandMatches("inspect-snapshot")) |m| {
+            try runWebInspectSnapshot(allocator, m.getSingleValue("snapshot") orelse "");
+            return;
+        }
+        if (web_matches.subcommandMatches("probe")) |m| {
+            try runWebProbe(
+                allocator,
+                m.getSingleValue("ses-socket") orelse "",
+                m.containsArg("no-autostart-ses"),
+            );
+            return;
+        }
+        if (web_matches.subcommandMatches("serve")) |m| {
+            try runWebServe(
+                allocator,
+                m.getSingleValue("ses-socket") orelse "",
+                m.containsArg("no-autostart-ses"),
+            );
+            return;
+        }
+    } else if (matches.subcommandMatches("syslink")) |syslink_matches| {
+        if (syslink_matches.subcommandMatches("inspect-snapshot")) |m| {
+            try runSyslinkInspectSnapshot(allocator, m.getSingleValue("snapshot") orelse "");
+            return;
+        }
+        if (syslink_matches.subcommandMatches("probe")) |m| {
+            try runSyslinkProbe(
+                allocator,
+                m.getSingleValue("ses-socket") orelse "",
+                m.containsArg("no-autostart-ses"),
+            );
+            return;
+        }
+        if (syslink_matches.subcommandMatches("serve")) |m| {
+            try runSyslinkServe(
+                allocator,
+                m.getSingleValue("ses-socket") orelse "",
+                m.containsArg("no-autostart-ses"),
+            );
             return;
         }
     } else if (matches.subcommandMatches("shell")) |shp_matches| {

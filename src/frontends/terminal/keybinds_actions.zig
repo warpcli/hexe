@@ -1,5 +1,6 @@
 const std = @import("std");
 const core = @import("core");
+const frontend_core = @import("frontend_core");
 
 const layout_mod = @import("layout.zig");
 const actions = @import("loop_actions.zig");
@@ -11,10 +12,20 @@ const Pane = @import("pane.zig").Pane;
 
 const BindAction = core.Config.BindAction;
 
+fn layoutDirectionFromCore(direction: frontend_core.Direction) layout_mod.Layout.Direction {
+    return switch (direction) {
+        .up => .up,
+        .down => .down,
+        .left => .left,
+        .right => .right,
+    };
+}
+
 pub fn dispatchAction(state: *State, action: BindAction) bool {
     const cfg = &state.config;
+    const request = frontend_core.actionRequestFromBindAction(action);
 
-    switch (action) {
+    switch (request) {
         .mux_quit => {
             if (cfg.confirm_on_exit) {
                 _ = state.showConfirmOrNotify(.exit, "Exit terminal session?");
@@ -52,6 +63,255 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             actions.enterPaneSelectMode(state, false);
             return true;
         },
+        .host_surface => |host_action| return dispatchHostSurfaceAction(state, host_action),
+        .tab_select,
+        .tab_remove,
+        .float_select,
+        .focus_set,
+        .tab_focus_set,
+        => return false,
+        .split_h => {
+            // Prevent split creation during detach (race prevention)
+            if (state.isDetachMode()) {
+                return true; // Silently ignore during detach
+            }
+            const parent_pane = state.currentLayout().getFocusedPane() orelse {
+                core.logging.warn("terminal", "split_h skipped: no focused pane", .{});
+                return true;
+            };
+            const parent_uuid = parent_pane.uuid;
+            var cwd: ?[]const u8 = null;
+            if (state.currentLayout().getFocusedPane()) |p| {
+                cwd = state.getReliableCwd(p);
+            }
+            // Fallback to the terminal process CWD if pane CWD is unavailable.
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (cwd == null) {
+                cwd = std.posix.getcwd(&cwd_buf) catch |err| blk: {
+                    core.logging.logError("terminal", "split_h: failed to get fallback cwd", err);
+                    break :blk null;
+                };
+            }
+            const new_pane = state.currentLayout().splitFocused(.horizontal, cwd) catch |err| blk: {
+                core.logging.logError("terminal", "split_h failed to create pane", err);
+                state.notifications.show("Split failed: pane creation error");
+                break :blk null;
+            };
+            if (new_pane) |pane| {
+                if (state.syncSessionSplitPaneChecked(parent_uuid, pane.uuid, .horizontal, pane.uuid)) {
+                    state.syncPaneAux(pane, parent_uuid);
+                } else {
+                    _ = state.currentLayout().closePane(pane.uuid);
+                    state.notifications.show("Split failed: session sync rejected pane");
+                }
+            }
+            state.needs_render = true;
+            return true;
+        },
+        .split_v => {
+            // Prevent split creation during detach (race prevention)
+            if (state.isDetachMode()) {
+                return true; // Silently ignore during detach
+            }
+            const parent_pane = state.currentLayout().getFocusedPane() orelse {
+                core.logging.warn("terminal", "split_v skipped: no focused pane", .{});
+                return true;
+            };
+            const parent_uuid = parent_pane.uuid;
+            var cwd: ?[]const u8 = null;
+            if (state.currentLayout().getFocusedPane()) |p| {
+                cwd = state.getReliableCwd(p);
+            }
+            // Fallback to the terminal process CWD if pane CWD is unavailable.
+            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
+            if (cwd == null) {
+                cwd = std.posix.getcwd(&cwd_buf) catch |err| blk: {
+                    core.logging.logError("terminal", "split_v: failed to get fallback cwd", err);
+                    break :blk null;
+                };
+            }
+            const new_pane = state.currentLayout().splitFocused(.vertical, cwd) catch |err| blk: {
+                core.logging.logError("terminal", "split_v failed to create pane", err);
+                state.notifications.show("Split failed: pane creation error");
+                break :blk null;
+            };
+            if (new_pane) |pane| {
+                if (state.syncSessionSplitPaneChecked(parent_uuid, pane.uuid, .vertical, pane.uuid)) {
+                    state.syncPaneAux(pane, parent_uuid);
+                } else {
+                    _ = state.currentLayout().closePane(pane.uuid);
+                    state.notifications.show("Split failed: session sync rejected pane");
+                }
+            }
+            state.needs_render = true;
+            return true;
+        },
+        .split_resize => |dir| {
+            // Only applies to split panes (floats should ignore).
+            if (state.activeFloatingIndex() != null) return true;
+            const shared_sync = state.applyFrontendSplitResize(dir, 1);
+            if (state.currentLayout().resizeFocused(layoutDirectionFromCore(dir), 1)) |sync| {
+                state.needs_render = true;
+                state.renderer.invalidate();
+                state.force_full_render = true;
+                const sync_to_send: frontend_core.SplitRatioChange = shared_sync orelse .{
+                    .first_anchor_uuid = sync.first_anchor_uuid,
+                    .second_anchor_uuid = sync.second_anchor_uuid,
+                    .ratio = sync.ratio,
+                };
+                state.syncSessionSplitRatio(sync_to_send.first_anchor_uuid, sync_to_send.second_anchor_uuid, sync_to_send.ratio);
+            } else if (shared_sync != null) {
+                // The shared projection should mirror the terminal tree. If it
+                // could resize but the terminal presentation could not, throw
+                // away the optimistic shared mutation and wait for the next
+                // authoritative snapshot/runtime refresh.
+                state.refreshFrontendView();
+            }
+            return true;
+        },
+        .tab_new => {
+            // Prevent tab creation during detach (race prevention)
+            if (state.isDetachMode()) {
+                return true; // Silently ignore during detach
+            }
+            state.setActiveFloatingIndex(null);
+            state.createTab() catch |e| {
+                core.logging.logError("terminal", "createTab failed", e);
+            };
+            state.needs_render = true;
+            return true;
+        },
+        .tab_next => {
+            actions.switchToNextTab(state);
+            return true;
+        },
+        .tab_prev => {
+            actions.switchToPrevTab(state);
+            return true;
+        },
+        .pane_close => {
+            // Close float or split pane, but never the tab.
+            if (state.activeFloatingIndex() != null) {
+                // Close the focused float.
+                if (cfg.confirm_on_close) {
+                    _ = state.showConfirmOrNotify(.close, "Close float?");
+                } else {
+                    actions.performClose(state);
+                }
+            } else {
+                // Close split pane if there are multiple splits.
+                const layout = state.currentLayout();
+                if (layout.splitCount() > 1) {
+                    if (cfg.confirm_on_close) {
+                        _ = state.showConfirmOrNotify(.pane_close, "Close pane?");
+                    } else {
+                        const closing_pane = layout.getFocusedPane().?;
+                        const closing_uuid = closing_pane.uuid;
+                        state.runtime.killPane(closing_uuid) catch |err| {
+                            core.logging.logError("terminal", "killPane failed before split close", err);
+                            state.notifications.show("Close pane failed: session rejected pane kill");
+                            state.needs_render = true;
+                            return true;
+                        };
+                        state.clearTransientPaneState(closing_pane);
+                        _ = layout.closePaneLocal(closing_uuid);
+                        if (layout.getFocusedPane()) |new_pane| {
+                            state.applyFrontendPaneRemoved(closing_uuid, new_pane.uuid);
+                            state.syncPaneFocus(new_pane, null);
+                        } else {
+                            state.applyFrontendPaneRemoved(closing_uuid, null);
+                        }
+                        state.needs_render = true;
+                    }
+                }
+                // If only one pane, do nothing (don't close the tab).
+            }
+            return true;
+        },
+        .tab_close => {
+            if (cfg.confirm_on_close) {
+                const msg = if (state.activeFloatingIndex() != null) "Close float?" else "Close tab?";
+                _ = state.showConfirmOrNotify(.close, msg);
+            } else {
+                actions.performClose(state);
+            }
+            return true;
+        },
+        .mux_detach => {
+            if (cfg.confirm_on_detach) {
+                _ = state.showConfirmOrNotify(.detach, "Detach session?");
+                return true;
+            }
+            actions.performDetach(state);
+            return true;
+        },
+        .float_toggle => |fk| {
+            if (state.getLayoutFloatByKey(fk)) |float_def| {
+                actions.toggleNamedFloat(state, float_def);
+                state.needs_render = true;
+                return true;
+            }
+            return false;
+        },
+        .float_nudge => |dir| {
+            const fi = state.activeFloatingIndex() orelse {
+                core.logging.warn("terminal", "float_nudge skipped: no active float", .{});
+                return false;
+            };
+            if (fi >= state.view.float_views.items.len) {
+                core.logging.warn("terminal", "float_nudge skipped: active float index is out of range", .{});
+                return false;
+            }
+            const pane = state.view.float_views.items[fi];
+            if (state.paneParentTab(pane)) |parent| {
+                if (parent != state.activeTabIndex()) {
+                    core.logging.warn("terminal", "float_nudge skipped: active float belongs to another tab", .{});
+                    return false;
+                }
+            }
+
+            nudgeFloat(state, pane, layoutDirectionFromCore(dir), 1);
+            if (!state.syncSessionFloatChecked(pane, true)) {
+                if (state.paneSticky(pane) or state.paneIsPwd(pane)) {
+                    core.logging.warn("terminal", "float_nudge: shared sticky/per-CWD float sync rejected; kept local nudge", .{});
+                } else {
+                    state.notifications.show("Nudge float failed: session sync rejected update");
+                }
+            }
+            state.needs_render = true;
+            return true;
+        },
+        .focus_move => |dir| {
+            return focus_move.perform(state, layoutDirectionFromCore(dir));
+        },
+        .layout_save => {
+            _ = state.showPickerOrNotify(
+                .layout_save_choose,
+                &.{ "local", "global", "both" },
+                "Save layout scope",
+            );
+            return true;
+        },
+        .layout_load => {
+            if (std.fs.cwd().access(".hexe.lua", .{})) |_| {} else |_| {
+                state.notifications.showFor("No local .hexe.lua", 1400);
+                state.needs_render = true;
+                return true;
+            }
+
+            _ = state.showPickerOrNotify(
+                .layout_load_choose,
+                &.{ "detach", "replace" },
+                "Load local layout: detach or replace",
+            );
+            return true;
+        },
+        .invalid_direction => return true,
+    }
+}
+
+fn dispatchHostSurfaceAction(state: *State, action: frontend_core.HostSurfaceAction) bool {
+    switch (action) {
         .clipboard_copy => {
             const pane: ?*Pane = if (state.activeFloatingIndex()) |idx|
                 state.view.float_views.items[idx]
@@ -174,244 +434,6 @@ pub fn dispatchAction(state: *State, action: BindAction) bool {
             }
             return true;
         },
-        .split_h => {
-            // Prevent split creation during detach (race prevention)
-            if (state.isDetachMode()) {
-                return true; // Silently ignore during detach
-            }
-            const parent_pane = state.currentLayout().getFocusedPane() orelse {
-                core.logging.warn("terminal", "split_h skipped: no focused pane", .{});
-                return true;
-            };
-            const parent_uuid = parent_pane.uuid;
-            var cwd: ?[]const u8 = null;
-            if (state.currentLayout().getFocusedPane()) |p| {
-                cwd = state.getReliableCwd(p);
-            }
-            // Fallback to the terminal process CWD if pane CWD is unavailable.
-            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-            if (cwd == null) {
-                cwd = std.posix.getcwd(&cwd_buf) catch |err| blk: {
-                    core.logging.logError("terminal", "split_h: failed to get fallback cwd", err);
-                    break :blk null;
-                };
-            }
-            const new_pane = state.currentLayout().splitFocused(.horizontal, cwd) catch |err| blk: {
-                core.logging.logError("terminal", "split_h failed to create pane", err);
-                state.notifications.show("Split failed: pane creation error");
-                break :blk null;
-            };
-            if (new_pane) |pane| {
-                if (state.syncSessionSplitPaneChecked(parent_uuid, pane.uuid, .horizontal, pane.uuid)) {
-                    state.syncPaneAux(pane, parent_uuid);
-                } else {
-                    _ = state.currentLayout().closePane(pane.uuid);
-                    state.notifications.show("Split failed: session sync rejected pane");
-                }
-            }
-            state.needs_render = true;
-            return true;
-        },
-        .split_v => {
-            // Prevent split creation during detach (race prevention)
-            if (state.isDetachMode()) {
-                return true; // Silently ignore during detach
-            }
-            const parent_pane = state.currentLayout().getFocusedPane() orelse {
-                core.logging.warn("terminal", "split_v skipped: no focused pane", .{});
-                return true;
-            };
-            const parent_uuid = parent_pane.uuid;
-            var cwd: ?[]const u8 = null;
-            if (state.currentLayout().getFocusedPane()) |p| {
-                cwd = state.getReliableCwd(p);
-            }
-            // Fallback to the terminal process CWD if pane CWD is unavailable.
-            var cwd_buf: [std.fs.max_path_bytes]u8 = undefined;
-            if (cwd == null) {
-                cwd = std.posix.getcwd(&cwd_buf) catch |err| blk: {
-                    core.logging.logError("terminal", "split_v: failed to get fallback cwd", err);
-                    break :blk null;
-                };
-            }
-            const new_pane = state.currentLayout().splitFocused(.vertical, cwd) catch |err| blk: {
-                core.logging.logError("terminal", "split_v failed to create pane", err);
-                state.notifications.show("Split failed: pane creation error");
-                break :blk null;
-            };
-            if (new_pane) |pane| {
-                if (state.syncSessionSplitPaneChecked(parent_uuid, pane.uuid, .vertical, pane.uuid)) {
-                    state.syncPaneAux(pane, parent_uuid);
-                } else {
-                    _ = state.currentLayout().closePane(pane.uuid);
-                    state.notifications.show("Split failed: session sync rejected pane");
-                }
-            }
-            state.needs_render = true;
-            return true;
-        },
-        .split_resize => |dir_kind| {
-            // Only applies to split panes (floats should ignore).
-            if (state.activeFloatingIndex() != null) return true;
-            const dir: ?layout_mod.Layout.Direction = switch (dir_kind) {
-                .up => .up,
-                .down => .down,
-                .left => .left,
-                .right => .right,
-                else => null,
-            };
-            if (dir == null) return true;
-            if (state.currentLayout().resizeFocused(dir.?, 1)) |sync| {
-                state.needs_render = true;
-                state.renderer.invalidate();
-                state.force_full_render = true;
-                state.syncSessionSplitRatio(sync.first_anchor_uuid, sync.second_anchor_uuid, sync.ratio);
-            }
-            return true;
-        },
-        .tab_new => {
-            // Prevent tab creation during detach (race prevention)
-            if (state.isDetachMode()) {
-                return true; // Silently ignore during detach
-            }
-            state.setActiveFloatingIndex(null);
-            state.createTab() catch |e| {
-                core.logging.logError("terminal", "createTab failed", e);
-            };
-            state.needs_render = true;
-            return true;
-        },
-        .tab_next => {
-            actions.switchToNextTab(state);
-            return true;
-        },
-        .tab_prev => {
-            actions.switchToPrevTab(state);
-            return true;
-        },
-        .pane_close => {
-            // Close float or split pane, but never the tab.
-            if (state.activeFloatingIndex() != null) {
-                // Close the focused float.
-                if (cfg.confirm_on_close) {
-                    _ = state.showConfirmOrNotify(.close, "Close float?");
-                } else {
-                    actions.performClose(state);
-                }
-            } else {
-                // Close split pane if there are multiple splits.
-                const layout = state.currentLayout();
-                if (layout.splitCount() > 1) {
-                    if (cfg.confirm_on_close) {
-                        _ = state.showConfirmOrNotify(.pane_close, "Close pane?");
-                    } else {
-                        const closing_pane = layout.getFocusedPane().?;
-                        const closing_uuid = closing_pane.uuid;
-                        state.runtime.killPane(closing_uuid) catch |err| {
-                            core.logging.logError("terminal", "killPane failed before split close", err);
-                            state.notifications.show("Close pane failed: session rejected pane kill");
-                            state.needs_render = true;
-                            return true;
-                        };
-                        state.clearTransientPaneState(closing_pane);
-                        _ = layout.closePaneLocal(closing_uuid);
-                        if (layout.getFocusedPane()) |new_pane| {
-                            state.syncPaneFocus(new_pane, null);
-                        }
-                        state.needs_render = true;
-                    }
-                }
-                // If only one pane, do nothing (don't close the tab).
-            }
-            return true;
-        },
-        .tab_close => {
-            if (cfg.confirm_on_close) {
-                const msg = if (state.activeFloatingIndex() != null) "Close float?" else "Close tab?";
-                _ = state.showConfirmOrNotify(.close, msg);
-            } else {
-                actions.performClose(state);
-            }
-            return true;
-        },
-        .mux_detach => {
-            if (cfg.confirm_on_detach) {
-                _ = state.showConfirmOrNotify(.detach, "Detach session?");
-                return true;
-            }
-            actions.performDetach(state);
-            return true;
-        },
-        .float_toggle => |fk| {
-            if (state.getLayoutFloatByKey(fk)) |float_def| {
-                actions.toggleNamedFloat(state, float_def);
-                state.needs_render = true;
-                return true;
-            }
-            return false;
-        },
-        .float_nudge => |dir_kind| {
-            const dir: ?layout_mod.Layout.Direction = switch (dir_kind) {
-                .up => .up,
-                .down => .down,
-                .left => .left,
-                .right => .right,
-                else => null,
-            };
-            if (dir == null) return false;
-            const fi = state.activeFloatingIndex() orelse {
-                core.logging.warn("terminal", "float_nudge skipped: no active float", .{});
-                return false;
-            };
-            if (fi >= state.view.float_views.items.len) {
-                core.logging.warn("terminal", "float_nudge skipped: active float index is out of range", .{});
-                return false;
-            }
-            const pane = state.view.float_views.items[fi];
-            if (state.paneParentTab(pane)) |parent| {
-                if (parent != state.activeTabIndex()) {
-                    core.logging.warn("terminal", "float_nudge skipped: active float belongs to another tab", .{});
-                    return false;
-                }
-            }
-
-            nudgeFloat(state, pane, dir.?, 1);
-            state.needs_render = true;
-            return true;
-        },
-        .focus_move => |dir_kind| {
-            const dir: ?layout_mod.Layout.Direction = switch (dir_kind) {
-                .up => .up,
-                .down => .down,
-                .left => .left,
-                .right => .right,
-                else => null,
-            };
-            if (dir) |d| return focus_move.perform(state, d);
-            return true;
-        },
-        .layout_save => {
-            _ = state.showPickerOrNotify(
-                .layout_save_choose,
-                &.{ "local", "global", "both" },
-                "Save layout scope",
-            );
-            return true;
-        },
-        .layout_load => {
-            if (std.fs.cwd().access(".hexe.lua", .{})) |_| {} else |_| {
-                state.notifications.showFor("No local .hexe.lua", 1400);
-                state.needs_render = true;
-                return true;
-            }
-
-            _ = state.showPickerOrNotify(
-                .layout_load_choose,
-                &.{ "detach", "replace" },
-                "Load local layout: detach or replace",
-            );
-            return true;
-        },
     }
 }
 
@@ -459,6 +481,16 @@ fn nudgeFloat(state: *State, pane: *Pane, dir: layout_mod.Layout.Direction, step
         state.paneFloatPadX(pane),
         state.paneFloatPadY(pane),
     );
+    state.setPaneFloatGeometry(
+        pane,
+        state.paneFloatWidthPct(pane),
+        state.paneFloatHeightPct(pane),
+        pos_x_pct,
+        pos_y_pct,
+        state.paneFloatPadX(pane),
+        state.paneFloatPadY(pane),
+    );
+    state.applyFrontendFloatNudge(pane);
 
     state.resizeFloatingPanes();
 }

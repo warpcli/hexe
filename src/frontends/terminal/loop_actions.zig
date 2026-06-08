@@ -86,6 +86,7 @@ fn destroyBlockingFloat(state: *State, pane: *Pane) void {
                     return;
                 };
             }
+            const closing_uuid = pane.uuid;
             _ = state.view.float_views.orderedRemove(i);
             state.clearLocalFloatState(pane.uuid);
             state.clearTransientPaneState(pane);
@@ -100,6 +101,7 @@ fn destroyBlockingFloat(state: *State, pane: *Pane) void {
                     state.setActiveFloatingIndex(afi - 1);
                 }
             }
+            state.applyFrontendPaneRemoved(closing_uuid, null);
             // Ensure proper re-render with cursor restoration.
             state.needs_render = true;
             state.force_full_render = true;
@@ -481,6 +483,7 @@ pub fn performClose(state: *State) void {
     if (state.activeFloatingIndex()) |idx| {
         const old_uuid = state.getCurrentFocusedUuid();
         const pane = state.view.float_views.items[idx];
+        const closing_uuid = pane.uuid;
         terminal_main.debugLogUuid(&pane.uuid, "performClose: float pane_id={?d} vt_fd={?d}", .{
             pane.getPaneId(),
             state.runtime.currentVtFd(),
@@ -504,15 +507,20 @@ pub fn performClose(state: *State) void {
         pane.deinit();
         state.allocator.destroy(pane);
         // Focus another float or fall back to tiled pane.
+        var next_focus_uuid: ?[32]u8 = null;
         if (state.view.float_views.items.len > 0) {
             state.setActiveFloatingIndex(0);
-            state.syncPaneFocus(state.view.float_views.items[0], old_uuid);
+            const next_pane = state.view.float_views.items[0];
+            next_focus_uuid = next_pane.uuid;
+            state.syncPaneFocus(next_pane, old_uuid);
         } else {
             state.setActiveFloatingIndex(null);
             if (state.currentLayout().getFocusedPane()) |tiled| {
+                next_focus_uuid = tiled.uuid;
                 state.syncPaneFocus(tiled, old_uuid);
             }
         }
+        state.applyFrontendPaneRemoved(closing_uuid, next_focus_uuid);
         // Force full render to restore cursor state properly.
         state.force_full_render = true;
         state.renderer.invalidate();

@@ -77,6 +77,14 @@ pub fn build(b: *std.Build) void {
     }
     core_module.addImport("logly", logly_mod);
 
+    // Create frontend-core module (host-neutral frontend event/action boundary)
+    const frontend_core_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/core/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    frontend_core_module.addImport("core", core_module);
+
     // Create shell module (shell prompt/status bar segments)
     const shp_module = b.createModule(.{
         .root_source_file = b.path("src/modules/shell/mod.zig"),
@@ -102,6 +110,7 @@ pub fn build(b: *std.Build) void {
     });
     terminal_module.addIncludePath(b.path("src/frontends/terminal"));
     terminal_module.addImport("core", core_module);
+    terminal_module.addImport("frontend_core", frontend_core_module);
     terminal_module.addImport("xev", xev_mod);
     terminal_module.addImport("shp", shp_module);
     terminal_module.addImport("pop", pop_module);
@@ -109,6 +118,23 @@ pub fn build(b: *std.Build) void {
         terminal_module.addImport("ghostty-vt", vt);
     }
     terminal_module.addImport("vaxis", vaxis_mod);
+
+    // Create web/syslink frontend adapter modules for CLI entrypoints.
+    const web_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/web/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    web_module.addImport("core", core_module);
+    web_module.addImport("frontend_core", frontend_core_module);
+
+    const syslink_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/syslink/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    syslink_module.addImport("core", core_module);
+    syslink_module.addImport("frontend_core", frontend_core_module);
 
     // Create session module for unified CLI
     const ses_module = b.createModule(.{
@@ -144,7 +170,10 @@ pub fn build(b: *std.Build) void {
         .link_libc = true,
     });
     cli_root.addImport("core", core_module);
+    cli_root.addImport("frontend_core", frontend_core_module);
     cli_root.addImport("terminal", terminal_module);
+    cli_root.addImport("web", web_module);
+    cli_root.addImport("syslink", syslink_module);
     cli_root.addImport("ses", ses_module);
     cli_root.addImport("pod", pod_module);
     cli_root.addImport("shp", shp_module);
@@ -258,12 +287,76 @@ pub fn build(b: *std.Build) void {
     });
     const run_fast_path_tests = b.addRunArtifact(fast_path_tests);
 
+    // Terminal OSC passthrough/query regression tests.
+    const pane_output_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/terminal/pane_output.zig"),
+        .target = target,
+        .optimize = optimize,
+        .link_libc = true,
+    });
+    pane_output_test_module.addIncludePath(b.path("src/frontends/terminal"));
+    pane_output_test_module.addImport("core", core_module);
+    pane_output_test_module.addImport("pop", pop_module);
+    if (ghostty_vt_mod) |vt| {
+        pane_output_test_module.addImport("ghostty-vt", vt);
+    }
+
+    const pane_output_tests = b.addTest(.{
+        .root_module = pane_output_test_module,
+    });
+    const run_pane_output_tests = b.addRunArtifact(pane_output_tests);
+
+    // Frontend-core host boundary tests.
+    const frontend_core_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/core/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    frontend_core_test_module.addImport("core", core_module);
+
+    const frontend_core_tests = b.addTest(.{
+        .root_module = frontend_core_test_module,
+    });
+    const run_frontend_core_tests = b.addRunArtifact(frontend_core_tests);
+
+    // Web host adapter boundary tests.
+    const web_host_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/web/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    web_host_test_module.addImport("core", core_module);
+    web_host_test_module.addImport("frontend_core", frontend_core_module);
+
+    const web_host_tests = b.addTest(.{
+        .root_module = web_host_test_module,
+    });
+    const run_web_host_tests = b.addRunArtifact(web_host_tests);
+
+    // Syslink host adapter boundary tests.
+    const syslink_host_test_module = b.createModule(.{
+        .root_source_file = b.path("src/frontends/syslink/mod.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    syslink_host_test_module.addImport("core", core_module);
+    syslink_host_test_module.addImport("frontend_core", frontend_core_module);
+
+    const syslink_host_tests = b.addTest(.{
+        .root_module = syslink_host_test_module,
+    });
+    const run_syslink_host_tests = b.addRunArtifact(syslink_host_tests);
+
     const test_step = b.step("test", "Run hexe test suites");
     test_step.dependOn(&run_ses_tests.step);
     test_step.dependOn(&run_ses_server_tests.step);
     test_step.dependOn(&run_wire_tests.step);
     test_step.dependOn(&run_vt_tests.step);
     test_step.dependOn(&run_fast_path_tests.step);
+    test_step.dependOn(&run_pane_output_tests.step);
+    test_step.dependOn(&run_frontend_core_tests.step);
+    test_step.dependOn(&run_web_host_tests.step);
+    test_step.dependOn(&run_syslink_host_tests.step);
 }
 
 fn computeRuntimeEpoch(b: *std.Build) []const u8 {

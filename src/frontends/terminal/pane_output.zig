@@ -330,18 +330,47 @@ fn handleOscQuery(self: *Pane, code: u32) bool {
 
 fn shouldPassthroughOsc(seq: []const u8) bool {
     const code = parseOscCode(seq) orelse return false;
-    if (code == 0 or code == 1 or code == 2) return true;
-    if (code == 7) return true;
-    if (code == 4 or code == 104) return true;
-    if (code >= 10 and code <= 19) return true;
-    if (code >= 110 and code <= 119) return true;
-    return false;
+    return isPassthroughOscCode(code);
 }
 
 fn isOscQuery(seq: []const u8) bool {
     const code = parseOscCode(seq) orelse return false;
-    if (!(code == 4 or code == 104 or (code >= 10 and code <= 19) or (code >= 110 and code <= 119))) return false;
+    if (!isQueryReplyOscCode(code)) return false;
     return std.mem.indexOf(u8, seq, ";?") != null;
+}
+
+fn isPassthroughOscCode(code: u32) bool {
+    // Window title / icon title / cwd updates.
+    if (code == 0 or code == 1 or code == 2 or code == 7) return true;
+
+    // Palette and dynamic-color control/query families. Keep this deliberately
+    // broader than only OSC 4/10/11/12: terminals and TUIs use OSC 5, 13-19,
+    // 50/51, and reset forms such as 104/105/110-119 for color/font feedback.
+    if (code == 4 or code == 5 or code == 104 or code == 105) return true;
+    if (code >= 10 and code <= 19) return true;
+    if (code >= 50 and code <= 59) return true;
+    if (code >= 110 and code <= 119) return true;
+    return false;
+}
+
+fn isQueryReplyOscCode(code: u32) bool {
+    if (code == 4 or code == 5 or code == 104 or code == 105) return true;
+    if (code >= 10 and code <= 19) return true;
+    if (code >= 50 and code <= 59) return true;
+    if (code >= 110 and code <= 119) return true;
+    return false;
+}
+
+test "OSC passthrough keeps color feedback families including OSC 51" {
+    try std.testing.expect(shouldPassthroughOsc("\x1b]4;1;?\x07"));
+    try std.testing.expect(shouldPassthroughOsc("\x1b]10;?\x07"));
+    try std.testing.expect(shouldPassthroughOsc("\x1b]11;?\x07"));
+    try std.testing.expect(shouldPassthroughOsc("\x1b]51;?\x07"));
+    try std.testing.expect(shouldPassthroughOsc("\x1b]110;?\x07"));
+
+    try std.testing.expect(isOscQuery("\x1b]51;?\x07"));
+    try std.testing.expect(isOscQuery("\x1b]119;?\x07"));
+    try std.testing.expect(!shouldPassthroughOsc("\x1b]99;?\x07"));
 }
 
 fn containsClearSeq(tail: []const u8, data: []const u8) bool {

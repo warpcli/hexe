@@ -1,4 +1,5 @@
 const std = @import("std");
+const frontend_core = @import("frontend_core");
 const core = @import("core");
 const pop = @import("pop");
 const vaxis = @import("vaxis");
@@ -157,8 +158,18 @@ pub fn handlePaneSelectEvent(state: *State, parsed_event: ?vaxis.Event) bool {
 /// Switch to the next tab, handling focus transitions.
 /// Does NOT wrap around - stays on last tab if already there.
 pub fn switchToNextTab(state: *State) void {
-    if (state.view.tab_views.items.len <= 1) return;
-    if (state.activeTabIndex() >= state.view.tab_views.items.len - 1) return;
+    const target_tab = blk: {
+        if (state.frontend_view) |*view| {
+            switch (frontend_core.applyViewAction(view, .tab_next) catch .ignored) {
+                .applied => break :blk view.active_tab,
+                .ignored => return,
+                .unsupported => {},
+            }
+        }
+        if (state.view.tab_views.items.len <= 1) return;
+        if (state.activeTabIndex() >= state.view.tab_views.items.len - 1) return;
+        break :blk state.activeTabIndex() + 1;
+    };
 
     const old_uuid = state.getCurrentFocusedUuid();
 
@@ -173,7 +184,7 @@ pub fn switchToNextTab(state: *State) void {
         state.syncPaneUnfocus(old_pane);
     }
 
-    state.setActiveTabIndex(state.activeTabIndex() + 1);
+    state.setActiveTabIndex(target_tab);
     restoreFocusInTab(state, old_uuid);
     state.renderer.invalidate();
     state.force_full_render = true;
@@ -183,8 +194,18 @@ pub fn switchToNextTab(state: *State) void {
 /// Switch to the previous tab, handling focus transitions.
 /// Does NOT wrap around - stays on first tab if already there.
 pub fn switchToPrevTab(state: *State) void {
-    if (state.view.tab_views.items.len <= 1) return;
-    if (state.activeTabIndex() == 0) return;
+    const target_tab = blk: {
+        if (state.frontend_view) |*view| {
+            switch (frontend_core.applyViewAction(view, .tab_prev) catch .ignored) {
+                .applied => break :blk view.active_tab,
+                .ignored => return,
+                .unsupported => {},
+            }
+        }
+        if (state.view.tab_views.items.len <= 1) return;
+        if (state.activeTabIndex() == 0) return;
+        break :blk state.activeTabIndex() - 1;
+    };
 
     const old_uuid = state.getCurrentFocusedUuid();
 
@@ -199,7 +220,7 @@ pub fn switchToPrevTab(state: *State) void {
         state.syncPaneUnfocus(old_pane);
     }
 
-    state.setActiveTabIndex(state.activeTabIndex() - 1);
+    state.setActiveTabIndex(target_tab);
     restoreFocusInTab(state, old_uuid);
     state.renderer.invalidate();
     state.force_full_render = true;

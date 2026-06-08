@@ -32,6 +32,20 @@ test "wire round-trip: empty payload (ping)" {
 
     const hdr = try wire.readControlHeader(pair.b);
     try testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.ping)), hdr.msg_type);
+    try testing.expectEqual(@as(u32, 0), hdr.request_id);
+    try testing.expectEqual(@as(u32, 0), hdr.payload_len);
+}
+
+test "wire round-trip: explicit request id" {
+    const pair = try socketPair();
+    defer posix.close(pair.a);
+    defer posix.close(pair.b);
+
+    try wire.writeControlWithRequestId(pair.a, .ping, 42, &.{});
+
+    const hdr = try wire.readControlHeader(pair.b);
+    try testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.ping)), hdr.msg_type);
+    try testing.expectEqual(@as(u32, 42), hdr.request_id);
     try testing.expectEqual(@as(u32, 0), hdr.payload_len);
 }
 
@@ -61,6 +75,64 @@ test "wire round-trip: fixed-size struct (PaneUuid)" {
 
     const got = try wire.readStruct(wire.PaneUuid, pair.b);
     try testing.expectEqualSlices(u8, &sent.uuid, &got.uuid);
+}
+
+test "wire round-trip: structured Disconnect reason" {
+    const pair = try socketPair();
+    defer posix.close(pair.a);
+    defer posix.close(pair.b);
+
+    var sent: wire.Disconnect = .{
+        .mode = @intFromEnum(wire.DisconnectMode.shutdown),
+        .preserve_sticky = 1,
+        .reason = @intFromEnum(wire.DisconnectReason.user_exit),
+    };
+
+    try wire.writeControl(pair.a, .disconnect, std.mem.asBytes(&sent));
+
+    const hdr = try wire.readControlHeader(pair.b);
+    try testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.disconnect)), hdr.msg_type);
+    try testing.expectEqual(@as(u32, @sizeOf(wire.Disconnect)), hdr.payload_len);
+
+    const got = try wire.readStruct(wire.Disconnect, pair.b);
+    try testing.expectEqualSlices(u8, std.mem.asBytes(&sent), std.mem.asBytes(&got));
+    try testing.expectEqual(wire.DisconnectReason.user_exit, try std.meta.intToEnum(wire.DisconnectReason, got.reason));
+}
+
+test "wire round-trip: Register carries frontend capability flags" {
+    const pair = try socketPair();
+    defer posix.close(pair.a);
+    defer posix.close(pair.b);
+
+    const name = "web";
+    const root = "/tmp/hexe";
+    const trail = "web/tmp/hexe";
+    var sent: wire.FrontendRegister = .{
+        .session_id = [_]u8{'s'} ** 32,
+        .keepalive = 1,
+        .frontend_kind = @intFromEnum(wire.FrontendKind.web),
+        .transport_kind = @intFromEnum(wire.FrontendTransportKind.local_ipc),
+        .capability_flags = wire.FrontendCapabilityFlag.interactive_input |
+            wire.FrontendCapabilityFlag.cell_render |
+            wire.FrontendCapabilityFlag.pixel_render |
+            wire.FrontendCapabilityFlag.reconnect,
+        .name_len = @intCast(name.len),
+        .base_root_len = @intCast(root.len),
+    };
+
+    try wire.writeControlWithTrail(pair.a, .register, std.mem.asBytes(&sent), trail);
+
+    const hdr = try wire.readControlHeader(pair.b);
+    try testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.register)), hdr.msg_type);
+    try testing.expectEqual(
+        @as(u32, @intCast(@sizeOf(wire.FrontendRegister) + name.len + root.len)),
+        hdr.payload_len,
+    );
+
+    const got = try wire.readStruct(wire.FrontendRegister, pair.b);
+    try testing.expectEqual(@as(u8, @intFromEnum(wire.FrontendKind.web)), got.frontend_kind);
+    try testing.expect((got.capability_flags & wire.FrontendCapabilityFlag.pixel_render) != 0);
+    try testing.expect((got.capability_flags & wire.FrontendCapabilityFlag.reconnect) != 0);
 }
 
 test "wire round-trip: struct + trailing bytes (notify)" {
@@ -133,6 +205,7 @@ test "wire: oversize payload header trips MAX_PAYLOAD_LEN check" {
 
     var forged: wire.ControlHeader = .{
         .msg_type = @intFromEnum(wire.MsgType.ping),
+        .request_id = 0,
         .payload_len = @intCast(wire.MAX_PAYLOAD_LEN + 1),
     };
     try wire.writeAll(pair.a, std.mem.asBytes(&forged));
@@ -151,10 +224,10 @@ test "wire: timeout-bounded header read rejects partial nonblocking frame" {
     try testing.expectError(error.Timeout, wire.readControlHeaderTimeout(pair.b, 10));
 }
 
-test "wire: protocol version 2 is minimum supported" {
-    try testing.expect(!wire.isProtocolVersionSupported(1));
-    try testing.expect(wire.isProtocolVersionSupported(2));
-    try testing.expect(!wire.isProtocolVersionDeprecated(1));
+test "wire: protocol version 3 is minimum supported" {
+    try testing.expect(!wire.isProtocolVersionSupported(2));
+    try testing.expect(wire.isProtocolVersionSupported(3));
+    try testing.expect(!wire.isProtocolVersionDeprecated(2));
 }
 
 test "wire round-trip: Error payload + trail" {
@@ -168,6 +241,7 @@ test "wire round-trip: Error payload + trail" {
 
     const hdr = try wire.readControlHeader(pair.b);
     try testing.expectEqual(@as(u16, @intFromEnum(wire.MsgType.@"error")), hdr.msg_type);
+    try testing.expectEqual(@as(u32, 0), hdr.request_id);
 
     const got = try wire.readStruct(wire.Error, pair.b);
     try testing.expectEqual(@as(u16, msg.len), got.msg_len);

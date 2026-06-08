@@ -14,7 +14,7 @@ const DetachedSessionInfo = core.FrontendDetachedSessionInfo;
 const OrphanedPaneInfo = core.FrontendOrphanedPaneInfo;
 
 const State = @import("state.zig").State;
-const loop_core = @import("loop_core.zig");
+const terminal_host = @import("host.zig");
 const statusbar = @import("statusbar.zig");
 
 var debug_enabled: bool = false;
@@ -397,7 +397,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
             // Fall back to default tab
             try state.createTab();
             state.adoptStickyPanes();
-            try loop_core.runMainLoop(&state);
+            try terminal_host.run(&state);
             return;
         };
         defer config.deinit(allocator);
@@ -445,7 +445,7 @@ pub fn run(terminal_args: TerminalArgs) !void {
     state.adoptStickyPanes();
 
     // Continue with main loop.
-    try loop_core.runMainLoop(&state);
+    try terminal_host.run(&state);
 }
 
 pub fn main() !void {

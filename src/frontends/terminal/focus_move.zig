@@ -1,7 +1,17 @@
+const frontend_core = @import("frontend_core");
 const layout_mod = @import("layout.zig");
 const focus_nav = @import("focus_nav.zig");
 const State = @import("state.zig").State;
 const actions = @import("loop_actions.zig");
+
+fn coreDirectionFromLayout(dir: layout_mod.Layout.Direction) frontend_core.Direction {
+    return switch (dir) {
+        .up => .up,
+        .down => .down,
+        .left => .left,
+        .right => .right,
+    };
+}
 
 /// Move focus across splits in the given direction.
 ///
@@ -40,6 +50,7 @@ pub fn perform(state: *State, dir: layout_mod.Layout.Direction) bool {
 
     if (focus_nav.focusDirectionAny(state, dir, cursor)) |target| {
         state.setActiveFloatingIndex(null);
+        state.applyFrontendFocusMove(coreDirectionFromLayout(dir), target.pane.uuid);
         state.syncPaneFocus(target.pane, old_uuid);
         state.renderer.invalidate();
         state.force_full_render = true;

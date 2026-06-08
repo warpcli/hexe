@@ -14,12 +14,12 @@ pub const MAX_PAYLOAD_LEN: usize = @import("constants.zig").Sizes.max_payload_le
 
 /// Current protocol version. Increment when making breaking changes.
 /// Sent as second byte after handshake byte.
-pub const PROTOCOL_VERSION: u8 = 2;
+pub const PROTOCOL_VERSION: u8 = 3;
 
 /// Minimum supported protocol version.
 /// Version 2 adds password-mode VT frames; accepting older frontends would
 /// silently disable POD-side backlog/observer privacy guarantees.
-pub const MIN_PROTOCOL_VERSION: u8 = 2;
+pub const MIN_PROTOCOL_VERSION: u8 = 3;
 pub const RUNTIME_EPOCH = build_options.runtime_epoch;
 pub const SERVER_HELLO_MAGIC = "HEXEHEL1";
 
@@ -155,9 +155,15 @@ pub const MsgType = enum(u16) {
 // Headers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 6-byte control message header (all control channels).
+/// 10-byte control message header (all control channels).
+///
+/// `request_id == 0` means an unsolicited async event or a legacy-style
+/// fire-and-forget command. Non-zero request ids are reserved for request /
+/// response matching so future web/syslink clients can safely overlap multiple
+/// frontend actions without sync readers stealing each other's responses.
 pub const ControlHeader = extern struct {
     msg_type: u16 align(1),
+    request_id: u32 align(1) = 0,
     payload_len: u32 align(1),
 };
 
@@ -184,14 +190,26 @@ pub const FrontendTransportKind = enum(u8) {
     preconnected = 3,
 };
 
+pub const FrontendCapabilityFlag = struct {
+    pub const interactive_input: u32 = 1 << 0;
+    pub const cell_render: u32 = 1 << 1;
+    pub const pixel_render: u32 = 1 << 2;
+    pub const mouse: u32 = 1 << 3;
+    pub const clipboard: u32 = 1 << 4;
+    pub const desktop_notify: u32 = 1 << 5;
+    pub const reconnect: u32 = 1 << 6;
+    pub const remote_transport: u32 = 1 << 7;
+};
+
 /// Register: session_id[32] + keepalive(u8) + frontend_kind(u8) +
-/// transport_kind(u8) + name_len(u16) + base_root_len(u16)
+/// transport_kind(u8) + capability_flags(u32) + name_len(u16) + base_root_len(u16)
 /// Followed by: name bytes, then base_root bytes.
 pub const FrontendRegister = extern struct {
     session_id: [32]u8 align(1),
     keepalive: u8 align(1),
     frontend_kind: u8 align(1),
     transport_kind: u8 align(1),
+    capability_flags: u32 align(1),
     name_len: u16 align(1),
     base_root_len: u16 align(1),
 };
@@ -250,10 +268,29 @@ pub const SessionReattached = extern struct {
     pane_count: u16 align(1),
 };
 
+/// Disconnect mode for a frontend that is still able to notify SES before its
+/// control fd closes.
+pub const DisconnectMode = enum(u8) {
+    shutdown = 0,
+    crash = 1,
+};
+
+/// Structured disconnect reason. This is advisory metadata for logs/policy; the
+/// authoritative lifecycle action remains `DisconnectMode`.
+pub const DisconnectReason = enum(u8) {
+    unspecified = 0,
+    user_exit = 1,
+    explicit_detach = 2,
+    host_closed = 3,
+    transport_lost = 4,
+    frontend_io_error = 5,
+};
+
 /// Disconnect.
 pub const Disconnect = extern struct {
-    mode: u8 align(1), // 0=shutdown, 1=crash
+    mode: u8 align(1), // DisconnectMode
     preserve_sticky: u8 align(1),
+    reason: u8 align(1), // DisconnectReason
 };
 
 /// SessionAddTab: add a new tab with a single split pane to the canonical snapshot.
@@ -734,8 +771,14 @@ pub const StickyPaneEntry = extern struct {
 
 /// Write a control message (header + struct payload + optional trailing bytes).
 pub fn writeControl(fd: posix.fd_t, msg_type: MsgType, payload: []const u8) !void {
+    try writeControlWithRequestId(fd, msg_type, 0, payload);
+}
+
+/// Write a control message with an explicit request id.
+pub fn writeControlWithRequestId(fd: posix.fd_t, msg_type: MsgType, request_id: u32, payload: []const u8) !void {
     var hdr: ControlHeader = .{
         .msg_type = @intFromEnum(msg_type),
+        .request_id = request_id,
         .payload_len = @intCast(payload.len),
     };
     const hdr_bytes = std.mem.asBytes(&hdr);
@@ -747,8 +790,14 @@ pub fn writeControl(fd: posix.fd_t, msg_type: MsgType, payload: []const u8) !voi
 
 /// Write a control message with a fixed struct followed by trailing variable data.
 pub fn writeControlWithTrail(fd: posix.fd_t, msg_type: MsgType, fixed: []const u8, trail: []const u8) !void {
+    try writeControlWithTrailAndRequestId(fd, msg_type, 0, fixed, trail);
+}
+
+/// Write a control message with an explicit request id, fixed struct, and trail.
+pub fn writeControlWithTrailAndRequestId(fd: posix.fd_t, msg_type: MsgType, request_id: u32, fixed: []const u8, trail: []const u8) !void {
     var hdr: ControlHeader = .{
         .msg_type = @intFromEnum(msg_type),
+        .request_id = request_id,
         .payload_len = @intCast(fixed.len + trail.len),
     };
     const hdr_bytes = std.mem.asBytes(&hdr);
@@ -763,11 +812,17 @@ pub fn writeControlWithTrail(fd: posix.fd_t, msg_type: MsgType, fixed: []const u
 
 /// Write a control message composed of a fixed struct + up to 3 trailing slices.
 pub fn writeControlMsg(fd: posix.fd_t, msg_type: MsgType, fixed: []const u8, trails: []const []const u8) !void {
+    try writeControlMsgWithRequestId(fd, msg_type, 0, fixed, trails);
+}
+
+/// Write a control message with an explicit request id and multiple trails.
+pub fn writeControlMsgWithRequestId(fd: posix.fd_t, msg_type: MsgType, request_id: u32, fixed: []const u8, trails: []const []const u8) !void {
     var total: usize = fixed.len;
     for (trails) |t| total += t.len;
 
     var hdr: ControlHeader = .{
         .msg_type = @intFromEnum(msg_type),
+        .request_id = request_id,
         .payload_len = @intCast(total),
     };
     const hdr_bytes = std.mem.asBytes(&hdr);

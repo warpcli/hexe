@@ -1,0 +1,244 @@
+const std = @import("std");
+const posix = std.posix;
+const core = @import("core");
+const frontend_core = @import("frontend_core");
+const xev = @import("xev").Dynamic;
+
+const State = @import("state.zig").State;
+const loop_core = @import("loop_core.zig");
+const loop_watchers = @import("loop_watchers.zig");
+const loop_input = @import("loop_input.zig");
+const loop_mouse = @import("loop_mouse.zig");
+const loop_render = @import("loop_render.zig");
+const terminal = @import("terminal.zig");
+
+const TERMINAL_QUERY_TIMEOUT_MS: i64 = 1200;
+
+fn connectionLost(state: *State) void {
+    state.runtime.requestFrontendDisconnectStop();
+}
+
+fn handleInput(state: *State, bytes: []const u8) void {
+    loop_input.handleInput(state, bytes);
+}
+
+fn handleStopRequest(state: *State, request: frontend_core.StopRequest) void {
+    if (request.user_message) |msg| {
+        state.notifications.showFor(msg, 3500);
+    }
+}
+
+fn applyPostQueryFeatureModes(state: *State) void {
+    const stdout = std.fs.File.stdout();
+    var tty_buf: [1024]u8 = undefined;
+    var tty = stdout.writer(&tty_buf);
+
+    // Prefer Unicode width handling when explicit-width modifiers are supported.
+    // This lets render output use richer grapheme width semantics without relying
+    // on Mode 2027 being active.
+    if (state.renderer.vx.caps.explicit_width or state.renderer.vx.caps.unicode == .unicode) {
+        state.renderer.vx.screen.width_method = .unicode;
+    }
+
+    // Re-apply mouse mode after capability discovery so terminals with
+    // SGR-pixels support get upgraded from cell-coordinates to pixel mode.
+    state.renderer.vx.setMouseMode(&tty.interface, true) catch |err| {
+        core.logging.logError("terminal", "failed to set mouse mode after capability query", err);
+    };
+
+    // Enable runtime color-scheme updates only when detected.
+    if (state.renderer.vx.caps.color_scheme_updates) {
+        state.renderer.vx.subscribeToColorSchemeUpdates(&tty.interface) catch |err| {
+            core.logging.logError("terminal", "failed to subscribe to color-scheme updates", err);
+        };
+    }
+
+    tty.interface.flush() catch |err| {
+        core.logging.logError("terminal", "failed to flush post-query feature modes", err);
+    };
+}
+
+fn logTerminalCapabilities(state: *State, timed_out: bool) void {
+    const caps = state.renderer.vx.caps;
+    core.logging.debug(
+        "terminal",
+        "terminal caps: kitty_keyboard={} kitty_graphics={} rgb={} unicode={s} sgr_pixels={} color_updates={} multi_cursor={} explicit_width={} scaled_text={} timeout={}",
+        .{
+            caps.kitty_keyboard,
+            caps.kitty_graphics,
+            caps.rgb,
+            @tagName(caps.unicode),
+            caps.sgr_pixels,
+            caps.color_scheme_updates,
+            caps.multi_cursor,
+            caps.explicit_width,
+            caps.scaled_text,
+            timed_out,
+        },
+    );
+
+    if (timed_out) {
+        core.logging.debug("terminal", "terminal capability query timed out; using best-effort feature set", .{});
+    }
+}
+
+fn finalizeCapabilities(state: *State, now_ms: i64) void {
+    if (!state.terminal_query_in_flight) return;
+
+    const query_done = state.renderer.vx.queries_done.load(.unordered);
+    const timed_out = now_ms >= state.terminal_query_deadline_ms;
+    if (!query_done and !timed_out) return;
+
+    const stdout = std.fs.File.stdout();
+    var tty_buf: [1024]u8 = undefined;
+    var tty = stdout.writer(&tty_buf);
+    state.renderer.vx.enableDetectedFeatures(&tty.interface) catch |err| {
+        core.logging.logError("terminal", "failed to enable detected terminal features", err);
+    };
+    applyPostQueryFeatureModes(state);
+    tty.interface.flush() catch |err| {
+        core.logging.logError("terminal", "failed to flush terminal feature enablement", err);
+    };
+
+    state.renderer.vx.queries_done.store(true, .unordered);
+    state.terminal_query_in_flight = false;
+    state.terminal_query_deadline_ms = 0;
+    state.terminal_caps_ready = true;
+    state.terminal_query_timed_out = timed_out;
+    logTerminalCapabilities(state, timed_out);
+}
+
+fn pollResize(state: *State) void {
+    const new_size = terminal.getTermSize();
+    if (new_size.cols != state.term_width or new_size.rows != state.term_height) {
+        state.applyTerminalResize(new_size.cols, new_size.rows);
+    }
+}
+
+fn readInput(fd: posix.fd_t, buffer: []u8) !usize {
+    return posix.read(fd, buffer);
+}
+
+fn render(state: *State) !void {
+    const stdout = std.fs.File.stdout();
+    try loop_render.renderTo(state, stdout);
+}
+
+fn renderIfDue(state: *State, last_render_ms: *i64) void {
+    if (!state.needs_render) return;
+
+    const render_now = std.time.milliTimestamp();
+    if (render_now - last_render_ms.* < 16) return; // ~60fps
+
+    render(state) catch |err| {
+        core.logging.logError("terminal", "terminal render failed", err);
+    };
+    state.needs_render = false;
+    state.force_full_render = false;
+    last_render_ms.* = render_now;
+}
+
+/// Terminal host adapter entrypoint.
+///
+/// `loop_core` still owns most xev watcher dispatch for now, but this adapter
+/// owns terminal-host lifecycle: raw mode, alternate screen setup, terminal
+/// capability query startup, and terminal cleanup on exit.
+pub const TerminalHost = struct {
+    state: *State,
+
+    pub fn init(state: *State) TerminalHost {
+        return .{ .state = state };
+    }
+
+    pub fn capabilities() frontend_core.HostCapabilities {
+        return frontend_core.defaultCapabilities(.terminal);
+    }
+
+    pub fn run(self: *TerminalHost) !void {
+        const orig_termios = try terminal.enableRawMode(posix.STDIN_FILENO);
+        defer terminal.disableRawMode(posix.STDIN_FILENO, orig_termios) catch |err| {
+            core.logging.logError("terminal", "failed to restore terminal raw mode", err);
+        };
+
+        try self.enterTerminalScreen();
+        defer self.restoreTerminalScreen();
+
+        try xev.detect();
+        var loop = try xev.Loop.init(.{});
+        defer loop.deinit();
+        var loop_timer = try xev.Timer.init();
+        defer loop_timer.deinit();
+        var loop_resources: loop_watchers.LoopResources = undefined;
+        loop_resources.init(&loop);
+
+        try loop_core.runMainLoop(self.state, .{
+            .connectionLost = connectionLost,
+            .finalizeCapabilities = finalizeCapabilities,
+            .handleInput = handleInput,
+            .handleStopRequest = handleStopRequest,
+            .pollResize = pollResize,
+            .readInput = readInput,
+            .renderIfDue = renderIfDue,
+            .stdin_fd = posix.STDIN_FILENO,
+        }, &loop, &loop_timer, &loop_resources);
+    }
+
+    fn enterTerminalScreen(self: *TerminalHost) !void {
+        const stdout = std.fs.File.stdout();
+        var tty_init_buf: [1024]u8 = undefined;
+        var tty_init = stdout.writer(&tty_init_buf);
+        try self.state.renderer.vx.enterAltScreen(&tty_init.interface);
+        try self.state.renderer.vx.setBracketedPaste(&tty_init.interface, true);
+        try self.state.renderer.vx.setMouseMode(&tty_init.interface, true);
+
+        // Keep kitty keyboard available as baseline while capability probing runs.
+        self.state.renderer.vx.caps.kitty_keyboard = true;
+        self.state.renderer.vx.queryTerminalSend(&tty_init.interface) catch {
+            try self.state.renderer.vx.enableDetectedFeatures(&tty_init.interface);
+            applyPostQueryFeatureModes(self.state);
+            self.state.renderer.vx.queries_done.store(true, .unordered);
+            self.state.terminal_query_in_flight = false;
+            self.state.terminal_query_deadline_ms = 0;
+            self.state.terminal_caps_ready = true;
+            self.state.terminal_query_timed_out = true;
+            logTerminalCapabilities(self.state, true);
+        };
+        if (!self.state.renderer.vx.queries_done.load(.unordered)) {
+            self.state.terminal_query_in_flight = true;
+            self.state.terminal_query_deadline_ms = std.time.milliTimestamp() + TERMINAL_QUERY_TIMEOUT_MS;
+        }
+        try tty_init.interface.flush();
+    }
+
+    fn restoreTerminalScreen(self: *TerminalHost) void {
+        const stdout = std.fs.File.stdout();
+        var tty_restore_buf: [512]u8 = undefined;
+        var tty_restore = stdout.writer(&tty_restore_buf);
+        if (self.state.view.tab_views.items.len > 0) {
+            var split_it = self.state.currentLayout().splitIterator();
+            while (split_it.next()) |pane| {
+                pane.*.vt.freeCachedKittyImages(&self.state.renderer.vx, &tty_restore.interface);
+            }
+        }
+        for (self.state.view.float_views.items) |pane| {
+            pane.vt.freeCachedKittyImages(&self.state.renderer.vx, &tty_restore.interface);
+        }
+        // Ensure in-band resize mode is reset even if vaxis internal state
+        // tracking missed setting it during capability query setup.
+        tty_restore.interface.writeAll("\x1b[?2048l") catch |err| {
+            core.logging.logError("terminal", "failed to disable in-band resize mode on restore", err);
+        };
+        loop_mouse.resetShape(self.state);
+        self.state.renderer.vx.resetState(&tty_restore.interface) catch |err| {
+            core.logging.logError("terminal", "failed to reset terminal renderer state", err);
+        };
+        tty_restore.interface.flush() catch |err| {
+            core.logging.logError("terminal", "failed to flush terminal restore state", err);
+        };
+    }
+};
+
+pub fn run(state: *State) !void {
+    var terminal_host = TerminalHost.init(state);
+    try terminal_host.run();
+}

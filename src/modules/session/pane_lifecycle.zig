@@ -31,6 +31,7 @@ fn notifyPaneExitedBestEffort(fd: posix.fd_t, uuid: [32]u8) void {
     var msg: wire.PaneUuid = .{ .uuid = uuid };
     var hdr: wire.ControlHeader = .{
         .msg_type = @intFromEnum(wire.MsgType.pane_exited),
+        .request_id = 0,
         .payload_len = @sizeOf(wire.PaneUuid),
     };
 

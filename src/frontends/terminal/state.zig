@@ -5,6 +5,7 @@ const cregex = @cImport({
 });
 
 const core = @import("core");
+const frontend_core = @import("frontend_core");
 const wire = core.wire;
 const pop = @import("pop");
 
@@ -235,6 +236,7 @@ pub const State = struct {
     pop_config: pop.PopConfig,
     ses_config: core.SesConfig,
     runtime: *FrontendRuntime,
+    frontend_view: ?frontend_core.SessionView,
     active_layout_floats: []const core.LayoutFloatDef,
     view: TerminalViewState,
     float_ui: std.AutoHashMap([32]u8, FloatUiState),
@@ -395,6 +397,7 @@ pub const State = struct {
             .pop_config = pop_cfg,
             .ses_config = ses_cfg,
             .runtime = runtime,
+            .frontend_view = null,
             .active_layout_floats = layout_floats,
             .view = TerminalViewState.init(),
             .float_ui = std.AutoHashMap([32]u8, FloatUiState).init(allocator),
@@ -664,6 +667,9 @@ pub const State = struct {
             core.logging.logError("terminal", "failed to finalize frontend exit with SES", err);
         };
 
+        if (self.frontend_view) |*view| view.deinit();
+        self.frontend_view = null;
+
         self.key_timers.deinit(self.allocator);
 
         self.view.deinit(self.allocator);
@@ -867,6 +873,13 @@ pub const State = struct {
     pub fn setActiveTabIndex(self: *State, idx: usize) void {
         const clamped = if (self.view.tab_views.items.len == 0) 0 else @min(idx, self.view.tab_views.items.len - 1);
         self.runtime.setActiveTab(clamped);
+        if (self.frontend_view) |*view| {
+            _ = frontend_core.applyViewActionWithContext(view, .tab_select, .{
+                .active_tab_idx = clamped,
+            }) catch |err| {
+                core.logging.logError("terminal", "failed to apply shared active tab selection", err);
+            };
+        }
     }
 
     pub fn activeFloatingIndex(self: *State) ?usize {
@@ -894,15 +907,39 @@ pub const State = struct {
     pub fn setActiveFloatingIndex(self: *State, idx: ?usize) void {
         if (idx) |value| {
             if (value < self.view.float_views.items.len) {
-                self.runtime.setActiveFloatUuid(self.view.float_views.items[value].uuid);
+                const uuid = self.view.float_views.items[value].uuid;
+                self.runtime.setActiveFloatUuid(uuid);
+                if (self.frontend_view) |*view| {
+                    _ = frontend_core.applyViewActionWithContext(view, .float_select, .{
+                        .active_float_uuid = uuid,
+                    }) catch |err| {
+                        core.logging.logError("terminal", "failed to apply shared active float selection", err);
+                    };
+                }
                 return;
             }
         }
         self.runtime.setActiveFloatUuid(null);
+        if (self.frontend_view) |*view| {
+            _ = frontend_core.applyViewActionWithContext(view, .float_select, .{
+                .clear_active_float = true,
+            }) catch |err| {
+                core.logging.logError("terminal", "failed to clear shared active float selection", err);
+            };
+        }
     }
 
     pub fn setActiveFloatingUuid(self: *State, uuid: ?[32]u8) void {
         self.runtime.setActiveFloatUuid(uuid);
+        if (self.frontend_view) |*view| {
+            _ = frontend_core.applyViewActionWithContext(view, .float_select, if (uuid) |value| .{
+                .active_float_uuid = value,
+            } else .{
+                .clear_active_float = true,
+            }) catch |err| {
+                core.logging.logError("terminal", "failed to apply shared active float uuid", err);
+            };
+        }
     }
 
     pub fn rememberFloatingFocus(self: *State, pane: *Pane) void {
@@ -960,7 +997,264 @@ pub const State = struct {
     }
 
     pub fn applySessionSnapshot(self: *State) bool {
-        return state_tabs.applySessionSnapshot(self);
+        const applied = state_tabs.applySessionSnapshot(self);
+        if (applied) self.refreshFrontendView();
+        return applied;
+    }
+
+    pub fn refreshFrontendView(self: *State) void {
+        var next = frontend_core.SessionView.fromRuntime(self.allocator, self.runtime) catch |err| {
+            core.logging.logError("terminal", "failed to refresh shared frontend view", err);
+            return;
+        };
+        errdefer next.deinit();
+        if (self.frontend_view) |*old| old.deinit();
+        self.frontend_view = next;
+    }
+
+    pub fn applyFrontendPaneCwd(self: *State, uuid: [32]u8, cwd: []const u8) void {
+        if (self.frontend_view) |*view| {
+            frontend_core.applyPaneCwdPayload(view, .{
+                .uuid = uuid,
+                .cwd = @constCast(cwd),
+            }) catch {};
+        }
+    }
+
+    pub fn applyFrontendPaneInfo(self: *State, uuid: [32]u8, name: ?[]const u8, fg_name: ?[]const u8, fg_pid: ?i32) void {
+        if (self.frontend_view) |*view| {
+            frontend_core.applyPaneInfoPayload(view, .{
+                .uuid = uuid,
+                .name = if (name) |value| @constCast(value) else null,
+                .fg_name = if (fg_name) |value| @constCast(value) else null,
+                .fg_pid = fg_pid,
+            }) catch {};
+        }
+    }
+
+    pub fn applyFrontendShellEvent(self: *State, payload: frontend_core.ShellEventPayload) void {
+        if (self.frontend_view) |*view| {
+            frontend_core.applyShellEventPayload(view, payload) catch {};
+        }
+    }
+
+    pub fn applyFrontendPaneExited(self: *State, uuid: [32]u8) void {
+        if (self.frontend_view) |*view| {
+            frontend_core.applyPaneExitedPayload(view, .{ .uuid = uuid }) catch {};
+        }
+    }
+
+    pub fn applyFrontendTabAdded(self: *State, tab_idx: usize, tab_uuid: [32]u8, name: []const u8, pane_uuid: [32]u8) void {
+        if (self.frontend_view) |*view| {
+            _ = frontend_core.applyViewActionWithContext(view, .tab_new, .{
+                .add_tab = .{
+                    .tab_idx = tab_idx,
+                    .tab_uuid = tab_uuid,
+                    .name = name,
+                    .pane_uuid = pane_uuid,
+                },
+            }) catch |err| {
+                core.logging.logError("terminal", "failed to mirror added tab into shared frontend view", err);
+                return;
+            };
+        }
+    }
+
+    pub fn applyFrontendSplitPane(self: *State, tab_idx: usize, source_pane_uuid: [32]u8, new_pane_uuid: [32]u8, focused_pane_uuid: ?[32]u8, dir: layout_mod.SplitDir) void {
+        if (self.frontend_view) |*view| {
+            _ = frontend_core.applyViewActionWithContext(
+                view,
+                switch (dir) {
+                    .horizontal => .split_h,
+                    .vertical => .split_v,
+                },
+                .{
+                    .split_pane = .{
+                        .tab_idx = tab_idx,
+                        .source_pane_uuid = source_pane_uuid,
+                        .new_pane_uuid = new_pane_uuid,
+                        .focused_pane_uuid = focused_pane_uuid,
+                    },
+                },
+            ) catch |err| {
+                core.logging.logError("terminal", "failed to mirror split pane into shared frontend view", err);
+                return;
+            };
+        }
+    }
+
+    pub fn applyFrontendPaneRemoved(self: *State, pane_uuid: [32]u8, next_focus_uuid: ?[32]u8) void {
+        if (self.frontend_view) |*view| {
+            _ = frontend_core.applyViewActionWithContext(
+                view,
+                .pane_close,
+                .{
+                    .remove_pane_uuid = pane_uuid,
+                    .next_focus_uuid = next_focus_uuid,
+                },
+            ) catch |err| {
+                core.logging.logError("terminal", "failed to mirror removed pane into shared frontend view", err);
+                return;
+            };
+        }
+    }
+
+    pub fn applyFrontendFloatSynced(self: *State, pane_uuid: [32]u8, pane: *Pane, active: bool) void {
+        if (self.frontend_view) |*view| {
+            _ = frontend_core.applyViewActionWithContext(view, .{ .float_toggle = self.paneFloatKey(pane) }, .{
+                .sync_float = .{
+                    .float_state = .{
+                        .pane_uuid = pane_uuid,
+                        .parent_tab = self.paneParentTab(pane),
+                        .visible = if (self.paneFloatState(pane)) |float_state| float_state.visible else true,
+                        .tab_visible = if (self.paneFloatState(pane)) |float_state| float_state.tab_visible else 0,
+                        .sticky = self.paneSticky(pane),
+                        .is_pwd = self.paneIsPwd(pane),
+                        .float_key = self.paneFloatKey(pane),
+                        .width_pct = self.paneFloatWidthPct(pane),
+                        .height_pct = self.paneFloatHeightPct(pane),
+                        .pos_x_pct = self.paneFloatPosXPct(pane),
+                        .pos_y_pct = self.paneFloatPosYPct(pane),
+                        .pad_x = self.paneFloatPadX(pane),
+                        .pad_y = self.paneFloatPadY(pane),
+                    },
+                    .active = active,
+                },
+            }) catch |err| {
+                core.logging.logError("terminal", "failed to mirror synced float into shared frontend view", err);
+                return;
+            };
+        }
+    }
+
+    pub fn applyFrontendFloatGeometry(self: *State, pane: *Pane) void {
+        if (self.frontend_view) |*view| {
+            _ = frontend_core.applyViewActionWithContext(
+                view,
+                .{ .float_nudge = .right },
+                .{
+                    .float_geometry = .{
+                        .pane_uuid = pane.uuid,
+                        .width_pct = self.paneFloatWidthPct(pane),
+                        .height_pct = self.paneFloatHeightPct(pane),
+                        .pos_x_pct = self.paneFloatPosXPct(pane),
+                        .pos_y_pct = self.paneFloatPosYPct(pane),
+                        .pad_x = self.paneFloatPadX(pane),
+                        .pad_y = self.paneFloatPadY(pane),
+                    },
+                },
+            ) catch |err| {
+                core.logging.logError("terminal", "failed to mirror float geometry into shared frontend view", err);
+            };
+        }
+    }
+
+    pub fn applyFrontendPaneReplaced(self: *State, old_pane_uuid: [32]u8, new_pane_uuid: [32]u8) void {
+        if (self.frontend_view) |*view| {
+            _ = frontend_core.applyViewActionWithContext(view, .pane_adopt, .{
+                .replace_pane = .{
+                    .old_pane_uuid = old_pane_uuid,
+                    .new_pane_uuid = new_pane_uuid,
+                },
+            }) catch |err| {
+                core.logging.logError("terminal", "failed to mirror replaced pane into shared frontend view", err);
+                return;
+            };
+        }
+    }
+
+    pub fn applyFrontendSplitRatio(self: *State, first_anchor_uuid: [32]u8, second_anchor_uuid: [32]u8, ratio: f32) void {
+        if (self.frontend_view) |*view| {
+            _ = frontend_core.applyViewActionWithContext(view, .{ .split_resize = .right }, .{
+                .split_ratio = .{
+                    .first_anchor_uuid = first_anchor_uuid,
+                    .second_anchor_uuid = second_anchor_uuid,
+                    .ratio = ratio,
+                },
+            }) catch |err| {
+                core.logging.logError("terminal", "failed to mirror split ratio into shared frontend view", err);
+                return;
+            };
+        }
+    }
+
+    pub fn applyFrontendSplitResize(self: *State, direction: frontend_core.Direction, step_cells: u16) ?frontend_core.SplitRatioChange {
+        if (self.frontend_view) |*view| {
+            const axis_cells = switch (direction) {
+                .left, .right => self.currentLayout().width,
+                .up, .down => self.currentLayout().height,
+            };
+            const outcome = frontend_core.applyViewActionWithContext(
+                view,
+                .{ .split_resize = direction },
+                .{
+                    .split_axis_cells = axis_cells,
+                    .step_cells = step_cells,
+                },
+            ) catch |err| {
+                core.logging.logError("terminal", "failed to apply shared split resize", err);
+                return null;
+            };
+            if (outcome.result != .applied) return null;
+            return outcome.split_ratio;
+        }
+        return null;
+    }
+
+    pub fn applyFrontendFloatNudge(self: *State, pane: *Pane) void {
+        if (self.frontend_view) |*view| {
+            _ = frontend_core.applyViewActionWithContext(
+                view,
+                .{ .float_nudge = .right },
+                .{
+                    .float_geometry = .{
+                        .pane_uuid = pane.uuid,
+                        .width_pct = self.paneFloatWidthPct(pane),
+                        .height_pct = self.paneFloatHeightPct(pane),
+                        .pos_x_pct = self.paneFloatPosXPct(pane),
+                        .pos_y_pct = self.paneFloatPosYPct(pane),
+                        .pad_x = self.paneFloatPadX(pane),
+                        .pad_y = self.paneFloatPadY(pane),
+                    },
+                },
+            ) catch |err| {
+                core.logging.logError("terminal", "failed to apply shared float nudge", err);
+                return;
+            };
+        }
+    }
+
+    pub fn applyFrontendFocusMove(self: *State, direction: frontend_core.Direction, target_uuid: [32]u8) void {
+        if (self.frontend_view) |*view| {
+            _ = frontend_core.applyViewActionWithContext(
+                view,
+                .{ .focus_move = direction },
+                .{ .focus_target_uuid = target_uuid },
+            ) catch |err| {
+                core.logging.logError("terminal", "failed to apply shared focus move", err);
+                return;
+            };
+        }
+    }
+
+    pub fn applyFrontendTabRemoved(self: *State, tab_idx: usize, next_active_tab: ?usize) void {
+        if (self.frontend_view) |*view| {
+            if (view.active_tab == tab_idx) {
+                switch (frontend_core.applyViewAction(view, .tab_close) catch |err| {
+                    core.logging.logError("terminal", "failed to apply shared tab-close action", err);
+                    return;
+                }) {
+                    .applied, .ignored => return,
+                    .unsupported => {},
+                }
+            }
+            _ = frontend_core.applyViewActionWithContext(view, .tab_remove, .{
+                .remove_tab_idx = tab_idx,
+                .next_active_tab_idx = next_active_tab,
+            }) catch |err| {
+                core.logging.logError("terminal", "failed to mirror removed tab into shared frontend view", err);
+            };
+        }
     }
 
     pub fn attachOrphanedPane(self: *State, uuid_prefix: []const u8) bool {
@@ -980,11 +1274,15 @@ pub const State = struct {
     }
 
     pub fn syncSessionTabAddedChecked(self: *State, tab_uuid: [32]u8, name: []const u8, pane_uuid: [32]u8) bool {
-        if (!self.runtime.isConnected()) return true;
+        if (!self.runtime.isConnected()) {
+            self.applyFrontendTabAdded(self.activeTabIndex(), tab_uuid, name, pane_uuid);
+            return true;
+        }
         self.runtime.sessionAddTab(tab_uuid, pane_uuid, self.activeTabIndex(), name) catch |err| {
             core.logging.logError("terminal", "failed sessionAddTab IPC", err);
             return false;
         };
+        self.applyFrontendTabAdded(self.activeTabIndex(), tab_uuid, name, pane_uuid);
         return true;
     }
 
@@ -998,7 +1296,10 @@ pub const State = struct {
     }
 
     pub fn syncSessionFloatChecked(self: *State, pane: *Pane, active: bool) bool {
-        if (!self.runtime.isConnected()) return true;
+        if (!self.runtime.isConnected()) {
+            self.applyFrontendFloatSynced(pane.uuid, pane, active);
+            return true;
+        }
         if (pane.uuid[0] == 0) return true;
 
         return self.syncSessionFloatUuid(pane.uuid, pane, active, "failed sessionSyncFloat IPC");
@@ -1031,6 +1332,7 @@ pub const State = struct {
             core.logging.logError("terminal", context, err);
             return false;
         };
+        self.applyFrontendFloatSynced(pane_uuid, pane, active);
         return true;
     }
 
@@ -1041,7 +1343,10 @@ pub const State = struct {
         dir: layout_mod.SplitDir,
         focused_pane_uuid: ?[32]u8,
     ) bool {
-        if (!self.runtime.isConnected()) return true;
+        if (!self.runtime.isConnected()) {
+            self.applyFrontendSplitPane(self.activeTabIndex(), source_pane_uuid, new_pane_uuid, focused_pane_uuid, dir);
+            return true;
+        }
         const tab_uuid = self.runtime.tabUuid(self.activeTabIndex()) orelse {
             core.logging.warn("terminal", "session split-pane sync skipped: active tab has no session UUID", .{});
             return false;
@@ -1060,6 +1365,7 @@ pub const State = struct {
             core.logging.logError("terminal", "failed sessionSplitPane IPC", err);
             return false;
         };
+        self.applyFrontendSplitPane(self.activeTabIndex(), source_pane_uuid, new_pane_uuid, focused_pane_uuid, dir);
         return true;
     }
 
@@ -1184,6 +1490,7 @@ pub const State = struct {
             self.rollbackNewReplacementPane(new_pane_uuid, rollback, rollback_context);
             return false;
         };
+        self.applyFrontendPaneReplaced(old_pane_uuid, new_pane_uuid);
 
         return true;
     }

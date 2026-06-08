@@ -281,6 +281,10 @@ pub const FrontendRuntime = struct {
         try self.client.shutdown(preserve_sticky);
     }
 
+    pub fn shutdownWithReason(self: *FrontendRuntime, preserve_sticky: bool, reason: wire.DisconnectReason) !void {
+        try self.client.shutdownWithReason(preserve_sticky, reason);
+    }
+
     pub fn detachSession(self: *FrontendRuntime, session_id: [32]u8) !void {
         try self.client.detachSession(session_id);
     }
@@ -298,7 +302,7 @@ pub const FrontendRuntime = struct {
         }
 
         if (!self.isDetachMode() and self.isConnected()) {
-            try self.shutdown(preserve_sticky);
+            try self.shutdownWithReason(preserve_sticky, .user_exit);
         }
     }
 

@@ -214,6 +214,7 @@ pub fn closeCurrentTab(self: anytype) bool {
     tab.deinit();
     self.runtime.removeTabMeta(closing_tab);
     self.runtime.removeTabFocusMemory(closing_tab);
+    self.applyFrontendTabRemoved(closing_tab, next_active_tab);
     if (self.activeTabIndex() >= self.view.tab_views.items.len) {
         self.setActiveTabIndex(self.view.tab_views.items.len - 1);
     } else {

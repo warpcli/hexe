@@ -293,6 +293,36 @@ fn resolveFocusedPaneForInput(state: *State) ?*Pane {
     return state.currentLayout().getFocusedPane();
 }
 
+fn isOscBytes(bytes: []const u8) bool {
+    if (bytes.len == 0) return false;
+    if (bytes[0] == 0x9d) return true;
+    return bytes.len >= 2 and bytes[0] == 0x1b and bytes[1] == ']';
+}
+
+fn isPaneFeedbackOscEvent(parsed_event: ?vaxis.Event, raw: []const u8) bool {
+    if (!isOscBytes(raw)) return false;
+    const ev = parsed_event orelse return true;
+    return std.meta.activeTag(ev) == .color_report;
+}
+
+fn routePaneFeedbackOscBytes(state: *State, raw: []const u8) bool {
+    if (state.terminal_query_in_flight) return false;
+
+    harvestPendingOscReplies(state);
+    if (dequeueLiveOscReplyTarget(state)) |uuid| {
+        if (state.findPaneByUuid(uuid)) |pane| {
+            state.writePaneInput(pane, raw);
+            terminal_main.debugLogUuid(&uuid, "OSC feedback routed from terminal input len={d}", .{raw.len});
+            return true;
+        }
+    }
+
+    const pane = resolveFocusedPaneForInput(state) orelse return false;
+    state.writePaneInput(pane, raw);
+    terminal_main.debugLogUuid(&pane.uuid, "OSC feedback routed to focused pane len={d}", .{raw.len});
+    return true;
+}
+
 fn runLayoutSaveWithScope(state: *State, scope: []const u8) void {
     const pane = resolveFocusedPaneForInput(state) orelse {
         state.notifications.showFor("no focused pane for layout save", 1400);
@@ -467,7 +497,10 @@ fn handleMuxLevelPopup(state: *State, parsed_event: ?vaxis.Event) bool {
                                             state.clearTransientPaneState(closing_pane);
                                             _ = layout.closePaneLocal(closing_uuid);
                                             if (layout.getFocusedPane()) |new_pane| {
+                                                state.applyFrontendPaneRemoved(closing_uuid, new_pane.uuid);
                                                 state.syncPaneFocus(new_pane, null);
+                                            } else {
+                                                state.applyFrontendPaneRemoved(closing_uuid, null);
                                             }
                                         }
                                     }
@@ -790,6 +823,13 @@ fn handleFocusedInputLoop(state: *State, inp: []const u8, first_parsed: ?ParsedE
                     },
                     else => {},
                 }
+            }
+
+            const raw_event = inp[i .. i + res.n];
+            if (isPaneFeedbackOscEvent(res.event, raw_event) and routePaneFeedbackOscBytes(state, raw_event)) {
+                freeParsedEventPayload(state, res.event);
+                i += res.n;
+                continue;
             }
 
             const dispatch = dispatchParsedEvent(state, res);
