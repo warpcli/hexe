@@ -41,15 +41,12 @@ pub const ConfigBuilder = struct {
         }
     }
 
-    /// Build final Config from accumulated state
-    pub fn build(self: *ConfigBuilder) !config.Config {
-        var result = config.Config{};
-        result._allocator = self.allocator;
-
-        // TODO: Build config from section builders
-
-        return result;
-    }
+    // Note: there is no top-level `build()` because each section is consumed
+    // independently — `MuxConfigBuilder.build()` by the mux config loader,
+    // `SesConfigBuilder.build()` by the ses config loader, and the shp/pop
+    // builders are read field-by-field by their respective loaders. Callers
+    // that need a section's final config should reach through the specific
+    // section builder.
 };
 
 /// MUX section builder - accumulates mux configuration
@@ -68,16 +65,16 @@ pub const MuxConfigBuilder = struct {
     binds: std.ArrayList(config.Config.Bind),
 
     // Floats
-    float_defaults: ?FloatDefaults = null,
-    floats: std.ArrayList(config.FloatDef),
-
+    float_defaults: ?FloatVisualConfig = null,
+    float_adhoc: ?FloatVisualConfig = null,
+    float_matches: std.ArrayList(FloatMatchRule),
     // Tabs
     tabs_config: TabsConfig,
 
     // Splits
     splits_config: SplitsConfig,
 
-    const FloatDefaults = struct {
+    pub const FloatVisualConfig = struct {
         width_percent: ?u8 = null,
         height_percent: ?u8 = null,
         padding_x: ?u8 = null,
@@ -85,6 +82,25 @@ pub const MuxConfigBuilder = struct {
         color: ?config.BorderColor = null,
         style: ?config.FloatStyle = null,
         attributes: ?config.FloatAttributes = null,
+
+        pub fn deinit(self: *FloatVisualConfig, allocator: std.mem.Allocator) void {
+            if (self.style) |*style| {
+                var copy = @constCast(style);
+                copy.deinit(allocator);
+            }
+            self.* = .{};
+        }
+    };
+
+    pub const FloatMatchRule = struct {
+        pattern: []const u8,
+        visual: FloatVisualConfig = .{},
+
+        pub fn deinit(self: *FloatMatchRule, allocator: std.mem.Allocator) void {
+            allocator.free(@constCast(self.pattern));
+            self.visual.deinit(allocator);
+            self.* = undefined;
+        }
     };
 
     const TabsConfig = struct {
@@ -106,7 +122,7 @@ pub const MuxConfigBuilder = struct {
         self.* = .{
             .allocator = allocator,
             .binds = .{},
-            .floats = .{},
+            .float_matches = .{},
             .tabs_config = .{
                 .segments_left = .{},
                 .segments_center = .{},
@@ -118,8 +134,15 @@ pub const MuxConfigBuilder = struct {
     }
 
     pub fn deinit(self: *MuxConfigBuilder) void {
+        if (self.float_defaults) |*defaults| defaults.deinit(self.allocator);
+        if (self.float_adhoc) |*adhoc| adhoc.deinit(self.allocator);
+        if (self.float_matches.items.len > 0) {
+            for (self.float_matches.items) |*rule| {
+                rule.deinit(self.allocator);
+            }
+        }
+        self.float_matches.deinit(self.allocator);
         self.binds.deinit(self.allocator);
-        self.floats.deinit(self.allocator);
         self.tabs_config.segments_left.deinit(self.allocator);
         self.tabs_config.segments_center.deinit(self.allocator);
         self.tabs_config.segments_right.deinit(self.allocator);
@@ -289,13 +312,39 @@ pub const MuxConfigBuilder = struct {
 
         // Apply float defaults
         if (self.float_defaults) |defaults| {
-            if (defaults.width_percent) |v| result.float_width_percent = v;
-            if (defaults.height_percent) |v| result.float_height_percent = v;
-            if (defaults.padding_x) |v| result.float_padding_x = v;
-            if (defaults.padding_y) |v| result.float_padding_y = v;
-            if (defaults.color) |v| result.float_color = v;
-            if (defaults.style) |s| result.float_style_default = try duplicateFloatStyle(s, self.allocator);
+            if (defaults.width_percent) |v| result.float_named_defaults.width_percent = v;
+            if (defaults.height_percent) |v| result.float_named_defaults.height_percent = v;
+            if (defaults.padding_x) |v| result.float_named_defaults.padding_x = v;
+            if (defaults.padding_y) |v| result.float_named_defaults.padding_y = v;
+            if (defaults.color) |v| result.float_named_defaults.color = v;
+            if (defaults.style) |s| result.float_named_defaults.style = try duplicateFloatStyle(s, self.allocator);
             if (defaults.attributes) |v| result.float_default_attributes = v;
+        }
+
+        if (self.float_adhoc) |defaults| {
+            if (defaults.width_percent) |v| result.float_adhoc_defaults.width_percent = v;
+            if (defaults.height_percent) |v| result.float_adhoc_defaults.height_percent = v;
+            if (defaults.padding_x) |v| result.float_adhoc_defaults.padding_x = v;
+            if (defaults.padding_y) |v| result.float_adhoc_defaults.padding_y = v;
+            if (defaults.color) |v| result.float_adhoc_defaults.color = v;
+            if (defaults.style) |s| result.float_adhoc_defaults.style = try duplicateFloatStyle(s, self.allocator);
+        }
+
+        if (self.float_matches.items.len > 0) {
+            const rules = try self.allocator.alloc(config.FloatMatchRule, self.float_matches.items.len);
+            for (self.float_matches.items, 0..) |rule, i| {
+                rules[i] = .{
+                    .pattern = try self.allocator.dupe(u8, rule.pattern),
+                    .visual = .{},
+                };
+                if (rule.visual.width_percent) |v| rules[i].visual.width_percent = v;
+                if (rule.visual.height_percent) |v| rules[i].visual.height_percent = v;
+                if (rule.visual.padding_x) |v| rules[i].visual.padding_x = v;
+                if (rule.visual.padding_y) |v| rules[i].visual.padding_y = v;
+                if (rule.visual.color) |v| rules[i].visual.color = v;
+                if (rule.visual.style) |s| rules[i].visual.style = try duplicateFloatStyle(s, self.allocator);
+            }
+            result.float_match_rules = rules;
         }
 
         // Apply tabs config - duplicate segments to prevent use-after-free

@@ -1,6 +1,8 @@
 const std = @import("std");
 const posix = std.posix;
 const xev = @import("xev").Dynamic;
+const build_options = @import("build_options");
+const log = std.log.scoped(.wire);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Protocol limits
@@ -12,11 +14,14 @@ pub const MAX_PAYLOAD_LEN: usize = @import("constants.zig").Sizes.max_payload_le
 
 /// Current protocol version. Increment when making breaking changes.
 /// Sent as second byte after handshake byte.
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROTOCOL_VERSION: u8 = 3;
 
-/// Minimum supported protocol version for backward compatibility.
-/// Clients with versions >= MIN_VERSION and <= PROTOCOL_VERSION are accepted.
-pub const MIN_PROTOCOL_VERSION: u8 = 1;
+/// Minimum supported protocol version.
+/// Version 2 adds password-mode VT frames; accepting older frontends would
+/// silently disable POD-side backlog/observer privacy guarantees.
+pub const MIN_PROTOCOL_VERSION: u8 = 3;
+pub const RUNTIME_EPOCH = build_options.runtime_epoch;
+pub const SERVER_HELLO_MAGIC = "HEXEHEL1";
 
 /// Check if a client protocol version is supported.
 pub fn isProtocolVersionSupported(version: u8) bool {
@@ -33,10 +38,14 @@ pub fn isProtocolVersionDeprecated(version: u8) bool {
 // Second byte is always PROTOCOL_VERSION.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Sent by MUX to SES to open the control channel (①).
-pub const SES_HANDSHAKE_MUX_CTL: u8 = 0x01;
-/// Sent by MUX to SES to open the VT data channel (②).
-pub const SES_HANDSHAKE_MUX_VT: u8 = 0x02;
+/// Sent by a frontend to SES to open the control channel (①).
+pub const SES_HANDSHAKE_FRONTEND_CTL: u8 = 0x01;
+/// Sent by a frontend to SES to open the VT data channel (②).
+pub const SES_HANDSHAKE_FRONTEND_VT: u8 = 0x02;
+/// Legacy alias kept while terminal mux call sites are being rewritten.
+pub const SES_HANDSHAKE_MUX_CTL: u8 = SES_HANDSHAKE_FRONTEND_CTL;
+/// Legacy alias kept while terminal mux call sites are being rewritten.
+pub const SES_HANDSHAKE_MUX_VT: u8 = SES_HANDSHAKE_FRONTEND_VT;
 /// Sent by POD to SES to open the pod control uplink (④).
 /// Followed by 16 raw bytes of UUID (binary, not hex).
 pub const SES_HANDSHAKE_POD_CTL: u8 = 0x03;
@@ -58,7 +67,7 @@ pub const POD_HANDSHAKE_AUX_OBSERVER: u8 = 0x04;
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub const MsgType = enum(u16) {
-    // Channel ① — MUX ↔ SES control
+    // Channel ① — frontend ↔ SES control
     register = 0x0100,
     registered = 0x0101,
     create_pane = 0x0102,
@@ -67,13 +76,11 @@ pub const MsgType = enum(u16) {
     detach = 0x0105,
     reattach = 0x0106,
     session_state = 0x0107,
-    layout_sync = 0x0108,
     notify = 0x0109,
     pop_confirm = 0x010A,
     pop_choose = 0x010B,
     pop_response = 0x010C,
     disconnect = 0x010D,
-    sync_state = 0x010E,
     orphan_pane = 0x010F,
     list_orphaned = 0x0110,
     adopt_pane = 0x0111,
@@ -107,29 +114,39 @@ pub const MsgType = enum(u16) {
     float_created = 0x012D,
     float_result = 0x012E,
     pane_exited = 0x012F,
-    replay_backlogs = 0x0130, // MUX tells SES it's ready for backlog replay
+    replay_backlogs = 0x0130, // frontend tells SES it's ready for backlog replay
     kill_session = 0x0131, // CLI → SES: kill a detached session
     clear_sessions = 0x0132, // CLI → SES: kill all detached sessions
     clear_orphaned_panes = 0x0133, // CLI → SES: kill all orphaned/sticky panes
-    get_layout = 0x0134, // CLI → SES: get mux state for layout save
-    apply_layout = 0x0135, // CLI → SES → MUX: apply saved layout tree
+    get_layout = 0x0134, // CLI → SES: get layout export JSON for layout save
+    apply_layout = 0x0135, // CLI → SES → terminal frontend: apply saved layout tree
     get_session_state = 0x0136, // CLI → SES: export detached session to JSON
     session_stolen = 0x0137, // SES → MUX: this session was attached elsewhere
+    session_add_tab = 0x0138,
+    session_remove_tab = 0x0139,
+    session_sync_float = 0x013A,
+    session_remove_float = 0x013B,
+    session_split_pane = 0x013D,
+    // 0x013E (session_close_split_pane) reserved — removed 2026-05;
+    // live split close is represented by kill_pane, dead pane cleanup by SES.
+    session_replace_split_pane = 0x013F,
+    session_set_split_ratio = 0x0140,
 
     // Channel ④ — POD → SES control
     cwd_changed = 0x0400,
     fg_changed = 0x0401,
     shell_event = 0x0402,
-    title_changed = 0x0403,
+    // 0x0403 (title_changed) reserved — removed 2026-04, never implemented.
     bell = 0x0404,
     exited = 0x0405,
-    query_state = 0x0406,
-    pod_register = 0x0407,
+    // 0x0406 (query_state) reserved — removed 2026-04, never implemented.
+    // 0x0407 (pod_register) reserved — removed 2026-04, POD registration
+    // happens via the initial handshake instead.
 
     // Channel ⑤ — SHP → POD control
     shp_shell_event = 0x0500,
-    shp_prompt_req = 0x0501,
-    shp_prompt_resp = 0x0502,
+    // 0x0501/0x0502 (shp_prompt_req/resp) reserved — removed 2026-04,
+    // shell prompt metadata flows through shell_event instead.
 
     _,
 };
@@ -138,9 +155,15 @@ pub const MsgType = enum(u16) {
 // Headers
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// 6-byte control message header (all control channels).
+/// 10-byte control message header (all control channels).
+///
+/// `request_id == 0` means an unsolicited async event or a legacy-style
+/// fire-and-forget command. Non-zero request ids are reserved for request /
+/// response matching so future web/syslink clients can safely overlap multiple
+/// frontend actions without sync readers stealing each other's responses.
 pub const ControlHeader = extern struct {
     msg_type: u16 align(1),
+    request_id: u32 align(1) = 0,
     payload_len: u32 align(1),
 };
 
@@ -152,26 +175,57 @@ pub const MuxVtHeader = extern struct {
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Channel ① payloads — MUX ↔ SES control
+// Channel ① payloads — frontend ↔ SES control
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Register: session_id[32] + keepalive(u8) + name_len(u16)
-/// Followed by: name bytes (name_len).
-pub const Register = extern struct {
+pub const FrontendKind = enum(u8) {
+    terminal = 1,
+    web = 2,
+    desktop = 3,
+};
+
+pub const FrontendTransportKind = enum(u8) {
+    local_ipc = 1,
+    liblink = 2,
+    preconnected = 3,
+};
+
+pub const FrontendCapabilityFlag = struct {
+    pub const interactive_input: u32 = 1 << 0;
+    pub const cell_render: u32 = 1 << 1;
+    pub const pixel_render: u32 = 1 << 2;
+    pub const mouse: u32 = 1 << 3;
+    pub const clipboard: u32 = 1 << 4;
+    pub const desktop_notify: u32 = 1 << 5;
+    pub const reconnect: u32 = 1 << 6;
+    pub const remote_transport: u32 = 1 << 7;
+};
+
+/// Register: session_id[32] + keepalive(u8) + frontend_kind(u8) +
+/// transport_kind(u8) + capability_flags(u32) + name_len(u16) + base_root_len(u16)
+/// Followed by: name bytes, then base_root bytes.
+pub const FrontendRegister = extern struct {
     session_id: [32]u8 align(1),
     keepalive: u8 align(1),
+    frontend_kind: u8 align(1),
+    transport_kind: u8 align(1),
+    capability_flags: u32 align(1),
     name_len: u16 align(1),
+    base_root_len: u16 align(1),
 };
+pub const Register = FrontendRegister;
 
 /// Registered (response to Register).
 /// Trailing data: resolved session_name (may differ from requested if collision).
-pub const Registered = extern struct {
+pub const FrontendRegistered = extern struct {
     name_len: u16 align(1) = 0,
 };
+pub const Registered = FrontendRegistered;
 
 /// CreatePane: lengths of variable fields.
 /// Followed by: shell bytes, cwd bytes, sticky_pwd bytes, isolation_profile bytes,
-/// and optionally inherit_env_parent_uuid bytes (32 bytes when inherit_env_parent_uuid_len > 0).
+/// optionally inherit_env_parent_uuid bytes (32 bytes when inherit_env_parent_uuid_len > 0),
+/// then env_count entries each prefixed with u16 len.
 pub const CreatePane = extern struct {
     shell_len: u16 align(1),
     cwd_len: u16 align(1),
@@ -179,6 +233,7 @@ pub const CreatePane = extern struct {
     sticky_pwd_len: u16 align(1),
     isolation_profile_len: u8 align(1),
     inherit_env_parent_uuid_len: u8 align(1) = 0,
+    env_count: u16 align(1) = 0,
 };
 
 /// PaneCreated (response to CreatePane).
@@ -195,11 +250,9 @@ pub const PaneUuid = extern struct {
     uuid: [32]u8 align(1),
 };
 
-/// Detach: session_id + length of mux_state JSON.
-/// Followed by: mux_state bytes (state_len).
+/// Detach: session_id only. SES detaches using its own canonical session snapshot.
 pub const Detach = extern struct {
     session_id: [32]u8 align(1),
-    state_len: u32 align(1),
 };
 
 /// Reattach: prefix of session_id to match.
@@ -209,23 +262,107 @@ pub const Reattach = extern struct {
 };
 
 /// SessionReattached response.
-/// Followed by: mux_state bytes (state_len), then pane_count * 32 bytes of UUIDs.
+/// Followed by: canonical session snapshot bytes (state_len), then pane_count * 32 bytes of UUIDs.
 pub const SessionReattached = extern struct {
     state_len: u32 align(1),
     pane_count: u16 align(1),
 };
 
-/// Disconnect.
-pub const Disconnect = extern struct {
-    mode: u8 align(1), // 0=shutdown, 1=crash
-    preserve_sticky: u8 align(1),
+/// Disconnect mode for a frontend that is still able to notify SES before its
+/// control fd closes.
+pub const DisconnectMode = enum(u8) {
+    shutdown = 0,
+    crash = 1,
 };
 
-/// SyncState: length of mux_state JSON.
-/// Followed by: mux_state bytes (state_len).
-pub const SyncState = extern struct {
-    state_len: u32 align(1),
-    version: u32 align(1), // Monotonically increasing version; SES rejects stale updates.
+/// Structured disconnect reason. This is advisory metadata for logs/policy; the
+/// authoritative lifecycle action remains `DisconnectMode`.
+pub const DisconnectReason = enum(u8) {
+    unspecified = 0,
+    user_exit = 1,
+    explicit_detach = 2,
+    host_closed = 3,
+    transport_lost = 4,
+    frontend_io_error = 5,
+};
+
+/// Disconnect.
+pub const Disconnect = extern struct {
+    mode: u8 align(1), // DisconnectMode
+    preserve_sticky: u8 align(1),
+    reason: u8 align(1), // DisconnectReason
+};
+
+/// SessionAddTab: add a new tab with a single split pane to the canonical snapshot.
+/// Followed by: tab name bytes (name_len).
+pub const SessionAddTab = extern struct {
+    tab_uuid: [32]u8 align(1),
+    pane_uuid: [32]u8 align(1),
+    tab_index: u16 align(1),
+    name_len: u16 align(1),
+};
+
+/// SessionRemoveTab: remove a tab from the canonical snapshot.
+pub const SessionRemoveTab = extern struct {
+    tab_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    has_active_tab: u8 align(1),
+};
+
+/// SessionSyncFloat: upsert a float record in the canonical snapshot.
+pub const SessionSyncFloat = extern struct {
+    pane_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    parent_tab: u16 align(1),
+    tab_visible: u64 align(1),
+    has_active_tab: u8 align(1),
+    has_parent_tab: u8 align(1),
+    visible: u8 align(1),
+    sticky: u8 align(1),
+    is_pwd: u8 align(1),
+    float_key: u8 align(1),
+    width_pct: u8 align(1),
+    height_pct: u8 align(1),
+    pos_x_pct: u8 align(1),
+    pos_y_pct: u8 align(1),
+    pad_x: u8 align(1),
+    pad_y: u8 align(1),
+    active: u8 align(1),
+};
+
+/// SessionRemoveFloat: remove a float record from the canonical snapshot.
+pub const SessionRemoveFloat = extern struct {
+    pane_uuid: [32]u8 align(1),
+};
+
+/// SessionSplitPane: split one canonical split pane into a 50/50 split.
+pub const SessionSplitPane = extern struct {
+    tab_uuid: [32]u8 align(1),
+    source_pane_uuid: [32]u8 align(1),
+    new_pane_uuid: [32]u8 align(1),
+    focused_pane_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    dir: u8 align(1),
+    has_focused_pane: u8 align(1),
+};
+
+/// SessionReplaceSplitPane: replace one split pane UUID in the canonical split tree.
+pub const SessionReplaceSplitPane = extern struct {
+    tab_uuid: [32]u8 align(1),
+    old_pane_uuid: [32]u8 align(1),
+    new_pane_uuid: [32]u8 align(1),
+    focused_pane_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    has_focused_pane: u8 align(1),
+};
+
+/// SessionSetSplitRatio: update one split divider by child anchor panes.
+pub const SessionSetSplitRatio = extern struct {
+    tab_uuid: [32]u8 align(1),
+    first_anchor_uuid: [32]u8 align(1),
+    second_anchor_uuid: [32]u8 align(1),
+    active_tab: u16 align(1),
+    ratio: f32 align(1),
 };
 
 /// Notify: message for the owning MUX.
@@ -260,8 +397,14 @@ pub const SetSticky = extern struct {
 
 /// FindSticky: look up a sticky pane by pwd+key.
 /// Followed by: pwd bytes (pwd_len).
+/// claim_free=0: claim the pane even if it must be stolen from a live owner
+/// or pulled out of a detached session (explicit user-driven handoff).
+/// claim_free=1: only claim the pane when no live client owns it and it is
+/// not parked inside a detached session; otherwise reply pane_not_found with
+/// no side effects (speculative reconciliation must never steal).
 pub const FindSticky = extern struct {
     key: u8 align(1),
+    claim_free: u8 align(1),
     pwd_len: u16 align(1),
 };
 
@@ -283,6 +426,7 @@ pub const OrphanedPanes = extern struct {
 pub const OrphanedPaneEntry = extern struct {
     uuid: [32]u8 align(1),
     pid: i32 align(1),
+    name_len: u16 align(1),
 };
 
 /// SessionsList response.
@@ -295,7 +439,8 @@ pub const SessionEntry = extern struct {
     session_id: [32]u8 align(1),
     pane_count: u16 align(1),
     name_len: u16 align(1),
-    // Followed by: name bytes (name_len).
+    base_root_len: u16 align(1),
+    // Followed by: name bytes, then base_root bytes.
 };
 
 /// Error response.
@@ -317,8 +462,10 @@ pub const UpdatePaneAux = extern struct {
     uuid: [32]u8 align(1),
     created_from: [32]u8 align(1),
     focused_from: [32]u8 align(1),
+    active_tab: u16 align(1),
     has_created_from: u8 align(1),
     has_focused_from: u8 align(1),
+    has_active_tab: u8 align(1),
     is_focused: u8 align(1),
 };
 
@@ -389,7 +536,7 @@ pub const ExitIntentResult = extern struct {
 /// Followed by: cmd (cmd_len), title (title_len), cwd (cwd_len),
 /// result_path (result_path_len), exit_key (exit_key_len), then env_count entries each prefixed with u16 len.
 pub const FloatRequest = extern struct {
-    flags: u8 align(1), // bit 0: wait_for_exit, bit 1: isolated, bit 2: focus (dim background)
+    flags: u8 align(1), // bit 0: wait_for_exit, bit 1: isolated
     cmd_len: u16 align(1),
     title_len: u16 align(1),
     cwd_len: u16 align(1),
@@ -443,8 +590,8 @@ pub const ClearOrphanedPanesResult = extern struct {
     killed_panes: u16 align(1),
 };
 
-/// ApplyLayout: CLI → SES → MUX: apply a saved layout tree.
-/// uuid identifies the source pane (to find the right session/MUX).
+/// ApplyLayout: CLI → SES: apply a saved layout tree to the session owning uuid.
+/// SES mutates canonical session state, then pushes a session snapshot event.
 /// Followed by: tree_json bytes (tree_json_len).
 pub const ApplyLayout = extern struct {
     uuid: [32]u8 align(1),
@@ -522,6 +669,7 @@ pub const ForwardedShellEvent = extern struct {
 /// PaneCwd response.
 /// Followed by: cwd bytes (cwd_len).
 pub const PaneCwd = extern struct {
+    uuid: [32]u8 align(1),
     cwd_len: u16 align(1),
 };
 
@@ -535,6 +683,7 @@ pub const PaneInfoResp = extern struct {
     pid: i32 align(1),
     fg_pid: i32 align(1),
     base_pid: i32 align(1),
+    pane_id: u16 align(1),
     cols: u16 align(1),
     rows: u16 align(1),
     cursor_x: u16 align(1),
@@ -583,7 +732,7 @@ pub const StatusResp = extern struct {
 };
 
 /// StatusClient entry (connected mux).
-/// Followed by: name bytes (name_len), mux_state bytes (mux_state_len),
+/// Followed by: name bytes (name_len), session snapshot bytes (session_state_len),
 ///   then pane_count StatusPaneEntry entries.
 pub const StatusClient = extern struct {
     id: u16 align(1),
@@ -591,7 +740,7 @@ pub const StatusClient = extern struct {
     has_session_id: u8 align(1),
     name_len: u16 align(1),
     pane_count: u16 align(1),
-    mux_state_len: u32 align(1),
+    session_state_len: u32 align(1),
 };
 
 /// StatusPaneEntry (pane within a client or orphaned pane).
@@ -604,12 +753,12 @@ pub const StatusPaneEntry = extern struct {
 };
 
 /// DetachedSessionEntry.
-/// Followed by: name bytes (name_len), mux_state bytes (mux_state_len).
+/// Followed by: name bytes (name_len), session snapshot bytes (session_state_len).
 pub const DetachedSessionEntry = extern struct {
     session_id: [32]u8 align(1),
     name_len: u16 align(1),
     pane_count: u16 align(1),
-    mux_state_len: u32 align(1),
+    session_state_len: u32 align(1),
 };
 
 /// StickyPaneEntry.
@@ -628,8 +777,14 @@ pub const StickyPaneEntry = extern struct {
 
 /// Write a control message (header + struct payload + optional trailing bytes).
 pub fn writeControl(fd: posix.fd_t, msg_type: MsgType, payload: []const u8) !void {
+    try writeControlWithRequestId(fd, msg_type, 0, payload);
+}
+
+/// Write a control message with an explicit request id.
+pub fn writeControlWithRequestId(fd: posix.fd_t, msg_type: MsgType, request_id: u32, payload: []const u8) !void {
     var hdr: ControlHeader = .{
         .msg_type = @intFromEnum(msg_type),
+        .request_id = request_id,
         .payload_len = @intCast(payload.len),
     };
     const hdr_bytes = std.mem.asBytes(&hdr);
@@ -641,8 +796,14 @@ pub fn writeControl(fd: posix.fd_t, msg_type: MsgType, payload: []const u8) !voi
 
 /// Write a control message with a fixed struct followed by trailing variable data.
 pub fn writeControlWithTrail(fd: posix.fd_t, msg_type: MsgType, fixed: []const u8, trail: []const u8) !void {
+    try writeControlWithTrailAndRequestId(fd, msg_type, 0, fixed, trail);
+}
+
+/// Write a control message with an explicit request id, fixed struct, and trail.
+pub fn writeControlWithTrailAndRequestId(fd: posix.fd_t, msg_type: MsgType, request_id: u32, fixed: []const u8, trail: []const u8) !void {
     var hdr: ControlHeader = .{
         .msg_type = @intFromEnum(msg_type),
+        .request_id = request_id,
         .payload_len = @intCast(fixed.len + trail.len),
     };
     const hdr_bytes = std.mem.asBytes(&hdr);
@@ -657,11 +818,17 @@ pub fn writeControlWithTrail(fd: posix.fd_t, msg_type: MsgType, fixed: []const u
 
 /// Write a control message composed of a fixed struct + up to 3 trailing slices.
 pub fn writeControlMsg(fd: posix.fd_t, msg_type: MsgType, fixed: []const u8, trails: []const []const u8) !void {
+    try writeControlMsgWithRequestId(fd, msg_type, 0, fixed, trails);
+}
+
+/// Write a control message with an explicit request id and multiple trails.
+pub fn writeControlMsgWithRequestId(fd: posix.fd_t, msg_type: MsgType, request_id: u32, fixed: []const u8, trails: []const []const u8) !void {
     var total: usize = fixed.len;
     for (trails) |t| total += t.len;
 
     var hdr: ControlHeader = .{
         .msg_type = @intFromEnum(msg_type),
+        .request_id = request_id,
         .payload_len = @intCast(total),
     };
     const hdr_bytes = std.mem.asBytes(&hdr);
@@ -795,7 +962,11 @@ fn waitForReadable(fd: posix.fd_t, timeout_ms: i32) !void {
             result: xev.PollError!xev.PollEvent,
         ) xev.CallbackAction {
             const c = cb_ctx orelse return .disarm;
-            _ = result catch return .disarm;
+            _ = result catch |err| {
+                log.debug("waitForReadable: poll error: {}", .{err});
+                c.ready = true;
+                return .disarm;
+            };
             c.ready = true;
             return .disarm;
         }
@@ -809,7 +980,11 @@ fn waitForReadable(fd: posix.fd_t, timeout_ms: i32) !void {
             result: xev.Timer.RunError!void,
         ) xev.CallbackAction {
             const c = cb_ctx orelse return .disarm;
-            _ = result catch return .disarm;
+            _ = result catch |err| {
+                log.debug("waitForReadable: timer error: {}", .{err});
+                c.timed_out = true;
+                return .disarm;
+            };
             c.timed_out = true;
             return .disarm;
         }
@@ -860,7 +1035,11 @@ fn waitDelayTimeout(timeout_ms: i32) !void {
             result: xev.Timer.RunError!void,
         ) xev.CallbackAction {
             const c = cctx orelse return .disarm;
-            _ = result catch return .disarm;
+            _ = result catch |err| {
+                log.debug("waitDelayTimeout: timer error: {}", .{err});
+                c.done = true;
+                return .disarm;
+            };
             c.done = true;
             return .disarm;
         }
@@ -901,23 +1080,20 @@ pub fn readExact(fd: posix.fd_t, buf: []u8) !void {
 
 pub fn readExactTimeout(fd: posix.fd_t, buf: []u8, timeout_ms: i32) !void {
     var off: usize = 0;
-    var retries: usize = 0;
-    const MAX_RETRIES = @import("constants.zig").Limits.max_wire_retries;
+    const deadline_ms = std.time.milliTimestamp() + @as(i64, timeout_ms);
 
     while (off < buf.len) {
         const n = posix.read(fd, buf[off..]) catch |err| switch (err) {
             error.WouldBlock => {
-                // Wait for fd to become readable with timeout
-                waitReadableTimeout(fd, timeout_ms) catch |wait_err| return wait_err;
-                retries += 1;
-                if (retries > MAX_RETRIES) return error.TooManyRetries;
+                const remaining_ms = deadline_ms - std.time.milliTimestamp();
+                if (remaining_ms <= 0) return error.Timeout;
+                waitReadableTimeout(fd, @intCast(@min(remaining_ms, @as(i64, std.math.maxInt(i32))))) catch |wait_err| return wait_err;
                 continue;
             },
             else => return err,
         };
         if (n == 0) return error.ConnectionClosed;
         off += n;
-        retries = 0; // Reset retry counter on successful read
     }
 }
 
@@ -936,6 +1112,32 @@ pub fn bytesToStruct(comptime T: type, buf: []const u8) ?T {
 pub fn sendHandshake(fd: posix.fd_t, channel_type: u8) !void {
     const handshake = [_]u8{ channel_type, PROTOCOL_VERSION };
     try writeAll(fd, &handshake);
+}
+
+/// Send the server's runtime identity after the initial client handshake.
+/// Clients validate this before sending stateful requests to avoid talking to
+/// a stale daemon from a previous dev build.
+pub fn sendServerHello(fd: posix.fd_t) !void {
+    try writeAll(fd, SERVER_HELLO_MAGIC);
+    try writeAll(fd, RUNTIME_EPOCH);
+}
+
+pub fn readAndValidateServerHello(fd: posix.fd_t) !void {
+    var magic: [SERVER_HELLO_MAGIC.len]u8 = undefined;
+    try readExact(fd, &magic);
+    if (!std.mem.eql(u8, magic[0..], SERVER_HELLO_MAGIC)) return error.RuntimeEpochMismatch;
+
+    var epoch: [RUNTIME_EPOCH.len]u8 = undefined;
+    try readExact(fd, &epoch);
+    if (!std.mem.eql(u8, epoch[0..], RUNTIME_EPOCH)) return error.RuntimeEpochMismatch;
+}
+
+pub fn sendCliHandshake(fd: posix.fd_t) !void {
+    const timeout = posix.timeval{ .sec = 3, .usec = 0 };
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.RCVTIMEO, std.mem.asBytes(&timeout)) catch {};
+    posix.setsockopt(fd, posix.SOL.SOCKET, posix.SO.SNDTIMEO, std.mem.asBytes(&timeout)) catch {};
+    try sendHandshake(fd, SES_HANDSHAKE_CLI);
+    try readAndValidateServerHello(fd);
 }
 
 /// Read a versioned handshake. Returns the channel type and version.

@@ -2,6 +2,9 @@
 
 Floats are overlay panes that appear on top of your splits. They are toggled with a keybinding and can be configured with rich behavior around persistence, scope, and lifecycle.
 
+Layouts own float structure and behavior: key, command, title, size, position, and attrs.
+Mux config owns float visuals: default borders, ad-hoc float visuals, and title-based visual matches.
+
 ---
 
 ## Defining floats
@@ -9,30 +12,26 @@ Floats are overlay panes that appear on top of your splits. They are toggled wit
 Floats are defined under `floats` in your session layout:
 
 ```lua
-hx.ses.layout.define({
-  name = "default",
+return hexe.layout("default", {
   floats = {
-    {
+    hexe.float("git", {
       key     = "g",
       command = "lazygit",
       title   = "git",
-      attributes = { per_cwd = true, sticky = true, global = true },
-      width_percent  = 90,
-      height_percent = 90,
-    },
-    {
+      attrs = { per_cwd = true, sticky = true, global = true },
+      size = { width = 90, height = 90 },
+    }),
+    hexe.float("files", {
       key     = "f",
       command = "fzf",
-      attributes = { per_cwd = true, sticky = true, global = true },
-    },
-    {
+      attrs = { per_cwd = true, sticky = true, global = true },
+    }),
+    hexe.float("scratch", {
       key        = "t",
-      attributes = { global = false, destroy = true },
-      width_percent  = 40,
-      height_percent = 30,
-      pos_x = 100,
-      pos_y = 0,
-    },
+      attrs = { global = false, destroy = true },
+      size = { width = 40, height = 30 },
+      position = { x = 100, y = 0 },
+    }),
   },
 })
 ```
@@ -40,9 +39,9 @@ hx.ses.layout.define({
 And toggled via keybindings:
 
 ```lua
-{ on = "press", mods = { hx.mod.alt }, key = "g",
+{ on = "press", mods = { hexe.mod.alt }, key = "g",
   when = "focus:any",
-  action = { type = hx.action.float_toggle, float = "g" } },
+  action = hexe.action.float.toggle("g") },
 ```
 
 ---
@@ -51,18 +50,16 @@ And toggled via keybindings:
 
 | Field | Default | Description |
 |---|---|---|
-| `width_percent` | 60 | Width as % of terminal (10–100) |
-| `height_percent` | 60 | Height as % of terminal (10–100) |
-| `pos_x` | 50 | Horizontal anchor (0=left, 50=center, 100=right) |
-| `pos_y` | 50 | Vertical anchor (0=top, 50=center, 100=bottom) |
-| `padding_x` | 1 | Left/right inner padding |
-| `padding_y` | 0 | Top/bottom inner padding |
+| `size.width` | float default | Width as % of terminal (10–100) |
+| `size.height` | float default | Height as % of terminal (10–100) |
+| `position.x` | `50` | Horizontal anchor (0=left, 50=center, 100=right) |
+| `position.y` | `50` | Vertical anchor (0=top, 50=center, 100=bottom) |
 
 ---
 
 ## Attributes
 
-Attributes control behavior. They are set under `attributes = { ... }`:
+Attributes control behavior. They are set under `attrs = { ... }`:
 
 ### `per_cwd`
 
@@ -76,10 +73,10 @@ Useful for project-scoped tools: `lazygit`, `nvim`, REPLs, file browsers.
 
 ### `sticky`
 
-The float survives mux restarts.
+The float survives terminal-frontend restarts.
 
-- Pod is kept alive in a half-attached state when mux detaches or exits
-- New mux automatically reclaims it on reattach
+- Pod is kept alive in a half-attached state when the frontend detaches or exits
+- A new frontend automatically reclaims it on reattach
 - Combine with `per_cwd` for directory-specific persistent floats
 
 ### `global`
@@ -108,23 +105,74 @@ The float runs inside a sandboxed pod (Linux namespaces + cgroups).
 
 See [isolation](isolation.md) for profiles and resource limits.
 
-## Border style
+## Visual policy
 
-Each float can have custom border characters and colors:
+Float visuals are configured in the `mux.floats` section.
+
+Named floats use `defaults` as their base. Ad-hoc CLI floats use `adhoc`.
+Then every `match[pattern]` rule whose regex pattern matches the float title is applied in declaration order. Later matches win.
 
 ```lua
-style = {
-  top_left     = "╭",
-  top_right    = "╮",
-  bottom_left  = "╰",
-  bottom_right = "╯",
-  horizontal   = "─",
-  vertical     = "│",
-},
-color = {
-  active  = 2,   -- palette index when focused
-  passive = 8,   -- palette index when unfocused
-},
+return {
+  floats = {
+    defaults = {
+      size = { width = 65, height = 65 },
+      color = { active = 2, passive = 237 },
+      attrs = { global = true },
+    },
+    adhoc = {
+      size = { width = 80, height = 70 },
+      color = { active = 4, passive = 237 },
+    },
+    match = {
+      ["^explorer$"] = {
+        padding = { x = 2, y = 1 },
+        color = { active = 6, passive = 238 },
+      },
+    },
+  },
+}
+```
+
+`match[...]` uses the float title, not the pane name.
+
+### Border style
+
+Border characters and colors live in `defaults`, `adhoc`, or `match`:
+
+```lua
+return {
+  floats = {
+    match = {
+      ["^git$"] = {
+        style = {
+          border = {
+            chars = {
+              top_left = "╭",
+              top_right = "╮",
+              bottom_left = "╰",
+              bottom_right = "╯",
+              horizontal = "─",
+              vertical = "│",
+            },
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+```lua
+return {
+  floats = {
+    match = {
+      ["^git$"] = {
+        color = { active = 2, passive = 8 },
+      },
+    },
+  },
+}
 ```
 
 ### Border title
@@ -132,30 +180,33 @@ color = {
 Embed a title or status module in the border:
 
 ```lua
-style = {
-  position = "topcenter",   -- topleft | topcenter | topright | bottomleft | bottomcenter | bottomright
-  module   = "time",        -- any built-in segment name
-  outputs  = {
-    { style = "bg:0 fg:1",   format = "[" },
-    { style = "bg:237 fg:250", format = " $output " },
-    { style = "bg:0 fg:1",   format = "]" },
+return {
+  floats = {
+    match = {
+      ["^git$"] = {
+        style = {
+          title = {
+            name = "title",
+            position = "topcenter",
+            segments = {
+              {
+                name = "title",
+                render = function(ctx)
+                  local t = hexe.segment.title(ctx)
+                  return {
+                    { text = "[", style = "bg:0 fg:1" },
+                    { text = " " .. t .. " ", style = "bg:237 fg:250" },
+                    { text = "]", style = "bg:0 fg:1" },
+                  }
+                end,
+              },
+            },
+          },
+        },
+      },
+    },
   },
-},
-```
-
----
-
-## Global defaults
-
-Set defaults for all floats in your mux config. Per-float values override these:
-
-```lua
-hx.mux.float.set_defaults({
-  width_percent  = 65,
-  height_percent = 65,
-  color = { active = 2, passive = 237 },
-  attributes = { global = true },
-})
+}
 ```
 
 ---
@@ -165,9 +216,9 @@ hx.mux.float.set_defaults({
 Spawn a one-off float from the command line:
 
 ```sh
-hexe mux float --command "btop" --title "monitor" --size "80,70,0,0"
-hexe mux float --command "zsh" --isolation sandbox
-hexe mux float --command "bash /tmp/script.sh" --result-file /tmp/result
+hexe terminal float --command "btop" --title "monitor" --size "80,70,0,0"
+hexe terminal float --command "zsh" --isolation sandbox
+hexe terminal float --command "bash /tmp/script.sh" --result-file /tmp/result
 ```
 
 Options:
@@ -178,7 +229,6 @@ Options:
 | `--title` | Border title |
 | `--cwd` | Working directory |
 | `--size WxH,X,Y` | Size and position |
-| `--focus` | Focus the float on open |
 | `--isolation <profile>` | Isolation profile |
 | `--key <key>` | Exit key (sent on dismiss) |
 | `--result-file <path>` | Write float output here on close |
@@ -192,8 +242,8 @@ Options:
 You can nudge a float's position with a keybinding:
 
 ```lua
-{ on = "press", mods = { hx.mod.alt, hx.mod.shift }, key = "up",
-  action = { type = hx.action.float_nudge, dir = "up" } },
+{ on = "press", mods = { hexe.mod.alt, hexe.mod.shift }, key = "up",
+  action = hexe.action.float.nudge("up") },
 ```
 
 ---

@@ -9,34 +9,15 @@ const c = @cImport({
 
 const linux = std.os.linux;
 
-/// Unix credentials structure for SO_PEERCRED
-const ucred = extern struct {
-    pid: i32,
-    uid: u32,
-    gid: u32,
-};
-
-/// SO_PEERCRED option value (from Linux headers)
-const SO_PEERCRED: u32 = 17;
-
-/// Verify connecting peer has same UID as current process (security check)
-fn verifyPeerCredentials(fd: posix.fd_t) bool {
-    var cred: ucred = undefined;
-    var len: linux.socklen_t = @sizeOf(ucred);
-    const rc = linux.getsockopt(fd, linux.SOL.SOCKET, SO_PEERCRED, @ptrCast(&cred), &len);
-    if (rc != 0) {
-        debugLog("SO_PEERCRED failed", .{});
-        return false;
-    }
-    const my_uid = linux.getuid();
-    if (cred.uid != my_uid) {
-        debugLog("peer uid {d} != our uid {d}, rejecting", .{ cred.uid, my_uid });
-        return false;
-    }
-    return true;
-}
-
 const core = @import("core");
+
+/// Verify connecting peer has same UID as current process (security check).
+/// Thin wrapper around `core.ipc.verifyPeerUid` that preserves the debug log.
+fn verifyPeerCredentials(fd: posix.fd_t) bool {
+    if (core.ipc.verifyPeerUid(fd)) return true;
+    debugLog("peer uid mismatch on fd={d}, rejecting", .{fd});
+    return false;
+}
 const pod_protocol = core.pod_protocol;
 const pod_meta = core.pod_meta;
 const wire = core.wire;
@@ -47,25 +28,34 @@ const RingBuffer = buffering.RingBuffer;
 const Osc7Scanner = buffering.Osc7Scanner;
 const containsClearSeq = buffering.containsClearSeq;
 
+const POD_CTL_IO_TIMEOUT_MS: i32 = 2000;
+
 var pod_debug: bool = false;
 
-fn debugLog(comptime fmt: []const u8, args: anytype) void {
+inline fn debugLog(comptime fmt: []const u8, args: anytype) void {
     if (!pod_debug) return;
-    const ms = std.time.milliTimestamp();
-    const secs = @divTrunc(ms, 1000);
-    const frac = @mod(ms, 1000);
-    std.debug.print("{d}.{d:0>3} [pod] " ++ fmt ++ "\n", .{ secs, frac } ++ args);
+    core.logging.debugWithSource("pod", fmt, args, @src());
 }
 
 fn setBlocking(fd: posix.fd_t) void {
-    const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch return;
+    const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch |err| {
+        debugLog("setBlocking: fcntl GETFL failed for fd={d}: {s}", .{ fd, @errorName(err) });
+        return;
+    };
     const new_flags: usize = flags & ~@as(usize, @intCast(c.O_NONBLOCK));
-    _ = posix.fcntl(fd, posix.F.SETFL, new_flags) catch {};
+    _ = posix.fcntl(fd, posix.F.SETFL, new_flags) catch |err| {
+        debugLog("setBlocking: fcntl SETFL failed for fd={d}: {s}", .{ fd, @errorName(err) });
+    };
 }
 
 fn setNonBlocking(fd: posix.fd_t) void {
-    const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch return;
-    _ = posix.fcntl(fd, posix.F.SETFL, flags | @as(usize, @intCast(c.O_NONBLOCK))) catch {};
+    const flags = posix.fcntl(fd, posix.F.GETFL, 0) catch |err| {
+        debugLog("setNonBlocking: fcntl GETFL failed for fd={d}: {s}", .{ fd, @errorName(err) });
+        return;
+    };
+    _ = posix.fcntl(fd, posix.F.SETFL, flags | @as(usize, @intCast(c.O_NONBLOCK))) catch |err| {
+        debugLog("setNonBlocking: fcntl SETFL failed for fd={d}: {s}", .{ fd, @errorName(err) });
+    };
 }
 
 pub const PodArgs = struct {
@@ -78,7 +68,7 @@ pub const PodArgs = struct {
     labels: ?[]const u8 = null,
     write_meta: bool = true,
     write_alias: bool = false,
-    debug: bool = false,
+    log_level: ?core.logging.Level = null,
     log_file: ?[]const u8 = null,
     /// When true, print a single JSON line on stdout once ready.
     emit_ready: bool = false,
@@ -108,8 +98,11 @@ pub fn run(args: PodArgs) !void {
     // Use page_allocator for log path since it must survive daemonization
     const log_path: ?[]const u8 = if (args.log_file) |path|
         (if (path.len > 0) path else null)
-    else if (args.debug)
-        (core.ipc.getLogPath(std.heap.page_allocator) catch null)
+    else if (args.log_level != null)
+        (core.ipc.getLogPath(std.heap.page_allocator) catch |err| blk: {
+            core.logging.logError("pod", "failed to resolve default log path", err);
+            break :blk null;
+        })
     else
         null;
 
@@ -118,6 +111,8 @@ pub fn run(args: PodArgs) !void {
     } else if (log_path) |path| {
         redirectStderrToLog(path);
     }
+
+    core.logging.setLogLevel(args.log_level);
 
     // Best-effort: name this process for `ps` discovery.
     setProcessName(args.name);
@@ -138,11 +133,19 @@ pub fn run(args: PodArgs) !void {
 
     // Optional: create alias symlink pod@<name>.sock -> pod-<uuid>.sock
     if (args.write_alias and args.name != null and args.name.?.len > 0) {
-        created_alias_path = createAliasSymlink(allocator, args.name.?, args.socket_path) catch null;
+        created_alias_path = createAliasSymlink(allocator, args.name.?, args.socket_path) catch |err| blk: {
+            core.logging.logError("pod", "failed to create pod alias symlink", err);
+            break :blk null;
+        };
     }
 
-    pod_debug = args.debug;
+    pod_debug = core.logging.levelEnablesDebug(args.log_level);
     debugLog("started uuid={s} socket={s} name={s}", .{ args.uuid[0..@min(args.uuid.len, 8)], args.socket_path, args.name orelse "(none)" });
+    debugLog("daemon={} level={s} logfile={s}", .{
+        args.daemon,
+        if (args.log_level) |level| @tagName(level) else "off",
+        log_path orelse "(none)",
+    });
 
     if (args.emit_ready) {
         // IMPORTANT: write handshake to stdout (ses reads stdout).
@@ -161,7 +164,9 @@ pub fn run(args: PodArgs) !void {
         };
     }
     if (created_alias_path) |p| {
-        std.fs.cwd().deleteFile(p) catch {};
+        std.fs.cwd().deleteFile(p) catch |err| {
+            if (err != error.FileNotFound) debugLog("cleanupMetaForUuid: delete alias failed for '{s}': {s}", .{ p, @errorName(err) });
+        };
     }
 }
 
@@ -226,12 +231,15 @@ fn writePodMetaSidecar(
     defer allocator.free(path);
 
     const dir = std.fs.path.dirname(path) orelse return;
-    std.fs.cwd().makePath(dir) catch {};
+    std.fs.cwd().makePath(dir) catch |err| {
+        debugLog("writePodMetaSidecar: makePath failed for '{s}': {s}", .{ dir, @errorName(err) });
+        return;
+    };
 
     const line = try meta.formatMetaLine(allocator);
     defer allocator.free(line);
 
-    var f = try std.fs.cwd().createFile(path, .{ .truncate = true, .mode = 0o644 });
+    var f = try std.fs.cwd().createFile(path, .{ .truncate = true, .mode = 0o600 });
     defer f.close();
     try f.writeAll(line);
     try f.writeAll("\n");
@@ -241,12 +249,21 @@ fn detectShell(child_pid: posix.pid_t) ?[]const u8 {
     if (child_pid <= 0) return null;
 
     var comm_path_buf: [64]u8 = undefined;
-    const comm_path = std.fmt.bufPrint(&comm_path_buf, "/proc/{d}/comm", .{child_pid}) catch return null;
-    const comm_file = std.fs.openFileAbsolute(comm_path, .{}) catch return null;
+    const comm_path = std.fmt.bufPrint(&comm_path_buf, "/proc/{d}/comm", .{child_pid}) catch |err| {
+        debugLog("detectShell: failed to format comm path for pid={d}: {s}", .{ child_pid, @errorName(err) });
+        return null;
+    };
+    const comm_file = std.fs.openFileAbsolute(comm_path, .{}) catch |err| {
+        debugLog("detectShell: failed to open {s}: {s}", .{ comm_path, @errorName(err) });
+        return null;
+    };
     defer comm_file.close();
 
     var comm_buf: [64]u8 = undefined;
-    const comm_len = comm_file.read(&comm_buf) catch return null;
+    const comm_len = comm_file.read(&comm_buf) catch |err| {
+        debugLog("detectShell: failed to read {s}: {s}", .{ comm_path, @errorName(err) });
+        return null;
+    };
     if (comm_len == 0) return null;
 
     const comm = std.mem.trim(u8, comm_buf[0..comm_len], " \t\n\r");
@@ -316,7 +333,9 @@ fn deletePodMetaSidecar(allocator: std.mem.Allocator, uuid: []const u8) !void {
     defer tmp.deinit();
     const path = try tmp.metaPath(allocator);
     defer allocator.free(path);
-    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path) catch |err| {
+        if (err != error.FileNotFound) debugLog("deletePodMetaSidecar: delete failed for '{s}': {s}", .{ path, @errorName(err) });
+    };
 }
 
 fn daemonize(log_file: ?[]const u8) !void {
@@ -324,42 +343,49 @@ fn daemonize(log_file: ?[]const u8) !void {
     const pid1 = try posix.fork();
     if (pid1 != 0) posix.exit(0);
 
-    _ = posix.setsid() catch {};
+    _ = try posix.setsid();
 
     // Second fork
     const pid2 = try posix.fork();
     if (pid2 != 0) posix.exit(0);
 
     // Redirect stdin/stdout/stderr to /dev/null
-    const devnull = posix.open("/dev/null", .{ .ACCMODE = .RDWR }, 0) catch return;
-    posix.dup2(devnull, posix.STDIN_FILENO) catch {};
-    posix.dup2(devnull, posix.STDOUT_FILENO) catch {};
+    const devnull = try posix.open("/dev/null", .{ .ACCMODE = .RDWR }, 0);
+    try posix.dup2(devnull, posix.STDIN_FILENO);
+    try posix.dup2(devnull, posix.STDOUT_FILENO);
     if (log_file) |path| {
-        const logfd = posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch {
-            posix.dup2(devnull, posix.STDERR_FILENO) catch {};
-            if (devnull > 2) posix.close(devnull);
-            std.posix.chdir("/") catch {};
-            return;
-        };
-        posix.dup2(logfd, posix.STDERR_FILENO) catch {};
+        const logfd = try posix.open(path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644);
+        try posix.dup2(logfd, posix.STDERR_FILENO);
         if (logfd > 2) posix.close(logfd);
     } else {
-        posix.dup2(devnull, posix.STDERR_FILENO) catch {};
+        try posix.dup2(devnull, posix.STDERR_FILENO);
     }
     if (devnull > 2) posix.close(devnull);
 
-    std.posix.chdir("/") catch {};
+    try std.posix.chdir("/");
 }
 
 fn redirectStderrToLog(log_path: []const u8) void {
-    const logfd = posix.open(log_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch return;
-    posix.dup2(logfd, posix.STDERR_FILENO) catch {};
+    const logfd = posix.open(log_path, .{ .ACCMODE = .WRONLY, .CREAT = true, .APPEND = true }, 0o644) catch |err| {
+        debugLog("redirectStderrToLog: open {s} failed: {s}", .{ log_path, @errorName(err) });
+        return;
+    };
+    posix.dup2(logfd, posix.STDERR_FILENO) catch |err| {
+        debugLog("redirectStderrToLog: dup2 failed: {s}", .{@errorName(err)});
+    };
     if (logfd > 2) posix.close(logfd);
 }
 
 /// Write buffer capacity for non-blocking PTY writes.
 /// Large enough to absorb typical clipboard pastes without dropping data.
 const PTY_WRITE_BUF_CAP: usize = 256 * 1024;
+const POD_EXIT_ATTACH_GRACE_MS: i64 = 300;
+
+fn applyPasswordMode(backlog: *RingBuffer, password_mode: *bool, enabled: bool) void {
+    if (password_mode.* == enabled) return;
+    password_mode.* = enabled;
+    if (enabled) backlog.clear();
+}
 
 const Pod = struct {
     allocator: std.mem.Allocator,
@@ -371,6 +397,7 @@ const Pod = struct {
     backlog: RingBuffer,
     reader: pod_protocol.Reader,
     pty_paused: bool = false,
+    password_mode: bool = false,
 
     uplink: PodUplink,
 
@@ -382,6 +409,7 @@ const Pod = struct {
     // OSC 7 CWD tracking
     osc7_scanner: Osc7Scanner = .{},
     osc7_cwd: ?[]u8 = null,
+    vt_client_ever_attached: bool = false,
 
     const RunOptions = struct {
         write_meta: bool,
@@ -446,6 +474,13 @@ const Pod = struct {
         if (self.osc7_cwd) |cwd| self.allocator.free(cwd);
     }
 
+    fn setPasswordMode(self: *Pod, enabled: bool) void {
+        const old = self.password_mode;
+        applyPasswordMode(&self.backlog, &self.password_mode, enabled);
+        if (old == self.password_mode) return;
+        debugLog("password_mode: {}", .{enabled});
+    }
+
     pub fn run(self: *Pod, opts: RunOptions) !void {
         try xev.detect();
         var loop = try xev.Loop.init(.{});
@@ -469,6 +504,7 @@ const Pod = struct {
 
         var should_stop = false;
         var callback_error: ?anyerror = null;
+        var exit_grace_deadline_ms: ?i64 = null;
         var pty_armed = false;
         var client_completion_0: xev.Completion = .{};
         var client_completion_1: xev.Completion = .{};
@@ -523,15 +559,27 @@ const Pod = struct {
         ticker.run(&loop, &timer_completion, 100, TimerContext, &timer_ctx, timerCallback);
 
         while (true) {
-            // Exit if the child shell/process exited.
-            if (self.pty.pollStatus() != null) break;
+            var waiting_for_initial_vt_attach = false;
+            if (self.pty.pollStatus() != null) {
+                self.flushRemainingPtyOutput(buf);
+                if (self.client != null or self.vt_client_ever_attached) {
+                    break;
+                }
+                if (exit_grace_deadline_ms == null) {
+                    exit_grace_deadline_ms = std.time.milliTimestamp() + POD_EXIT_ATTACH_GRACE_MS;
+                }
+                if (std.time.milliTimestamp() >= exit_grace_deadline_ms.?) {
+                    break;
+                }
+                waiting_for_initial_vt_attach = true;
+            }
 
-            if (should_stop) break;
+            if (should_stop and !waiting_for_initial_vt_attach) break;
             if (callback_error) |err| return err;
 
             try loop.run(.once);
 
-            if (should_stop) break;
+            if (should_stop and !waiting_for_initial_vt_attach) break;
             if (callback_error) |err| return err;
         }
     }
@@ -597,9 +645,15 @@ const Pod = struct {
         result: xev.PollError!xev.PollEvent,
     ) xev.CallbackAction {
         const accept_ctx = ctx orelse return .disarm;
-        _ = result catch return .rearm;
+        _ = result catch |err| {
+            debugLog("acceptCallback: poll error: {s}", .{@errorName(err)});
+            return .rearm;
+        };
 
-        while (accept_ctx.pod.server.tryAccept() catch null) |conn| {
+        while (accept_ctx.pod.server.tryAccept() catch |err| blk: {
+            debugLog("acceptCallback: tryAccept failed: {s}", .{@errorName(err)});
+            break :blk null;
+        }) |conn| {
             debugLog("acceptCallback: new conn fd={d}, client_before={?d}, watched_fd={?d}, pty_paused={}, pty_armed={}", .{
                 conn.fd,
                 if (accept_ctx.pod.client) |cl| cl.fd else null,
@@ -758,6 +812,10 @@ const Pod = struct {
             const read_buf = pty_ctx.io_buf[0..@min(pty_ctx.io_buf.len, free)];
             const n = pty_ctx.pod.pty.read(read_buf) catch |err| switch (err) {
                 error.WouldBlock => 0,
+                // PTY masters commonly report EIO once the child side is gone.
+                // Treat that as clean end-of-stream so the pod can keep the
+                // socket alive briefly and SES can still attach/read backlog.
+                error.InputOutput => 0,
                 else => {
                     pty_ctx.callback_error.* = err;
                     pty_ctx.armed.* = false;
@@ -772,10 +830,8 @@ const Pod = struct {
             }
 
             const data = read_buf[0..n];
-            pty_ctx.pod.scanOsc7(data);
-            if (containsClearSeq(data)) {
-                pty_ctx.pod.backlog.clear();
-            }
+            pty_ctx.pod.scanOutputMetadata(data);
+            if (pty_ctx.pod.password_mode) return .rearm;
             if (!pty_ctx.pod.backlog.appendNoDrop(data) or pty_ctx.pod.backlog.isFull()) {
                 pty_ctx.pod.pty_paused = true;
                 pty_ctx.armed.* = false;
@@ -787,6 +843,7 @@ const Pod = struct {
 
         const n = pty_ctx.pod.pty.read(pty_ctx.io_buf) catch |err| switch (err) {
             error.WouldBlock => 0,
+            error.InputOutput => 0,
             else => {
                 pty_ctx.callback_error.* = err;
                 pty_ctx.armed.* = false;
@@ -799,22 +856,7 @@ const Pod = struct {
             return .disarm;
         }
 
-        const data = pty_ctx.io_buf[0..n];
-        pty_ctx.pod.scanOsc7(data);
-        if (containsClearSeq(data)) {
-            pty_ctx.pod.backlog.clear();
-        }
-        pty_ctx.pod.backlog.append(data);
-        if (pty_ctx.pod.client) |*client| {
-            pod_protocol.writeFrame(client, .output, data) catch {
-                debugLog("ptyCallback: writeFrame FAILED, closing client fd={d}", .{client.fd});
-                client.close();
-                pty_ctx.pod.client = null;
-            };
-        } else if (pty_ctx.pod.observers.items.len == 0) {
-            debugLog("ptyCallback: no client, data goes to backlog only ({d} bytes)", .{data.len});
-        }
-        pty_ctx.pod.broadcastToObservers(data);
+        pty_ctx.pod.processPtyOutput(pty_ctx.io_buf[0..n]);
 
         return .rearm;
     }
@@ -938,7 +980,9 @@ const Pod = struct {
                     @intCast(c.getpid()),
                     timer_ctx.pod.pty.child_pid,
                     timer_ctx.opts.created_at,
-                ) catch {};
+                ) catch |err| {
+                    debugLog("timerCallback: writePodMetaSidecar failed: {s}", .{@errorName(err)});
+                };
                 timer_ctx.last_meta_ms = now_ms;
             }
         }
@@ -954,28 +998,24 @@ const Pod = struct {
             tmp.close();
             return;
         }
+        setNonBlocking(conn.fd);
 
         var handshake: [2]u8 = undefined;
-        var hoff: usize = 0;
-        while (hoff < 2) {
-            const n = posix.read(conn.fd, handshake[hoff..]) catch {
-                var tmp_conn = conn;
-                tmp_conn.close();
-                return;
-            };
-            if (n == 0) {
-                var tmp_conn = conn;
-                tmp_conn.close();
-                return;
-            }
-            hoff += n;
-        }
+        wire.readExactTimeout(conn.fd, &handshake, POD_CTL_IO_TIMEOUT_MS) catch |err| {
+            debugLog("reject: handshake read failed fd={d}: {s}", .{ conn.fd, @errorName(err) });
+            var tmp_conn = conn;
+            tmp_conn.close();
+            return;
+        };
 
-        if (handshake[1] != wire.PROTOCOL_VERSION) {
+        if (!wire.isProtocolVersionSupported(handshake[1])) {
             debugLog("reject: unsupported protocol version {d} fd={d}", .{ handshake[1], conn.fd });
             var tmp_conn = conn;
             tmp_conn.close();
             return;
+        }
+        if (wire.isProtocolVersionDeprecated(handshake[1])) {
+            debugLog("accept: deprecated protocol version {d} fd={d} (current={d})", .{ handshake[1], conn.fd, wire.PROTOCOL_VERSION });
         }
 
         if (handshake[0] == wire.POD_HANDSHAKE_SES_VT) {
@@ -1001,8 +1041,9 @@ const Pod = struct {
         var obs_conn = conn;
         setBlocking(conn.fd);
 
-        // Replay current backlog to new observer.
-        const n = self.backlog.copyOut(backlog_tmp);
+        // Replay current backlog to new observer unless password mode is
+        // active; password-mode output is live-only and never recorded.
+        const n = if (self.password_mode) 0 else self.backlog.copyOut(backlog_tmp);
         var off: usize = 0;
         while (off < n) {
             const chunk = @min(@as(usize, 16 * 1024), n - off);
@@ -1026,6 +1067,7 @@ const Pod = struct {
     }
 
     fn broadcastToObservers(self: *Pod, data: []const u8) void {
+        if (self.password_mode) return;
         var i: usize = 0;
         while (i < self.observers.items.len) {
             const obs = &self.observers.items[i];
@@ -1038,6 +1080,37 @@ const Pod = struct {
         }
     }
 
+    fn processPtyOutput(self: *Pod, data: []const u8) void {
+        self.scanOutputMetadata(data);
+        if (!self.password_mode) {
+            self.backlog.append(data);
+        }
+        if (self.client) |*client| {
+            pod_protocol.writeFrame(client, .output, data) catch {
+                debugLog("processPtyOutput: writeFrame FAILED, closing client fd={d}", .{client.fd});
+                client.close();
+                self.client = null;
+            };
+        } else if (self.observers.items.len == 0) {
+            debugLog("processPtyOutput: no client, data goes to backlog only ({d} bytes)", .{data.len});
+        }
+        self.broadcastToObservers(data);
+    }
+
+    fn flushRemainingPtyOutput(self: *Pod, io_buf: []u8) void {
+        while (true) {
+            const n = self.pty.read(io_buf) catch |err| switch (err) {
+                error.WouldBlock => return,
+                else => {
+                    debugLog("flushRemainingPtyOutput: read error: {s}", .{@errorName(err)});
+                    return;
+                },
+            };
+            if (n == 0) return;
+            self.processPtyOutput(io_buf[0..n]);
+        }
+    }
+
     fn handleFrame(self: *Pod, frame: pod_protocol.Frame) void {
         switch (frame.frame_type) {
             .input => {
@@ -1047,8 +1120,14 @@ const Pod = struct {
                 if (frame.payload.len >= 4) {
                     const cols = std.mem.readInt(u16, frame.payload[0..2], .big);
                     const rows = std.mem.readInt(u16, frame.payload[2..4], .big);
-                    self.pty.setSize(cols, rows) catch {};
+                    self.pty.setSize(cols, rows) catch |err| {
+                        debugLog("handleFrame: resize to {d}x{d} failed: {s}", .{ cols, rows, @errorName(err) });
+                    };
                 }
+            },
+            .password_mode => {
+                if (frame.payload.len < 1) return;
+                self.setPasswordMode(frame.payload[0] != 0);
             },
             else => {},
         }
@@ -1071,17 +1150,29 @@ const Pod = struct {
             self.client = null;
             return;
         };
+        self.vt_client_ever_attached = true;
         self.reader.reset();
 
-        // Replay backlog.
-        const n = self.backlog.copyOut(backlog_tmp);
+        // Replay backlog unless password mode is active; while active, screen
+        // contents are intentionally not persisted or replayed.
+        const n = if (self.password_mode) 0 else self.backlog.copyOut(backlog_tmp);
         var off: usize = 0;
         while (off < n) {
             const chunk = @min(@as(usize, 16 * 1024), n - off);
-            pod_protocol.writeFrame(&self.client.?, .output, backlog_tmp[off .. off + chunk]) catch {};
+            pod_protocol.writeFrame(&self.client.?, .output, backlog_tmp[off .. off + chunk]) catch |err| {
+                debugLog("acceptVtClient: backlog replay failed at offset={d}: {s}", .{ off, @errorName(err) });
+                if (self.client) |*current| current.close();
+                self.client = null;
+                return;
+            };
             off += chunk;
         }
-        pod_protocol.writeFrame(&self.client.?, .backlog_end, &[_]u8{}) catch {};
+        pod_protocol.writeFrame(&self.client.?, .backlog_end, &[_]u8{}) catch |err| {
+            debugLog("acceptVtClient: backlog_end write failed: {s}", .{@errorName(err)});
+            if (self.client) |*current| current.close();
+            self.client = null;
+            return;
+        };
 
         // Keep backlog after replay so repeated detach/reattach cycles can
         // still restore scrollback for panes that stayed idle between
@@ -1097,7 +1188,7 @@ const Pod = struct {
     fn handleBinaryShpConnection(self: *Pod, conn: core.IpcConnection) void {
         debugLog("shp connection fd={d}", .{conn.fd});
         // Read the binary control header.
-        const hdr = wire.readControlHeader(conn.fd) catch {
+        const hdr = wire.readControlHeaderTimeout(conn.fd, POD_CTL_IO_TIMEOUT_MS) catch {
             var tmp = conn;
             tmp.close();
             return;
@@ -1148,33 +1239,38 @@ const Pod = struct {
     /// Reads pod_protocol frames and writes input directly to the PTY
     /// without replacing the main VT client.
     fn handleAuxInput(self: *Pod, conn: core.IpcConnection) void {
-        setBlocking(conn.fd);
-        var buf: [4096]u8 = undefined;
-        // Read available data and parse frames.
-        const n = posix.read(conn.fd, &buf) catch {
+        var hdr: [5]u8 = undefined;
+        wire.readExactTimeout(conn.fd, &hdr, POD_CTL_IO_TIMEOUT_MS) catch |err| {
+            debugLog("handleAuxInput: frame header read failed fd={d}: {s}", .{ conn.fd, @errorName(err) });
             var tmp = conn;
             tmp.close();
             return;
         };
-        if (n > 0) {
-            // Parse pod_protocol frames from the data.
-            var off: usize = 0;
-            while (off + 5 <= n) {
-                const frame_type_byte = buf[off];
-                const payload_len = std.mem.readInt(u32, buf[off + 1 ..][0..4], .big);
-                off += 5;
-                if (payload_len > n - off) break;
-                if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.input)) {
-                    self.queuePtyWrite(buf[off .. off + payload_len]);
-                } else if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.resize)) {
-                    if (payload_len >= 4) {
-                        const cols = std.mem.readInt(u16, buf[off..][0..2], .big);
-                        const rows = std.mem.readInt(u16, buf[off + 2 ..][0..2], .big);
-                        self.pty.setSize(cols, rows) catch {};
-                    }
-                }
-                off += payload_len;
-            }
+
+        const frame_type_byte = hdr[0];
+        const payload_len = std.mem.readInt(u32, hdr[1..5], .big);
+        var buf: [4096]u8 = undefined;
+        if (payload_len > buf.len) {
+            debugLog("handleAuxInput: frame too large len={d}", .{payload_len});
+            var tmp = conn;
+            tmp.close();
+            return;
+        }
+        wire.readExactTimeout(conn.fd, buf[0..payload_len], POD_CTL_IO_TIMEOUT_MS) catch |err| {
+            debugLog("handleAuxInput: frame payload read failed fd={d}: {s}", .{ conn.fd, @errorName(err) });
+            var tmp = conn;
+            tmp.close();
+            return;
+        };
+
+        if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.input)) {
+            self.queuePtyWrite(buf[0..payload_len]);
+        } else if (frame_type_byte == @intFromEnum(pod_protocol.FrameType.resize) and payload_len >= 4) {
+            const cols = std.mem.readInt(u16, buf[0..2], .big);
+            const rows = std.mem.readInt(u16, buf[2..4], .big);
+            self.pty.setSize(cols, rows) catch |err| {
+                debugLog("handleAuxInput: resize to {d}x{d} failed: {s}", .{ cols, rows, @errorName(err) });
+            };
         }
         var tmp = conn;
         tmp.close();
@@ -1189,9 +1285,30 @@ const Pod = struct {
         self.osc7_scanner.feed(data, &new_cwd);
         if (new_cwd) |path| {
             // Store a copy of the path
+            const copy = self.allocator.dupe(u8, path) catch |err| {
+                debugLog("scanOsc7: failed to allocate cwd path: {s}", .{@errorName(err)});
+                return;
+            };
             if (self.osc7_cwd) |old| self.allocator.free(old);
-            self.osc7_cwd = self.allocator.dupe(u8, path) catch null;
+            self.osc7_cwd = copy;
         }
+    }
+
+    fn scanOutputMetadata(self: *Pod, data: []const u8) void {
+        if (!self.shouldScanOutputMetadata(data)) return;
+        self.scanOsc7(data);
+        if (containsClearSeq(data)) {
+            self.backlog.clear();
+        }
+    }
+
+    fn shouldScanOutputMetadata(self: *const Pod, data: []const u8) bool {
+        if (data.len == 0) return false;
+        if (!self.osc7_scanner.isIdle()) return true;
+        for (data) |byte| {
+            if (byte == 0x1b or byte == 0x0c) return true;
+        }
+        return false;
     }
 };
 
@@ -1213,4 +1330,17 @@ test "ring buffer basic" {
     rb.append("0123456789");
     const n2 = rb.copyOut(&out);
     try std.testing.expectEqual(@as(usize, 8), n2);
+}
+
+test "password mode clears backlog on enter" {
+    var buf: [16]u8 = undefined;
+    var rb = RingBuffer{ .buf = &buf };
+    rb.append("secret-ish");
+
+    var password_mode = false;
+    applyPasswordMode(&rb, &password_mode, true);
+
+    try std.testing.expect(password_mode);
+    var out: [16]u8 = undefined;
+    try std.testing.expectEqual(@as(usize, 0), rb.copyOut(&out));
 }

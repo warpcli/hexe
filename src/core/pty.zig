@@ -11,6 +11,8 @@ const c = @cImport({
 const isolation_voidbox = @import("isolation_voidbox.zig");
 const voidbox = @import("libvoid");
 
+const log = std.log.scoped(.pty);
+
 // External declaration for environ (modified by setenv)
 extern var environ: [*:null]?[*:0]u8;
 
@@ -105,7 +107,9 @@ pub const Pty = struct {
             if (cwd) |dir| {
                 posix.chdir(dir) catch {
                     if (posix.getenv("HOME")) |home| {
-                        posix.chdir(home) catch {};
+                        posix.chdir(home) catch posix.exit(1);
+                    } else {
+                        posix.exit(1);
                     }
                 };
             }
@@ -117,10 +121,10 @@ pub const Pty = struct {
                     .done_fd = done_pipe[0],
                 };
                 voidbox.applyIsolationInChildSync(cfg, std.heap.c_allocator, sync) catch |err| {
-                    if (std.fs.createFileAbsolute("/tmp/hexe-isolation-error.log", .{})) |f| {
+                    if (std.fs.createFileAbsolute("/tmp/hexe-isolation-error.log", .{ .mode = 0o600 })) |f| {
                         var errbuf: [256]u8 = undefined;
                         const msg = std.fmt.bufPrint(&errbuf, "applyInChild failed: {}\n", .{err}) catch "unknown\n";
-                        _ = f.write(msg) catch {};
+                        _ = f.write(msg) catch 0;
                         f.close();
                     } else |_| {}
                     posix.exit(1);
@@ -140,11 +144,15 @@ pub const Pty = struct {
             if (has_spaces) {
                 const cmd_z = std.heap.c_allocator.dupeZ(u8, shell) catch posix.exit(1);
                 var argv = [_:null]?[*:0]const u8{ "/bin/sh", "-c", cmd_z, null };
-                posix.execvpeZ("/bin/sh", &argv, envp) catch posix.exit(1);
+                const err = posix.execvpeZ("/bin/sh", &argv, envp);
+                writeExecFailure(shell, err);
+                posix.exit(execFailureExitCode(err));
             } else {
                 const shell_z = std.heap.c_allocator.dupeZ(u8, shell) catch posix.exit(1);
                 var argv = [_:null]?[*:0]const u8{ shell_z, null };
-                posix.execvpeZ(shell_z, &argv, envp) catch posix.exit(1);
+                const err = posix.execvpeZ(shell_z, &argv, envp);
+                writeExecFailure(shell, err);
+                posix.exit(execFailureExitCode(err));
             }
             unreachable;
         }
@@ -162,16 +170,33 @@ pub const Pty = struct {
 
             // Wait for child to create all namespaces (single unshare call)
             var buf: [1]u8 = undefined;
-            _ = posix.read(sync_pipe[0], &buf) catch {};
+            const sync_n = posix.read(sync_pipe[0], &buf) catch |err| {
+                abortIsolatedSpawn(pid, @intCast(master_fd), .{ sync_pipe[0], -1 }, .{ -1, done_pipe[1] });
+                return err;
+            };
             posix.close(sync_pipe[0]);
+            if (sync_n != 1) {
+                abortIsolatedSpawn(pid, @intCast(master_fd), .{ -1, -1 }, .{ -1, done_pipe[1] });
+                return error.IsolationSyncFailed;
+            }
 
             // Write uid_map and gid_map from parent side
             const ns = @import("libvoid").namespace;
-            ns.writeUserRootMappings(std.heap.c_allocator, pid) catch {};
+            ns.writeUserRootMappings(std.heap.c_allocator, pid) catch |err| {
+                abortIsolatedSpawn(pid, @intCast(master_fd), .{ -1, -1 }, .{ -1, done_pipe[1] });
+                return err;
+            };
 
             // Signal child that mapping is done
-            _ = posix.write(done_pipe[1], &[_]u8{1}) catch {};
+            const done_n = posix.write(done_pipe[1], &[_]u8{1}) catch |err| {
+                abortIsolatedSpawn(pid, @intCast(master_fd), .{ -1, -1 }, .{ -1, done_pipe[1] });
+                return err;
+            };
             posix.close(done_pipe[1]);
+            if (done_n != 1) {
+                abortIsolatedSpawn(pid, @intCast(master_fd), .{ -1, -1 }, .{ -1, -1 });
+                return error.IsolationSyncFailed;
+            }
 
             // Apply cgroups (resource limits)
             const pane_uuid = findPaneUuid(extra_env);
@@ -184,12 +209,50 @@ pub const Pty = struct {
         };
     }
 
+    fn abortIsolatedSpawn(pid: posix.pid_t, master_fd: posix.fd_t, sync_pipe: [2]posix.fd_t, done_pipe: [2]posix.fd_t) void {
+        if (sync_pipe[0] >= 0) posix.close(sync_pipe[0]);
+        if (sync_pipe[1] >= 0) posix.close(sync_pipe[1]);
+        if (done_pipe[0] >= 0) posix.close(done_pipe[0]);
+        if (done_pipe[1] >= 0) posix.close(done_pipe[1]);
+        if (master_fd >= 0) posix.close(master_fd);
+        posix.kill(pid, posix.SIG.KILL) catch |err| {
+            log.warn("failed to kill child after isolated spawn failure pid={d}: {}", .{ pid, err });
+        };
+    }
+
     fn findPaneUuid(extra_env: ?[]const [2][]const u8) ?[]const u8 {
         const extras = extra_env orelse return null;
         for (extras) |kv| {
             if (std.mem.eql(u8, kv[0], "HEXE_PANE_UUID")) return kv[1];
         }
         return null;
+    }
+
+    fn execFailureExitCode(err: anyerror) u8 {
+        return switch (err) {
+            error.FileNotFound => 127,
+            error.AccessDenied, error.PermissionDenied, error.InvalidExe => 126,
+            else => 126,
+        };
+    }
+
+    fn execFailureReason(err: anyerror) []const u8 {
+        return switch (err) {
+            error.FileNotFound => "command not found",
+            error.AccessDenied, error.PermissionDenied => "permission denied",
+            error.InvalidExe => "not executable",
+            else => @errorName(err),
+        };
+    }
+
+    fn writeExecFailure(command: []const u8, err: anyerror) void {
+        var buf: [512]u8 = undefined;
+        const msg = std.fmt.bufPrint(&buf, "hexe: {s}: {s}\r\n", .{ command, execFailureReason(err) }) catch {
+            const fallback = "hexe: failed to exec command\r\n";
+            _ = posix.write(posix.STDERR_FILENO, fallback) catch 0;
+            return;
+        };
+        _ = posix.write(posix.STDERR_FILENO, msg) catch 0;
     }
 
     fn buildEnv(extra_env: ?[]const [2][]const u8) ![*:null]const ?[*:0]const u8 {
@@ -248,9 +311,13 @@ pub const Pty = struct {
         const result = linux.syscall3(.close_range, first_fd, max_fd, 0);
         const signed: isize = @bitCast(result);
         if (!(signed < 0 and signed > -4096)) return;
-        // Fallback: close_range not available, close FDs individually
+        // Fallback: close_range not available (pre-Linux 5.9). Walk up to the
+        // actual RLIMIT_NOFILE so raised ulimits don't leak FDs >= 1024 to
+        // the child shell.
+        const limit = posix.getrlimit(.NOFILE) catch posix.rlimit{ .cur = 1024, .max = 1024 };
+        const end_fd: usize = @intCast(limit.cur);
         var fd: usize = first_fd;
-        while (fd < 1024) : (fd += 1) {
+        while (fd < end_fd) : (fd += 1) {
             posix.close(@intCast(fd));
         }
     }

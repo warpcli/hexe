@@ -1,15 +1,15 @@
 # Instances (Dev/Test Isolation)
 
-Hexe supports running multiple independent mux/ses/pod stacks on the same machine.
+Hexe supports running multiple independent terminal-frontend/ses/pod stacks on the same machine.
 This is intended for development and feature testing without touching your "working" Hexe.
 
 The feature is implemented by **namespacing all IPC sockets** under an instance name.
 
 ## Concepts
 
-Hexe has three cooperating processes:
+Hexe has three cooperating process roles:
 
-- `mux` (UI + input)
+- `terminal frontend` (`hexe terminal`; `hexe mux` is a compatibility alias) for UI + input
 - `ses` (session registry + spawns pods)
 - `pod` (one per pane; owns the PTY)
 
@@ -42,14 +42,14 @@ This overrides `HEXE_INSTANCE` for that invocation (and any processes it spawns)
 Examples:
 
 ```sh
-hexe mux new -I dev
+hexe terminal new -I dev
 hexe ses list -I dev
-hexe mux attach -I dev nidoking
+hexe terminal attach -I dev nidoking
 ```
 
 ## Test-Only Sessions
 
-`hexe mux new` supports:
+`hexe terminal new` supports:
 
 - `-T` / `--test-only`
 
@@ -60,7 +60,7 @@ This starts an isolated stack by generating a unique instance name like:
 The command prints the chosen instance so you can target it later:
 
 ```sh
-hexe mux new -T
+hexe terminal new -T
 # prints: test instance: test-acde1234
 ```
 
@@ -109,7 +109,7 @@ pkill -KILL -f "hexe .*instance dev"
 Notes:
 
 - This matches both `-I dev` and `--instance dev` because the regex looks for the substring `instance dev`.
-- Killing pods will make mux show a "Shell exited" popup for panes; kill the mux for a hard stop of the UI.
+- Killing pods will make the terminal frontend show a "Shell exited" popup for panes; kill the frontend process for a hard stop of the UI.
 
 ## Recommended Workflow
 
@@ -117,11 +117,11 @@ To make "working" vs "dev" unambiguous, use explicit instances:
 
 ```sh
 # your daily session
-hexe mux new -I prod
+hexe terminal new -I prod
 
 # your development stack
-hexe mux new -I dev
+hexe terminal new -I dev
 
 # quick experiments
-hexe mux new -T
+hexe terminal new -T
 ```

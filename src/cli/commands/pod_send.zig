@@ -61,7 +61,10 @@ pub fn runPodSend(
     defer client.close();
 
     // Send versioned handshake for auxiliary input.
-    wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_INPUT) catch return;
+    wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_AUX_INPUT) catch |err| {
+        print("Error: failed to handshake with pod: {s}\n", .{@errorName(err)});
+        return;
+    };
 
     var conn = client.toConnection();
     try pod_protocol.writeFrame(&conn, .input, data_buf[0..data_len]);

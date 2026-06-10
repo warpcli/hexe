@@ -217,6 +217,10 @@ fn deinitShpConfig(config: *ShpConfig, allocator: std.mem.Allocator) void {
         if (config.left.len > 0) allocator.free(config.left);
         if (config.right.len > 0) allocator.free(config.right);
     }
+    if (config.lua_runtime) |rt| {
+        rt.deinit();
+        allocator.destroy(rt);
+    }
     config.* = .{ .left = &[_]core.Segment{}, .right = &[_]core.Segment{}, .has_config = false, .lua_runtime = null };
 }
 
@@ -234,6 +238,34 @@ fn deinitModules(mods: []const core.Segment, allocator: std.mem.Allocator) void 
         }
         if (m.outputs.len > 0) allocator.free(m.outputs);
     }
+}
+
+fn replacePromptModules(config: *ShpConfig, allocator: std.mem.Allocator, left: []const core.Segment, right: []const core.Segment) void {
+    deinitModules(config.left, allocator);
+    deinitModules(config.right, allocator);
+    if (config.left.len > 0) allocator.free(config.left);
+    if (config.right.len > 0) allocator.free(config.right);
+
+    config.left = left;
+    config.right = right;
+    config.has_config = left.len > 0 or right.len > 0;
+}
+
+fn refreshPromptFromBuilder(config: *ShpConfig, runtime: *LuaRuntime, allocator: std.mem.Allocator) void {
+    const builder = runtime.getBuilder() orelse return;
+    const shp_builder = builder.shp orelse return;
+    replacePromptModules(
+        config,
+        allocator,
+        convertSegments(shp_builder.left_segments.items, allocator),
+        convertSegments(shp_builder.right_segments.items, allocator),
+    );
+}
+
+fn writeStderr(bytes: []const u8) void {
+    std.fs.File.stderr().writeAll(bytes) catch |err| {
+        core.logging.logError("shp", "failed to write stderr diagnostic", err);
+    };
 }
 
 fn renderDefaultPrompt(ctx: *segment.Context, is_right: bool, stdout: std.fs.File) !void {
@@ -353,20 +385,16 @@ fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
     defer allocator.free(path);
 
     const runtime_ptr = allocator.create(LuaRuntime) catch {
-        const stderr = std.fs.File.stderr();
-        stderr.writeAll("shp: failed to allocate Lua runtime\n") catch {};
+        writeStderr("shp: failed to allocate Lua runtime\n");
         return config;
     };
     runtime_ptr.* = LuaRuntime.init(allocator) catch {
         allocator.destroy(runtime_ptr);
-        const stderr = std.fs.File.stderr();
-        stderr.writeAll("shp: failed to initialize Lua\n") catch {};
+        writeStderr("shp: failed to initialize Lua\n");
         return config;
     };
     const runtime = runtime_ptr;
     config.lua_runtime = runtime_ptr;
-
-    runtime.setHexeSection("shp");
 
     // Load global config
     runtime.loadConfig(path) catch |err| {
@@ -375,29 +403,25 @@ fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
                 // Silent - missing config is fine
             },
             else => {
-                const stderr = std.fs.File.stderr();
-                stderr.writeAll("shp: config error") catch {};
+                writeStderr("shp: config error");
                 if (runtime.last_error) |msg| {
-                    stderr.writeAll(": ") catch {};
-                    stderr.writeAll(msg) catch {};
+                    writeStderr(": ");
+                    writeStderr(msg);
                 }
-                stderr.writeAll("\n") catch {};
+                writeStderr("\n");
             },
         }
         return config;
     };
 
-    // Build config from ConfigBuilder (new API)
-    if (runtime.getBuilder()) |builder| {
-        if (builder.shp) |shp_builder| {
-            config.has_config = true;
-            config.left = convertSegments(shp_builder.left_segments.items, allocator);
-            config.right = convertSegments(shp_builder.right_segments.items, allocator);
-        }
-    }
+    refreshPromptFromBuilder(&config, runtime, allocator);
 
     // Pop config return value (if any) from stack
     runtime.pop();
+
+    if (std.posix.getenv("HEXE_SKIP_LOCAL_CONFIG")) |v| {
+        if (std.mem.eql(u8, v, "1")) return config;
+    }
 
     // Try to load local .hexe.lua from current directory
     const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;
@@ -409,154 +433,16 @@ fn loadConfig(allocator: std.mem.Allocator) ShpConfig {
         return config;
     };
 
-    // Local config exists, load it and merge/overwrite
+    // Local config exists; canonical local config must use hexe.setup({ prompt = ... }).
     runtime.loadConfig(local_path) catch {
         // Failed to load local config, but global is already loaded
         return config;
     };
 
-    // Access the "shp" section of local config and merge
-    if (runtime.pushTable(-1, "shp")) {
-        config.has_config = true;
-
-        // Parse prompt.left and prompt.right from local config (overwrites global)
-        if (runtime.pushTable(-1, "prompt")) {
-            // Free global modules before overwriting
-            deinitModules(config.left, allocator);
-            deinitModules(config.right, allocator);
-            if (config.left.len > 0) allocator.free(config.left);
-            if (config.right.len > 0) allocator.free(config.right);
-
-            config.left = parseModules(runtime, allocator, "left");
-            config.right = parseModules(runtime, allocator, "right");
-            runtime.pop();
-        }
-        runtime.pop();
-    }
+    refreshPromptFromBuilder(&config, runtime, allocator);
 
     // Pop local config table
     runtime.pop();
 
     return config;
-}
-
-fn parseModules(runtime: *LuaRuntime, allocator: std.mem.Allocator, key: [:0]const u8) []const core.Segment {
-    if (!runtime.pushTable(-1, key)) {
-        return &[_]core.Segment{};
-    }
-    defer runtime.pop();
-
-    var list = std.ArrayList(core.Segment).empty;
-    const len = runtime.getArrayLen(-1);
-
-    for (1..len + 1) |i| {
-        if (runtime.pushArrayElement(-1, i)) {
-            if (parseModule(runtime, allocator)) |mod| {
-                list.append(allocator, mod) catch {};
-            }
-            runtime.pop();
-        }
-    }
-
-    return list.toOwnedSlice(allocator) catch &[_]core.Segment{};
-}
-
-fn parseModule(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?core.Segment {
-    const name = runtime.getStringAlloc(-1, "name") orelse return null;
-
-    const when_ty = runtime.fieldType(-1, "when");
-    if (when_ty != .nil and when_ty != .table) {
-        const stderr = std.fs.File.stderr();
-        stderr.writeAll("shp: module 'when' must be a table\n") catch {};
-        allocator.free(name);
-        return null;
-    }
-
-    var command = runtime.getStringAlloc(-1, "command");
-    if (command == null) {
-        if (runtime.getString(-1, "lua")) |code| {
-            command = allocator.dupe(u8, code) catch null;
-        }
-    }
-
-    const priority_i64 = runtime.getInt(i64, -1, "priority") orelse 50;
-    return core.Segment{
-        .name = name,
-        .priority = @intCast(@max(@as(i64, 0), @min(priority_i64, 255))),
-        .outputs = parseOutputs(runtime, allocator),
-        .command = command,
-        .when = parseWhenPrompt(runtime),
-    };
-}
-
-fn parseWhenPrompt(runtime: *LuaRuntime) ?core.WhenDef {
-    const ty = runtime.fieldType(-1, "when");
-    if (ty == .nil) return null;
-    if (ty != .table) return null;
-
-    if (!runtime.pushTable(-1, "when")) return null;
-    defer runtime.pop();
-
-    // Strict: prompt does not allow hexe.* providers.
-    if (runtime.fieldType(-1, "hexe") != .nil or
-        runtime.fieldType(-1, "hexe.shp") != .nil or
-        runtime.fieldType(-1, "hexe.mux") != .nil or
-        runtime.fieldType(-1, "hexe.ses") != .nil or
-        runtime.fieldType(-1, "hexe.pod") != .nil)
-    {
-        return null;
-    }
-
-    var when: core.WhenDef = .{};
-    when.bash = runtime.getStringAlloc(-1, "bash");
-    when.lua = runtime.getStringAlloc(-1, "lua");
-    when.env = runtime.getStringAlloc(-1, "env");
-    when.env_not = runtime.getStringAlloc(-1, "env_not");
-    return when;
-}
-
-fn parseOutputs(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const core.OutputDef {
-    if (!runtime.pushTable(-1, "outputs")) {
-        return &[_]core.OutputDef{};
-    }
-    defer runtime.pop();
-
-    var list = std.ArrayList(core.OutputDef).empty;
-    const len = runtime.getArrayLen(-1);
-
-    for (1..len + 1) |i| {
-        if (runtime.pushArrayElement(-1, i)) {
-            const style = if (runtime.getString(-1, "style")) |s|
-                allocator.dupe(u8, s) catch {
-                    runtime.pop();
-                    continue;
-                }
-            else
-                allocator.dupe(u8, "") catch {
-                    runtime.pop();
-                    continue;
-                };
-
-            const format = if (runtime.getString(-1, "format")) |s|
-                allocator.dupe(u8, s) catch {
-                    allocator.free(style);
-                    runtime.pop();
-                    continue;
-                }
-            else
-                allocator.dupe(u8, "$output") catch {
-                    allocator.free(style);
-                    runtime.pop();
-                    continue;
-                };
-
-            list.append(allocator, .{ .style = style, .format = format }) catch {
-                allocator.free(style);
-                allocator.free(format);
-            };
-            runtime.pop();
-        }
-    }
-
-    return list.toOwnedSlice(allocator) catch &[_]core.OutputDef{};
 }

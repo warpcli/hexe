@@ -1,8 +1,11 @@
 const std = @import("std");
 const yazap = @import("yazap");
 const core = @import("core");
+const frontend_core = @import("frontend_core");
 const ipc = core.ipc;
-const mux = @import("mux");
+const terminal = @import("terminal");
+const web_frontend = @import("web");
+const syslink_frontend = @import("syslink");
 const ses = @import("ses");
 const pod = @import("pod");
 const shp = @import("shp");
@@ -10,6 +13,7 @@ const pop_handlers = @import("pop_handlers.zig");
 const cli_cmds = @import("commands/com.zig");
 const config_validate = @import("commands/config_validate.zig");
 const ses_export = @import("commands/ses_export.zig");
+const ses_pipe = @import("commands/ses_pipe.zig");
 const ses_stats = @import("commands/ses_stats.zig");
 
 const c = @cImport({
@@ -20,14 +24,9 @@ const App = yazap.App;
 const Arg = yazap.Arg;
 const print = std.debug.print;
 
-const help_ansi = struct {
-    pub const RESET = "\x1b[0m";
-    pub const BOLD = "\x1b[1m";
-    pub const DIM = "\x1b[2m";
-    pub const TITLE = "\x1b[38;5;45m";
-    pub const SECTION = "\x1b[38;5;81m";
-    pub const CMD = "\x1b[38;5;220m";
-    pub const ALIAS = "\x1b[38;5;171m";
+pub const std_options: std.Options = .{
+    .log_level = .debug,
+    .logFn = core.logging.stdLogFn,
 };
 
 fn setEnvVar(key: []const u8, value: []const u8) void {
@@ -75,81 +74,246 @@ fn parseOptionalI64(value: ?[]const u8, field_name: []const u8) !i64 {
     return 0;
 }
 
+fn parseCliLogLevel(value: ?[]const u8) !?core.logging.Level {
+    if (value) |raw| {
+        const level = core.logging.parseLevel(raw) orelse {
+            print("Error: invalid --log level '{s}' (use trace|debug|info)\n", .{raw});
+            return error.InvalidArgument;
+        };
+        if (level != .trace and level != .debug and level != .info) {
+            print("Error: invalid --log level '{s}' (use trace|debug|info)\n", .{raw});
+            return error.InvalidArgument;
+        }
+        return level;
+    }
+    return null;
+}
+
+fn printFrontendViewSummary(kind: []const u8, view: *const frontend_core.SessionView) void {
+    print("{s} frontend snapshot\n", .{kind});
+    print("  session: {s} name={s}\n", .{ view.session_uuid[0..8], view.session_name });
+    if (view.base_root) |root| {
+        print("  base_root: {s}\n", .{root});
+    } else {
+        print("  base_root: -\n", .{});
+    }
+    print("  active_tab: {d}\n", .{view.active_tab});
+    print("  tabs: {d}\n", .{view.tabs.items.len});
+    print("  panes: {d}\n", .{view.panes.items.len});
+    print("  floats: {d}\n", .{view.floats.items.len});
+    for (view.tabs.items, 0..) |tab, idx| {
+        print("    tab[{d}]: {s} name={s} layout={}\n", .{ idx, tab.uuid[0..8], tab.name, tab.hasLayout() });
+    }
+    for (view.panes.items, 0..) |pane, idx| {
+        print("    pane[{d}]: {s} kind={s} parent_tab={?d} sticky={} pwd={} key={d}\n", .{
+            idx,
+            pane.uuid[0..8],
+            @tagName(pane.kind),
+            pane.parent_tab,
+            pane.sticky,
+            pane.is_pwd,
+            pane.float_key,
+        });
+    }
+}
+
+fn runWebInspectSnapshot(allocator: std.mem.Allocator, snapshot_path: []const u8) !void {
+    if (snapshot_path.len == 0) {
+        print("Error: snapshot path is required\n", .{});
+        return error.InvalidArgument;
+    }
+    const json = try std.fs.cwd().readFileAlloc(allocator, snapshot_path, 16 * 1024 * 1024);
+    defer allocator.free(json);
+
+    var host = web_frontend.WebHost.init(allocator);
+    defer host.deinit();
+    try host.applySessionStateJson(json);
+    printFrontendViewSummary("web", &host.current_view.?);
+}
+
+fn printFrontendProbeSummary(kind: []const u8, caps: frontend_core.HostCapabilities, runtime: *core.FrontendRuntime) void {
+    print("{s} frontend probe\n", .{kind});
+    print("  session: {s} name={s}\n", .{ runtime.sessionUuid()[0..8], runtime.sessionName() });
+    print("  base_root: {s}\n", .{runtime.baseRoot()});
+    print("  capabilities:\n", .{});
+    print("    cell_render: {}\n", .{caps.cell_render});
+    print("    pixel_render: {}\n", .{caps.pixel_render});
+    print("    mouse: {}\n", .{caps.mouse});
+    print("    clipboard: {}\n", .{caps.clipboard});
+    print("    reconnect: {}\n", .{caps.reconnect});
+    print("    remote_transport: {}\n", .{caps.remote_transport});
+}
+
+fn runFrontendServe(
+    allocator: std.mem.Allocator,
+    kind: []const u8,
+    frontend_kind: core.FrontendKind,
+    caps: frontend_core.HostCapabilities,
+    socket_path: []const u8,
+    no_autostart_ses: bool,
+) !void {
+    var session = try frontend_core.FrontendHostSession.create(
+        allocator,
+        core.ipc.generateUuid(),
+        kind,
+        frontend_kind,
+        core.FrontendTransportHelpers.resolveTransport(.{
+            .socket_path = if (socket_path.len > 0) socket_path else null,
+            .autostart_ses = !no_autostart_ses,
+        }),
+    );
+    defer session.deinit();
+
+    var startup_attach = try session.attach();
+    defer startup_attach.deinit(allocator);
+
+    print("{s} frontend serve ready\n", .{kind});
+    printFrontendProbeSummary(kind, caps, session.runtime);
+    if (session.view) |*view| printFrontendViewSummary(kind, view);
+    print("{s} host protocol: tick | render | resize <cols> <rows> | close | disconnect | exit\n", .{kind});
+
+    var in_buf: [4096]u8 = undefined;
+    var stdin = std.fs.File.stdin().reader(&in_buf);
+    while (true) {
+        const line = stdin.interface.takeDelimiterExclusive('\n') catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => return err,
+        };
+        const action = frontend_core.parseHostProtocolLine(line) catch |err| {
+            print("{s} protocol error: {s}\n", .{ kind, @errorName(err) });
+            continue;
+        };
+        switch (action) {
+            .host_event => |event| {
+                try session.applyHostEvent(event);
+                if (session.takeStopRequest()) |stop| {
+                    print("{s} stop: {s} detach={}\n", .{ kind, @tagName(stop.kind), stop.detach });
+                    break;
+                }
+            },
+            .render => {
+                try session.refreshViewFromRuntime();
+                if (session.view) |*view| printFrontendViewSummary(kind, view);
+            },
+            .exit => break,
+        }
+    }
+}
+
+fn runWebProbe(allocator: std.mem.Allocator, socket_path: []const u8, no_autostart_ses: bool) !void {
+    var host = web_frontend.WebHost.init(allocator);
+    defer host.deinit();
+
+    var session = try frontend_core.FrontendHostSession.create(
+        allocator,
+        core.ipc.generateUuid(),
+        "web",
+        .web,
+        core.FrontendTransportHelpers.resolveTransport(.{
+            .socket_path = if (socket_path.len > 0) socket_path else null,
+            .autostart_ses = !no_autostart_ses,
+        }),
+    );
+    defer session.deinit();
+
+    var startup_attach = try session.attach();
+    defer startup_attach.deinit(allocator);
+    if (session.view) |*view| {
+        host.current_view = try frontend_core.SessionView.fromRuntime(allocator, session.runtime);
+        _ = view;
+    }
+    printFrontendProbeSummary("web", web_frontend.WebHost.capabilities(), session.runtime);
+    if (host.current_view) |*view| printFrontendViewSummary("web", view);
+}
+
+fn runWebServe(allocator: std.mem.Allocator, socket_path: []const u8, no_autostart_ses: bool) !void {
+    try runFrontendServe(
+        allocator,
+        "web",
+        .web,
+        web_frontend.WebHost.capabilities(),
+        socket_path,
+        no_autostart_ses,
+    );
+}
+
+fn runSyslinkInspectSnapshot(allocator: std.mem.Allocator, snapshot_path: []const u8) !void {
+    if (snapshot_path.len == 0) {
+        print("Error: snapshot path is required\n", .{});
+        return error.InvalidArgument;
+    }
+    const json = try std.fs.cwd().readFileAlloc(allocator, snapshot_path, 16 * 1024 * 1024);
+    defer allocator.free(json);
+
+    var host = syslink_frontend.SyslinkHost.init(allocator);
+    defer host.deinit();
+    try host.applySessionStateJson(json);
+    printFrontendViewSummary("syslink", &host.current_view.?);
+}
+
+fn runSyslinkProbe(allocator: std.mem.Allocator, socket_path: []const u8, no_autostart_ses: bool) !void {
+    var host = syslink_frontend.SyslinkHost.init(allocator);
+    defer host.deinit();
+
+    var session = try frontend_core.FrontendHostSession.create(
+        allocator,
+        core.ipc.generateUuid(),
+        "syslink",
+        .desktop,
+        core.FrontendTransportHelpers.resolveTransport(.{
+            .socket_path = if (socket_path.len > 0) socket_path else null,
+            .autostart_ses = !no_autostart_ses,
+        }),
+    );
+    defer session.deinit();
+
+    var startup_attach = try session.attach();
+    defer startup_attach.deinit(allocator);
+    if (session.view) |*view| {
+        host.current_view = try frontend_core.SessionView.fromRuntime(allocator, session.runtime);
+        _ = view;
+    }
+    printFrontendProbeSummary("syslink", syslink_frontend.SyslinkHost.capabilities(), session.runtime);
+    if (host.current_view) |*view| printFrontendViewSummary("syslink", view);
+}
+
+fn runSyslinkServe(allocator: std.mem.Allocator, socket_path: []const u8, no_autostart_ses: bool) !void {
+    try runFrontendServe(
+        allocator,
+        "syslink",
+        .desktop,
+        syslink_frontend.SyslinkHost.capabilities(),
+        socket_path,
+        no_autostart_ses,
+    );
+}
+
+
 fn normalizeTopLevelCommand(command: []const u8) []const u8 {
     if (std.mem.eql(u8, command, "ses")) return "session";
-    if (std.mem.eql(u8, command, "mux")) return "multiplexer";
+    if (std.mem.eql(u8, command, "lay")) return "layout";
+    if (std.mem.eql(u8, command, "mux")) return "terminal";
+    if (std.mem.eql(u8, command, "multiplexer")) return "terminal";
     if (std.mem.eql(u8, command, "shp")) return "shell";
     if (std.mem.eql(u8, command, "pop")) return "popup";
     if (std.mem.eql(u8, command, "cfg")) return "config";
     return command;
 }
 
-fn hasHelpFlag(args: []const [:0]u8) bool {
-    for (args[1..]) |arg| {
-        if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) return true;
+fn ensureArgDescriptions(command: *yazap.Command) void {
+    for (command.options.items) |*option| {
+        if (option.description == null) {
+            option.description = option.name;
+        }
     }
-    return false;
-}
-
-fn firstCommandToken(args: []const [:0]u8) ?[]const u8 {
-    for (args[1..]) |arg| {
-        if (arg.len > 0 and arg[0] != '-') return arg;
+    for (command.positional_args.items) |*arg| {
+        if (arg.description == null) {
+            arg.description = arg.name;
+        }
     }
-    return null;
-}
-
-fn printHelpRoot() void {
-    print("{s}{s}Hexe CLI{s}\n", .{ help_ansi.BOLD, help_ansi.TITLE, help_ansi.RESET });
-    print("{s}A terminal multiplexer where UI is disposable.{s}\n\n", .{ help_ansi.DIM, help_ansi.RESET });
-    print("{s}Usage{s}: hexe <command> [subcommand] [options]\n\n", .{ help_ansi.SECTION, help_ansi.RESET });
-    print("{s}Commands{s}:\n", .{ help_ansi.SECTION, help_ansi.RESET });
-    print("  {s}session{s}      {s}(alias: ses){s}  Session daemon management\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-    print("  {s}multiplexer{s}  {s}(alias: mux){s}  Terminal multiplexer\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-    print("  {s}pod{s}          {s}(alias: pod){s}  Per-pane PTY daemon\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-    print("  {s}shell{s}        {s}(alias: shp){s}  Shell prompt renderer\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-    print("  {s}popup{s}        {s}(alias: pop){s}  Popup overlays\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-    print("  {s}record{s}       Record lifecycle control\n", .{ help_ansi.CMD, help_ansi.RESET });
-    print("  {s}config{s}       {s}(alias: cfg){s}  Configuration management\n\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-    print("Try {s}hexe session --help{s} or {s}hexe multiplexer --help{s}\n", .{ help_ansi.CMD, help_ansi.RESET, help_ansi.CMD, help_ansi.RESET });
-}
-
-fn printHelpCommand(command: []const u8) void {
-    if (std.mem.eql(u8, command, "session")) {
-        print("{s}{s}session{s} {s}(alias: ses){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-        print("Subcommands: daemon, status, list, kill, clear, export, stats, open, freeze\n", .{});
-        return;
+    for (command.subcommands.items) |*subcommand| {
+        ensureArgDescriptions(subcommand);
     }
-    if (std.mem.eql(u8, command, "multiplexer")) {
-        print("{s}{s}multiplexer{s} {s}(alias: mux){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-        print("Subcommands: new, attach, record, float, notify, send, info, layout, focus\n", .{});
-        return;
-    }
-    if (std.mem.eql(u8, command, "pod")) {
-        print("{s}{s}pod{s} {s}(alias: pod){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-        print("Subcommands: daemon, list, new, send, attach, record, kill, gc\n", .{});
-        return;
-    }
-    if (std.mem.eql(u8, command, "shell")) {
-        print("{s}{s}shell{s} {s}(alias: shp){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-        print("Subcommands: prompt, init, exit-intent, shell-event, spinner\n", .{});
-        return;
-    }
-    if (std.mem.eql(u8, command, "popup")) {
-        print("{s}{s}popup{s} {s}(alias: pop){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-        print("Subcommands: notify, confirm, choose\n", .{});
-        return;
-    }
-    if (std.mem.eql(u8, command, "config")) {
-        print("{s}{s}config{s} {s}(alias: cfg){s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET, help_ansi.ALIAS, help_ansi.RESET });
-        print("Subcommands: validate\n", .{});
-        return;
-    }
-    if (std.mem.eql(u8, command, "record")) {
-        print("{s}{s}record{s}\n", .{ help_ansi.BOLD, help_ansi.CMD, help_ansi.RESET });
-        print("Subcommands: start, stop, status, toggle\n", .{});
-        return;
-    }
-    printHelpRoot();
 }
 
 pub fn main() !void {
@@ -157,7 +321,7 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    var app = App.init(allocator, "hexe", "Hexe terminal multiplexer");
+    var app = App.init(allocator, "hexe", "Hexe terminal frontend");
     defer app.deinit();
 
     var root = app.rootCommand();
@@ -165,11 +329,20 @@ pub fn main() !void {
     var ses_cmd = app.createCommand("session", "Session daemon management");
     ses_cmd.setProperty(.help_on_empty_args);
 
+    var layout_cmd = app.createCommand("layout", "Saved session layouts (.lua)");
+    layout_cmd.setProperty(.help_on_empty_args);
+
     var pod_cmd = app.createCommand("pod", "Per-pane PTY daemon");
     pod_cmd.setProperty(.help_on_empty_args);
 
-    var mux_cmd = app.createCommand("multiplexer", "Terminal multiplexer");
-    mux_cmd.setProperty(.help_on_empty_args);
+    var terminal_cmd = app.createCommand("terminal", "Terminal frontend");
+    terminal_cmd.setProperty(.help_on_empty_args);
+
+    var web_cmd = app.createCommand("web", "Web frontend adapter");
+    web_cmd.setProperty(.help_on_empty_args);
+
+    var syslink_cmd = app.createCommand("syslink", "Syslink remote frontend adapter");
+    syslink_cmd.setProperty(.help_on_empty_args);
 
     var shp_cmd = app.createCommand("shell", "Shell prompt renderer");
     shp_cmd.setProperty(.help_on_empty_args);
@@ -186,7 +359,7 @@ pub fn main() !void {
     // SES subcommands
     var ses_daemon = app.createCommand("daemon", "Start the session daemon");
     try ses_daemon.addArg(Arg.booleanOption("foreground", 'f', null));
-    try ses_daemon.addArg(Arg.booleanOption("debug", 'd', null));
+    try ses_daemon.addArg(Arg.singleValueOption("log", null, null));
     try ses_daemon.addArg(Arg.singleValueOption("logfile", 'L', null));
     try ses_daemon.addArg(Arg.singleValueOption("instance", 'I', null));
     try ses_daemon.addArg(Arg.booleanOption("test-only", 'T', null));
@@ -215,14 +388,8 @@ pub fn main() !void {
     var ses_stats_cmd = app.createCommand("stats", "Show resource usage statistics");
     try ses_stats_cmd.addArg(Arg.singleValueOption("instance", 'I', null));
 
-    var ses_open = app.createCommand("open", "Open a session from .hexe.lua config");
-    try ses_open.addArg(Arg.positional("target", null, null));
-    try ses_open.addArg(Arg.booleanOption("debug", 'd', null));
-    try ses_open.addArg(Arg.singleValueOption("logfile", 'L', null));
-    try ses_open.addArg(Arg.singleValueOption("instance", 'I', null));
-
-    var ses_freeze = app.createCommand("freeze", "Snapshot current session as .hexe.lua");
-    try ses_freeze.addArg(Arg.singleValueOption("instance", 'I', null));
+    var ses_pipe_cmd = app.createCommand("pipe", "Internal SES byte-stream bridge");
+    try ses_pipe_cmd.addArg(Arg.singleValueOption("ses-socket", null, null));
 
     try ses_cmd.addSubcommands(&[_]yazap.Command{
         ses_daemon,
@@ -232,9 +399,23 @@ pub fn main() !void {
         ses_clear,
         ses_export_cmd,
         ses_stats_cmd,
-        ses_open,
-        ses_freeze,
+        ses_pipe_cmd,
     });
+
+    var layout_list = app.createCommand("list", "List saved session layouts");
+    try layout_list.addArg(Arg.booleanOption("json", 'j', null));
+
+    var layout_open = app.createCommand("open", "Open a saved session layout");
+    try layout_open.addArg(Arg.positional("target", null, null));
+    try layout_open.addArg(Arg.singleValueOption("log", null, null));
+    try layout_open.addArg(Arg.singleValueOption("logfile", 'L', null));
+    try layout_open.addArg(Arg.singleValueOption("instance", 'I', null));
+
+    var layout_save = app.createCommand("save", "Save current session as .hexe.lua");
+    try layout_save.addArg(Arg.singleValueOption("instance", 'I', null));
+    try layout_save.addArg(Arg.singleValueOption("scope", null, null));
+
+    try layout_cmd.addSubcommands(&[_]yazap.Command{ layout_list, layout_open, layout_save });
 
     // POD subcommands
     var pod_daemon = app.createCommand("daemon", "Start a per-pane pod daemon");
@@ -248,7 +429,7 @@ pub fn main() !void {
     try pod_daemon.addArg(Arg.booleanOption("no-write-meta", null, null));
     try pod_daemon.addArg(Arg.booleanOption("write-alias", null, null));
     try pod_daemon.addArg(Arg.booleanOption("foreground", 'f', null));
-    try pod_daemon.addArg(Arg.booleanOption("debug", 'd', null));
+    try pod_daemon.addArg(Arg.singleValueOption("log", null, null));
     try pod_daemon.addArg(Arg.singleValueOption("logfile", 'L', null));
     try pod_daemon.addArg(Arg.singleValueOption("instance", 'I', null));
     try pod_daemon.addArg(Arg.booleanOption("test-only", 'T', null));
@@ -265,7 +446,7 @@ pub fn main() !void {
     try pod_new.addArg(Arg.singleValueOption("cwd", 'C', null));
     try pod_new.addArg(Arg.singleValueOption("labels", null, null));
     try pod_new.addArg(Arg.booleanOption("alias", null, null));
-    try pod_new.addArg(Arg.booleanOption("debug", 'd', null));
+    try pod_new.addArg(Arg.singleValueOption("log", null, null));
     try pod_new.addArg(Arg.singleValueOption("logfile", 'L', null));
     try pod_new.addArg(Arg.singleValueOption("instance", 'I', null));
     try pod_new.addArg(Arg.booleanOption("test-only", 'T', null));
@@ -305,20 +486,24 @@ pub fn main() !void {
     try pod_cmd.addSubcommands(&[_]yazap.Command{ pod_daemon, pod_list, pod_new, pod_send, pod_attach, pod_record, pod_kill, pod_gc });
 
     // MUX subcommands
-    var mux_new = app.createCommand("new", "Create new multiplexer session");
+    var mux_new = app.createCommand("new", "Create new terminal session");
     try mux_new.addArg(Arg.singleValueOption("name", 'n', null));
-    try mux_new.addArg(Arg.booleanOption("debug", 'd', null));
+    try mux_new.addArg(Arg.singleValueOption("log", null, null));
     try mux_new.addArg(Arg.singleValueOption("logfile", 'L', null));
+    try mux_new.addArg(Arg.singleValueOption("ses-socket", null, null));
+    try mux_new.addArg(Arg.booleanOption("no-autostart-ses", null, null));
     try mux_new.addArg(Arg.singleValueOption("instance", 'I', null));
     try mux_new.addArg(Arg.booleanOption("test-only", 'T', null));
 
     var mux_attach = app.createCommand("attach", "Attach to existing session");
     try mux_attach.addArg(Arg.positional("name", null, null));
-    try mux_attach.addArg(Arg.booleanOption("debug", 'd', null));
+    try mux_attach.addArg(Arg.singleValueOption("log", null, null));
     try mux_attach.addArg(Arg.singleValueOption("logfile", 'L', null));
+    try mux_attach.addArg(Arg.singleValueOption("ses-socket", null, null));
+    try mux_attach.addArg(Arg.booleanOption("no-autostart-ses", null, null));
     try mux_attach.addArg(Arg.singleValueOption("instance", 'I', null));
 
-    var mux_record = app.createCommand("record", "Attach to mux and record asciicast");
+    var mux_record = app.createCommand("record", "Attach to terminal frontend and record asciicast");
     try mux_record.addArg(Arg.singleValueOption("out", 'o', null));
     try mux_record.addArg(Arg.booleanOption("capture-input", null, null));
     try mux_record.addArg(Arg.singleValueOption("instance", 'I', null));
@@ -333,7 +518,6 @@ pub fn main() !void {
     try mux_float.addArg(Arg.booleanOption("isolated", null, null));
     try mux_float.addArg(Arg.singleValueOption("isolation", null, null));
     try mux_float.addArg(Arg.singleValueOption("size", null, null));
-    try mux_float.addArg(Arg.booleanOption("focus", null, null));
     try mux_float.addArg(Arg.singleValueOption("key", null, null));
     try mux_float.addArg(Arg.singleValueOption("instance", 'I', null));
 
@@ -377,7 +561,27 @@ pub fn main() !void {
     var mux_focus = app.createCommand("focus", "Move focus to adjacent pane");
     try mux_focus.addArg(Arg.positional("dir", null, null));
 
-    try mux_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_record, mux_float, mux_notify, mux_send, mux_info, mux_layout, mux_focus });
+    try terminal_cmd.addSubcommands(&[_]yazap.Command{ mux_new, mux_attach, mux_record, mux_float, mux_notify, mux_send, mux_info, mux_layout, mux_focus });
+
+    var web_inspect = app.createCommand("inspect-snapshot", "Load a session snapshot through the web adapter");
+    try web_inspect.addArg(Arg.positional("snapshot", null, null));
+    var web_probe = app.createCommand("probe", "Start the web adapter against SES and print frontend state");
+    try web_probe.addArg(Arg.singleValueOption("ses-socket", 0, "Path to SES socket"));
+    try web_probe.addArg(Arg.booleanOption("no-autostart-ses", 0, "Do not start SES automatically"));
+    var web_serve = app.createCommand("serve", "Run the web adapter host-protocol serving loop");
+    try web_serve.addArg(Arg.singleValueOption("ses-socket", 0, "Path to SES socket"));
+    try web_serve.addArg(Arg.booleanOption("no-autostart-ses", 0, "Do not start SES automatically"));
+    try web_cmd.addSubcommands(&[_]yazap.Command{ web_inspect, web_probe, web_serve });
+
+    var syslink_inspect = app.createCommand("inspect-snapshot", "Load a session snapshot through the syslink adapter");
+    try syslink_inspect.addArg(Arg.positional("snapshot", null, null));
+    var syslink_probe = app.createCommand("probe", "Start the syslink adapter against SES and print frontend state");
+    try syslink_probe.addArg(Arg.singleValueOption("ses-socket", 0, "Path to SES socket"));
+    try syslink_probe.addArg(Arg.booleanOption("no-autostart-ses", 0, "Do not start SES automatically"));
+    var syslink_serve = app.createCommand("serve", "Run the syslink adapter host-protocol serving loop");
+    try syslink_serve.addArg(Arg.singleValueOption("ses-socket", 0, "Path to SES socket"));
+    try syslink_serve.addArg(Arg.booleanOption("no-autostart-ses", 0, "Do not start SES automatically"));
+    try syslink_cmd.addSubcommands(&[_]yazap.Command{ syslink_inspect, syslink_probe, syslink_serve });
 
     // SHP subcommands
     var shp_prompt = app.createCommand("prompt", "Render shell prompt");
@@ -433,7 +637,10 @@ pub fn main() !void {
 
     // CONFIG subcommands
     const config_validate_cmd = app.createCommand("validate", "Validate configuration file");
-    try config_cmd.addSubcommand(config_validate_cmd);
+    const config_check_cmd = app.createCommand("check", "Check configuration file");
+    const config_dump_cmd = app.createCommand("dump", "Dump normalized configuration");
+    const config_paths_cmd = app.createCommand("paths", "Show configuration search paths");
+    try config_cmd.addSubcommands(&[_]yazap.Command{ config_validate_cmd, config_check_cmd, config_dump_cmd, config_paths_cmd });
 
     var record_start = app.createCommand("start", "Start background recording");
     try record_start.addArg(Arg.singleValueOption("scope", null, null));
@@ -459,7 +666,8 @@ pub fn main() !void {
     try record_toggle.addArg(Arg.booleanOption("capture-input", null, null));
     try record_cmd.addSubcommands(&[_]yazap.Command{ record_start, record_stop, record_status, record_toggle });
 
-    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, pod_cmd, mux_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd });
+    try root.addSubcommands(&[_]yazap.Command{ ses_cmd, layout_cmd, pod_cmd, terminal_cmd, web_cmd, syslink_cmd, shp_cmd, pop_cmd, record_cmd, config_cmd });
+    ensureArgDescriptions(root);
 
     const raw_args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, raw_args);
@@ -471,16 +679,6 @@ pub fn main() !void {
     defer {
         for (owned_alias_args.items) |item| allocator.free(item);
         owned_alias_args.deinit(allocator);
-    }
-
-    if (hasHelpFlag(raw_args)) {
-        const cmd = if (firstCommandToken(raw_args)) |token| normalizeTopLevelCommand(token) else null;
-        if (cmd) |name| {
-            printHelpCommand(name);
-        } else {
-            printHelpRoot();
-        }
-        return;
     }
 
     for (raw_args[1..], 0..) |arg, idx| {
@@ -497,7 +695,18 @@ pub fn main() !void {
     const matches = try app.parseFrom(normalized_args.items);
 
     if (!matches.containsArgs()) {
-        try runMuxNew("", false, "");
+        var has_local_layout = false;
+        if (std.fs.cwd().access(".hexe.lua", .{})) |_| {
+            has_local_layout = true;
+        } else |_| {}
+        if (has_local_layout and shouldLoadLocalLayoutPrompt()) {
+            if (askUseLocalLayout()) {
+                try cli_cmds.runSesOpen(allocator, ".", null, "", "");
+                return;
+            }
+        }
+
+        try runTerminalNew("", null, "", "", false);
         return;
     }
 
@@ -512,7 +721,8 @@ pub fn main() !void {
                     return;
                 }
             }
-            try runSesDaemon(m.containsArg("foreground"), m.containsArg("debug"), m.getSingleValue("logfile") orelse "");
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
+            try runSesDaemon(m.containsArg("foreground"), log_level, m.getSingleValue("logfile") orelse "");
             return;
         }
         if (ses_matches.subcommandMatches("status")) |m| {
@@ -551,22 +761,37 @@ pub fn main() !void {
             try ses_stats.run(allocator);
             return;
         }
-        if (ses_matches.subcommandMatches("open")) |m| {
+        if (ses_matches.subcommandMatches("pipe")) |m| {
+            try ses_pipe.run(allocator, m.getSingleValue("ses-socket") orelse "");
+            return;
+        }
+    } else if (matches.subcommandMatches("layout")) |layout_matches| {
+        if (layout_matches.subcommandMatches("list")) |m| {
+            try cli_cmds.runSessionLayoutList(allocator, m.containsArg("json"));
+            return;
+        }
+        if (layout_matches.subcommandMatches("open")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
             try cli_cmds.runSesOpen(
                 allocator,
                 m.getSingleValue("target") orelse ".",
-                m.containsArg("debug"),
+                log_level,
                 m.getSingleValue("logfile") orelse "",
                 instance,
             );
             return;
         }
-        if (ses_matches.subcommandMatches("freeze")) |m| {
+        if (layout_matches.subcommandMatches("save")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
-            try cli_cmds.runSesFreeze(allocator);
+            const scope_raw = m.getSingleValue("scope") orelse "both";
+            const scope = std.meta.stringToEnum(cli_cmds.LayoutSaveScope, scope_raw) orelse {
+                print("Error: invalid --scope (use local|global|both)\n", .{});
+                return;
+            };
+            try cli_cmds.runSesFreeze(allocator, scope);
             return;
         }
     } else if (matches.subcommandMatches("pod")) |pod_matches| {
@@ -580,6 +805,7 @@ pub fn main() !void {
                     return;
                 }
             }
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
             try runPodDaemon(
                 m.containsArg("foreground"),
                 m.getSingleValue("uuid") orelse "",
@@ -591,7 +817,7 @@ pub fn main() !void {
                 m.containsArg("write-meta"),
                 m.containsArg("no-write-meta"),
                 m.containsArg("write-alias"),
-                m.containsArg("debug"),
+                log_level,
                 m.getSingleValue("logfile") orelse "",
             );
             return;
@@ -612,6 +838,7 @@ pub fn main() !void {
                     return;
                 }
             }
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
             try cli_cmds.runPodNew(
                 allocator,
                 m.getSingleValue("name") orelse "",
@@ -619,7 +846,7 @@ pub fn main() !void {
                 m.getSingleValue("cwd") orelse "",
                 m.getSingleValue("labels") orelse "",
                 m.containsArg("alias"),
-                m.containsArg("debug"),
+                log_level,
                 m.getSingleValue("logfile") orelse "",
             );
             return;
@@ -678,7 +905,7 @@ pub fn main() !void {
             try cli_cmds.runPodGc(allocator, m.containsArg("dry-run"));
             return;
         }
-    } else if (matches.subcommandMatches("multiplexer")) |mux_matches| {
+    } else if (matches.subcommandMatches("terminal")) |mux_matches| {
         if (mux_matches.subcommandMatches("new")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) {
@@ -687,13 +914,27 @@ pub fn main() !void {
             } else if (m.containsArg("test-only")) {
                 setGeneratedTestInstance();
             }
-            try runMuxNew(m.getSingleValue("name") orelse "", m.containsArg("debug"), m.getSingleValue("logfile") orelse "");
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
+            try runTerminalNew(
+                m.getSingleValue("name") orelse "",
+                log_level,
+                m.getSingleValue("logfile") orelse "",
+                m.getSingleValue("ses-socket") orelse "",
+                m.containsArg("no-autostart-ses"),
+            );
             return;
         }
         if (mux_matches.subcommandMatches("attach")) |m| {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
-            try runMuxAttach(m.getSingleValue("name") orelse "", m.containsArg("debug"), m.getSingleValue("logfile") orelse "");
+            const log_level = parseCliLogLevel(m.getSingleValue("log")) catch return;
+            try runTerminalAttach(
+                m.getSingleValue("name") orelse "",
+                log_level,
+                m.getSingleValue("logfile") orelse "",
+                m.getSingleValue("ses-socket") orelse "",
+                m.containsArg("no-autostart-ses"),
+            );
             return;
         }
         if (mux_matches.subcommandMatches("record")) |m| {
@@ -722,7 +963,6 @@ pub fn main() !void {
                 m.containsArg("isolated"),
                 m.getSingleValue("isolation") orelse "",
                 m.getSingleValue("size") orelse "",
-                m.containsArg("focus"),
                 exit_key,
             );
             return;
@@ -777,6 +1017,48 @@ pub fn main() !void {
             const instance = m.getSingleValue("instance") orelse "";
             if (instance.len > 0) setInstanceFromCli(instance);
             try cli_cmds.runInfo(allocator, m.getSingleValue("uuid") orelse "", m.containsArg("creator"), m.containsArg("last"));
+            return;
+        }
+    } else if (matches.subcommandMatches("web")) |web_matches| {
+        if (web_matches.subcommandMatches("inspect-snapshot")) |m| {
+            try runWebInspectSnapshot(allocator, m.getSingleValue("snapshot") orelse "");
+            return;
+        }
+        if (web_matches.subcommandMatches("probe")) |m| {
+            try runWebProbe(
+                allocator,
+                m.getSingleValue("ses-socket") orelse "",
+                m.containsArg("no-autostart-ses"),
+            );
+            return;
+        }
+        if (web_matches.subcommandMatches("serve")) |m| {
+            try runWebServe(
+                allocator,
+                m.getSingleValue("ses-socket") orelse "",
+                m.containsArg("no-autostart-ses"),
+            );
+            return;
+        }
+    } else if (matches.subcommandMatches("syslink")) |syslink_matches| {
+        if (syslink_matches.subcommandMatches("inspect-snapshot")) |m| {
+            try runSyslinkInspectSnapshot(allocator, m.getSingleValue("snapshot") orelse "");
+            return;
+        }
+        if (syslink_matches.subcommandMatches("probe")) |m| {
+            try runSyslinkProbe(
+                allocator,
+                m.getSingleValue("ses-socket") orelse "",
+                m.containsArg("no-autostart-ses"),
+            );
+            return;
+        }
+        if (syslink_matches.subcommandMatches("serve")) |m| {
+            try runSyslinkServe(
+                allocator,
+                m.getSingleValue("ses-socket") orelse "",
+                m.containsArg("no-autostart-ses"),
+            );
             return;
         }
     } else if (matches.subcommandMatches("shell")) |shp_matches| {
@@ -874,15 +1156,24 @@ pub fn main() !void {
         if (config_matches.subcommandMatches("validate")) |_| {
             try config_validate.run();
             return;
+        } else if (config_matches.subcommandMatches("check")) |_| {
+            try config_validate.runCheck();
+            return;
+        } else if (config_matches.subcommandMatches("dump")) |_| {
+            try config_validate.runDump();
+            return;
+        } else if (config_matches.subcommandMatches("paths")) |_| {
+            try config_validate.runPaths();
+            return;
         }
     }
 }
 
-fn runSesDaemon(foreground: bool, debug: bool, log_file: []const u8) !void {
+fn runSesDaemon(foreground: bool, log_level: ?core.logging.Level, log_file: []const u8) !void {
     const log: ?[]const u8 = if (log_file.len > 0) log_file else null;
     try ses.run(.{
         .daemon = !foreground,
-        .debug = debug,
+        .log_level = log_level,
         .log_file = log,
     });
 }
@@ -914,7 +1205,7 @@ fn runPodDaemon(
     write_meta: bool,
     no_write_meta: bool,
     write_alias: bool,
-    debug: bool,
+    log_level: ?core.logging.Level,
     log_file: []const u8,
 ) !void {
     if (uuid.len == 0 or socket_path.len == 0) {
@@ -934,7 +1225,7 @@ fn runPodDaemon(
         .labels = if (labels.len > 0) labels else null,
         .write_meta = effective_write_meta,
         .write_alias = write_alias,
-        .debug = debug,
+        .log_level = log_level,
         .log_file = if (log_file.len > 0) log_file else null,
         .emit_ready = foreground,
     });
@@ -982,7 +1273,38 @@ fn showNestedMuxConfirmation(pane_uuid: []const u8) !bool {
     return resp.response_type == 1;
 }
 
-fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8) !void {
+fn shouldLoadLocalLayoutPrompt() bool {
+    if (std.posix.getenv("HEXE_SKIP_LOCAL_CONFIG")) |v| {
+        return !std.mem.eql(u8, v, "1");
+    }
+    return true;
+}
+
+fn askUseLocalLayout() bool {
+    const stdin_fd = std.posix.STDIN_FILENO;
+    const stdout_fd = std.posix.STDOUT_FILENO;
+    if (!std.posix.isatty(stdin_fd) or !std.posix.isatty(stdout_fd)) return true;
+
+    const stdout = std.fs.File.stdout();
+    stdout.writeAll("Local .hexe.lua found. Load local layout? [Y/n]: ") catch return true;
+
+    var line_buf: [32]u8 = undefined;
+    const n = std.posix.read(stdin_fd, line_buf[0..]) catch return true;
+    if (n == 0) return true;
+    const line = std.mem.trim(u8, line_buf[0..n], " \t\r\n");
+    if (line.len == 0) return true;
+    if (std.ascii.eqlIgnoreCase(line, "y") or std.ascii.eqlIgnoreCase(line, "yes")) return true;
+    return false;
+}
+
+fn buildTerminalConnectOptions(socket_path: []const u8, no_autostart_ses: bool) core.FrontendConnectOptions {
+    return .{
+        .socket_path = if (socket_path.len > 0) socket_path else null,
+        .autostart_ses = !no_autostart_ses,
+    };
+}
+
+fn runTerminalNew(name: []const u8, log_level: ?core.logging.Level, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
     if (std.posix.getenv("HEXE_PANE_UUID")) |pane_uuid| {
         if (pane_uuid.len >= 32) {
             if (!try showNestedMuxConfirmation(pane_uuid)) {
@@ -991,19 +1313,21 @@ fn runMuxNew(name: []const u8, debug: bool, log_file: []const u8) !void {
         }
     }
 
-    try mux.run(.{
+    try terminal.run(.{
         .name = if (name.len > 0) name else null,
-        .debug = debug,
+        .log_level = log_level,
         .log_file = if (log_file.len > 0) log_file else null,
+        .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses),
     });
 }
 
-fn runMuxAttach(name: []const u8, debug: bool, log_file: []const u8) !void {
+fn runTerminalAttach(name: []const u8, log_level: ?core.logging.Level, log_file: []const u8, socket_path: []const u8, no_autostart_ses: bool) !void {
     if (name.len > 0) {
-        try mux.run(.{
+        try terminal.run(.{
             .attach = name,
-            .debug = debug,
+            .log_level = log_level,
             .log_file = if (log_file.len > 0) log_file else null,
+            .connect_options = buildTerminalConnectOptions(socket_path, no_autostart_ses),
         });
     } else {
         print("Error: session name required\n", .{});
@@ -1061,5 +1385,7 @@ fn runShpSpinner(name: []const u8, width_i: i64, interval_i: i64, hold_i: i64, l
         std.Thread.sleep(interval_ms * std.time.ns_per_ms);
     }
 
-    stdout.writeAll("\r\n") catch {};
+    stdout.writeAll("\r\n") catch |err| {
+        core.logging.logError("cli", "failed to finish animation line", err);
+    };
 }

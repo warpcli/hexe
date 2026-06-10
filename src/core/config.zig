@@ -5,11 +5,41 @@ const LuaRuntime = lua_runtime.LuaRuntime;
 
 const log = std.log.scoped(.config);
 
+fn shouldLoadLocalConfig() bool {
+    if (std.posix.getenv("HEXE_SKIP_LOCAL_CONFIG")) |v| {
+        return !std.mem.eql(u8, v, "1");
+    }
+    return true;
+}
+
 threadlocal var PARSE_ERROR: ?[]const u8 = null;
 
 fn setParseError(allocator: std.mem.Allocator, msg: []const u8) void {
     if (PARSE_ERROR != null) return;
-    PARSE_ERROR = allocator.dupe(u8, msg) catch null;
+    PARSE_ERROR = allocator.dupe(u8, msg) catch |err| {
+        log.warn("failed to allocate config parse error message: {}", .{err});
+        return;
+    };
+}
+
+fn dupeStatusMessage(allocator: std.mem.Allocator, msg: []const u8) ?[]const u8 {
+    return allocator.dupe(u8, msg) catch |err| {
+        log.warn("failed to allocate config status message: {}", .{err});
+        return null;
+    };
+}
+
+fn dupeConfigString(allocator: std.mem.Allocator, value: []const u8, comptime context: []const u8) ?[]u8 {
+    return allocator.dupe(u8, value) catch |err| {
+        log.warn(context ++ ": {}", .{err});
+        return null;
+    };
+}
+
+fn dupeTrimmedConfigString(allocator: std.mem.Allocator, value: []const u8, comptime context: []const u8) ?[]u8 {
+    const trimmed = std.mem.trim(u8, value, " \t\r\n");
+    if (trimmed.len == 0) return null;
+    return dupeConfigString(allocator, trimmed, context);
 }
 
 /// Output definition for status modules (style + format pair)
@@ -172,6 +202,108 @@ pub const FloatStyle = struct {
     position: ?FloatStylePosition = null,
     module: ?Segment = null,
     title_segments: []const Segment = &[_]Segment{},
+
+    pub fn deinit(self: *FloatStyle, allocator: std.mem.Allocator) void {
+        const freeSegment = struct {
+            fn call(seg: *Segment, a: std.mem.Allocator) void {
+                a.free(@constCast(seg.name));
+                if (seg.outputs.len > 0) {
+                    for (seg.outputs) |*out| {
+                        a.free(@constCast(out.style));
+                        a.free(@constCast(out.format));
+                    }
+                    a.free(seg.outputs);
+                }
+                if (seg.command) |cmd| a.free(@constCast(cmd));
+                if (seg.builtin) |b| a.free(@constCast(b));
+                if (seg.progress_show_when) |s| a.free(@constCast(s));
+                if (seg.on_click) |cmd| a.free(@constCast(cmd));
+                if (seg.on_right_click) |cmd| a.free(@constCast(cmd));
+                if (seg.on_middle_click) |cmd| a.free(@constCast(cmd));
+                if (seg.button_active_bash) |cmd| a.free(@constCast(cmd));
+                if (seg.button_left_style) |s| a.free(@constCast(s));
+                if (seg.button_middle_style) |s| a.free(@constCast(s));
+                if (seg.button_right_style) |s| a.free(@constCast(s));
+                if (seg.when) |*w| {
+                    var when = @constCast(w);
+                    when.deinit(a);
+                }
+                if (seg.spinner) |*sp| {
+                    var spinner = @constCast(sp);
+                    spinner.deinit(a);
+                }
+                a.free(@constCast(seg.active_style));
+                a.free(@constCast(seg.inactive_style));
+                a.free(@constCast(seg.separator));
+                a.free(@constCast(seg.separator_style));
+                a.free(@constCast(seg.tab_title));
+                a.free(@constCast(seg.left_arrow));
+                a.free(@constCast(seg.right_arrow));
+            }
+        }.call;
+
+        if (self.module) |*mod| {
+            freeSegment(@constCast(mod), allocator);
+        }
+        if (self.title_segments.len > 0) {
+            for (self.title_segments) |*seg_ptr| {
+                freeSegment(@constCast(seg_ptr), allocator);
+            }
+            allocator.free(self.title_segments);
+        }
+        self.* = .{};
+    }
+};
+
+/// Border color config (active/passive)
+pub const BorderColor = struct {
+    active: u8 = 1,
+    passive: u8 = 237,
+};
+
+pub const FloatVisualPreset = struct {
+    width_percent: u8 = 60,
+    height_percent: u8 = 60,
+    padding_x: u8 = 1,
+    padding_y: u8 = 0,
+    color: BorderColor = .{},
+    style: ?FloatStyle = null,
+
+    pub fn deinit(self: *FloatVisualPreset, allocator: std.mem.Allocator) void {
+        if (self.style) |*style| {
+            var copy = @constCast(style);
+            copy.deinit(allocator);
+        }
+        self.* = .{};
+    }
+};
+
+pub const FloatVisualRule = struct {
+    width_percent: ?u8 = null,
+    height_percent: ?u8 = null,
+    padding_x: ?u8 = null,
+    padding_y: ?u8 = null,
+    color: ?BorderColor = null,
+    style: ?FloatStyle = null,
+
+    pub fn deinit(self: *FloatVisualRule, allocator: std.mem.Allocator) void {
+        if (self.style) |*style| {
+            var copy = @constCast(style);
+            copy.deinit(allocator);
+        }
+        self.* = .{};
+    }
+};
+
+pub const FloatMatchRule = struct {
+    pattern: []const u8,
+    visual: FloatVisualRule = .{},
+
+    pub fn deinit(self: *FloatMatchRule, allocator: std.mem.Allocator) void {
+        allocator.free(@constCast(self.pattern));
+        self.visual.deinit(allocator);
+        self.* = undefined;
+    }
 };
 
 pub const FloatAttributes = struct {
@@ -217,12 +349,6 @@ pub const FloatDef = struct {
     style: ?FloatStyle = null,
     // Per-float isolation config (null = use global isolation)
     isolation: ?IsolationConfig = null,
-};
-
-/// Border color config (active/passive)
-pub const BorderColor = struct {
-    active: u8 = 1,
-    passive: u8 = 237,
 };
 
 /// Split border style with junction characters
@@ -285,9 +411,6 @@ pub const NotificationConfig = struct {
         .offset = 0,
     },
 };
-
-/// Panes configuration (placeholder for future use)
-pub const PanesConfig = struct {};
 
 // ===== Layout definitions for ses section =====
 
@@ -356,64 +479,11 @@ pub const LayoutFloatDef = struct {
     height_percent: ?u8 = null,
     pos_x: ?u8 = null,
     pos_y: ?u8 = null,
-    padding_x: ?u8 = null,
-    padding_y: ?u8 = null,
-    color: ?BorderColor = null,
-    style: ?FloatStyle = null,
     isolation: ?IsolationConfig = null,
 
     pub fn deinit(self: *LayoutFloatDef, allocator: std.mem.Allocator) void {
         if (self.command) |c| allocator.free(@constCast(c));
         if (self.title) |t| allocator.free(@constCast(t));
-        if (self.style) |*style_ptr| {
-            const freeSegment = struct {
-                fn call(seg: *Segment, a: std.mem.Allocator) void {
-                    a.free(@constCast(seg.name));
-                    if (seg.outputs.len > 0) {
-                        for (seg.outputs) |*out| {
-                            a.free(@constCast(out.style));
-                            a.free(@constCast(out.format));
-                        }
-                        a.free(seg.outputs);
-                    }
-                    if (seg.command) |cmd| a.free(@constCast(cmd));
-                    if (seg.builtin) |b| a.free(@constCast(b));
-                    if (seg.progress_show_when) |s| a.free(@constCast(s));
-                    if (seg.on_click) |cmd| a.free(@constCast(cmd));
-                    if (seg.on_right_click) |cmd| a.free(@constCast(cmd));
-                    if (seg.on_middle_click) |cmd| a.free(@constCast(cmd));
-                    if (seg.button_active_bash) |cmd| a.free(@constCast(cmd));
-                    if (seg.button_left_style) |s| a.free(@constCast(s));
-                    if (seg.button_middle_style) |s| a.free(@constCast(s));
-                    if (seg.button_right_style) |s| a.free(@constCast(s));
-                    if (seg.when) |*w| {
-                        var when = @constCast(w);
-                        when.deinit(a);
-                    }
-                    if (seg.spinner) |*sp| {
-                        var spinner = @constCast(sp);
-                        spinner.deinit(a);
-                    }
-                    a.free(@constCast(seg.active_style));
-                    a.free(@constCast(seg.inactive_style));
-                    a.free(@constCast(seg.separator));
-                    a.free(@constCast(seg.separator_style));
-                    a.free(@constCast(seg.tab_title));
-                    a.free(@constCast(seg.left_arrow));
-                    a.free(@constCast(seg.right_arrow));
-                }
-            }.call;
-
-            if (style_ptr.module) |*mod| {
-                freeSegment(@constCast(mod), allocator);
-            }
-            if (style_ptr.title_segments.len > 0) {
-                for (style_ptr.title_segments) |*seg_ptr| {
-                    freeSegment(@constCast(seg_ptr), allocator);
-                }
-                allocator.free(style_ptr.title_segments);
-            }
-        }
         if (self.isolation) |*iso| {
             var isolation = @constCast(iso);
             isolation.deinit(allocator);
@@ -485,45 +555,71 @@ pub const SesConfig = struct {
     pub fn load(allocator: std.mem.Allocator) SesConfig {
         var config = SesConfig{};
 
-        var runtime = LuaRuntime.init(allocator) catch return config;
+        var runtime = LuaRuntime.init(allocator) catch |err| {
+            log.warn("failed to initialize ses config Lua runtime: {s}", .{@errorName(err)});
+            return config;
+        };
         defer runtime.deinit();
 
-        // Set section to "ses"
-        runtime.setHexeSection("ses");
-
         // Load global config
-        const config_path = lua_runtime.getConfigPath(allocator, "init.lua") catch return config;
+        const config_path = lua_runtime.getConfigPath(allocator, "init.lua") catch |err| {
+            log.warn("failed to resolve ses config path: {s}", .{@errorName(err)});
+            return config;
+        };
         defer allocator.free(config_path);
 
-        runtime.loadConfig(config_path) catch return config;
+        runtime.loadConfig(config_path) catch |err| {
+            log.warn("failed to load ses config {s}: {s}", .{ config_path, @errorName(err) });
+            return config;
+        };
 
-        // Use ConfigBuilder API approach
-        if (runtime.getBuilder()) |builder| {
-            if (builder.ses) |ses_builder| {
-                config = ses_builder.build() catch config;
+        if (!shouldLoadLocalConfig()) {
+            if (runtime.getBuilder()) |builder| {
+                if (builder.ses) |ses_builder| {
+                    config = ses_builder.build() catch config;
+                }
             }
+            // Pop global config return value (if any) from stack
+            runtime.pop();
+            return config;
         }
 
-        // Pop config return value (if any) from stack
-        runtime.pop();
-
         // Try to load local .hexe.lua from current directory
-        const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;
+        const local_path = allocator.dupe(u8, ".hexe.lua") catch |err| {
+            log.warn("failed to allocate local ses config path: {s}", .{@errorName(err)});
+            return config;
+        };
         defer allocator.free(local_path);
 
         // Check if local config exists
         std.fs.cwd().access(local_path, .{}) catch {
             // No local config, use global only
+            if (runtime.getBuilder()) |builder| {
+                if (builder.ses) |ses_builder| {
+                    config = ses_builder.build() catch config;
+                }
+            }
+            // Pop global config return value (if any) from stack
+            runtime.pop();
             return config;
         };
 
         // Local config exists, load it and merge/overwrite
         runtime.loadConfig(local_path) catch {
             // Failed to load local config, but global is already loaded
+            if (runtime.getBuilder()) |builder| {
+                if (builder.ses) |ses_builder| {
+                    config = ses_builder.build() catch config;
+                }
+            }
+            // Pop global config return value (if any) from stack
+            runtime.pop();
             return config;
         };
 
-        // Use ConfigBuilder API approach for local config (merge/overwrite)
+        // Build once after both global and local config have run. Building the
+        // SES builder eagerly consumes layout definitions, so a second build
+        // after loading local config would otherwise wipe the global layouts.
         if (runtime.getBuilder()) |builder| {
             if (builder.ses) |ses_builder| {
                 config = ses_builder.build() catch config;
@@ -604,6 +700,8 @@ pub const Config = struct {
         float_toggle,
         float_nudge,
         focus_move,
+        layout_save,
+        layout_load,
     };
 
     pub const BindAction = union(BindActionTag) {
@@ -628,6 +726,8 @@ pub const Config = struct {
         float_toggle: u8, // float key (matches FloatDef.key)
         float_nudge: BindKeyKind, // up/down/left/right
         focus_move: BindKeyKind, // up/down/left/right
+        layout_save,
+        layout_load,
     };
 
     pub const Bind = struct {
@@ -674,7 +774,7 @@ pub const Config = struct {
         /// When this chord is held during mouse drag, the mux will perform
         /// pane-local selection even when the target pane is in alt-screen.
         ///
-        /// Bitmask uses hx.mod values (alt=1, ctrl=2, shift=4, super=8).
+        /// Bitmask uses hexe.mod values (alt=1, ctrl=2, shift=4, super=8).
         selection_override_mods: u8 = 1 | 2, // default: Ctrl+Alt
     };
 
@@ -693,13 +793,9 @@ pub const Config = struct {
     confirm_on_close: bool = false, // When Alt+x closes a float/tab
 
     // Floating pane defaults
-    float_width_percent: u8 = 60,
-    float_height_percent: u8 = 60,
-    float_padding_x: u8 = 1, // left/right padding inside border
-    float_padding_y: u8 = 0, // top/bottom padding inside border
-    // Float borders default to active=1, passive=237.
-    float_color: BorderColor = .{},
-    float_style_default: ?FloatStyle = null,
+    float_named_defaults: FloatVisualPreset = .{},
+    float_adhoc_defaults: FloatVisualPreset = .{},
+    float_match_rules: []FloatMatchRule = &[_]FloatMatchRule{},
     // Default float attributes (from mux.float.attributes)
     float_default_attributes: FloatAttributes = .{},
 
@@ -732,20 +828,17 @@ pub const Config = struct {
 
         const runtime_ptr = allocator.create(LuaRuntime) catch {
             config.status = .@"error";
-            config.status_message = allocator.dupe(u8, "failed to allocate Lua runtime") catch null;
+            config.status_message = dupeStatusMessage(allocator, "failed to allocate Lua runtime");
             return config;
         };
         runtime_ptr.* = LuaRuntime.init(allocator) catch {
             allocator.destroy(runtime_ptr);
             config.status = .@"error";
-            config.status_message = allocator.dupe(u8, "failed to initialize Lua") catch null;
+            config.status_message = dupeStatusMessage(allocator, "failed to initialize Lua");
             return config;
         };
         var runtime = runtime_ptr;
         config._lua_runtime = runtime_ptr;
-
-        // Let a single config file avoid building other sections.
-        runtime.setHexeSection("mux");
 
         // Load global config
         runtime.loadConfig(path) catch |err| {
@@ -756,7 +849,7 @@ pub const Config = struct {
                 else => {
                     config.status = .@"error";
                     if (runtime.last_error) |msg| {
-                        config.status_message = allocator.dupe(u8, msg) catch null;
+                        config.status_message = dupeStatusMessage(allocator, msg);
                     }
                 },
             }
@@ -766,8 +859,23 @@ pub const Config = struct {
         // Pop config return value (if any) from stack
         runtime.pop();
 
+        if (!shouldLoadLocalConfig()) {
+            applyBuilderConfig(runtime, &config, allocator);
+            if (config.status != .@"error") {
+                if (PARSE_ERROR) |msg| {
+                    config.status = .@"error";
+                    config.status_message = msg;
+                    PARSE_ERROR = null;
+                }
+            }
+            return config;
+        }
+
         // Try to load local .hexe.lua from current directory
-        const local_path = allocator.dupe(u8, ".hexe.lua") catch return config;
+        const local_path = allocator.dupe(u8, ".hexe.lua") catch |err| {
+            log.warn("failed to allocate local terminal config path: {s}", .{@errorName(err)});
+            return config;
+        };
         defer allocator.free(local_path);
 
         log.debug("checking for local config: {s}", .{local_path});
@@ -804,18 +912,9 @@ pub const Config = struct {
             return config;
         };
 
-        // Rebuild from ConfigBuilder after local config load so local builder calls
-        // (hexe.mux.* API) are applied consistently with global config loading.
+        // Rebuild from ConfigBuilder after local config load so canonical
+        // hexe.setup({ mux = ..., keys = ... }) values are applied.
         applyBuilderConfig(runtime, &config, allocator);
-
-        // Access the "mux" section of the local config table and merge
-        if (runtime.pushTable(-1, "mux")) {
-            log.info("parsing mux section from local config", .{});
-            parseConfig(runtime, &config, allocator);
-            runtime.pop();
-        } else {
-            log.warn("no mux section in local config", .{});
-        }
 
         // Pop local config table
         runtime.pop();
@@ -853,15 +952,19 @@ pub const Config = struct {
 
         PARSE_ERROR = null;
 
+        if (runtime.typeOf(-1) != .table) {
+            applyBuilderConfig(runtime, &config, runtime.allocator);
+            return config;
+        }
+
         // If not local_only, access the "mux" section
         if (!local_only) {
-            runtime.setHexeSection("mux");
             if (runtime.pushTable(-1, "mux")) {
                 parseConfig(runtime, &config, runtime.allocator);
                 runtime.pop();
             } else {
                 config.status = .@"error";
-                config.status_message = runtime.allocator.dupe(u8, "no 'mux' section in config") catch null;
+                config.status_message = dupeStatusMessage(runtime.allocator, "no 'mux' section in config");
                 return config;
             }
             runtime.pop(); // Pop global config table
@@ -905,6 +1008,16 @@ pub const Config = struct {
                 rt.deinit();
                 alloc.destroy(rt);
                 self._lua_runtime = null;
+            }
+
+            self.float_named_defaults.deinit(alloc);
+            self.float_adhoc_defaults.deinit(alloc);
+            if (self.float_match_rules.len > 0) {
+                for (self.float_match_rules) |*rule| {
+                    var mutable_rule = @constCast(rule);
+                    mutable_rule.deinit(alloc);
+                }
+                alloc.free(self.float_match_rules);
             }
         }
     }
@@ -962,7 +1075,7 @@ fn parseConfig(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocat
 fn parseMouseConfig(runtime: *LuaRuntime, config: *Config) void {
     // Accept either:
     // - selection_override_mods = <number>
-    // - selection_override_mods = { hx.mod.ctrl, hx.mod.alt }
+    // - selection_override_mods = { hexe.mod.ctrl, hexe.mod.alt }
     if (runtime.pushTable(-1, "selection_override_mods")) {
         defer runtime.pop();
         var mask: u8 = 0;
@@ -1009,7 +1122,9 @@ fn parseBinds(runtime: *LuaRuntime, allocator: std.mem.Allocator, existing: []co
     // Add existing binds first
     log.debug("parseBinds: starting with {} existing binds", .{existing.len});
     for (existing) |bind| {
-        list.append(allocator, bind) catch {};
+        list.append(allocator, bind) catch |err| {
+            log.warn("parseBinds: failed to keep existing bind: {s}", .{@errorName(err)});
+        };
     }
 
     const len = runtime.getArrayLen(-1);
@@ -1019,7 +1134,9 @@ fn parseBinds(runtime: *LuaRuntime, allocator: std.mem.Allocator, existing: []co
         if (runtime.pushArrayElement(-1, i)) {
             if (parseBind(runtime, allocator)) |bind| {
                 log.debug("parseBinds: successfully parsed bind #{}", .{i});
-                list.append(allocator, bind) catch {};
+                list.append(allocator, bind) catch |err| {
+                    log.warn("parseBinds: failed to append bind #{}: {s}", .{ i, @errorName(err) });
+                };
             } else {
                 log.warn("parseBinds: failed to parse bind #{}", .{i});
             }
@@ -1046,8 +1163,8 @@ fn parseKeyString(key_str: []const u8) ?Config.BindKey {
 
 fn parseBind(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?Config.Bind {
     // Parse key - supports two formats:
-    // 1. New unified: key = { hx.key.alt, hx.key.right } (array of strings)
-    // 2. Old format: mods = { hx.mod.alt }, key = "right" (separate fields)
+    // 1. New unified: key = { hexe.key.alt, hexe.key.right } (array of strings)
+    // 2. Separate fields: mods = { hexe.mod.alt }, key = "right"
 
     var mods: u8 = 0;
     var key: Config.BindKey = undefined;
@@ -1200,20 +1317,30 @@ fn parseStringList(runtime: *LuaRuntime, allocator: std.mem.Allocator, key: [:0]
         for (1..len + 1) |i| {
             if (runtime.pushArrayElement(-1, i)) {
                 if (runtime.toStringAt(-1)) |s| {
-                    const dup = allocator.dupe(u8, s) catch null;
+                    const dup = dupeConfigString(allocator, s, "failed to allocate config string-list item");
                     if (dup) |d| {
-                        out.append(allocator, d) catch allocator.free(d);
+                        out.append(allocator, d) catch |err| {
+                            log.warn("failed to append config string-list item: {}", .{err});
+                            allocator.free(d);
+                        };
                     }
                 }
                 runtime.pop();
             }
         }
-        return out.toOwnedSlice(allocator) catch null;
+        return out.toOwnedSlice(allocator) catch |err| {
+            log.warn("failed to finalize config string list: {}", .{err});
+            return null;
+        };
     }
 
     if (runtime.getString(-1, key)) |s| {
-        const one = allocator.dupe(u8, s) catch return null;
-        const slice = allocator.alloc([]u8, 1) catch {
+        const one = allocator.dupe(u8, s) catch |err| {
+            log.warn("failed to allocate string list value for {s}: {s}", .{ key, @errorName(err) });
+            return null;
+        };
+        const slice = allocator.alloc([]u8, 1) catch |err| {
+            log.warn("failed to allocate string list wrapper for {s}: {s}", .{ key, @errorName(err) });
             allocator.free(one);
             return null;
         };
@@ -1242,6 +1369,8 @@ fn parseAction(runtime: *LuaRuntime, action_type: []const u8) ?Config.BindAction
     if (std.mem.eql(u8, action_type, "tab.next")) return .tab_next;
     if (std.mem.eql(u8, action_type, "tab.prev")) return .tab_prev;
     if (std.mem.eql(u8, action_type, "tab.close")) return .tab_close;
+    if (std.mem.eql(u8, action_type, "layout.save")) return .layout_save;
+    if (std.mem.eql(u8, action_type, "layout.load")) return .layout_load;
 
     if (std.mem.eql(u8, action_type, "split.resize")) {
         const dir = runtime.getString(-1, "dir") orelse return null;
@@ -1288,6 +1417,8 @@ fn parseSimpleAction(action: []const u8) ?Config.BindAction {
     if (std.mem.eql(u8, action, "tab.next")) return .tab_next;
     if (std.mem.eql(u8, action, "tab.prev")) return .tab_prev;
     if (std.mem.eql(u8, action, "tab.close")) return .tab_close;
+    if (std.mem.eql(u8, action, "layout.save")) return .layout_save;
+    if (std.mem.eql(u8, action, "layout.load")) return .layout_load;
     return null;
 }
 
@@ -1325,8 +1456,13 @@ fn parseFloat(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocato
         runtime.pop();
     }
 
-    // Parse default attributes
-    if (runtime.pushTable(-1, "attributes")) {
+    if (runtime.fieldType(-1, "attributes") != .nil) {
+        setParseError(allocator, "config: float.attributes is removed; use float.attrs");
+        return;
+    }
+
+    // Parse default attrs
+    if (runtime.pushTable(-1, "attrs")) {
         if (runtime.getBool(-1, "exclusive")) |v| config.float_default_attributes.exclusive = v;
         if (runtime.getBool(-1, "per_cwd")) |v| config.float_default_attributes.per_cwd = v;
         if (runtime.getBool(-1, "sticky")) |v| config.float_default_attributes.sticky = v;
@@ -1338,12 +1474,12 @@ fn parseFloat(runtime: *LuaRuntime, config: *Config, allocator: std.mem.Allocato
     }
 
     // Apply to config defaults
-    if (width) |w| config.float_width_percent = w;
-    if (height) |h| config.float_height_percent = h;
-    if (pad_x) |p| config.float_padding_x = p;
-    if (pad_y) |p| config.float_padding_y = p;
-    if (color) |c| config.float_color = c;
-    if (style) |s| config.float_style_default = s;
+    if (width) |w| config.float_named_defaults.width_percent = w;
+    if (height) |h| config.float_named_defaults.height_percent = h;
+    if (pad_x) |p| config.float_named_defaults.padding_x = p;
+    if (pad_y) |p| config.float_named_defaults.padding_y = p;
+    if (color) |c| config.float_named_defaults.color = c;
+    if (style) |s| config.float_named_defaults.style = s;
 }
 
 fn parseFloatStyle(runtime: *LuaRuntime, allocator: std.mem.Allocator) FloatStyle {
@@ -1392,7 +1528,10 @@ fn parseFloatStyle(runtime: *LuaRuntime, allocator: std.mem.Allocator) FloatStyl
             defer runtime.pop();
             const len = runtime.getArrayLen(-1);
             if (len > 0) {
-                const segs = allocator.alloc(Segment, len) catch null;
+                const segs = allocator.alloc(Segment, len) catch |err| blk: {
+                    log.warn("failed to allocate float title segment list: {}", .{err});
+                    break :blk null;
+                };
                 if (segs) |arr| {
                     var count: usize = 0;
                     for (1..len + 1) |i| {
@@ -1429,62 +1568,50 @@ fn parseFloatStyle(runtime: *LuaRuntime, allocator: std.mem.Allocator) FloatStyl
 fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocator, default_name: ?[]const u8) ?Segment {
     const name = runtime.getStringAlloc(-1, "name") orelse blk: {
         if (default_name) |dn| {
-            break :blk allocator.dupe(u8, dn) catch return null;
+            break :blk allocator.dupe(u8, dn) catch |err| {
+                log.warn("failed to allocate default status segment name: {s}", .{@errorName(err)});
+                return null;
+            };
         }
         return null;
     };
 
-    var value_code: ?[]const u8 = blk: {
-        if (runtime.getString(-1, "value")) |v| {
-            const trimmed = std.mem.trim(u8, v, " \t\r\n");
-            if (trimmed.len == 0) break :blk null;
-            break :blk allocator.dupe(u8, trimmed) catch null;
+    inline for (.{
+        .{ "right_click", "on_right_click" },
+        .{ "middle_click", "on_middle_click" },
+        .{ "left_click_style", "button_left_style or button.left_style" },
+        .{ "on_left_click_style", "button_left_style or button.left_style" },
+        .{ "middle_click_style", "button_middle_style or button.middle_style" },
+        .{ "on_middle_click_style", "button_middle_style or button.middle_style" },
+        .{ "right_click_style", "button_right_style or button.right_style" },
+        .{ "on_right_click_style", "button_right_style or button.right_style" },
+        .{ "value", "render" },
+        .{ "source", "render and builtin" },
+    }) |removed| {
+        if (runtime.fieldType(-1, removed[0]) != .nil) {
+            const msg = std.fmt.allocPrint(allocator, "config: segment field '{s}' is removed; use {s}", .{ removed[0], removed[1] }) catch "config: removed segment field";
+            defer if (!std.mem.eql(u8, msg, "config: removed segment field")) allocator.free(msg);
+            setParseError(allocator, msg);
+            allocator.free(name);
+            return null;
         }
-        if (runtime.pushTable(-1, "value")) {
-            defer runtime.pop();
-            if (runtime.getString(-1, "lua")) |v| {
-                const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                if (trimmed.len > 0) break :blk allocator.dupe(u8, trimmed) catch null;
-            }
-            if (runtime.getString(-1, "fn")) |v| {
-                const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                if (trimmed.len > 0) break :blk allocator.dupe(u8, trimmed) catch null;
-            }
+    }
+
+    const render_code: ?[]const u8 = blk: {
+        if (runtime.getString(-1, "render")) |v| {
+            break :blk dupeTrimmedConfigString(allocator, v, "failed to allocate status segment render code");
         }
         break :blk null;
     };
-
-    var source_builtin: ?[]const u8 = null;
-    var source_value: ?[]const u8 = null;
-    if (runtime.pushTable(-1, "source")) {
-        defer runtime.pop();
-        source_builtin = runtime.getStringAlloc(-1, "builtin") orelse runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
-        if (runtime.getString(-1, "value")) |v| {
-            const trimmed = std.mem.trim(u8, v, " \t\r\n");
-            if (trimmed.len > 0) source_value = allocator.dupe(u8, trimmed) catch null;
-        }
-    }
 
     var builtin_name: ?[]const u8 = runtime.getStringAlloc(-1, "builtin");
     if (builtin_name == null and runtime.pushTable(-1, "builtin")) {
         defer runtime.pop();
         builtin_name = runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
     }
-    if (builtin_name == null) {
-        builtin_name = source_builtin;
-    } else if (source_builtin) |b| {
-        allocator.free(b);
-    }
-    if (value_code == null) {
-        value_code = source_value;
-    } else if (source_value) |v| {
-        allocator.free(v);
-    }
     var show_when_code: ?[]const u8 = blk: {
         if (runtime.getString(-1, "show_when")) |v| {
-            const trimmed = std.mem.trim(u8, v, " \t\r\n");
-            if (trimmed.len == 0) break :blk null;
-            break :blk allocator.dupe(u8, trimmed) catch null;
+            break :blk dupeTrimmedConfigString(allocator, v, "failed to allocate status segment show_when code");
         }
         break :blk null;
     };
@@ -1496,8 +1623,7 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
         }
         if (show_when_code == null) {
             if (runtime.getString(-1, "show_when")) |v| {
-                const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                if (trimmed.len > 0) show_when_code = allocator.dupe(u8, trimmed) catch null;
+                show_when_code = dupeTrimmedConfigString(allocator, v, "failed to allocate progress show_when code");
             }
         }
         if (builtin_name == null) {
@@ -1507,18 +1633,12 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
             defer runtime.pop();
             builtin_name = runtime.getStringAlloc(-1, "builtin") orelse runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
         }
-        if (value_code == null) {
-            if (runtime.getString(-1, "value")) |v| {
-                const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
-            }
-            if (value_code == null and runtime.pushTable(-1, "source")) {
-                defer runtime.pop();
-                if (runtime.getString(-1, "value")) |v| {
-                    const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                    if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
-                }
-            }
+        if (runtime.fieldType(-1, "value") != .nil) {
+            setParseError(allocator, "config: segment field 'progress.value' is removed; use progress.render");
+            allocator.free(name);
+            if (builtin_name) |b| allocator.free(@constCast(b));
+            if (show_when_code) |s| allocator.free(@constCast(s));
+            return null;
         }
     }
 
@@ -1538,61 +1658,91 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
     };
 
     var on_click = runtime.getStringAlloc(-1, "on_click") orelse runtime.getStringAlloc(-1, "on_left_click");
-    var on_right_click = runtime.getStringAlloc(-1, "on_right_click") orelse runtime.getStringAlloc(-1, "right_click");
-    var on_middle_click = runtime.getStringAlloc(-1, "on_middle_click") orelse runtime.getStringAlloc(-1, "middle_click");
+    var on_right_click = runtime.getStringAlloc(-1, "on_right_click");
+    var on_middle_click = runtime.getStringAlloc(-1, "on_middle_click");
     var button_active_bash = runtime.getStringAlloc(-1, "button_active_bash");
-    var button_left_style = runtime.getStringAlloc(-1, "button_left_style") orelse runtime.getStringAlloc(-1, "left_click_style") orelse runtime.getStringAlloc(-1, "on_left_click_style");
-    var button_middle_style = runtime.getStringAlloc(-1, "button_middle_style") orelse runtime.getStringAlloc(-1, "middle_click_style") orelse runtime.getStringAlloc(-1, "on_middle_click_style");
-    var button_right_style = runtime.getStringAlloc(-1, "button_right_style") orelse runtime.getStringAlloc(-1, "right_click_style") orelse runtime.getStringAlloc(-1, "on_right_click_style");
+    var button_left_style = runtime.getStringAlloc(-1, "button_left_style");
+    var button_middle_style = runtime.getStringAlloc(-1, "button_middle_style");
+    var button_right_style = runtime.getStringAlloc(-1, "button_right_style");
     var inverse_on_hover = runtime.getBool(-1, "inverse_on_hover") orelse true;
     if (runtime.pushTable(-1, "button")) {
         defer runtime.pop();
+        inline for (.{
+            .{ "right_click", "on_right_click" },
+            .{ "middle_click", "on_middle_click" },
+            .{ "left_click_style", "left_style" },
+            .{ "on_left_click_style", "left_style" },
+            .{ "middle_click_style", "middle_style" },
+            .{ "on_middle_click_style", "middle_style" },
+            .{ "right_click_style", "right_style" },
+            .{ "on_right_click_style", "right_style" },
+        }) |removed| {
+            if (runtime.fieldType(-1, removed[0]) != .nil) {
+                const msg = std.fmt.allocPrint(allocator, "config: segment field 'button.{s}' is removed; use button.{s}", .{ removed[0], removed[1] }) catch "config: removed segment button field";
+                defer if (!std.mem.eql(u8, msg, "config: removed segment button field")) allocator.free(msg);
+                setParseError(allocator, msg);
+                allocator.free(name);
+                if (render_code) |rc| allocator.free(rc);
+                if (builtin_name) |b| allocator.free(@constCast(b));
+                if (show_when_code) |s| allocator.free(@constCast(s));
+                if (on_click) |c| allocator.free(@constCast(c));
+                if (on_right_click) |c| allocator.free(@constCast(c));
+                if (on_middle_click) |c| allocator.free(@constCast(c));
+                if (button_active_bash) |c| allocator.free(@constCast(c));
+                if (button_left_style) |c| allocator.free(@constCast(c));
+                if (button_middle_style) |c| allocator.free(@constCast(c));
+                if (button_right_style) |c| allocator.free(@constCast(c));
+                return null;
+            }
+        }
         if (on_click == null) on_click = runtime.getStringAlloc(-1, "on_click") orelse runtime.getStringAlloc(-1, "on_left_click");
-        if (on_right_click == null) on_right_click = runtime.getStringAlloc(-1, "on_right_click") orelse runtime.getStringAlloc(-1, "right_click");
-        if (on_middle_click == null) on_middle_click = runtime.getStringAlloc(-1, "on_middle_click") orelse runtime.getStringAlloc(-1, "middle_click");
+        if (on_right_click == null) on_right_click = runtime.getStringAlloc(-1, "on_right_click");
+        if (on_middle_click == null) on_middle_click = runtime.getStringAlloc(-1, "on_middle_click");
         if (button_active_bash == null) button_active_bash = runtime.getStringAlloc(-1, "active_when");
-        if (button_left_style == null) button_left_style = runtime.getStringAlloc(-1, "left_style") orelse runtime.getStringAlloc(-1, "left_click_style") orelse runtime.getStringAlloc(-1, "on_left_click_style");
-        if (button_middle_style == null) button_middle_style = runtime.getStringAlloc(-1, "middle_style") orelse runtime.getStringAlloc(-1, "middle_click_style") orelse runtime.getStringAlloc(-1, "on_middle_click_style");
-        if (button_right_style == null) button_right_style = runtime.getStringAlloc(-1, "right_style") orelse runtime.getStringAlloc(-1, "right_click_style") orelse runtime.getStringAlloc(-1, "on_right_click_style");
+        if (button_left_style == null) button_left_style = runtime.getStringAlloc(-1, "left_style");
+        if (button_middle_style == null) button_middle_style = runtime.getStringAlloc(-1, "middle_style");
+        if (button_right_style == null) button_right_style = runtime.getStringAlloc(-1, "right_style");
         if (runtime.getBool(-1, "inverse_on_hover")) |v| inverse_on_hover = v;
         if (builtin_name == null) builtin_name = runtime.getStringAlloc(-1, "builtin");
         if (builtin_name == null and runtime.pushTable(-1, "source")) {
             defer runtime.pop();
             builtin_name = runtime.getStringAlloc(-1, "builtin") orelse runtime.getStringAlloc(-1, "name") orelse runtime.getStringAlloc(-1, "segment");
         }
-        if (value_code == null) {
-            if (runtime.getString(-1, "value")) |v| {
-                const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
-            }
-            if (value_code == null and runtime.pushTable(-1, "source")) {
-                defer runtime.pop();
-                if (runtime.getString(-1, "value")) |v| {
-                    const trimmed = std.mem.trim(u8, v, " \t\r\n");
-                    if (trimmed.len > 0) value_code = allocator.dupe(u8, trimmed) catch null;
-                }
-            }
+        if (runtime.fieldType(-1, "value") != .nil) {
+            setParseError(allocator, "config: segment field 'button.value' is removed; use button.render");
+            allocator.free(name);
+            if (render_code) |rc| allocator.free(rc);
+            if (builtin_name) |b| allocator.free(@constCast(b));
+            if (show_when_code) |s| allocator.free(@constCast(s));
+            if (on_click) |c| allocator.free(@constCast(c));
+            if (on_right_click) |c| allocator.free(@constCast(c));
+            if (on_middle_click) |c| allocator.free(@constCast(c));
+            if (button_active_bash) |c| allocator.free(@constCast(c));
+            if (button_left_style) |c| allocator.free(@constCast(c));
+            if (button_middle_style) |c| allocator.free(@constCast(c));
+            if (button_right_style) |c| allocator.free(@constCast(c));
+            return null;
         }
     }
     const kind: SegmentKind = if (has_progress)
         .progress
     else if (has_button)
         .button
-    else if (builtin_name != null and value_code == null)
+    else if (builtin_name != null and render_code == null)
         .builtin
     else
         .value;
 
     const command: ?[]const u8 = switch (kind) {
-        .value => value_code,
+        .value => render_code,
         .builtin => null,
-        .button, .progress => value_code,
+        .button, .progress => render_code,
     };
 
     if (runtime.fieldType(-1, "outputs") != .nil) {
-        setParseError(allocator, "config: segment field 'outputs' is removed; return styled blocks from 'value'");
+        setParseError(allocator, "config: segment field 'outputs' is removed; return styled blocks from 'render'");
         allocator.free(name);
-        if (value_code) |vc| allocator.free(vc);
+        if (render_code) |rc| allocator.free(rc);
         return null;
     }
 
@@ -1600,9 +1750,9 @@ fn parseSegmentWithDefaultName(runtime: *LuaRuntime, allocator: std.mem.Allocato
     if (!has_source) {
         const err_msg = switch (kind) {
             .builtin => "config: builtin segment requires non-empty 'builtin'",
-            .value => "config: value segment requires a non-empty 'value'",
-            .button => "config: button segment requires 'value' or 'builtin'",
-            .progress => "config: progress segment requires 'value' or 'builtin'",
+            .value => "config: value segment requires a non-empty 'render'",
+            .button => "config: button segment requires 'render' or 'builtin'",
+            .progress => "config: progress segment requires 'render' or 'builtin'",
         };
         setParseError(allocator, err_msg);
         allocator.free(name);
@@ -1691,7 +1841,9 @@ fn parseSegments(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const Seg
     for (1..len + 1) |i| {
         if (runtime.pushArrayElement(-1, i)) {
             if (parseSegment(runtime, allocator)) |mod| {
-                list.append(allocator, mod) catch {};
+                list.append(allocator, mod) catch |err| {
+                    log.warn("failed to append status segment #{}: {s}", .{ i, @errorName(err) });
+                };
             }
             runtime.pop();
         }
@@ -1702,6 +1854,44 @@ fn parseSegments(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const Seg
 
 fn parseSegment(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?Segment {
     return parseSegmentWithDefaultName(runtime, allocator, null);
+}
+
+test "legacy status segment parser rejects removed click aliases" {
+    var runtime = try LuaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    const code =
+        "return {\n" ++
+        "  tabs = { status = { left = {\n" ++
+        "    { name = 'bad', render = 'return nil', right_click = 'echo nope' },\n" ++
+        "  } } },\n" ++
+        "}\n";
+
+    const z = try std.testing.allocator.dupeZ(u8, code);
+    defer std.testing.allocator.free(z);
+    try runtime.lua.loadString(z);
+    try runtime.lua.protectedCall(.{ .args = 0, .results = 1 });
+    defer runtime.lua.pop(1);
+
+    try std.testing.expectError(error.ConfigError, Config.parseFromLua(&runtime, true));
+}
+
+test "legacy mux float parser rejects attributes alias" {
+    var runtime = try LuaRuntime.init(std.testing.allocator);
+    defer runtime.deinit();
+
+    const code =
+        "return {\n" ++
+        "  float = { attributes = { global = true } },\n" ++
+        "}\n";
+
+    const z = try std.testing.allocator.dupeZ(u8, code);
+    defer std.testing.allocator.free(z);
+    try runtime.lua.loadString(z);
+    try runtime.lua.protectedCall(.{ .args = 0, .results = 1 });
+    defer runtime.lua.pop(1);
+
+    try std.testing.expectError(error.ConfigError, Config.parseFromLua(&runtime, true));
 }
 
 fn parseSpinner(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?SpinnerDef {
@@ -1717,7 +1907,10 @@ fn parseSpinner(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?SpinnerDef 
     var s = SpinnerDef{};
     // Always allocate kind so deinit is safe.
     const kind = runtime.getString(-1, "kind") orelse "knight_rider";
-    s.kind = allocator.dupe(u8, kind) catch return null;
+    s.kind = allocator.dupe(u8, kind) catch |err| {
+        log.warn("failed to allocate spinner kind: {s}", .{@errorName(err)});
+        return null;
+    };
 
     if (runtime.getInt(u8, -1, "width")) |v| s.width = v;
     if (runtime.getInt(u64, -1, "step")) |v| s.step_ms = v;
@@ -1733,7 +1926,9 @@ fn parseSpinner(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?SpinnerDef 
         for (1..len + 1) |i| {
             if (runtime.pushArrayElement(-1, i)) {
                 if (runtime.toIntAt(u8, -1)) |cv| {
-                    list.append(allocator, cv) catch {};
+                    list.append(allocator, cv) catch |err| {
+                        log.warn("failed to append spinner color #{}: {s}", .{ i, @errorName(err) });
+                    };
                 }
                 runtime.pop();
             }
@@ -1821,9 +2016,12 @@ fn parseTokenArray(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?[][]cons
     for (1..len + 1) |i| {
         if (runtime.pushArrayElement(-1, i)) {
             if (runtime.toStringAt(-1)) |s| {
-                const dup = allocator.dupe(u8, s) catch null;
+                const dup = dupeConfigString(allocator, s, "failed to allocate config when token");
                 if (dup) |d| {
-                    list.append(allocator, d) catch allocator.free(d);
+                    list.append(allocator, d) catch |err| {
+                        log.warn("failed to append config when token: {}", .{err});
+                        allocator.free(d);
+                    };
                 }
             }
             runtime.pop();
@@ -1831,7 +2029,10 @@ fn parseTokenArray(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?[][]cons
     }
 
     if (list.items.len == 0) return null;
-    return list.toOwnedSlice(allocator) catch null;
+    return list.toOwnedSlice(allocator) catch |err| {
+        log.warn("failed to finalize config when token list: {}", .{err});
+        return null;
+    };
 }
 
 /// Parse an array of expressions for 'any' clause.
@@ -1851,13 +2052,18 @@ fn parseAnyArray(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?[]const Wh
         if (elem_ty == .string) {
             // String element: wrap in single-token all
             if (runtime.toStringAt(-1)) |s| {
-                const dup = allocator.dupe(u8, s) catch continue;
-                const arr = allocator.alloc([]const u8, 1) catch {
+                const dup = allocator.dupe(u8, s) catch |err| {
+                    log.warn("failed to allocate when string expression #{}: {s}", .{ i, @errorName(err) });
+                    continue;
+                };
+                const arr = allocator.alloc([]const u8, 1) catch |err| {
+                    log.warn("failed to allocate when string wrapper #{}: {s}", .{ i, @errorName(err) });
                     allocator.free(dup);
                     continue;
                 };
                 arr[0] = dup;
-                list.append(allocator, .{ .all = arr }) catch {
+                list.append(allocator, .{ .all = arr }) catch |err| {
+                    log.warn("failed to append when string expression #{}: {s}", .{ i, @errorName(err) });
                     allocator.free(dup);
                     allocator.free(arr);
                 };
@@ -1865,7 +2071,8 @@ fn parseAnyArray(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?[]const Wh
         } else if (elem_ty == .table) {
             // Table element: parse recursively
             if (parseWhenExpr(runtime, allocator)) |w| {
-                list.append(allocator, w) catch {
+                list.append(allocator, w) catch |err| {
+                    log.warn("failed to append nested when expression #{}: {s}", .{ i, @errorName(err) });
                     var mw = w;
                     @constCast(&mw).deinit(allocator);
                 };
@@ -1874,7 +2081,10 @@ fn parseAnyArray(runtime: *LuaRuntime, allocator: std.mem.Allocator) ?[]const Wh
     }
 
     if (list.items.len == 0) return null;
-    return list.toOwnedSlice(allocator) catch null;
+    return list.toOwnedSlice(allocator) catch |err| {
+        log.warn("failed to finalize when expression list: {s}", .{@errorName(err)});
+        return null;
+    };
 }
 
 fn parseOutputs(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const OutputDef {
@@ -1891,7 +2101,9 @@ fn parseOutputs(runtime: *LuaRuntime, allocator: std.mem.Allocator) []const Outp
             list.append(allocator, .{
                 .style = runtime.getStringAlloc(-1, "style") orelse "",
                 .format = runtime.getStringAlloc(-1, "format") orelse "$output",
-            }) catch {};
+            }) catch |err| {
+                log.warn("failed to append output definition #{}: {s}", .{ i, @errorName(err) });
+            };
             runtime.pop();
         }
     }

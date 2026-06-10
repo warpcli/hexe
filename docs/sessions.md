@@ -2,7 +2,7 @@
 
 A session is a named collection of tabs, splits, and floats tracked by `hexe ses`.
 
-Sessions survive mux restarts. Detach and reattach freely — your shells keep running.
+Sessions survive terminal-frontend restarts. Detach and reattach freely — your shells keep running.
 
 ---
 
@@ -10,17 +10,17 @@ Sessions survive mux restarts. Detach and reattach freely — your shells keep r
 
 ```sh
 # Start a new session
-hexe mux new
+hexe terminal new
 
 # Start a named session
-hexe mux new --name work
+hexe terminal new --name work
 
 # List sessions
 hexe ses list
 
 # Attach to a session (by name or UUID prefix)
-hexe mux attach work
-hexe mux attach a3f2
+hexe terminal attach work
+hexe terminal attach a3f2
 
 # Detach from current session (leaves everything running)
 # (default keybind: Alt+Shift+D release)
@@ -30,7 +30,7 @@ hexe mux attach a3f2
 
 ## Detach and reattach
 
-Detaching leaves the ses daemon and all pods running. The mux process exits. On reattach:
+Detaching leaves the ses daemon and all pods running. The terminal frontend process exits. On reattach:
 
 - Layout is restored from ses state
 - Each pane reconnects to its pod
@@ -45,45 +45,43 @@ Scrollback is buffered in the pod as a ring buffer of raw PTY bytes. Ghostty VT 
 Layouts define the initial tab/split/float structure for a session. They are defined in your config and applied when a new session starts.
 
 ```lua
-local hx = require("hexe")
+local hexe = require("hexe")
 
-hx.ses.layout.define({
-  name = "default",
+return hexe.setup({
+  ses = {
+    layouts = {
+      hexe.layout("default", {
   enabled = true,
 
   tabs = {
-    {
-      name = "code",
-      root = {
-        dir = "h",
-        ratio = 0.65,
-        first = { cwd = "~/projects/myapp" },
-        second = {
-          dir = "v",
-          ratio = 0.5,
-          first  = { cwd = "~/projects/myapp", command = "btop" },
-          second = { cwd = "~/projects/myapp" },
-        },
-      },
-    },
-    {
-      name = "notes",
-      root = { cwd = "~/notes", command = "nvim" },
-    },
+    hexe.tab("code", {
+      root = hexe.split("horizontal", {
+        hexe.pane({ cwd = "~/projects/myapp" }),
+        hexe.split("vertical", {
+          hexe.pane({ cwd = "~/projects/myapp", command = "btop" }),
+          hexe.pane({ cwd = "~/projects/myapp" }),
+        }),
+      }),
+    }),
+    hexe.tab("notes", {
+      root = hexe.pane({ cwd = "~/notes", command = "nvim" }),
+    }),
   },
 
   floats = {
-    {
+    hexe.float("git", {
       key = "g",
       command = "lazygit",
-      attributes = { per_cwd = true, sticky = true },
-      width_percent = 90,
-      height_percent = 90,
-    },
-    {
+      attrs = { per_cwd = true, sticky = true },
+      size = { width = 90, height = 90 },
+    }),
+    hexe.float("files", {
       key = "f",
       command = "fzf",
-      attributes = { per_cwd = true, sticky = true },
+      attrs = { per_cwd = true, sticky = true },
+    }),
+  },
+      }),
     },
   },
 })
@@ -138,9 +136,9 @@ You can move orphaned panes between sessions.
 - **Disown**: remove a pane from the current session (pod keeps running, pane becomes orphaned)
 - **Adopt**: pick up an orphaned pane into the current session
 
-Keybinds (configure in `mux.input.binds`):
-- `action = { type = hx.action.pane_disown }`
-- `action = { type = hx.action.pane_adopt }`
+Keybinds:
+- `action = hexe.action.pane.disown()`
+- `action = hexe.action.pane.adopt()`
 
 On adopt, you can swap the adopted pane with the current one, or destroy the current pane and take its slot.
 

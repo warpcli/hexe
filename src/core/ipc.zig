@@ -1,5 +1,6 @@
 const std = @import("std");
 const posix = std.posix;
+const linux = std.os.linux;
 
 const c = @cImport({
     @cInclude("sys/socket.h");
@@ -7,9 +8,46 @@ const c = @cImport({
     @cInclude("unistd.h");
 });
 
+const log = std.log.scoped(.ipc);
+
 fn setCloexec(fd: posix.fd_t) void {
-    const flags = posix.fcntl(fd, posix.F.GETFD, 0) catch return;
-    _ = posix.fcntl(fd, posix.F.SETFD, flags | 1) catch {};
+    const flags = posix.fcntl(fd, posix.F.GETFD, 0) catch |err| {
+        log.warn("failed to read fd flags for fd={d}: {}", .{ fd, err });
+        return;
+    };
+    _ = posix.fcntl(fd, posix.F.SETFD, flags | 1) catch |err| {
+        log.warn("failed to set cloexec for fd={d}: {}", .{ fd, err });
+    };
+}
+
+/// Unix peer credentials returned by SO_PEERCRED.
+pub const PeerCredentials = extern struct {
+    pid: i32,
+    uid: u32,
+    gid: u32,
+};
+
+const SO_PEERCRED: u32 = 17;
+
+/// Read the peer credentials for a connected Unix domain socket. Returns
+/// null if the kernel call fails (non-Linux, unconnected socket, etc.).
+pub fn getPeerCredentials(fd: posix.fd_t) ?PeerCredentials {
+    var cred: PeerCredentials = undefined;
+    var len: linux.socklen_t = @sizeOf(PeerCredentials);
+    const rc = linux.getsockopt(fd, linux.SOL.SOCKET, SO_PEERCRED, @ptrCast(&cred), &len);
+    if (rc != 0) return null;
+    return cred;
+}
+
+/// Reject a connected peer unless it runs as the same UID as this process.
+/// Set HEXE_ALLOW_CROSS_UID=1 in the environment to allow cross-UID access
+/// (intended for test setups that legitimately need it).
+pub fn verifyPeerUid(fd: posix.fd_t) bool {
+    if (std.posix.getenv("HEXE_ALLOW_CROSS_UID")) |v| {
+        if (std.mem.eql(u8, v, "1")) return true;
+    }
+    const cred = getPeerCredentials(fd) orelse return false;
+    return cred.uid == linux.getuid();
 }
 
 /// Unix domain socket server for IPC
@@ -18,16 +56,42 @@ pub const Server = struct {
     path: []const u8,
     allocator: std.mem.Allocator,
 
+    fn accessSocketPath(path: []const u8) !void {
+        if (std.fs.path.isAbsolute(path)) {
+            return std.fs.accessAbsolute(path, .{});
+        }
+        return std.fs.cwd().access(path, .{});
+    }
+
+    fn deleteSocketPath(path: []const u8) !void {
+        if (std.fs.path.isAbsolute(path)) {
+            return std.fs.deleteFileAbsolute(path);
+        }
+        return std.fs.cwd().deleteFile(path);
+    }
+
+    fn makeSocketParentPath(path: []const u8) !void {
+        const dir = std.fs.path.dirname(path) orelse return;
+        if (std.fs.path.isAbsolute(dir)) {
+            var root = try std.fs.openDirAbsolute("/", .{});
+            defer root.close();
+            return root.makePath(dir[1..]);
+        }
+        return std.fs.cwd().makePath(dir);
+    }
+
     pub fn init(allocator: std.mem.Allocator, path: []const u8) !Server {
         // Validate path length to avoid silent truncation
         if (path.len >= 108) return error.NameTooLong; // sockaddr_un.path max
 
         // Check if socket file exists and if something is listening
-        if (std.fs.cwd().access(path, .{})) |_| {
+        if (accessSocketPath(path)) |_| {
             // Socket file exists - try to connect to see if something is listening
             const test_fd = posix.socket(posix.AF.UNIX, posix.SOCK.STREAM, 0) catch {
                 // Can't create socket, just try to delete the file
-                std.fs.cwd().deleteFile(path) catch {};
+                deleteSocketPath(path) catch |err| {
+                    if (err != error.FileNotFound) log.warn("failed to remove stale socket '{s}': {}", .{ path, err });
+                };
                 return initSocket(allocator, path);
             };
             defer posix.close(test_fd);
@@ -45,7 +109,9 @@ pub const Server = struct {
                 return error.AddressInUse;
             } else |_| {
                 // Connect failed - stale socket, safe to remove
-                std.fs.cwd().deleteFile(path) catch {};
+                deleteSocketPath(path) catch |err| {
+                    if (err != error.FileNotFound) return err;
+                };
             }
         } else |_| {
             // Socket file doesn't exist - nothing to clean up
@@ -61,12 +127,12 @@ pub const Server = struct {
         setCloexec(fd);
 
         // Ensure parent directory exists
-        if (std.fs.path.dirname(path)) |dir| {
-            std.fs.cwd().makePath(dir) catch {};
-        }
+        try makeSocketParentPath(path);
 
         // Remove socket file if it still exists (race condition protection)
-        std.fs.cwd().deleteFile(path) catch {};
+        deleteSocketPath(path) catch |err| {
+            if (err != error.FileNotFound) return err;
+        };
 
         // Bind to path
         var addr: posix.sockaddr.un = .{
@@ -94,7 +160,9 @@ pub const Server = struct {
 
     pub fn deinit(self: *Server) void {
         posix.close(self.fd);
-        std.fs.cwd().deleteFile(self.path) catch {};
+        deleteSocketPath(self.path) catch |err| {
+            if (err != error.FileNotFound) log.warn("failed to delete server socket '{s}': {}", .{ self.path, err });
+        };
         self.allocator.free(self.path);
     }
 
@@ -108,9 +176,17 @@ pub const Server = struct {
     pub fn tryAccept(self: *Server) !?Connection {
         // Set server socket to non-blocking temporarily for the accept check.
         const O_NONBLOCK: usize = 0o4000;
-        const flags = posix.fcntl(self.fd, posix.F.GETFL, 0) catch return null;
-        _ = posix.fcntl(self.fd, posix.F.SETFL, flags | O_NONBLOCK) catch return null;
-        defer _ = posix.fcntl(self.fd, posix.F.SETFL, flags) catch {};
+        const flags = posix.fcntl(self.fd, posix.F.GETFL, 0) catch |err| {
+            log.warn("failed to read server fd flags for fd={d}: {}", .{ self.fd, err });
+            return null;
+        };
+        _ = posix.fcntl(self.fd, posix.F.SETFL, flags | O_NONBLOCK) catch |err| {
+            log.warn("failed to set server fd nonblocking for fd={d}: {}", .{ self.fd, err });
+            return null;
+        };
+        defer _ = posix.fcntl(self.fd, posix.F.SETFL, flags) catch |err| {
+            log.warn("failed to restore server fd flags for fd={d}: {}", .{ self.fd, err });
+        };
 
         // Accept WITHOUT SOCK_NONBLOCK so the client fd is blocking.
         // This allows wire.readExact to work correctly without busy-spinning.
@@ -144,7 +220,8 @@ pub const Client = struct {
             .path = undefined,
         };
         @memset(&addr.path, 0);
-        @memcpy(addr.path[0..path.len], path);
+        const path_len = @min(path.len, addr.path.len - 1);
+        @memcpy(addr.path[0..path_len], path[0..path_len]);
 
         try posix.connect(fd, @ptrCast(&addr), @sizeOf(posix.sockaddr.un));
 
@@ -403,17 +480,26 @@ pub fn getTxLogPath(allocator: std.mem.Allocator) ![]const u8 {
 /// Check if ses is running by trying to connect.
 /// If socket file exists but connection fails, removes the stale socket.
 pub fn isSesRunning(allocator: std.mem.Allocator) bool {
-    const path = getSesSocketPath(allocator) catch return false;
+    const path = getSesSocketPath(allocator) catch |err| {
+        log.warn("failed to build ses socket path: {}", .{err});
+        return false;
+    };
     defer allocator.free(path);
 
     // First check if socket file exists
-    std.fs.cwd().access(path, .{}) catch return false;
+    std.fs.cwd().access(path, .{}) catch |err| {
+        if (err != error.FileNotFound) log.warn("failed to access ses socket '{s}': {}", .{ path, err });
+        return false;
+    };
 
     // Try to connect
-    var client = Client.connect(path) catch {
+    var client = Client.connect(path) catch |err| {
+        log.warn("failed to connect to ses socket '{s}', treating as stale: {}", .{ path, err });
         // Socket file exists but can't connect = stale socket
         // Remove it so the new SES can bind
-        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(path) catch |delete_err| {
+            if (delete_err != error.FileNotFound) log.warn("failed to remove stale ses socket '{s}': {}", .{ path, delete_err });
+        };
         return false;
     };
     client.close();
@@ -444,7 +530,7 @@ pub fn getSesStatePath(allocator: std.mem.Allocator) ![]const u8 {
             if (sanitized.len > 0) {
                 const dir = try std.fmt.allocPrint(allocator, "{s}/hexe/{s}", .{ state_home, sanitized });
                 defer allocator.free(dir);
-                std.fs.cwd().makePath(dir) catch {};
+                try std.fs.cwd().makePath(dir);
                 return std.fmt.allocPrint(allocator, "{s}/hexe/{s}/ses_state.json", .{ state_home, sanitized });
             }
         }
@@ -452,7 +538,7 @@ pub fn getSesStatePath(allocator: std.mem.Allocator) ![]const u8 {
 
     const dir = try std.fmt.allocPrint(allocator, "{s}/hexe", .{state_home});
     defer allocator.free(dir);
-    std.fs.cwd().makePath(dir) catch {};
+    try std.fs.cwd().makePath(dir);
 
     return std.fmt.allocPrint(allocator, "{s}/hexe/ses_state.json", .{state_home});
 }
@@ -469,7 +555,7 @@ pub fn getLogPath(allocator: std.mem.Allocator) ![]const u8 {
 
     const dir = try std.fmt.allocPrint(allocator, "/tmp/hexe/{s}", .{final_instance});
     defer allocator.free(dir);
-    std.fs.cwd().makePath(dir) catch {};
+    try std.fs.cwd().makePath(dir);
 
     return std.fmt.allocPrint(allocator, "/tmp/hexe/{s}/log", .{final_instance});
 }

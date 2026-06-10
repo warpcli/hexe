@@ -1,6 +1,6 @@
 # Float attributes
 
-Detailed reference for float behavior flags under `floats[].attributes`.
+Detailed reference for float behavior flags under `floats[].attrs`.
 
 For the full float guide (sizing, borders, layout, CLI) see [floats.md](floats.md).
 
@@ -9,12 +9,12 @@ For the full float guide (sizing, borders, layout, CLI) see [floats.md](floats.m
 ## Setting attributes
 
 ```lua
-hx.ses.layout.define({
+return hexe.layout("default", {
   floats = {
-    {
+    hexe.float("monitor", {
       key     = "f",
       command = "btop",
-      attributes = {
+      attrs = {
         exclusive = true,
         global    = true,
         per_cwd   = false,
@@ -23,7 +23,7 @@ hx.ses.layout.define({
         isolated  = false,
         inherit_env = false,
       },
-    },
+    }),
   },
 })
 ```
@@ -51,10 +51,10 @@ Use for project-scoped tools: `lazygit`, `nvim`, `opencode`, language REPLs.
 
 ## `sticky`
 
-The float survives mux exits and restarts.
+The float survives terminal-frontend exits and restarts.
 
-- On detach or mux exit, ses keeps the pod alive in a half-attached state
-- A new mux automatically reclaims it on reattach
+- On detach or frontend exit, ses keeps the pod alive in a half-attached state
+- A new frontend automatically reclaims it on reattach
 - Matched by directory + key combination
 
 Does not combine meaningfully with `destroy` (a sticky float that destroys itself on hide loses all persistence benefit).

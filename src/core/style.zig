@@ -1,5 +1,6 @@
 const std = @import("std");
 const vaxis = @import("vaxis");
+const log = std.log.scoped(.style);
 
 /// Color representation - compatible with mux/render_types.zig Color
 pub const Color = union(enum) {
@@ -28,20 +29,41 @@ pub const Color = union(enum) {
         }
 
         // Numeric palette: just a number
-        const num = std.fmt.parseInt(u8, trimmed, 10) catch return null;
+        const num = std.fmt.parseInt(u8, trimmed, 10) catch |err| {
+            log.debug("failed to parse palette color '{s}': {}", .{ trimmed, err });
+            return null;
+        };
         return .{ .palette = num };
     }
 
     fn parseHex(hex: []const u8) ?Color {
         if (hex.len == 6) {
-            const r = std.fmt.parseInt(u8, hex[0..2], 16) catch return null;
-            const g = std.fmt.parseInt(u8, hex[2..4], 16) catch return null;
-            const b = std.fmt.parseInt(u8, hex[4..6], 16) catch return null;
+            const r = std.fmt.parseInt(u8, hex[0..2], 16) catch |err| {
+                log.debug("failed to parse red hex color component '{s}': {}", .{ hex[0..2], err });
+                return null;
+            };
+            const g = std.fmt.parseInt(u8, hex[2..4], 16) catch |err| {
+                log.debug("failed to parse green hex color component '{s}': {}", .{ hex[2..4], err });
+                return null;
+            };
+            const b = std.fmt.parseInt(u8, hex[4..6], 16) catch |err| {
+                log.debug("failed to parse blue hex color component '{s}': {}", .{ hex[4..6], err });
+                return null;
+            };
             return .{ .rgb = .{ .r = r, .g = g, .b = b } };
         } else if (hex.len == 3) {
-            const r = std.fmt.parseInt(u8, hex[0..1], 16) catch return null;
-            const g = std.fmt.parseInt(u8, hex[1..2], 16) catch return null;
-            const b = std.fmt.parseInt(u8, hex[2..3], 16) catch return null;
+            const r = std.fmt.parseInt(u8, hex[0..1], 16) catch |err| {
+                log.debug("failed to parse short red hex color component '{s}': {}", .{ hex[0..1], err });
+                return null;
+            };
+            const g = std.fmt.parseInt(u8, hex[1..2], 16) catch |err| {
+                log.debug("failed to parse short green hex color component '{s}': {}", .{ hex[1..2], err });
+                return null;
+            };
+            const b = std.fmt.parseInt(u8, hex[2..3], 16) catch |err| {
+                log.debug("failed to parse short blue hex color component '{s}': {}", .{ hex[2..3], err });
+                return null;
+            };
             return .{ .rgb = .{ .r = r * 17, .g = g * 17, .b = b * 17 } };
         }
         return null;

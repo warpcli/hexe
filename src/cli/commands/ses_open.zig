@@ -8,7 +8,7 @@ const print = std.debug.print;
 pub fn runSesOpen(
     allocator: std.mem.Allocator,
     target: []const u8,
-    debug: bool,
+    log_level: ?core.logging.Level,
     log_file: []const u8,
     instance: []const u8,
 ) !void {
@@ -26,7 +26,7 @@ pub fn runSesOpen(
         return;
     } orelse {
         print("Error: config not found for '{s}'\n", .{target});
-        print("Looked for .hexe.lua in directory, or ~/.local/share/hexe/sessions/{s}.lua\n", .{target});
+        print("Looked for .hexe.lua in directory/path or registered layout name in sessions.json\n", .{});
         return;
     };
     defer allocator.free(resolved.path);
@@ -41,11 +41,10 @@ pub fn runSesOpen(
         }
         return;
     };
+    defer config.deinit(allocator);
 
     // Apply tab filter
-    if (resolved.tab_filter) |filter| {
-        config.filter_tab = filter;
-    }
+    const selected_tab_filter = resolved.tab_filter orelse config.filter_tab;
 
     // Resolve root directory
     var root_path: ?[]const u8 = null;
@@ -66,7 +65,7 @@ pub fn runSesOpen(
         }
     }
 
-    // Change to root directory before launching mux
+    // Change to root directory before launching the terminal frontend
     if (root_path) |rp| {
         std.posix.chdir(rp) catch |err| {
             print("Error: cannot chdir to root '{s}': {s}\n", .{ rp, @errorName(err) });
@@ -77,13 +76,13 @@ pub fn runSesOpen(
     // Determine session name
     const session_name: ?[]const u8 = config.name;
 
-    // Launch mux with the session config
-    const mux = @import("mux");
-    try mux.run(.{
+    // Launch the terminal frontend with the session config
+    const terminal = @import("terminal");
+    try terminal.run(.{
         .name = session_name,
-        .debug = debug,
+        .log_level = log_level,
         .log_file = if (log_file.len > 0) log_file else null,
         .session_config_path = resolved.path,
-        .session_tab_filter = config.filter_tab,
+        .session_tab_filter = selected_tab_filter,
     });
 }

@@ -4,7 +4,6 @@ const posix = std.posix;
 /// Transaction log for crash recovery during critical operations.
 /// Writes append-only log entries to disk before modifying state.
 /// On restart, incomplete transactions can be detected and rolled back/completed.
-
 pub const TxType = enum(u8) {
     detach_start = 1,
     detach_commit = 2,
@@ -26,7 +25,9 @@ pub const TxLog = struct {
     log_fd: ?posix.fd_t,
     log_path: []const u8,
 
-    pub fn init(allocator: std.mem.Allocator, log_path: []const u8) !TxLog {
+    const FILE_HEADER = "HEXETX01";
+
+    pub fn init(allocator: std.mem.Allocator, log_path: []const u8) TxLog {
         return TxLog{
             .allocator = allocator,
             .log_fd = null,
@@ -49,7 +50,35 @@ pub const TxLog = struct {
             .{ .ACCMODE = .RDWR, .CREAT = true, .APPEND = true },
             0o600,
         );
+        errdefer posix.close(fd);
+
+        try self.ensureCompatibleFile(fd);
         self.log_fd = fd;
+    }
+
+    fn ensureCompatibleFile(self: *TxLog, fd: posix.fd_t) !void {
+        _ = self;
+        try posix.lseek_SET(fd, 0);
+
+        var header: [FILE_HEADER.len]u8 = undefined;
+        var off: usize = 0;
+        while (off < header.len) {
+            const n = try posix.read(fd, header[off..]);
+            if (n == 0) break;
+            off += n;
+        }
+
+        if (off == header.len and std.mem.eql(u8, header[0..], FILE_HEADER)) {
+            try posix.lseek_END(fd, 0);
+            return;
+        }
+
+        // Old dev builds wrote raw TxEntry records with no file magic/version.
+        // They are intentionally not replayed into a newer daemon.
+        try posix.ftruncate(fd, 0);
+        try posix.lseek_SET(fd, 0);
+        try writeAll(fd, FILE_HEADER[0..]);
+        try posix.fsync(fd);
     }
 
     /// Write a transaction entry to the log (fsync for durability).
@@ -65,18 +94,18 @@ pub const TxLog = struct {
 
         const fd = self.log_fd.?;
 
-        // Write header
+        try posix.lseek_END(fd, 0);
         const header_bytes = std.mem.asBytes(&entry);
-        _ = try posix.write(fd, header_bytes);
-
-        // Write payload
-        if (payload.len > 0) {
-            _ = try posix.write(fd, payload);
-        }
+        try writeAll(fd, header_bytes);
+        try writeAll(fd, payload);
 
         // Ensure durability (critical for crash recovery)
-        posix.fsync(fd) catch {};
+        try posix.fsync(fd);
     }
+
+    /// Maximum total bytes accepted across all entries during replay. A log
+    /// larger than this is likely corrupt or adversarial; truncate the tail.
+    const MAX_REPLAY_BYTES: usize = 10 * 1024 * 1024;
 
     /// Read all transaction entries from the log.
     pub fn readAll(self: *TxLog, allocator: std.mem.Allocator) !std.ArrayList(TxLogEntry) {
@@ -85,6 +114,18 @@ pub const TxLog = struct {
         const fd = self.log_fd.?;
         try posix.lseek_SET(fd, 0); // Rewind to start
 
+        var file_header: [FILE_HEADER.len]u8 = undefined;
+        var file_header_off: usize = 0;
+        while (file_header_off < file_header.len) {
+            const n = try posix.read(fd, file_header[file_header_off..]);
+            if (n == 0) break;
+            file_header_off += n;
+        }
+        if (file_header_off != file_header.len or !std.mem.eql(u8, file_header[0..], FILE_HEADER)) {
+            try self.truncate();
+            return .empty;
+        }
+
         var entries: std.ArrayList(TxLogEntry) = .empty;
         errdefer {
             for (entries.items) |*e| {
@@ -92,6 +133,8 @@ pub const TxLog = struct {
             }
             entries.deinit(allocator);
         }
+
+        var total_bytes: usize = 0;
 
         while (true) {
             var header: TxEntry = undefined;
@@ -137,6 +180,9 @@ pub const TxLog = struct {
                 .session_id = header.session_id,
                 .payload = payload,
             });
+
+            total_bytes += header_bytes.len + payload.len;
+            if (total_bytes > MAX_REPLAY_BYTES) break;
         }
 
         return entries;
@@ -155,9 +201,19 @@ pub const TxLog = struct {
             .{ .ACCMODE = .RDWR, .CREAT = true, .TRUNC = true },
             0o600,
         );
+        try writeAll(fd, FILE_HEADER[0..]);
         posix.close(fd);
     }
 };
+
+fn writeAll(fd: posix.fd_t, data: []const u8) !void {
+    var off: usize = 0;
+    while (off < data.len) {
+        const written = try posix.write(fd, data[off..]);
+        if (written == 0) return error.WriteZero;
+        off += written;
+    }
+}
 
 pub const TxLogEntry = struct {
     tx_type: TxType,
@@ -166,12 +222,16 @@ pub const TxLogEntry = struct {
     payload: []const u8,
 };
 
-/// Analyze transaction log entries to detect incomplete operations.
-/// Returns sessions that need rollback/recovery.
-pub fn findIncompleteTransactions(entries: []const TxLogEntry) !std.ArrayList([16]u8) {
-    var incomplete: std.ArrayList([16]u8) = .empty;
+pub const IncompleteTransaction = struct {
+    session_id: [16]u8,
+    tx_type: TxType,
+};
 
-    // Track start/commit pairs
+/// Analyze transaction log entries to detect incomplete operations and preserve
+/// the operation type for recovery handling.
+pub fn findIncompleteOperations(entries: []const TxLogEntry) !std.ArrayList(IncompleteTransaction) {
+    var incomplete: std.ArrayList(IncompleteTransaction) = .empty;
+
     const alloc = std.heap.page_allocator;
     var pending_ops = std.AutoHashMap([16]u8, TxType).init(alloc);
     defer pending_ops.deinit();
@@ -179,28 +239,38 @@ pub fn findIncompleteTransactions(entries: []const TxLogEntry) !std.ArrayList([1
     for (entries) |entry| {
         switch (entry.tx_type) {
             .detach_start, .reattach_start => {
-                // Mark session as having a pending operation
                 try pending_ops.put(entry.session_id, entry.tx_type);
             },
             .detach_commit => {
-                // Complete detach operation
                 _ = pending_ops.remove(entry.session_id);
             },
             .reattach_commit => {
-                // Complete reattach operation
                 _ = pending_ops.remove(entry.session_id);
             },
-            .pane_state_change => {
-                // These don't require explicit commit (state is already changed)
-            },
+            .pane_state_change => {},
         }
     }
 
-    // Any remaining entries are incomplete
     var it = pending_ops.iterator();
     while (it.next()) |kv| {
-        try incomplete.append(alloc, kv.key_ptr.*);
+        try incomplete.append(alloc, .{
+            .session_id = kv.key_ptr.*,
+            .tx_type = kv.value_ptr.*,
+        });
     }
 
+    return incomplete;
+}
+
+/// Analyze transaction log entries to detect incomplete operations.
+/// Returns sessions that need rollback/recovery.
+pub fn findIncompleteTransactions(entries: []const TxLogEntry) !std.ArrayList([16]u8) {
+    var incomplete_ops = try findIncompleteOperations(entries);
+    defer incomplete_ops.deinit(std.heap.page_allocator);
+
+    var incomplete: std.ArrayList([16]u8) = .empty;
+    for (incomplete_ops.items) |entry| {
+        try incomplete.append(std.heap.page_allocator, entry.session_id);
+    }
     return incomplete;
 }

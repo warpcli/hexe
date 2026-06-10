@@ -20,7 +20,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
     const fd = client.fd;
 
     // Send versioned CLI handshake
-    try wire.sendHandshake(fd, wire.SES_HANDSHAKE_CLI);
+    try wire.sendCliHandshake(fd);
 
     // Request status
     try wire.writeControl(fd, .status, &.{});
@@ -31,6 +31,10 @@ pub fn run(allocator: std.mem.Allocator) !void {
     if (msg_type != .status) {
         print("Error: Failed to retrieve status\n", .{});
         return error.StatusFailed;
+    }
+    if (hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+        print("Error: status response too large\n", .{});
+        return error.ResponseTooLarge;
     }
 
     const status_payload = try allocator.alloc(u8, hdr.payload_len);
@@ -46,6 +50,10 @@ pub fn run(allocator: std.mem.Allocator) !void {
     if (sessions_msg_type != .sessions_list) {
         print("Error: Unexpected response\n", .{});
         return error.UnexpectedResponse;
+    }
+    if (sessions_hdr.payload_len > wire.MAX_PAYLOAD_LEN) {
+        print("Error: sessions list response too large\n", .{});
+        return error.ResponseTooLarge;
     }
 
     const payload = try allocator.alloc(u8, sessions_hdr.payload_len);
@@ -81,6 +89,12 @@ pub fn run(allocator: std.mem.Allocator) !void {
             return error.MalformedResponse;
         }
         off = name_end;
+        const base_root_end = off + entry.base_root_len;
+        if (base_root_end > payload.len) {
+            print("Error: malformed session base root\n", .{});
+            return error.MalformedResponse;
+        }
+        off = base_root_end;
 
         session_count += 1;
         total_panes += entry.pane_count;

@@ -1,5 +1,8 @@
 const std = @import("std");
 const style = @import("style.zig");
+
+const log = std.log.scoped(.popup_notification);
+
 pub const Style = style.Style;
 pub const Color = style.Color;
 pub const Align = style.Align;
@@ -93,8 +96,10 @@ pub const NotificationManager = struct {
         if (self.current == null) {
             self.current = notif;
         } else {
-            // Queue it (might fail, that's ok)
-            self.queue.append(self.allocator, notif) catch {};
+            self.queue.append(self.allocator, notif) catch |err| {
+                log.warn("failed to queue notification: {}", .{err});
+                if (notif.owned) self.allocator.free(notif.message);
+            };
         }
     }
 

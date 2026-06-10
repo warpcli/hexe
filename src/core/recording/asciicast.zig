@@ -18,7 +18,7 @@ pub const AsciicastWriter = struct {
             }
         }
 
-        const file = try std.fs.cwd().createFile(path, .{ .truncate = true, .mode = 0o644 });
+        const file = try std.fs.cwd().createFile(path, .{ .truncate = true, .mode = 0o600 });
         errdefer file.close();
 
         var writer = AsciicastWriter{

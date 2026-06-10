@@ -1,6 +1,7 @@
 const std = @import("std");
 const posix = std.posix;
 const linux = std.os.linux;
+const log = std.log.scoped(.isolation);
 
 const c = @cImport({
     @cInclude("fcntl.h");
@@ -56,14 +57,28 @@ fn tryUnshareUserNs() bool {
     const gid: u32 = @intCast(linux.syscall0(.getgid));
 
     // Required on many systems before writing gid_map.
-    writeProcFile("/proc/self/setgroups", "deny\n") catch {};
+    writeProcFile("/proc/self/setgroups", "deny\n") catch |err| {
+        std.log.scoped(.isolation).warn("failed to write /proc/self/setgroups: {}", .{err});
+    };
 
     var buf: [64]u8 = undefined;
-    const uid_line = std.fmt.bufPrint(&buf, "0 {d} 1\n", .{uid}) catch return false;
-    writeProcFile("/proc/self/uid_map", uid_line) catch return false;
+    const uid_line = std.fmt.bufPrint(&buf, "0 {d} 1\n", .{uid}) catch |err| {
+        log.warn("failed to format uid_map line: {}", .{err});
+        return false;
+    };
+    writeProcFile("/proc/self/uid_map", uid_line) catch |err| {
+        log.warn("failed to write /proc/self/uid_map: {}", .{err});
+        return false;
+    };
 
-    const gid_line = std.fmt.bufPrint(&buf, "0 {d} 1\n", .{gid}) catch return false;
-    writeProcFile("/proc/self/gid_map", gid_line) catch return false;
+    const gid_line = std.fmt.bufPrint(&buf, "0 {d} 1\n", .{gid}) catch |err| {
+        log.warn("failed to format gid_map line: {}", .{err});
+        return false;
+    };
+    writeProcFile("/proc/self/gid_map", gid_line) catch |err| {
+        log.warn("failed to write /proc/self/gid_map: {}", .{err});
+        return false;
+    };
 
     // Switch to uid/gid 0 inside the namespace so we gain capabilities there.
     // Best-effort: if it fails, we still keep Landlock as the primary sandbox.
@@ -257,9 +272,15 @@ pub fn applyChildIsolation(cwd: ?[]const u8) void {
 }
 
 fn readCgroupV2Path(allocator: std.mem.Allocator) ?[]u8 {
-    var file = std.fs.openFileAbsolute("/proc/self/cgroup", .{}) catch return null;
+    var file = std.fs.openFileAbsolute("/proc/self/cgroup", .{}) catch |err| {
+        log.debug("failed to open /proc/self/cgroup: {}", .{err});
+        return null;
+    };
     defer file.close();
-    const data = file.readToEndAlloc(allocator, 16 * 1024) catch return null;
+    const data = file.readToEndAlloc(allocator, 16 * 1024) catch |err| {
+        log.debug("failed to read /proc/self/cgroup: {}", .{err});
+        return null;
+    };
     errdefer allocator.free(data);
 
     // v2 format: "0::/some/path"
@@ -267,7 +288,10 @@ fn readCgroupV2Path(allocator: std.mem.Allocator) ?[]u8 {
     while (it.next()) |line| {
         if (std.mem.startsWith(u8, line, "0::")) {
             const p = line[3..];
-            const out = allocator.dupe(u8, p) catch return null;
+            const out = allocator.dupe(u8, p) catch |err| {
+                log.warn("failed to allocate cgroup v2 path: {}", .{err});
+                return null;
+            };
             allocator.free(data);
             return out;
         }
@@ -278,15 +302,24 @@ fn readCgroupV2Path(allocator: std.mem.Allocator) ?[]u8 {
 }
 
 fn tryWriteFileAbsolute(path: []const u8, data: []const u8) bool {
-    var file = std.fs.openFileAbsolute(path, .{ .mode = .write_only }) catch return false;
+    var file = std.fs.openFileAbsolute(path, .{ .mode = .write_only }) catch |err| {
+        log.debug("failed to open cgroup file {s}: {}", .{ path, err });
+        return false;
+    };
     defer file.close();
-    file.writeAll(data) catch return false;
+    file.writeAll(data) catch |err| {
+        log.debug("failed to write cgroup file {s}: {}", .{ path, err });
+        return false;
+    };
     return true;
 }
 
 fn tryWriteCgroupFile(dir_path: []const u8, file_name: []const u8, data: []const u8) bool {
     var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir_path, file_name }) catch return false;
+    const p = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir_path, file_name }) catch |err| {
+        log.debug("failed to format cgroup file path for {s}/{s}: {}", .{ dir_path, file_name, err });
+        return false;
+    };
     return tryWriteFileAbsolute(p, data);
 }
 
@@ -303,7 +336,10 @@ pub fn applyChildCgroup(extra_env: ?[]const [2][]const u8, child_pid: posix.pid_
     const allocator = gpa.allocator();
 
     // Only support cgroup v2.
-    var ctrls = std.fs.openFileAbsolute("/sys/fs/cgroup/cgroup.controllers", .{}) catch return;
+    var ctrls = std.fs.openFileAbsolute("/sys/fs/cgroup/cgroup.controllers", .{}) catch |err| {
+        log.debug("cgroup v2 controllers unavailable: {}", .{err});
+        return;
+    };
     ctrls.close();
 
     const rel = readCgroupV2Path(allocator) orelse return;
@@ -311,28 +347,46 @@ pub fn applyChildCgroup(extra_env: ?[]const [2][]const u8, child_pid: posix.pid_
 
     const uuid = findPaneUuid(extra_env) orelse "unknown";
     const short = uuid[0..@min(uuid.len, 8)];
-    const dir_path = std.fmt.allocPrint(allocator, "/sys/fs/cgroup{s}/hexe/pod-{s}", .{ rel, short }) catch return;
+    const dir_path = std.fmt.allocPrint(allocator, "/sys/fs/cgroup{s}/hexe/pod-{s}", .{ rel, short }) catch |err| {
+        log.warn("failed to allocate child cgroup path: {}", .{err});
+        return;
+    };
     defer allocator.free(dir_path);
 
     // Create cgroup directory (with parents) if we have delegation.
-    std.fs.cwd().makePath(dir_path) catch return;
+    std.fs.cwd().makePath(dir_path) catch |err| {
+        log.debug("failed to create child cgroup path {s}: {}", .{ dir_path, err });
+        return;
+    };
 
     var line_buf: [128]u8 = undefined;
 
     const pids_max = posix.getenv("HEXE_CGROUP_PIDS_MAX") orelse "512";
-    const pids_line = std.fmt.bufPrint(&line_buf, "{s}\n", .{pids_max}) catch return;
+    const pids_line = std.fmt.bufPrint(&line_buf, "{s}\n", .{pids_max}) catch |err| {
+        log.warn("failed to format pids.max cgroup value: {}", .{err});
+        return;
+    };
     _ = tryWriteCgroupFile(dir_path, "pids.max", pids_line);
 
     if (posix.getenv("HEXE_CGROUP_MEM_MAX")) |mem_max| {
-        const mem_line = std.fmt.bufPrint(&line_buf, "{s}\n", .{mem_max}) catch return;
+        const mem_line = std.fmt.bufPrint(&line_buf, "{s}\n", .{mem_max}) catch |err| {
+            log.warn("failed to format memory.max cgroup value: {}", .{err});
+            return;
+        };
         _ = tryWriteCgroupFile(dir_path, "memory.max", mem_line);
     }
     if (posix.getenv("HEXE_CGROUP_CPU_MAX")) |cpu_max| {
-        const cpu_line = std.fmt.bufPrint(&line_buf, "{s}\n", .{cpu_max}) catch return;
+        const cpu_line = std.fmt.bufPrint(&line_buf, "{s}\n", .{cpu_max}) catch |err| {
+            log.warn("failed to format cpu.max cgroup value: {}", .{err});
+            return;
+        };
         _ = tryWriteCgroupFile(dir_path, "cpu.max", cpu_line);
     }
 
     var pid_buf: [32]u8 = undefined;
-    const pid_line = std.fmt.bufPrint(&pid_buf, "{d}\n", .{child_pid}) catch return;
+    const pid_line = std.fmt.bufPrint(&pid_buf, "{d}\n", .{child_pid}) catch |err| {
+        log.warn("failed to format child pid cgroup value: {}", .{err});
+        return;
+    };
     _ = tryWriteCgroupFile(dir_path, "cgroup.procs", pid_line);
 }

@@ -31,7 +31,7 @@ pub fn runPopNotify(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64
         };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: --uuid required (or run inside hexe mux)\n", .{});
+            print("Error: --uuid required (or run inside hexe terminal)\n", .{});
             return;
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
@@ -49,7 +49,9 @@ pub fn runPopNotify(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64
         .timeout_ms = timeout_ms,
         .msg_len = @intCast(message.len),
     };
-    wire.writeControlWithTrail(fd, .targeted_notify, std.mem.asBytes(&tn), message) catch {};
+    wire.writeControlWithTrail(fd, .targeted_notify, std.mem.asBytes(&tn), message) catch |err| {
+        print("Error: failed to send popup notify: {s}\n", .{@errorName(err)});
+    };
 }
 
 pub fn runPopConfirm(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64, message: []const u8) !void {
@@ -69,7 +71,7 @@ pub fn runPopConfirm(allocator: std.mem.Allocator, uuid: []const u8, timeout: i6
         };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: --uuid required (or run inside hexe mux)\n", .{});
+            print("Error: --uuid required (or run inside hexe terminal)\n", .{});
             return;
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {
@@ -129,7 +131,7 @@ pub fn runPopChoose(allocator: std.mem.Allocator, uuid: []const u8, timeout: i64
         };
     } else {
         const env_uuid = std.posix.getenv("HEXE_PANE_UUID") orelse {
-            print("Error: --uuid required (or run inside hexe mux)\n", .{});
+            print("Error: --uuid required (or run inside hexe terminal)\n", .{});
             return;
         };
         target_uuid = parseUuid32Hex(env_uuid) orelse {

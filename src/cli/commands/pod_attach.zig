@@ -30,12 +30,14 @@ fn stdinCallback(
     result: xev.PollError!xev.PollEvent,
 ) xev.CallbackAction {
     const c = ctx orelse return .disarm;
-    _ = result catch {
+    _ = result catch |err| {
+        core.logging.logError("pod_attach", "stdin poll failed", err);
         c.running = false;
         return .disarm;
     };
 
-    const n = std.posix.read(std.posix.STDIN_FILENO, &c.in_buf) catch {
+    const n = std.posix.read(std.posix.STDIN_FILENO, &c.in_buf) catch |err| {
+        core.logging.logError("pod_attach", "stdin read failed", err);
         c.running = false;
         return .disarm;
     };
@@ -48,18 +50,21 @@ fn stdinCallback(
         if (c.saw_prefix) {
             c.saw_prefix = false;
             if (c.in_buf[0] == 'd' or c.in_buf[0] == 'D') {
-                _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch {};
+                _ = std.posix.write(std.posix.STDOUT_FILENO, "\n") catch 0;
                 c.running = false;
                 return .disarm;
             }
             var tmp: [2]u8 = .{ c.detach_code, c.in_buf[0] };
-            pod_protocol.writeFrame(c.conn, .input, tmp[0..2]) catch {
+            pod_protocol.writeFrame(c.conn, .input, tmp[0..2]) catch |err| {
+                core.logging.logError("pod_attach", "failed to send detach-prefix input", err);
                 c.running = false;
                 return .disarm;
             };
             if (c.capture_input) {
                 if (c.recorder) |r| {
-                    r.writeInput(tmp[0..2]) catch {};
+                    r.writeInput(tmp[0..2]) catch |err| {
+                        core.logging.logError("pod_attach", "failed to record detach-prefix input", err);
+                    };
                 }
             }
             return .rearm;
@@ -70,13 +75,16 @@ fn stdinCallback(
         }
     }
 
-    pod_protocol.writeFrame(c.conn, .input, c.in_buf[0..n]) catch {
+    pod_protocol.writeFrame(c.conn, .input, c.in_buf[0..n]) catch |err| {
+        core.logging.logError("pod_attach", "failed to send input", err);
         c.running = false;
         return .disarm;
     };
     if (c.capture_input) {
         if (c.recorder) |r| {
-            r.writeInput(c.in_buf[0..n]) catch {};
+            r.writeInput(c.in_buf[0..n]) catch |err| {
+                core.logging.logError("pod_attach", "failed to record input", err);
+            };
         }
     }
     return .rearm;
@@ -90,7 +98,8 @@ fn connCallback(
     result: xev.PollError!xev.PollEvent,
 ) xev.CallbackAction {
     const c = ctx orelse return .disarm;
-    _ = result catch {
+    _ = result catch |err| {
+        core.logging.logError("pod_attach", "connection poll failed", err);
         c.running = false;
         return .disarm;
     };
@@ -98,6 +107,7 @@ fn connCallback(
     const n = std.posix.read(c.conn.fd, &c.net_buf) catch |err| switch (err) {
         error.WouldBlock => 0,
         else => {
+            core.logging.logError("pod_attach", "pod connection read failed", err);
             c.running = false;
             return .disarm;
         },
@@ -125,9 +135,17 @@ fn resizeCallback(
     result: xev.PollError!xev.PollEvent,
 ) xev.CallbackAction {
     const c = ctx orelse return .disarm;
-    _ = result catch return .disarm;
-    _ = std.posix.read(c.pipe_fd, &c.net_buf) catch 0;
-    sendResize(c.conn, tty.getTermSize()) catch {};
+    _ = result catch |err| {
+        core.logging.logError("pod_attach", "resize pipe poll failed", err);
+        return .disarm;
+    };
+    _ = std.posix.read(c.pipe_fd, &c.net_buf) catch |err| {
+        core.logging.logError("pod_attach", "resize pipe read failed", err);
+        return .disarm;
+    };
+    sendResize(c.conn, tty.getTermSize()) catch |err| {
+        core.logging.logError("pod_attach", "failed to send resize after SIGWINCH", err);
+    };
     return .rearm;
 }
 
@@ -153,17 +171,24 @@ pub fn runPodAttach(
     defer client.close();
 
     // Send versioned handshake to identify as VT client.
-    wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_SES_VT) catch return;
+    wire.sendHandshake(client.fd, wire.POD_HANDSHAKE_SES_VT) catch |err| {
+        print("Error: failed to handshake with pod: {s}\n", .{@errorName(err)});
+        return;
+    };
 
     var conn = client.toConnection();
 
     // Enter raw mode on stdin so we can proxy bytes.
     const orig_termios = tty.enableRawMode(std.posix.STDIN_FILENO) catch null;
-    defer if (orig_termios) |t| tty.disableRawMode(std.posix.STDIN_FILENO, t) catch {};
+    defer if (orig_termios) |t| tty.disableRawMode(std.posix.STDIN_FILENO, t) catch |err| {
+        core.logging.logError("pod_attach", "failed to restore terminal mode", err);
+    };
 
     // Initial resize.
     const term_size = tty.getTermSize();
-    sendResize(&conn, term_size) catch {};
+    sendResize(&conn, term_size) catch |err| {
+        print("Warning: failed to send initial resize: {s}\n", .{@errorName(err)});
+    };
 
     var recorder: ?AsciicastWriter = null;
     if (record_path.len > 0) {
@@ -176,7 +201,9 @@ pub fn runPodAttach(
     }
     defer {
         if (recorder) |*r| {
-            r.flush() catch {};
+            r.flush() catch |err| {
+                core.logging.logError("pod_attach", "failed to flush recording", err);
+            };
             r.deinit();
         }
     }
@@ -265,9 +292,15 @@ fn podFrameCallback(ctx: *anyopaque, frame: pod_protocol.Frame) void {
     const attach: *AttachContext = @ptrCast(@alignCast(ctx));
     switch (frame.frame_type) {
         .output => {
-            _ = std.posix.write(std.posix.STDOUT_FILENO, frame.payload) catch {};
+            _ = std.posix.write(std.posix.STDOUT_FILENO, frame.payload) catch |err| {
+                core.logging.logError("pod_attach", "failed to write pod output to stdout", err);
+                attach.running = false;
+                return;
+            };
             if (attach.recorder) |r| {
-                r.writeOutput(frame.payload) catch {};
+                r.writeOutput(frame.payload) catch |err| {
+                    core.logging.logError("pod_attach", "failed to record pod output", err);
+                };
             }
         },
         .backlog_end => {},

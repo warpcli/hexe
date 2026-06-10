@@ -27,6 +27,7 @@ pub const Context = struct {
 
     // Shell metadata (for mux status bar mode)
     last_command: ?[]const u8 = null,
+    title: ?[]const u8 = null,
 
     // Shell activity telemetry (for mux status bar mode)
     shell_running: bool = false,
@@ -122,7 +123,9 @@ pub const Context = struct {
         if (segments_mod.registry.get(name)) |render_fn| {
             if (render_fn(self)) |segs| {
                 if (!is_dynamic) {
-                    self.cached_segments.put(name, segs) catch {};
+                    self.cached_segments.put(name, segs) catch |err| {
+                        std.log.scoped(.segments).warn("failed to cache segment '{s}': {}", .{ name, err });
+                    };
                 }
                 return segs;
             }
