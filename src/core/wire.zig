@@ -397,8 +397,14 @@ pub const SetSticky = extern struct {
 
 /// FindSticky: look up a sticky pane by pwd+key.
 /// Followed by: pwd bytes (pwd_len).
+/// claim_free=0: claim the pane even if it must be stolen from a live owner
+/// or pulled out of a detached session (explicit user-driven handoff).
+/// claim_free=1: only claim the pane when no live client owns it and it is
+/// not parked inside a detached session; otherwise reply pane_not_found with
+/// no side effects (speculative reconciliation must never steal).
 pub const FindSticky = extern struct {
     key: u8 align(1),
+    claim_free: u8 align(1),
     pwd_len: u16 align(1),
 };
 

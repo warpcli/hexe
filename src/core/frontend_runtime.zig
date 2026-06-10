@@ -352,8 +352,9 @@ pub const FrontendRuntime = struct {
         self: *FrontendRuntime,
         pwd: []const u8,
         key: u8,
+        claim_free: bool,
     ) !?PaneAttachResult {
-        const result = try self.client.findStickyPane(pwd, key);
+        const result = try self.client.findStickyPane(pwd, key, claim_free);
         if (result) |found| {
             return .{
                 .uuid = found.uuid,

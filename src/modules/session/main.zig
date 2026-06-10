@@ -115,6 +115,12 @@ fn recoverFromTransactionLog(ses_state: *state.SesState) !void {
         }
     }
 
+    // Recovery mutated canonical state (orphaned panes, removed detached
+    // sessions). Mark dirty so the next persistence cycle writes it out —
+    // otherwise the rollback is lost on a quiet shutdown and the half-done
+    // transaction reappears on the following restart.
+    ses_state.store.dirty = true;
+
     // Truncate log after recovery
     ses_state.persistence.txlog.truncate() catch |err| {
         core.logging.logError("ses", "failed to truncate txlog after recovery", err);

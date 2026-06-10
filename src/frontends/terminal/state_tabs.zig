@@ -188,12 +188,12 @@ pub fn closeCurrentTab(self: anytype) bool {
                 fp.deinit();
                 self.allocator.destroy(fp);
                 _ = self.view.float_views.orderedRemove(i);
-                // Clear active_floating if it was this float.
-                if (self.activeFloatingIndex()) |afi| {
-                    if (afi == i) {
-                        self.setActiveFloatingIndex(null);
-                    } else if (afi > i) {
-                        self.setActiveFloatingIndex(afi - 1);
+                // Active-float tracking is uuid-based and self-adjusts across
+                // removals; only clear it when the removed float was active.
+                // Index-shifting here re-pointed it at the wrong float.
+                if (self.runtime.activeFloatUuid()) |active_uuid| {
+                    if (std.mem.eql(u8, &active_uuid, &fp_uuid)) {
+                        self.setActiveFloatingUuid(null);
                     }
                 }
                 self.clearLocalFloatState(fp_uuid);
@@ -272,6 +272,24 @@ fn collectStickyAdoptionCwds(self: anytype, cwd_set: *std.StringHashMap(void)) v
     // base dir whose shell later cd'd away would otherwise be undiscoverable.
     if (self.runtime.attachedSnapshot()) |snapshot| {
         addCwdCandidate(self, cwd_set, snapshot.base_root);
+
+        // Sticky/per-CWD floats this session remembers but does not currently
+        // own keep their entry in the snapshot. Their SES sticky identity dir
+        // is a first-class candidate so reconciliation can reclaim them the
+        // moment they are free, even when no live pane sits in that dir.
+        for (snapshot.floats.items) |float_state| {
+            if (!float_state.sticky and !float_state.is_pwd) continue;
+            if (self.findPaneByUuid(float_state.pane_uuid) != null) continue;
+            if (self.runtime.getPaneInfoSnapshot(float_state.pane_uuid)) |info| {
+                defer {
+                    if (info.name) |s| self.allocator.free(s);
+                    if (info.cwd) |s| self.allocator.free(s);
+                    if (info.sticky_pwd) |s| self.allocator.free(s);
+                    if (info.fg_name) |s| self.allocator.free(s);
+                }
+                addCwdCandidate(self, cwd_set, info.sticky_pwd);
+            }
+        }
     }
 
     for (self.view.tab_views.items) |*tab| {
@@ -349,8 +367,11 @@ pub fn adoptStickyPanes(self: anytype) void {
             if (!float_def.attributes.sticky and !float_def.attributes.per_cwd) continue;
             if (hasLocalCwdFloat(self, float_def.key, cwd)) continue;
 
-            // Try to find a sticky pane in ses matching this directory + key.
-            const result = self.runtime.findStickyPane(cwd, float_def.key) catch |err| {
+            // Try to claim a FREE sticky pane in ses matching this directory +
+            // key. claim_free=true: speculative reconciliation must never
+            // steal a float from a live mux or rip it out of another detached
+            // session — that is how sessions lose floats across reattach.
+            const result = self.runtime.findStickyPane(cwd, float_def.key, true) catch |err| {
                 core.logging.logError("terminal", "failed to query sticky pane for layout float", err);
                 continue;
             };

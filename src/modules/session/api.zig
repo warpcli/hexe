@@ -137,6 +137,10 @@ pub fn removePaneFromDetachedSessions(self: anytype, pane_uuid: [32]u8) void {
     detached_sessions.removePaneFromDetachedSessions(self.allocator, &self.store, pane_uuid);
 }
 
+pub fn isPaneParked(self: anytype, pane: *const store_mod.Pane) bool {
+    return detached_sessions.isPaneParked(&self.store, pane);
+}
+
 pub fn listDetachedSessions(self: anytype, allocator: std.mem.Allocator) ![]store_mod.DetachedSession {
     return detached_sessions.listDetachedSessions(allocator, &self.store);
 }

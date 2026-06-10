@@ -17,7 +17,19 @@ pub fn isPidAlive(pid: posix.pid_t) bool {
         }
         return false;
     };
-    file.close();
+    defer file.close();
+
+    // A zombie still has a /proc entry but the process is gone: treating it
+    // as alive makes pane reuse race against pod teardown (the user closes a
+    // float, immediately reopens, and gets handed the dying pane). The state
+    // char is the first non-space byte after the last ')' in the stat line.
+    var buf: [512]u8 = undefined;
+    const n = file.read(&buf) catch return true;
+    const data = buf[0..n];
+    const close_paren = std.mem.lastIndexOfScalar(u8, data, ')') orelse return true;
+    var i = close_paren + 1;
+    while (i < data.len and data[i] == ' ') i += 1;
+    if (i < data.len and (data[i] == 'Z' or data[i] == 'X')) return false;
     return true;
 }
 
@@ -42,6 +54,10 @@ pub fn findStickyPaneWithAffinity(
         // spawning a duplicate just because it is not currently attached.
         if (pane.state == .sticky or pane.state == .attached or pane.state == .detached) {
             if (!isPidAlive(pane.child_pid)) continue;
+            // A pane whose pod died cannot be wired up again: skip it so the
+            // caller falls through to spawning a fresh pod instead of handing
+            // the frontend a dead pane.
+            if (!isPidAlive(pane.pod_pid)) continue;
             if (pane.sticky_pwd) |spwd| {
                 if (pane.sticky_key) |skey| {
                     if (skey == key and std.mem.eql(u8, spwd, pwd)) {

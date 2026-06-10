@@ -144,6 +144,10 @@ pub fn save(allocator: std.mem.Allocator, ses_state: *state.SesState) !void {
         if (p.sticky_key) |key| {
             try w.print(",\"sticky_key\":{d}", .{key});
         }
+        if (p.sticky_session_name) |ssn| {
+            try w.writeAll(",\"sticky_session_name\":");
+            try writeJsonString(w, ssn);
+        }
         if (p.session_id) |sid| {
             const hex_id: [32]u8 = std.fmt.bytesToHex(&sid, .lower);
             try w.writeAll(",\"session_id\":");
@@ -271,6 +275,13 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
             else
                 null;
             const sticky_key: ?u8 = if (obj.get("sticky_key")) |k| jsonU8(k) else null;
+            const sticky_session_name: ?[]const u8 = if (obj.get("sticky_session_name")) |v|
+                if (jsonString(v)) |ssn|
+                    (if (ssn.len > MAX_STICKY_PWD) null else try ses_state.allocator.dupe(u8, ssn))
+                else
+                    null
+            else
+                null;
 
             const stored_state: state.PaneState = if (std.mem.eql(u8, state_str, "attached")) .attached else if (std.mem.eql(u8, state_str, "detached")) .detached else if (std.mem.eql(u8, state_str, "sticky")) .sticky else .orphaned;
             const pane_state: state.PaneState = if (stored_state == .attached)
@@ -295,18 +306,28 @@ pub fn load(_: std.mem.Allocator, ses_state: *state.SesState) !void {
                 .pod_socket_path = owned_socket,
                 .child_pid = child_pid,
                 .state = pane_state,
+                // pane_id is an ephemeral SES-side routing id: it is not
+                // persisted, so every recovered pane must get a fresh one.
+                // Leaving the default (0) gives ALL recovered panes the same
+                // id and corrupts the pane_id->pod VT routing tables.
+                .pane_id = ses_state.store.allocPaneId(),
                 .sticky_pwd = sticky_pwd,
                 .sticky_key = sticky_key,
+                .sticky_session_name = sticky_session_name,
                 .attached_to = null,
                 .session_id = session_id,
                 .created_at = std.time.timestamp(),
-                .orphaned_at = null,
+                // Restart the cleanup clock: recovered panes are unowned, and
+                // a null orphaned_at makes the orphan-timeout sweep skip them
+                // forever.
+                .orphaned_at = if (pane_state == .attached) null else std.time.timestamp(),
                 .allocator = ses_state.allocator,
             };
             ses_state.store.panes.put(uuid, pane) catch {
                 ses_state.allocator.free(owned_socket);
                 if (name) |nn| ses_state.allocator.free(nn);
                 if (sticky_pwd) |pwd| ses_state.allocator.free(pwd);
+                if (sticky_session_name) |ssn| ses_state.allocator.free(ssn);
             };
         }
     }

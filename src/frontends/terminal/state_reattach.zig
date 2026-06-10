@@ -461,6 +461,22 @@ fn restoreFloatPane(
     actual_focus_uuid: ?[32]u8,
 ) ?*Pane {
     if (used_uuids.contains(float_state.pane_uuid)) return null;
+
+    // During an attached-snapshot rebuild, a sticky/per-CWD float entry with
+    // no local view and no adoption record is parked: another client owns the
+    // pod right now. Skip it without touching SES — the info-snapshot path in
+    // ensureAdoptInfo would otherwise build a ghost view around a pane whose
+    // VT is routed to a different frontend. Reconciliation (adoptStickyPanes)
+    // or an explicit toggle claims it back when it is free.
+    if (attached_snapshot and (float_state.sticky or float_state.is_pwd)) {
+        const locally_known = uuid_pane_map.contains(float_state.pane_uuid) or
+            (existing_views != null and existing_views.?.contains(float_state.pane_uuid));
+        if (!locally_known) {
+            terminal_main.debugLogUuid(&float_state.pane_uuid, "restoreFloatPane: skipping parked sticky float", .{});
+            return null;
+        }
+    }
+
     const info = ensureAdoptInfo(self, float_state.pane_uuid, uuid_pane_map, existing_views, attached_snapshot) orelse {
         terminal_main.debugLogUuid(&float_state.pane_uuid, "restoreFloatPane: missing adopt info", .{});
         return null;
@@ -592,17 +608,40 @@ fn layoutMatchesSnapshot(layout: *const layout_mod.Layout, node: ?*const LayoutN
     };
 }
 
+fn hasLocalFloatView(self: anytype, pane_uuid: [32]u8) bool {
+    for (self.view.float_views.items) |pane| {
+        if (std.mem.eql(u8, &pane.uuid, &pane_uuid)) return true;
+    }
+    return false;
+}
+
 fn canApplySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) bool {
     if (self.view.tab_views.items.len != snapshot.tabs.items.len) return false;
-    if (self.view.float_views.items.len != snapshot.floats.items.len) return false;
+
+    // Parked sticky/per-CWD floats stay in the snapshot while another client
+    // owns their pod; they have no local view and do not block the
+    // incremental path. Any other float mismatch forces a rebuild.
+    var matched_floats: usize = 0;
+    var live_floats: usize = 0;
+    for (snapshot.floats.items) |float_state| {
+        if (hasLocalFloatView(self, float_state.pane_uuid)) {
+            matched_floats += 1;
+            live_floats += 1;
+        } else if (!float_state.sticky and !float_state.is_pwd) {
+            return false;
+        }
+    }
+    if (matched_floats != self.view.float_views.items.len) return false;
 
     // The incremental path is safe only when float visibility/focus stays in a
     // simple "one active visible float" shape. Hidden/background/per-tab floats
     // have been the crashy case during toggle-hide, so force the conservative
-    // rebuild path there.
-    if (snapshot.floats.items.len > 0) {
+    // rebuild path there. Parked floats are exempt: they have no view to
+    // update, so their hidden state cannot desync anything locally.
+    if (live_floats > 0) {
         if (snapshot.active_float_uuid == null) return false;
         for (snapshot.floats.items) |float_state| {
+            if (!hasLocalFloatView(self, float_state.pane_uuid)) continue;
             if (float_state.parent_tab != null) {
                 if (!float_state.visible) return false;
             } else {
@@ -622,10 +661,6 @@ fn canApplySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot
         const live_tab = &self.view.tab_views.items[idx];
         if (live_tab.layout.splits.count() != countSessionLayoutPanes(snapshot_tab.root)) return false;
         if (!layoutMatchesSnapshot(&live_tab.layout, live_tab.layout.root, snapshot_tab.root)) return false;
-    }
-
-    for (snapshot.floats.items, 0..) |float_state, idx| {
-        if (!std.mem.eql(u8, &self.view.float_views.items[idx].uuid, &float_state.pane_uuid)) return false;
     }
 
     return true;
@@ -708,8 +743,13 @@ fn applySnapshotIncrementally(self: anytype, snapshot: *const SessionSnapshot) b
         applyTabSnapshotFocus(&self.view.tab_views.items[idx], snapshot_tab.focused_pane_uuid, snapshot.focused_pane_uuid);
     }
 
-    for (snapshot.floats.items, 0..) |float_state, idx| {
-        updateFloatPresentation(self, self.view.float_views.items[idx], float_state, snapshot.focused_pane_uuid);
+    for (snapshot.floats.items) |float_state| {
+        for (self.view.float_views.items) |pane| {
+            if (std.mem.eql(u8, &pane.uuid, &float_state.pane_uuid)) {
+                updateFloatPresentation(self, pane, float_state, snapshot.focused_pane_uuid);
+                break;
+            }
+        }
     }
 
     for (self.view.tab_views.items) |*tab| {

@@ -104,6 +104,38 @@ fn pruneDetachedSessionPanes(self: anytype, session_id: [16]u8) void {
             prunePaneFromDetachedSnapshot(self.allocator, &self.store, session_id, pane_uuid);
         }
     }
+
+    // Sticky/per-CWD float entries are kept in the snapshot even when their
+    // pane is owned elsewhere at detach time, so they are not covered by the
+    // pane_uuids sweep above. Drop the ones whose pod is gone for good; a
+    // float owned by a live client is alive by definition and stays.
+    const detached_after = self.store.detached_sessions.getPtr(session_id) orelse return;
+    var stale_floats: std.ArrayList([32]u8) = .empty;
+    defer stale_floats.deinit(self.allocator);
+
+    for (detached_after.session_snapshot.floats.items) |float_state| {
+        const pane = self.store.panes.getPtr(float_state.pane_uuid) orelse {
+            stale_floats.append(self.allocator, float_state.pane_uuid) catch |err| {
+                core.logging.logError("ses", "failed to collect missing detached float for pruning", err);
+            };
+            continue;
+        };
+        if (pane.attached_to == null and paneProcessDead(pane)) {
+            stale_floats.append(self.allocator, float_state.pane_uuid) catch |err| {
+                core.logging.logError("ses", "failed to collect dead detached float for pruning", err);
+            };
+        }
+    }
+
+    for (stale_floats.items) |pane_uuid| {
+        ses.debugLog("pruneDetachedSessionPanes: dropping stale float uuid={s}", .{pane_uuid[0..8]});
+        if (self.store.panes.contains(pane_uuid)) {
+            self.killPane(pane_uuid) catch |err| {
+                core.logging.logError("ses", "killPane failed pruning detached float", err);
+            };
+        }
+        snapshot_mod.removePaneFromSessionSnapshot(self.allocator, &detached_after.session_snapshot, pane_uuid);
+    }
 }
 
 pub fn detachSessionDirect(self: anytype, client: *store_mod.Client, session_id: [16]u8) bool {
@@ -127,7 +159,7 @@ pub fn detachSessionDirect(self: anytype, client: *store_mod.Client, session_id:
         pane_uuids_list.deinit(self.allocator);
         return false;
     };
-    client_panes.pruneSnapshotToPaneList(self.allocator, &session_snapshot, pane_uuids_list.items) catch |err| {
+    client_panes.pruneSnapshotToPaneList(self.allocator, &self.store, &session_snapshot, pane_uuids_list.items) catch |err| {
         core.logging.logError("ses", "failed to prune detached session snapshot", err);
         pane_uuids_list.deinit(self.allocator);
         session_snapshot.deinit();
@@ -208,7 +240,7 @@ pub fn detachSession(self: anytype, client_id: usize, session_id: [16]u8) bool {
                 return false;
             };
             if (detached_snapshot) |*snapshot| {
-                client_panes.pruneSnapshotToPaneList(self.allocator, snapshot, pane_uuids_list.items) catch |err| {
+                client_panes.pruneSnapshotToPaneList(self.allocator, &self.store, snapshot, pane_uuids_list.items) catch |err| {
                     core.logging.logError("ses", "failed to prune detached session snapshot", err);
                     pane_uuids_list.deinit(self.allocator);
                     var owned_snapshot = snapshot.*;

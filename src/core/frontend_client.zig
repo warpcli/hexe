@@ -365,9 +365,36 @@ pub const SesClient = struct {
         return resolved;
     }
 
+    /// Reconnect hygiene: a fresh connection must not inherit fds or queued
+    /// responses from a previous one. Stale queued responses can match a new
+    /// request_id and attribute an old connection's reply to a new operation;
+    /// stale fds simply leak.
+    fn resetConnectionState(self: *SesClient) void {
+        if (self.ctl_fd) |old_fd| {
+            posix.close(old_fd);
+            self.ctl_fd = null;
+        }
+        if (self.vt_fd) |old_fd| {
+            posix.close(old_fd);
+            self.vt_fd = null;
+        }
+        for (self.pending_cwd_responses.items) |resp| self.allocator.free(resp.cwd);
+        self.pending_cwd_responses.clearRetainingCapacity();
+        for (self.pending_pane_info_responses.items) |*resp| resp.deinit(self.allocator);
+        self.pending_pane_info_responses.clearRetainingCapacity();
+        self.pending_pane_exits.clearRetainingCapacity();
+        for (self.pending_control_responses.items) |*resp| resp.deinit(self.allocator);
+        self.pending_control_responses.clearRetainingCapacity();
+        if (self.pending_session_state) |json| {
+            self.allocator.free(json);
+            self.pending_session_state = null;
+        }
+    }
+
     /// Connect to the ses daemon, starting it if necessary.
     /// Opens CTL channel, registers, then opens VT channel.
     pub fn connect(self: *SesClient) !void {
+        self.resetConnectionState();
         switch (self.transport) {
             .local_ipc => |transport| try self.connectLocalIpc(transport),
             .liblink => |transport| try self.connectLiblink(transport),
@@ -932,12 +959,17 @@ pub const SesClient = struct {
         };
     }
 
-    /// Find a sticky pane (for pwd floats).
-    pub fn findStickyPane(self: *SesClient, pwd: []const u8, key: u8) !?struct { uuid: [32]u8, pane_id: u16, pid: posix.pid_t } {
+    /// Find a sticky pane (for pwd floats). With `claim_free` set, SES only
+    /// returns (and attaches) the pane when no live client owns it and it is
+    /// not parked in a detached session — a safe, non-stealing lookup for
+    /// speculative reconciliation. With it unset, SES performs the full
+    /// user-driven handoff (steal from live owner / unpark from detached).
+    pub fn findStickyPane(self: *SesClient, pwd: []const u8, key: u8, claim_free: bool) !?struct { uuid: [32]u8, pane_id: u16, pid: posix.pid_t } {
         const fd = self.ctl_fd orelse return error.NotConnected;
 
         var msg: wire.FindSticky = .{
             .key = key,
+            .claim_free = if (claim_free) 1 else 0,
             .pwd_len = @intCast(pwd.len),
         };
         const request_id = try self.writeControlTrailRequest(fd, .find_sticky, std.mem.asBytes(&msg), pwd);

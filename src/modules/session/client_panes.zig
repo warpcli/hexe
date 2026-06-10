@@ -60,17 +60,31 @@ pub fn collectDetachPaneUuidsWithFallback(
 
 pub fn pruneSnapshotToPaneList(
     allocator: std.mem.Allocator,
+    store: *store_mod.SessionStore,
     snapshot: *core.session_model.SessionSnapshot,
     pane_uuids: []const [32]u8,
 ) !void {
     var to_remove: std.ArrayList([32]u8) = .empty;
     defer to_remove.deinit(allocator);
 
-    var pane_iter = snapshot.panes.keyIterator();
-    while (pane_iter.next()) |uuid| {
-        if (!snapshot_mod.paneUuidInList(pane_uuids, uuid.*)) {
-            try to_remove.append(allocator, uuid.*);
+    var pane_iter = snapshot.panes.iterator();
+    while (pane_iter.next()) |entry| {
+        if (snapshot_mod.paneUuidInList(pane_uuids, entry.key_ptr.*)) continue;
+
+        // Sticky/per-CWD float identities stay in the session snapshot even
+        // when another client currently owns the pod. The pane is not
+        // adoptable by this session right now (it is not in pane_uuids), but
+        // dropping the float entry here is how sessions permanently "forget"
+        // their shared floats. Reattach restores it once the pane is free
+        // again; the reattach-time prune sweeps it if the process died.
+        if (entry.value_ptr.kind == .float and
+            (entry.value_ptr.sticky or entry.value_ptr.is_pwd) and
+            store.panes.contains(entry.key_ptr.*))
+        {
+            continue;
         }
+
+        try to_remove.append(allocator, entry.key_ptr.*);
     }
 
     for (to_remove.items) |uuid| {

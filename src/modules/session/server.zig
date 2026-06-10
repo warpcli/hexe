@@ -654,6 +654,18 @@ pub const Server = struct {
                 posix.close(kv.value);
             }
 
+            // If this was a POD CTL uplink, drop the pane's reference before
+            // the fd number can be reused by a new connection.
+            var pane_iter = self.ses_state.store.panes.valueIterator();
+            while (pane_iter.next()) |pane| {
+                if (pane.pod_ctl_fd) |pod_fd| {
+                    if (pod_fd == pending.fd) {
+                        pane.pod_ctl_fd = null;
+                        break;
+                    }
+                }
+            }
+
             if (!closed_by_client_remove) {
                 posix.close(pending.fd);
             }
@@ -1671,6 +1683,7 @@ pub const Server = struct {
                     return false;
                 }
                 const pu = wire.readStruct(wire.PaneUuid, fd) catch |err| {
+                    self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "failed to read pane_info payload", err);
                     return false;
                 };
@@ -1752,16 +1765,28 @@ pub const Server = struct {
         return true;
     }
 
-    fn skipBinaryPayload(_: *Server, fd: posix.fd_t, len: u32, buf: []u8) void {
+    fn skipBinaryPayload(self: *Server, fd: posix.fd_t, len: u32, buf: []u8) void {
         var remaining: usize = len;
         while (remaining > 0) {
             const chunk = @min(remaining, buf.len);
             wire.readExact(fd, buf[0..chunk]) catch |err| {
                 core.logging.logError("ses", "failed to skip CTL payload", err);
+                // The skip consumed an unknown number of bytes: the stream
+                // framing is unrecoverable, so tear the connection down.
+                self.ctlStreamDesynced(fd, "payload skip failed");
                 return;
             };
             remaining -= chunk;
         }
+    }
+
+    /// A read failed partway through a message body: an unknown number of
+    /// payload bytes were consumed, so every subsequent header read on this
+    /// connection would parse garbage. The only safe recovery is to close the
+    /// connection; the peer (mux or pod) reconnects through its normal path.
+    fn ctlStreamDesynced(self: *Server, fd: posix.fd_t, comptime context: []const u8) void {
+        core.logging.warnWithSource("ses", "CTL stream desynced (" ++ context ++ "): fd={d}, closing connection", .{fd}, @src());
+        self.queueCtlClose(fd, null);
     }
 
     fn sendBinaryError(self: *Server, fd: posix.fd_t, msg: []const u8) void {
@@ -1776,6 +1801,7 @@ pub const Server = struct {
             return;
         }
         const reg = wire.readStruct(wire.FrontendRegister, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "register request read failed", err);
             self.sendBinaryError(fd, "register: read failed");
             return;
@@ -1800,6 +1826,7 @@ pub const Server = struct {
             }
             if (trailing_len <= buf.len) {
                 wire.readExact(fd, buf[0..trailing_len]) catch |err| {
+                    self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "register trailing payload read failed", err);
                     self.sendBinaryError(fd, "register: name read failed");
                     return;
@@ -1917,6 +1944,7 @@ pub const Server = struct {
             return;
         }
         const msg = wire.readStruct(wire.SessionAddTab, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "session_add_tab request read failed", err);
             self.sendBinaryError(fd, "session_add_tab: read failed");
             return;
@@ -1928,6 +1956,7 @@ pub const Server = struct {
         }
         if (msg.name_len > 0) {
             wire.readExact(fd, buf[0..msg.name_len]) catch |err| {
+                self.ctlStreamDesynced(fd, "mid-message read failed");
                 core.logging.logError("ses", "session_add_tab name read failed", err);
                 self.sendBinaryError(fd, "session_add_tab: name read failed");
                 return;
@@ -1961,6 +1990,7 @@ pub const Server = struct {
             return;
         }
         const msg = wire.readStruct(wire.SessionRemoveTab, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "session_remove_tab request read failed", err);
             self.sendBinaryError(fd, "session_remove_tab: read failed");
             return;
@@ -1992,6 +2022,7 @@ pub const Server = struct {
             return;
         }
         const msg = wire.readStruct(wire.SessionSyncFloat, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "session_sync_float request read failed", err);
             self.sendBinaryError(fd, "session_sync_float: read failed");
             return;
@@ -2035,6 +2066,7 @@ pub const Server = struct {
             return;
         }
         const msg = wire.readStruct(wire.SessionRemoveFloat, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "session_remove_float request read failed", err);
             self.sendBinaryError(fd, "session_remove_float: read failed");
             return;
@@ -2062,6 +2094,7 @@ pub const Server = struct {
             return;
         }
         const msg = wire.readStruct(wire.SessionSplitPane, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "session_split_pane request read failed", err);
             self.sendBinaryError(fd, "session_split_pane: read failed");
             return;
@@ -2111,6 +2144,7 @@ pub const Server = struct {
             return;
         }
         const msg = wire.readStruct(wire.SessionReplaceSplitPane, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "session_replace_split_pane request read failed", err);
             self.sendBinaryError(fd, "session_replace_split_pane: read failed");
             return;
@@ -2151,6 +2185,7 @@ pub const Server = struct {
             return;
         }
         const msg = wire.readStruct(wire.SessionSetSplitRatio, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "session_set_split_ratio request read failed", err);
             self.sendBinaryError(fd, "session_set_split_ratio: read failed");
             return;
@@ -2191,6 +2226,7 @@ pub const Server = struct {
             return;
         }
         const cp = wire.readStruct(wire.CreatePane, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "create_pane request read failed", err);
             self.sendBinaryError(fd, "create_pane: read failed");
             return;
@@ -2205,6 +2241,7 @@ pub const Server = struct {
         }
         if (trail_len > 0) {
             wire.readExact(fd, buf[0..trail_len]) catch |err| {
+                self.ctlStreamDesynced(fd, "mid-message read failed");
                 core.logging.logError("ses", "create_pane trail read failed", err);
                 self.sendBinaryError(fd, "create_pane: trail read failed");
                 return;
@@ -2339,7 +2376,7 @@ pub const Server = struct {
                     null;
 
                 if (self.ses_state.findStickyPaneWithAffinity(pwd, key, preferred_session)) |existing| {
-                    if (existing.state == .detached) {
+                    if (existing.state == .detached or self.ses_state.isPaneParked(existing)) {
                         self.ses_state.removePaneFromDetachedSessions(existing.uuid);
                     }
                     if (existing.attached_to) |owner_id| {
@@ -2429,6 +2466,7 @@ pub const Server = struct {
             return;
         }
         const fs = wire.readStruct(wire.FindSticky, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "find_sticky request read failed", err);
             self.sendBinaryError(fd, "find_sticky: read failed");
             return;
@@ -2440,6 +2478,7 @@ pub const Server = struct {
         }
         if (fs.pwd_len > 0) {
             wire.readExact(fd, buf[0..fs.pwd_len]) catch |err| {
+                self.ctlStreamDesynced(fd, "mid-message read failed");
                 core.logging.logError("ses", "find_sticky pwd read failed", err);
                 self.sendBinaryError(fd, "find_sticky: pwd read failed");
                 return;
@@ -2459,15 +2498,38 @@ pub const Server = struct {
             null;
 
         if (self.ses_state.findStickyPaneWithAffinity(pwd, fs.key, preferred_session)) |pane| {
-            if (pane.state == .detached) {
-                self.ses_state.removePaneFromDetachedSessions(pane.uuid);
-            }
             var already_attached_to_client = false;
             if (pane.attached_to) |owner_id| {
-                if (owner_id != client_id) {
-                    _ = self.ses_state.stealAttachedPane(pane.uuid, client_id);
-                } else {
-                    already_attached_to_client = true;
+                already_attached_to_client = owner_id == client_id;
+            }
+
+            if (fs.claim_free != 0 and !already_attached_to_client) {
+                // Claim-free lookups (startup/reattach reconciliation) must
+                // never steal: refuse panes owned by another live client and
+                // panes parked inside a detached session's adoptable set. The
+                // explicit toggle handoff path uses claim_free=0 instead.
+                if (pane.attached_to) |owner_id| {
+                    if (self.ses_state.getClient(owner_id) != null) {
+                        ses.debugLog("find_sticky: claim_free refused, uuid={s} owned by live client {d}", .{ pane.uuid[0..8], owner_id });
+                        self.replyOrClose(fd, .pane_not_found, &.{});
+                        return;
+                    }
+                }
+                if (self.ses_state.isPaneParked(pane)) {
+                    ses.debugLog("find_sticky: claim_free refused, uuid={s} parked in detached session", .{pane.uuid[0..8]});
+                    self.replyOrClose(fd, .pane_not_found, &.{});
+                    return;
+                }
+            }
+
+            if (pane.state == .detached or self.ses_state.isPaneParked(pane)) {
+                self.ses_state.removePaneFromDetachedSessions(pane.uuid);
+            }
+            if (!already_attached_to_client) {
+                if (pane.attached_to) |owner_id| {
+                    if (owner_id != client_id) {
+                        _ = self.ses_state.stealAttachedPane(pane.uuid, client_id);
+                    }
                 }
             }
 
@@ -2508,6 +2570,7 @@ pub const Server = struct {
             return;
         }
         const pu = wire.readStruct(wire.PaneUuid, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "orphan_pane request read failed", err);
             self.sendBinaryError(fd, "orphan_pane: read failed");
             return;
@@ -2528,6 +2591,7 @@ pub const Server = struct {
             return;
         }
         const pu = wire.readStruct(wire.PaneUuid, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "adopt_pane request read failed", err);
             self.sendBinaryError(fd, "adopt_pane: read failed");
             return;
@@ -2569,6 +2633,7 @@ pub const Server = struct {
             return;
         }
         const pu = wire.readStruct(wire.PaneUuid, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "kill_pane request read failed", err);
             self.sendBinaryError(fd, "kill_pane: read failed");
             return;
@@ -2597,6 +2662,7 @@ pub const Server = struct {
             return;
         }
         const ss = wire.readStruct(wire.SetSticky, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "set_sticky request read failed", err);
             self.sendBinaryError(fd, "set_sticky: read failed");
             return;
@@ -2608,6 +2674,7 @@ pub const Server = struct {
         }
         if (ss.pwd_len > 0) {
             wire.readExact(fd, buf[0..ss.pwd_len]) catch |err| {
+                self.ctlStreamDesynced(fd, "mid-message read failed");
                 core.logging.logError("ses", "set_sticky pwd read failed", err);
                 self.sendBinaryError(fd, "set_sticky: pwd read failed");
                 return;
@@ -2664,6 +2731,7 @@ pub const Server = struct {
             return;
         }
         const gpc = wire.readStruct(wire.GetPaneCwd, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "get_pane_cwd request read failed", err);
             self.sendBinaryError(fd, "get_pane_cwd: read failed");
             return;
@@ -2791,6 +2859,7 @@ pub const Server = struct {
             return;
         }
         const det = wire.readStruct(wire.Detach, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "detach request read failed", err);
             self.sendBinaryError(fd, "detach: read failed");
             return;
@@ -2845,6 +2914,7 @@ pub const Server = struct {
             return;
         }
         const ra = wire.readStruct(wire.Reattach, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "reattach request read failed", err);
             self.sendBinaryError(fd, "reattach: read failed");
             return;
@@ -2855,6 +2925,7 @@ pub const Server = struct {
             return;
         }
         wire.readExact(fd, buf[0..ra.id_len]) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "reattach id read failed", err);
             self.sendBinaryError(fd, "reattach: id read failed");
             return;
@@ -3157,6 +3228,7 @@ pub const Server = struct {
             return;
         }
         const dc = wire.readStruct(wire.Disconnect, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "disconnect request read failed", err);
             self.sendBinaryError(fd, "disconnect: read failed");
             return;
@@ -3190,6 +3262,7 @@ pub const Server = struct {
             return;
         }
         const upn = wire.readStruct(wire.UpdatePaneName, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "update_pane_name request read failed", err);
             self.sendBinaryError(fd, "update_pane_name: read failed");
             return;
@@ -3201,6 +3274,7 @@ pub const Server = struct {
         }
         if (upn.name_len > 0) {
             wire.readExact(fd, buf[0..upn.name_len]) catch |err| {
+                self.ctlStreamDesynced(fd, "mid-message read failed");
                 core.logging.logError("ses", "update_pane_name name read failed", err);
                 self.sendBinaryError(fd, "update_pane_name: name read failed");
                 return;
@@ -3230,6 +3304,7 @@ pub const Server = struct {
             return;
         }
         const upa = wire.readStruct(wire.UpdatePaneAux, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "update_pane_aux request read failed", err);
             self.sendBinaryError(fd, "update_pane_aux: read failed");
             return;
@@ -3264,6 +3339,7 @@ pub const Server = struct {
             return;
         }
         const ups = wire.readStruct(wire.UpdatePaneShell, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "update_pane_shell request read failed", err);
             self.sendBinaryError(fd, "update_pane_shell: read failed");
             return;
@@ -3276,6 +3352,7 @@ pub const Server = struct {
         }
         if (trail_len > 0) {
             wire.readExact(fd, buf[0..trail_len]) catch |err| {
+                self.ctlStreamDesynced(fd, "mid-message read failed");
                 core.logging.logError("ses", "update_pane_shell trail read failed", err);
                 self.sendBinaryError(fd, "update_pane_shell: trail read failed");
                 return;
@@ -3347,6 +3424,7 @@ pub const Server = struct {
             return;
         }
         const pr = wire.readStruct(wire.PopResponse, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "pop_response request read failed", err);
             self.sendBinaryError(fd, "pop_response: read failed");
             return;
@@ -3369,6 +3447,7 @@ pub const Server = struct {
             return;
         }
         const cc = wire.readStruct(wire.CwdChanged, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.warnWithSource("ses", "cwd_changed read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
             return;
         };
@@ -3379,6 +3458,7 @@ pub const Server = struct {
         }
         if (cc.cwd_len > 0) {
             wire.readExact(fd, buf[0..cc.cwd_len]) catch |err| {
+                self.ctlStreamDesynced(fd, "mid-message read failed");
                 core.logging.warnWithSource("ses", "cwd_changed path read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
                 return;
             };
@@ -3406,6 +3486,7 @@ pub const Server = struct {
             return;
         }
         const fc = wire.readStruct(wire.FgChanged, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.warnWithSource("ses", "fg_changed read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
             return;
         };
@@ -3416,6 +3497,7 @@ pub const Server = struct {
         }
         if (fc.name_len > 0) {
             wire.readExact(fd, buf[0..fc.name_len]) catch |err| {
+                self.ctlStreamDesynced(fd, "mid-message read failed");
                 core.logging.warnWithSource("ses", "fg_changed name read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
                 return;
             };
@@ -3444,6 +3526,7 @@ pub const Server = struct {
             return;
         }
         const ev = wire.readStruct(wire.ShpShellEvent, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.warnWithSource("ses", "shell_event read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
             return;
         };
@@ -3454,6 +3537,7 @@ pub const Server = struct {
         }
         if (trail_len > 0) {
             wire.readExact(fd, buf[0..trail_len]) catch |err| {
+                self.ctlStreamDesynced(fd, "mid-message read failed");
                 core.logging.warnWithSource("ses", "shell_event trail read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
                 return;
             };
@@ -3512,6 +3596,7 @@ pub const Server = struct {
             return;
         }
         const ex = wire.readStruct(wire.Exited, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.warnWithSource("ses", "exited read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
             return;
         };
@@ -3556,6 +3641,7 @@ pub const Server = struct {
                     return;
                 }
                 const fm = wire.readStruct(wire.FocusMove, fd) catch |err| {
+                    self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "focus_move read failed", err);
                     self.closeCliRequest(fd, "focus_move read failed");
                     return;
@@ -3575,6 +3661,7 @@ pub const Server = struct {
                     return;
                 }
                 const ei = wire.readStruct(wire.ExitIntent, fd) catch |err| {
+                    self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "exit_intent read failed", err);
                     self.closeCliRequest(fd, "exit_intent read failed");
                     return;
@@ -3607,6 +3694,7 @@ pub const Server = struct {
                 }
                 const payload_len = hdr.payload_len;
                 const fr = wire.readStruct(wire.FloatRequest, fd) catch |err| {
+                    self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "float_request read failed", err);
                     self.closeCliRequest(fd, "float_request read failed");
                     return;
@@ -3619,6 +3707,7 @@ pub const Server = struct {
                 }
                 if (trail_len > 0) {
                     wire.readExact(fd, buf[0..trail_len]) catch |err| {
+                        self.ctlStreamDesynced(fd, "mid-message read failed");
                         core.logging.logError("ses", "float_request trail read failed", err);
                         self.closeCliRequest(fd, "float_request trail read failed");
                         return;
@@ -3658,6 +3747,7 @@ pub const Server = struct {
                 }
                 if (hdr.payload_len > 0) {
                     wire.readExact(fd, buf[0..hdr.payload_len]) catch |err| {
+                        self.ctlStreamDesynced(fd, "mid-message read failed");
                         core.logging.logError("ses", "notify payload read failed", err);
                         self.closeCliRequest(fd, "notify payload read failed");
                         return;
@@ -3680,6 +3770,7 @@ pub const Server = struct {
                     return;
                 }
                 wire.readExact(fd, buf[0..hdr.payload_len]) catch |err| {
+                    self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "send_keys payload read failed", err);
                     self.closeCliRequest(fd, "send_keys payload read failed");
                     return;
@@ -3708,6 +3799,7 @@ pub const Server = struct {
                     return;
                 }
                 wire.readExact(fd, buf[0..hdr.payload_len]) catch |err| {
+                    self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "targeted_notify payload read failed", err);
                     self.closeCliRequest(fd, "targeted_notify payload read failed");
                     return;
@@ -3729,6 +3821,7 @@ pub const Server = struct {
                 }
                 if (hdr.payload_len > 0) {
                     wire.readExact(fd, buf[0..hdr.payload_len]) catch |err| {
+                        self.ctlStreamDesynced(fd, "mid-message read failed");
                         core.logging.logError("ses", "broadcast_notify payload read failed", err);
                         self.closeCliRequest(fd, "broadcast_notify payload read failed");
                         return;
@@ -3752,6 +3845,7 @@ pub const Server = struct {
                     return;
                 }
                 wire.readExact(fd, buf[0..hdr.payload_len]) catch |err| {
+                    self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "pop_confirm payload read failed", err);
                     self.closeCliRequest(fd, "pop_confirm payload read failed");
                     return;
@@ -3786,6 +3880,7 @@ pub const Server = struct {
                     return;
                 }
                 wire.readExact(fd, buf[0..hdr.payload_len]) catch |err| {
+                    self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "pop_choose payload read failed", err);
                     self.closeCliRequest(fd, "pop_choose payload read failed");
                     return;
@@ -3816,6 +3911,7 @@ pub const Server = struct {
                     return;
                 }
                 const pu = wire.readStruct(wire.PaneUuid, fd) catch |err| {
+                    self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.logError("ses", "pane_info payload read failed", err);
                     self.closeCliRequest(fd, "pane_info payload read failed");
                     return;
@@ -3829,6 +3925,7 @@ pub const Server = struct {
                 if (hdr.payload_len >= 1) {
                     var flag: [1]u8 = undefined;
                     wire.readExact(fd, &flag) catch |err| {
+                        self.ctlStreamDesynced(fd, "mid-message read failed");
                         core.logging.logError("ses", "status flag read failed", err);
                         self.closeCliRequest(fd, "status flag read failed");
                         return;
@@ -3880,6 +3977,7 @@ pub const Server = struct {
             return;
         }
         const result = wire.readStruct(wire.ExitIntentResult, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "exit_intent_result request read failed", err);
             self.sendBinaryError(fd, "exit_intent_result: read failed");
             return;
@@ -3901,6 +3999,7 @@ pub const Server = struct {
             return;
         }
         const result = wire.readStruct(wire.FloatResult, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "float_result request read failed", err);
             self.sendBinaryError(fd, "float_result: read failed");
             return;
@@ -3920,11 +4019,17 @@ pub const Server = struct {
         }
 
         if (cli_fd) |cfd| {
-            // Forward the full message to CLI.
+            // Forward the full message to CLI. The CLI fd is closed via the
+            // pending-close queue in every branch: replyOrClose/sendBinaryError
+            // already queue it on write failure, and a direct posix.close here
+            // would double-close the same fd number (which may have been
+            // reused by then). queueCtlClose dedups, so routing the success
+            // path through it too gives the fd exactly one owner.
             if (trail_len > 0 and trail_len <= buf.len) {
                 wire.readExact(fd, buf[0..trail_len]) catch |err| {
+                    self.ctlStreamDesynced(fd, "mid-message read failed");
                     core.logging.warnWithSource("ses", "float_result trail read failed: fd={d} err={s}", .{ fd, @errorName(err) }, @src());
-                    posix.close(cfd);
+                    self.queueCtlClose(cfd, null);
                     return;
                 };
                 self.replyOrCloseWithTrail(cfd, .float_result, std.mem.asBytes(&result), buf[0..trail_len]);
@@ -3935,7 +4040,7 @@ pub const Server = struct {
             } else {
                 self.replyOrClose(cfd, .float_result, std.mem.asBytes(&result));
             }
-            posix.close(cfd);
+            self.queueCtlClose(cfd, null);
         } else {
             // No CLI waiting — skip trailing data.
             core.logging.warn("ses", "float_result arrived without pending CLI fd for uuid={s}", .{result.uuid[0..8]});
@@ -4332,6 +4437,7 @@ pub const Server = struct {
         }
 
         const ks = wire.readStruct(wire.KillSession, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "kill_session request read failed", err);
             const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 11 };
             self.replyOrCloseWithTrail(fd, .kill_session, std.mem.asBytes(&result), "read failed");
@@ -4345,6 +4451,7 @@ pub const Server = struct {
         }
 
         wire.readExact(fd, buf[0..ks.id_len]) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "kill_session id read failed", err);
             const result = wire.KillSessionResult{ .success = 0, .killed_panes = 0, .error_len = 11 };
             self.replyOrCloseWithTrail(fd, .kill_session, std.mem.asBytes(&result), "read failed");
@@ -4562,6 +4669,7 @@ pub const Server = struct {
             return;
         }
         const pu = wire.readStruct(wire.PaneUuid, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "get_layout pane uuid read failed", err);
             self.sendBinaryError(fd, "read failed");
             return;
@@ -4600,6 +4708,7 @@ pub const Server = struct {
 
         var hex_uuid: [32]u8 = undefined;
         wire.readExact(fd, &hex_uuid) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "get_session_state uuid read failed", err);
             self.sendBinaryError(fd, "read failed");
             return;
@@ -4660,6 +4769,7 @@ pub const Server = struct {
         }
 
         const al = wire.readStruct(wire.ApplyLayout, fd) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "apply_layout request read failed", err);
             self.sendBinaryError(fd, "read failed");
             return;
@@ -4679,6 +4789,7 @@ pub const Server = struct {
         defer self.allocator.free(json_buf);
 
         wire.readExact(fd, json_buf) catch |err| {
+            self.ctlStreamDesynced(fd, "mid-message read failed");
             core.logging.logError("ses", "apply_layout json read failed", err);
             self.sendBinaryError(fd, "read json failed");
             return;

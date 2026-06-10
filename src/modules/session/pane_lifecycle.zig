@@ -3,6 +3,7 @@ const posix = std.posix;
 const core = @import("core");
 const wire = core.wire;
 const ses = @import("main.zig");
+const detached_sessions = @import("detached_sessions.zig");
 const snapshot_mod = @import("snapshot.zig");
 const sticky_panes = @import("sticky_panes.zig");
 const store_mod = @import("store.zig");
@@ -127,6 +128,9 @@ pub fn stealAttachedPane(self: anytype, uuid: [32]u8, new_client_id: usize) bool
     } else {
         _ = pane.transitionState(.orphaned, "pane takeover");
     }
+    // A stolen pane is free, not parked: a stale session marker here would
+    // make later claims look like cross-session theft and get refused.
+    pane.session_id = null;
     pane.orphaned_at = std.time.timestamp();
     self.store.dirty = true;
     return true;
@@ -163,6 +167,31 @@ pub fn attachPane(self: anytype, uuid: [32]u8, client_id: usize) !*store_mod.Pan
     // Add to the client's pane list before mutating pane ownership. If the
     // client is gone, the pane must remain adoptable/orphaned.
     const client = self.getClient(client_id) orelse return error.ClientNotFound;
+
+    // A pane parked inside a detached session's adoptable pane set belongs to
+    // that session: only a client reattaching (or attached to) that exact
+    // session may adopt it directly. Cross-session takeover of sticky panes
+    // must go through the explicit find_sticky/create_pane claim paths, which
+    // unpark the pane via removePaneFromDetachedSessions first. Parked status
+    // is membership in pane_uuids — pane.session_id alone is a historical
+    // marker that can go stale and must not block free sticky panes.
+    if (pane.attached_to == null and detached_sessions.isPaneParked(&self.store, pane)) {
+        const sid = pane.session_id.?;
+        const allowed = blk: {
+            if (client.pending_reattach_session_id) |pending| {
+                if (std.mem.eql(u8, &pending, &sid)) break :blk true;
+            }
+            if (client.session_id) |csid| {
+                if (std.mem.eql(u8, &csid, &sid)) break :blk true;
+            }
+            break :blk false;
+        };
+        if (!allowed) {
+            ses.debugLog("attachPane: refused, uuid={s} parked in another detached session", .{uuid[0..8]});
+            return error.PaneParkedInOtherSession;
+        }
+    }
+
     try client.appendUuid(uuid);
 
     // Only request deferred VT reconnect/backlog replay when we currently
@@ -264,6 +293,8 @@ pub fn suspendPane(self: anytype, uuid: [32]u8) !void {
         ses.debugLog("suspendPane: {s} pwd={any}, key={any}", .{ uuid[0..8], pane.sticky_pwd != null, pane.sticky_key != null });
     }
     pane.attached_to = null;
+    // Suspended/disowned panes are free, not parked in any detached session.
+    pane.session_id = null;
     pane.orphaned_at = std.time.timestamp();
     self.store.dirty = true;
 }

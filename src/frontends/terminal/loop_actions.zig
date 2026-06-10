@@ -96,12 +96,12 @@ fn destroyBlockingFloat(state: *State, pane: *Pane) void {
             state.clearFloatUi(pane.uuid);
             pane.deinit();
             state.allocator.destroy(pane);
-            // Fix active_floating index.
-            if (state.activeFloatingIndex()) |afi| {
-                if (afi == i) {
-                    state.setActiveFloatingIndex(null);
-                } else if (afi > i) {
-                    state.setActiveFloatingIndex(afi - 1);
+            // Active-float tracking is uuid-based and self-adjusts across
+            // removals; only clear it when the removed float was the active
+            // one. Index-shifting here re-pointed it at the wrong float.
+            if (state.runtime.activeFloatUuid()) |active_uuid| {
+                if (std.mem.eql(u8, &active_uuid, &closing_uuid)) {
+                    state.setActiveFloatingUuid(null);
                 }
             }
             state.applyFrontendPaneRemoved(closing_uuid, null);
@@ -495,9 +495,16 @@ pub fn performClose(state: *State) void {
             terminal_main.debugLogUuid(&pane.uuid, "performClose: sending killPane to SES", .{});
             state.runtime.killPane(pane.uuid) catch |e| {
                 terminal_main.debugLogUuid(&pane.uuid, "performClose: killPane error: {s}", .{@errorName(e)});
-                state.notifications.show("Close float failed: session rejected pane kill");
-                state.needs_render = true;
-                return;
+                // SES may have already reaped the pane (e.g. the app inside
+                // exited and pod teardown won the race). In that case the kill
+                // failure is expected — proceed with local cleanup instead of
+                // leaving a dead float view that blocks the next toggle.
+                if (paneExistsInSes(state, pane.uuid)) {
+                    state.notifications.show("Close float failed: session rejected pane kill");
+                    state.needs_render = true;
+                    return;
+                }
+                terminal_main.debugLogUuid(&pane.uuid, "performClose: pane already gone in SES, cleaning up locally", .{});
             };
             terminal_main.debugLogUuid(&pane.uuid, "performClose: killPane done", .{});
         }
@@ -837,17 +844,19 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 }
 
                 const stale = state.view.float_views.orderedRemove(existing_idx);
+                const stale_uuid = stale.uuid;
                 state.clearLocalFloatState(stale.uuid);
                 state.clearTransientPaneState(stale);
                 state.clearFloatUi(stale.uuid);
                 stale.deinit();
                 state.allocator.destroy(stale);
 
-                if (state.activeFloatingIndex()) |af| {
-                    if (af == existing_idx) {
-                        state.setActiveFloatingIndex(null);
-                    } else if (af > existing_idx) {
-                        state.setActiveFloatingIndex(af - 1);
+                // Active-float tracking is uuid-based; only clear it when the
+                // stale float was active. Index-shifting re-pointed it at the
+                // wrong float.
+                if (state.runtime.activeFloatUuid()) |active_uuid| {
+                    if (std.mem.eql(u8, &active_uuid, &stale_uuid)) {
+                        state.setActiveFloatingUuid(null);
                     }
                 }
 
@@ -863,11 +872,11 @@ pub fn toggleNamedFloat(state: *State, float_def: *const core.LayoutFloatDef) vo
                 state.force_full_render = true;
                 state.renderer.invalidate();
 
-                // A visible stale float should clear on toggle; only hidden stale
-                // instances fall through to immediate recreation.
-                if (was_active or was_visible_on_tab) {
-                    return;
-                }
+                // The toggle key means "give me this tool": after clearing a
+                // stale instance — visible or hidden — fall through so a fresh
+                // float is created in the same keypress. Returning here made
+                // "close app, toggle key, nothing happens" a routine
+                // reliability complaint.
                 continue;
             }
 
@@ -1006,11 +1015,11 @@ fn rollbackCreatedFloat(state: *State, pane: *Pane) void {
     }
     if (idx) |i| {
         _ = state.view.float_views.orderedRemove(i);
-        if (state.activeFloatingIndex()) |active| {
-            if (active == i) {
-                state.setActiveFloatingIndex(null);
-            } else if (active > i) {
-                state.setActiveFloatingIndex(active - 1);
+        // Active-float tracking is uuid-based; only clear it when the removed
+        // float was the active one (index-shifting re-pointed it wrongly).
+        if (state.runtime.activeFloatUuid()) |active_uuid| {
+            if (std.mem.eql(u8, &active_uuid, &pane.uuid)) {
+                state.setActiveFloatingUuid(null);
             }
         }
     }
@@ -1195,7 +1204,9 @@ pub fn createNamedFloat(state: *State, float_def: *const core.LayoutFloatDef, cu
     const result: NamedFloatPaneResult = blk: {
         if (sticky_pwd) |pwd| {
             if (sticky_key) |key| {
-                if (state.runtime.findStickyPane(pwd, key)) |found_opt| {
+                // Explicit user-driven toggle: full claim semantics (steal from
+                // a live owner / unpark from a detached session) are intended.
+                if (state.runtime.findStickyPane(pwd, key, false)) |found_opt| {
                     if (found_opt) |found| {
                         terminal_main.debugLogUuid(&found.uuid, "createNamedFloat: reusing sticky/per-CWD pane before spawn", .{});
                         break :blk .{

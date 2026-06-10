@@ -1,8 +1,14 @@
 name: Release
 
+# Triggered by the tag push from git-rel (`make release`). The release itself
+# is created moments later by `gh release create` with git-cliff notes; the
+# upload step below attaches artifacts to that existing release. No
+# `release: published` trigger: git-rel's release creation runs under the
+# user's token and would fire a second, redundant build.
 on:
-  release:
-    types: [created]
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+"
 
 permissions:
   contents: write
@@ -16,7 +22,7 @@ jobs:
       matrix:
         include:
           # Linux x86_64
-          - os: ubuntu-24.04-x64
+          - os: ubuntu-24.04
             target: x86_64-linux
             artifact_name: hexe-x86_64-linux
 
@@ -39,16 +45,24 @@ jobs:
           GIT_CEILING_DIRECTORIES: ${{ github.workspace }}/.zig-cache
         run: zig build -Doptimize=ReleaseFast -Dtarget=${{ matrix.target }}
 
+      - name: Smoke-test binary
+        # Both targets run natively on their runner, so a basic invocation
+        # catches a broken artifact before it ships.
+        run: zig-out/bin/hexe --help
+
       - name: Prepare artifact
         run: |
           mkdir -p dist
           tar -czf dist/${{ matrix.artifact_name }}.tar.gz -C zig-out/bin hexe
+          (cd dist && sha256sum ${{ matrix.artifact_name }}.tar.gz > ${{ matrix.artifact_name }}.tar.gz.sha256)
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact_name }}
-          path: dist/${{ matrix.artifact_name }}.tar.gz
+          path: |
+            dist/${{ matrix.artifact_name }}.tar.gz
+            dist/${{ matrix.artifact_name }}.tar.gz.sha256
 
   release:
     needs: build
@@ -61,7 +75,9 @@ jobs:
           path: artifacts
           merge-multiple: true
 
-      - name: Create GitHub Release
+      - name: Attach artifacts to release
         uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*.tar.gz
+          files: |
+            artifacts/*.tar.gz
+            artifacts/*.tar.gz.sha256

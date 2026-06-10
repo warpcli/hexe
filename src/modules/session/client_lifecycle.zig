@@ -27,6 +27,22 @@ fn closeClientMuxFds(client: *store_mod.Client) void {
 
 fn killCollectedPanes(self: anytype, pane_uuids: []const [32]u8, comptime context: []const u8) void {
     for (pane_uuids) |uuid| {
+        // Sticky/per-CWD panes promise to survive frontend death: park them
+        // instead of killing them, on every client-removal path. Killing them
+        // here (e.g. probe clients or crashed frontends) permanently destroys
+        // floats the user expects to reclaim by key+directory.
+        if (self.store.panes.getPtr(uuid)) |pane| {
+            if (pane.sticky_pwd != null and pane.sticky_key != null) {
+                _ = pane.transitionState(.sticky, "client removed; sticky pane preserved");
+                pane.attached_to = null;
+                // Preserved sticky panes are free: clear the session marker so
+                // later claims are not mistaken for cross-session theft.
+                pane.session_id = null;
+                pane.orphaned_at = std.time.timestamp();
+                self.store.dirty = true;
+                continue;
+            }
+        }
         self.killPane(uuid) catch |err| {
             core.logging.logError("ses", context, err);
         };
@@ -151,6 +167,8 @@ pub fn shutdownClient(self: anytype, client_id: usize, preserve_sticky: bool) vo
                         if (pane.sticky_pwd != null and pane.sticky_key != null) {
                             _ = pane.transitionState(.sticky, "mux shutdown with sticky pwd");
                             pane.attached_to = null;
+                            // Preserved sticky panes are free, not parked.
+                            pane.session_id = null;
                             continue;
                         }
                     }

@@ -15,6 +15,20 @@ pub fn removeDetachedSession(store: *store_mod.SessionStore, session_id: [16]u8)
     }
 }
 
+/// A pane is "parked" only when it is actually listed in a detached session's
+/// adoptable pane set. `pane.session_id` alone is NOT sufficient: it is a
+/// historical marker that can go stale (e.g. a pane preserved as `.sticky`
+/// after its session detached again without it), and treating stale markers
+/// as parked makes free sticky panes unclaimable.
+pub fn isPaneParked(store: *store_mod.SessionStore, pane: *const store_mod.Pane) bool {
+    const sid = pane.session_id orelse return false;
+    const detached = store.detached_sessions.getPtr(sid) orelse return false;
+    for (detached.pane_uuids) |uuid| {
+        if (std.mem.eql(u8, &uuid, &pane.uuid)) return true;
+    }
+    return false;
+}
+
 pub fn removePaneFromDetachedSessions(
     allocator: std.mem.Allocator,
     store: *store_mod.SessionStore,

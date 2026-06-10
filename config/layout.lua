@@ -60,7 +60,7 @@ return hexe.setup({
     hexe.key({ hexe.key.alt, hexe.key["1"] }, hexe.action.float.toggle("1")),
     hexe.key({ hexe.key.alt, hexe.key["2"] }, hexe.action.float.toggle("2")),
     hexe.key({ hexe.key.alt, hexe.key["3"] }, hexe.action.float.toggle("3")),
-    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key.p }, hexe.action.float.toggle("p")),
+    hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["9"] }, hexe.action.float.toggle("p")),
     hexe.key({ hexe.key.ctrl, hexe.key.alt, hexe.key["0"] }, hexe.action.float.toggle("0")),
   },
 
