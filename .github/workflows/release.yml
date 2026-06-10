@@ -21,14 +21,16 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64
+          # Linux x86_64. The ABI must be -gnu: a bare "x86_64-linux" target
+          # resolves to musl, whose signal.h SIG_ERR macro fails translate-c
+          # inside the libvoid dependency.
           - os: ubuntu-24.04
-            target: x86_64-linux
+            target: x86_64-linux-gnu
             artifact_name: hexe-x86_64-linux
 
           # Linux aarch64 (native runner, avoids C cross-compilation issues)
           - os: ubuntu-24.04-arm
-            target: aarch64-linux
+            target: aarch64-linux-gnu
             artifact_name: hexe-aarch64-linux
 
     steps:
